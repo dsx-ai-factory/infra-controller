@@ -18,31 +18,32 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use carbide_utils::arch::CpuArchitecture;
 use mac_address::MacAddress;
-use rpc::machine_discovery::{CpuInfo, Gpu, InfinibandInterface, MemoryDevice};
-use rpc::{BlockDevice, DiscoveryInfo, DmiData, NetworkInterface, NvmeDevice, PciDeviceProperties};
 use serde_json::json;
 
 use crate::json::JsonExt;
 use crate::{BootOptionKind, Callbacks, hw, redfish};
 
-pub struct NvidiaDgxH100<'a> {
-    pub dgx_system_serial_number: Cow<'a, str>,
-    pub dgx_chassis_serial_number: Cow<'a, str>,
-    pub ib_nics: [hw::nic_nvidia_cx7::NicNvidiaCx7B<'a>; 2],
-    pub mgmt_nic: hw::nic_intel_x550::NicIntelX550,
-    pub dpu: hw::bluefield3::Bluefield3<'a>,
-    pub storage_nic0: hw::nic_nvidia_cx7::NicNvidiaCx7A<'a>,
-    pub storage_nic1: hw::nic_intel_e810::NicIntelE810,
-    pub gpu_serial: [Cow<'a, str>; 8],
-    pub bmc_mac_address_eth0: MacAddress,
-    pub bmc_mac_address_usb0: MacAddress,
-    pub hgx_bmc_mac_address_usb0: MacAddress,
+pub(crate) struct NvidiaDgxH100<'a> {
+    pub(crate) dgx_system_serial_number: Cow<'a, str>,
+    pub(crate) dgx_chassis_serial_number: Cow<'a, str>,
+    pub(crate) ib_nics: [hw::nic_nvidia_cx7::NicNvidiaCx7B<'a>; 2],
+    pub(crate) mgmt_nic: hw::nic_intel_x550::NicIntelX550,
+    pub(crate) dpu: hw::bluefield3::Bluefield3<'a>,
+    pub(crate) storage_nic0: hw::nic_nvidia_cx7::NicNvidiaCx7A<'a>,
+    pub(crate) storage_nic1: hw::nic_intel_e810::NicIntelE810,
+    pub(crate) gpu_serial: [Cow<'a, str>; 8],
+    pub(crate) bmc_mac_address_eth0: MacAddress,
+    pub(crate) bmc_mac_address_usb0: MacAddress,
+    pub(crate) hgx_bmc_mac_address_usb0: MacAddress,
 }
 
 impl NvidiaDgxH100<'_> {
-    pub fn manager_config(&self) -> redfish::manager::Config {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
+    pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC";
         let bmc_eth_builder = |eth| {
             redfish::ethernet_interface::builder(&redfish::ethernet_interface::manager_resource(
@@ -71,6 +72,7 @@ impl NvidiaDgxH100<'_> {
                         .interface_enabled(true)
                         .build(),
                     ]),
+                    serial_interfaces: None,
                     firmware_version: Some("25.02.12"),
                     oem: None,
                 },
@@ -85,6 +87,7 @@ impl NvidiaDgxH100<'_> {
                         .build(),
                     ]),
                     host_interfaces: None,
+                    serial_interfaces: None,
                     firmware_version: Some("HGX-22.10-1-rc67"),
                     oem: None,
                 },
@@ -92,6 +95,7 @@ impl NvidiaDgxH100<'_> {
                     id: "HGX_FabricManager_0",
                     eth_interfaces: None,
                     host_interfaces: None,
+                    serial_interfaces: None,
                     firmware_version: None,
                     oem: None,
                 },
@@ -99,9 +103,11 @@ impl NvidiaDgxH100<'_> {
         }
     }
 
-    pub fn system_config(&self, callbacks: Arc<dyn Callbacks>) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(
+        &self,
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "DGX";
-        let callbacks = Some(callbacks);
         let storage_nic0_ports = self.storage_nic0.ethernet_nics();
         let storage_nic1_ports = self.storage_nic1.ethernet_nics();
 
@@ -166,7 +172,7 @@ impl NvidiaDgxH100<'_> {
             .display_name("UEFI OS")
             .build(),
         ))
-        .collect();
+        .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
             systems: vec![
@@ -174,10 +180,11 @@ impl NvidiaDgxH100<'_> {
                     id: system_id.into(),
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("DGXH100".into()),
+                    bios_version: None,
                     eth_interfaces,
                     serial_number: Some(self.dgx_system_serial_number.to_string().into()),
                     boot_order_mode: redfish::computer_system::BootOrderMode::ViaSettings,
-                    callbacks,
+                    callbacks: Some(callbacks),
                     chassis: vec!["BMC".into()],
                     boot_options: Some(boot_options),
                     bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -186,12 +193,15 @@ impl NvidiaDgxH100<'_> {
                     log_services: None,
                     storage: None,
                     processors: None,
+                    memory: None,
+                    serial_console: None,
                     secure_boot_available: true,
                 },
                 redfish::computer_system::SingleSystemConfig {
                     id: "HGX_Baseboard_0".into(),
                     manufacturer: Some("NVIDIA".into()),
                     model: None,
+                    bios_version: None,
                     chassis: vec!["HGX_BMC_0".into()],
                     eth_interfaces: None,
                     callbacks: None,
@@ -203,14 +213,43 @@ impl NvidiaDgxH100<'_> {
                     base_bios: None,
                     log_services: None,
                     storage: None,
-                    processors: None,
+                    processors: Some(self.hgx_gpu_processors("HGX_Baseboard_0")),
+                    memory: None,
+                    serial_console: None,
                     secure_boot_available: false,
                 },
             ],
         }
     }
 
-    pub fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
+    /// The eight GPUs of the HGX baseboard, as Redfish `Processor` resources.
+    ///
+    /// Hardware exposes each GPU both here and as an `HGX_GPU_SXM_*` chassis.
+    /// The processor view is where GPU sensor readings are attributed, so a
+    /// fixture that omitted it could not exercise per-GPU sensor telemetry.
+    fn hgx_gpu_processors(&self, system_id: &str) -> Vec<redfish::processor::Processor> {
+        (1..=8)
+            .map(|index| {
+                let chassis_id = format!("HGX_GPU_SXM_{index}");
+                let voltage_sensor_id =
+                    redfish::sensor::sensor_id(redfish::sensor::SensorKind::Voltage, 1);
+                redfish::processor::gpu(
+                    system_id,
+                    &format!("GPU_SXM_{index}"),
+                    redfish::sensor::chassis_resource(&chassis_id, &voltage_sensor_id)
+                        .odata_id
+                        .as_ref(),
+                    &redfish::processor::GpuIdentity {
+                        uuid: &gpu_uuid(index),
+                        serial_number: &self.gpu_serial[index - 1],
+                        model: GPU_MODEL,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
         let dgx_chassis_id = "DGX";
         let net_adapter_builder = |id: &str| {
             redfish::network_adapter::builder(&redfish::network_adapter::chassis_resource(
@@ -335,7 +374,7 @@ impl NvidiaDgxH100<'_> {
         }
     }
 
-    pub fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
+    pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
         redfish::update_service::UpdateServiceConfig {
             firmware_inventory: [
                 // version required carbide to pass ingestion test in site explorer.
@@ -354,169 +393,10 @@ impl NvidiaDgxH100<'_> {
                 .build()
             })
             .collect(),
-        }
-    }
-
-    pub fn discovery_info(&self) -> DiscoveryInfo {
-        DiscoveryInfo {
-            network_interfaces: self.discovery_info_network_interfaces(),
-            infiniband_interfaces: self.discovery_info_ib_interfaces(),
-            cpu_info: vec![CpuInfo {
-                model: "Intel(R) Xeon(R) Platinum 8480CL".into(),
-                vendor: "GenuineIntel".into(),
-                sockets: 2,
-                cores: 56,
-                threads: 112,
-            }],
-            block_devices: (0..2)
-                .map(|n| BlockDevice {
-                    model: "Micron_7450_MTFDKBG1T9TFR".into(),
-                    revision: "E2MU200".into(),
-                    serial: format!("MicronFAKESERNUM{n}"),
-                    device_type: "disk".into(),
-                })
-                .chain((0..8).map(|n| BlockDevice {
-                    model: "KCM6DRUL3T84".into(),
-                    revision: "0107".into(),
-                    serial: format!("KCMFAKESERNUM{n}"),
-                    device_type: "disk".into(),
-                }))
-                .collect(),
-            machine_type: CpuArchitecture::X86_64.to_string(),
-            machine_arch: Some(rpc::utils::cpu_architecture_to_rpc(CpuArchitecture::X86_64)),
-            nvme_devices: (0..2)
-                .map(|n| NvmeDevice {
-                    model: "Micron_7450_MTFDKBG1T9TFR".into(),
-                    firmware_rev: "E2MU200".into(),
-                    serial: format!("MicronFAKESERNUM{n}"),
-                })
-                .chain((0..8).map(|n| NvmeDevice {
-                    model: "KCM6DRUL3T84".into(),
-                    firmware_rev: "0107".into(),
-                    serial: format!("KCMFAKESERNUM{n}"),
-                }))
-                .collect(),
-            dmi_data: Some(DmiData {
-                board_name: "DGXH100".into(),
-                board_version: "555.07L01.0001".into(),
-                bios_version: "1.6.7".into(),
-                bios_date: "02/20/2025".into(),
-                product_serial: self.dgx_system_serial_number.to_string(),
-                board_serial: format!("{}.FAKESERNUM1", self.dgx_system_serial_number),
-                chassis_serial: self.dgx_chassis_serial_number.to_string(),
-                product_name: "DGXH100".into(),
-                sys_vendor: "NVIDIA".into(),
-            }),
-            dpu_info: None,
-            gpus: (0..8)
-                .map(|n| {
-                    let pci_bus_id = [
-                        "00000000:1B:00.0",
-                        "00000000:43:00.0",
-                        "00000000:52:00.0",
-                        "00000000:61:00.0",
-                        "00000000:9D:00.0",
-                        "00000000:C3:00.0",
-                        "00000000:D1:00.0",
-                        "00000000:DF:00.0",
-                    ][n];
-                    Gpu {
-                        name: "NVIDIA H100 80GB HBM3".into(),
-                        serial: self.gpu_serial[n].to_string(),
-                        driver_version: "580.126.16".into(),
-                        vbios_version: "96.00.A5.00.01".into(),
-                        inforom_version: "G520.0200.00.05".into(),
-                        total_memory: "81559 MiB".into(),
-                        frequency: "1980 MHz".into(),
-                        pci_bus_id: pci_bus_id.into(),
-                        platform_info: None,
-                    }
-                })
-                .collect(),
-            memory_devices: (0..32)
-                .map(|_| MemoryDevice {
-                    size_mb: Some(65536),
-                    mem_type: Some("DDR5".into()),
-                })
-                .collect(),
-            tpm_ek_certificate: None,
-            tpm_description: None,
+            host_bmc_inventory_id: Some("HostBMC_0".to_string()),
+            host_uefi_inventory_id: Some("HostBIOS_0".to_string()),
             ..Default::default()
         }
-    }
-
-    fn discovery_info_network_interfaces(&self) -> Vec<NetworkInterface> {
-        vec![
-            self.mgmt_nic.discovery_info(
-                "/devices/pci0000:00/0000:00:10.0/0000:0b:00.0/net/eno3",
-                "0000:0b:00.0",
-                0,
-            ),
-            self.storage_nic0.discovery_info(
-                0,
-                "/devices/pci0000:24\
-                /0000:24:01.0/0000:25:00.0/0000:26:00.0\
-                /0000:27:00.0/0000:28:00.0/0000:29:00.0\
-                /net/enp41s0f0np0",
-                "0000:29:00.0",
-                0,
-            ),
-            self.storage_nic0.discovery_info(
-                1,
-                "/devices/pci0000:24/0000:24:01.0\
-                /0000:25:00.0/0000:26:00.0/0000:27:00.0\
-                /0000:28:00.0/0000:29:00.1\
-                /net/enp41s0f1np1",
-                "0000:29:00.1",
-                0,
-            ),
-            self.dpu.host_nic_discovery_info(
-                "/devices/pci0000:80/0000:80:05.0/0000:82:00.0/net/ens6np0",
-                "0000:82:00.0",
-                0,
-            ),
-        ]
-    }
-
-    fn discovery_info_ib_interfaces(&self) -> Vec<InfinibandInterface> {
-        self.ib_nics
-            .iter()
-            .flat_map(|nic| nic.ib_nics())
-            .enumerate()
-            .map(|(n, _nic)| {
-                let (bus, numa_node) = [
-                    (0x15, 0),
-                    (0x3d, 0),
-                    (0x4c, 0),
-                    (0x5b, 0),
-                    (0x97, 1),
-                    (0xbd, 1),
-                    (0xcb, 1),
-                    (0xd9, 1),
-                ][n];
-                let device_name = format!("ibp{bus}s0");
-                let path = format!(
-                    "/devices/pci0000:{:02x}/0000:{:02x}:01.0/0000:{:02x}:00.0/\
-                     0000:{:02x}:00.0/0000:{:02x}:00.0/infiniband/{device_name}",
-                    bus,
-                    bus,
-                    bus + 1,
-                    bus + 2,
-                    bus + 3
-                );
-                InfinibandInterface {
-                    pci_properties: Some(PciDeviceProperties {
-                        vendor: "Mellanox Technologies".into(),
-                        device: "MT2910 Family [ConnectX-7]".into(),
-                        path,
-                        numa_node,
-                        description: Some("MT2910 Family [ConnectX-7]".into()),
-                        slot: format!("0000:{:02x}:00.0", bus + 3).into(),
-                    }),
-                    guid: format!("94dae0000000000{n}"),
-                }
-            })
-            .collect()
     }
 }
 
@@ -545,23 +425,36 @@ fn base_bios(system_id: &str) -> serde_json::Value {
         }))
 }
 
+const GPU_MODEL: &str = "H100 80GB HBM3";
+
+/// Stable per-slot GPU UUID, so a test can assert that a given slot reports a
+/// specific device identity.
+///
+/// Hardware reports one UUID per GPU on the GPU's `Processor`, its enclosing
+/// `Chassis` and its `PCIeDevice` alike, so every fixture for a slot uses this.
+fn gpu_uuid(index: usize) -> String {
+    format!("beea8cdf-7b7d-035c-ed07-360e311fcb{index:02x}")
+}
+
 fn hgx_gpu_sxm_chassis(index: usize, serial: &str) -> redfish::chassis::SingleChassisConfig {
     let id = format!("HGX_GPU_SXM_{index}");
     redfish::chassis::SingleChassisConfig {
         chassis_type: "Other".into(),
         manufacturer: Some("NVIDIA".into()),
         part_number: Some("2330-885-A1".into()),
-        model: Some("H100 80GB HBM3".into()),
+        model: Some(GPU_MODEL.into()),
         serial_number: Some(serial.to_string().into()),
+        uuid: Some(gpu_uuid(index).into()),
         pcie_devices: Some(vec![
             redfish::pcie_device::builder(&redfish::pcie_device::chassis_resource(
                 &id,
                 &format!("GPU_SXM_{index}"),
             ))
             .manufacturer("NVIDIA")
-            .model("H100 80GB HBM3")
+            .model(GPU_MODEL)
             .part_number("2330-885-A1")
             .serial_number(serial)
+            .uuid(&gpu_uuid(index))
             .build(),
         ]),
         sensors: Some(redfish::sensor::generate_chassis_sensors(

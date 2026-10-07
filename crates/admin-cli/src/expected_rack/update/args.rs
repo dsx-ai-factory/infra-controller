@@ -25,34 +25,27 @@ use crate::errors::CarbideCliError;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Update an expected rack's rack profile:
-    $ nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 \
-    --rack-profile-id abcdef01-2345-6789-abcd-ef0123456789
-
 Update an expected rack's metadata name:
-    $ nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 \
-    --rack-profile-id abcdef01-2345-6789-abcd-ef0123456789 --meta-name rack-01
+    $ nico-admin-cli expected-rack update rack-01 --meta-name rack-01
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Rack ID of the expected rack")]
-    pub rack_id: RackId,
-    #[clap(long, help = "Rack profile ID of the expected rack")]
-    pub rack_profile_id: Option<String>,
+    rack_id: RackId,
 
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
         help = "The name that should be used as part of the Metadata for newly created Rack. If empty, the Rack Id will be used"
     )]
-    pub meta_name: Option<String>,
+    meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
         help = "The description that should be used as part of the Metadata for newly created Rack"
     )]
-    pub meta_description: Option<String>,
+    meta_description: Option<String>,
 
     #[clap(
         long = "label",
@@ -60,20 +53,17 @@ pub struct Args {
         help = "A label that will be added as metadata for the newly created Rack. The labels key and value must be separated by a : character",
         action = clap::ArgAction::Append
     )]
-    pub labels: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
 }
 
 impl TryFrom<Args> for rpc::forge::ExpectedRack {
     type Error = CarbideCliError;
 
     fn try_from(args: Args) -> Result<Self, Self::Error> {
-        // rack_profile_id is required for update.
-        let rack_profile_id = args.rack_profile_id.ok_or_else(|| {
-            CarbideCliError::GenericError("rack_profile_id is required".to_string())
-        })?;
         Ok(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(args.rack_id),
-            rack_profile_id: Some(rack_profile_id.into()),
+            rack_profile_id: None,
             metadata: Some(rpc::forge::Metadata {
                 name: args.meta_name.unwrap_or_default(),
                 description: args.meta_description.unwrap_or_default(),

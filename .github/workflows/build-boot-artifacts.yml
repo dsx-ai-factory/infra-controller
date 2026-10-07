@@ -3,6 +3,11 @@ name: Build Artifacts (Boot & Ephemeral Images)
 on:
   workflow_call:
     inputs:
+      target_login:
+        description: 'Allow authenticating to the build-container host when it differs from the extras host (publish runs only)'
+        required: false
+        default: false
+        type: boolean
       arch:
         description: 'Target architecture: x86_64 or aarch64'
         required: true
@@ -12,8 +17,13 @@ on:
         required: true
         type: string
       build_type:
-        description: 'Build type: boot or ephemeral'
+        description: 'Build type: boot, ephemeral, or package (compile-and-package only, uploads just target/debs)'
         required: true
+        type: string
+      prereq_artifact:
+        description: 'Artifact holding the prerequisite files for an ephemeral build. Defaults to the full boot-artifacts archive; point it at a package-artifacts archive to fetch only the forge-scout .deb the mkosi build actually consumes.'
+        required: false
+        default: ''
         type: string
       build_container:
         description: 'Build container image to use (for container mode only)'
@@ -46,26 +56,35 @@ on:
       extras_container:
         description: 'Location of additional artifacts to place into the built images'
         required: false
-        default: false
+        # An empty string, not boolean false: this is a string input, so a
+        # boolean default reaches callers as the literal text "false" and any
+        # job omitting the input then tries to docker login to a registry
+        # named "false". An empty value engages the `nvcr.io` fallback
+        # instead.
+        default: ''
         type: string
-    outputs:
-      artifacts_json:
-        description: 'Artifacts paths as JSON array'
-        value: ${{ jobs.build.outputs.artifacts }}
 
 jobs:
   build:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 120
-    outputs:
-      artifacts: ${{ steps.collect-artifacts.outputs.paths }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           submodules: recursive
           fetch-depth: 0  # Full git history needed for git describe
+
+      # Resolve or download validation Python before the long build, so an
+      # unsupported runner fails immediately. Shell-mode mkosi uses packages
+      # installed for the distro interpreter, so keep this runtime off PATH.
+      - name: Prepare Python for output validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          update-environment: false
 
       - name: Initialize submodules at pinned commits
         run: |
@@ -126,12 +145,12 @@ jobs:
           echo "✅ mkosi commit: $(cd pxe/mkosi && git rev-parse --short HEAD)"
           echo "✅ Submodules ready"
 
-      # For ephemeral builds, download boot artifacts first
+      # For ephemeral builds, download the prerequisite artifacts first
       - name: Download prerequisite boot artifacts
         if: inputs.build_type == 'ephemeral'
         uses: actions/download-artifact@v4
         with:
-          name: boot-artifacts-${{ inputs.arch }}-${{ github.run_id }}
+          name: ${{ inputs.prereq_artifact != '' && inputs.prereq_artifact || format('boot-artifacts-{0}-{1}', inputs.arch, github.run_id) }}
           path: .
         continue-on-error: false
 
@@ -140,16 +159,52 @@ jobs:
         if: inputs.build_type == 'ephemeral'
         uses: ./.github/actions/setup-mkosi-environment
         with:
-          rust-version: '1.90.0'
+          rust-version: '1.96.0'
           arch: ${{ inputs.arch }}
 
+      # Persist mkosi's downloaded distro packages between runs. Restore-keys let
+      # a run start from the most recent cache for this arch even when the
+      # profile set has changed, which is the common case.
+      #
+      # restore/save rather than actions/cache so the save can be limited to main;
+      # see "Save mkosi package cache" below for why.
+      - name: Restore mkosi package cache
+        id: mkosi-cache
+        if: inputs.build_type == 'ephemeral'
+        uses: actions/cache/restore@v4
+        with:
+          path: pxe/.mkosi-package-cache
+          key: mkosi-pkgs-${{ inputs.arch }}-${{ hashFiles('pxe/mkosi.conf', 'pxe/mkosi.profiles/**/mkosi.conf') }}
+          restore-keys: |
+            mkosi-pkgs-${{ inputs.arch }}-
+
       # Setup Docker for container-based builds
-      - name: Setup Docker authentication
+      - name: Derive registry hosts
+        id: registry-hosts
+        env:
+          EXTRAS: ${{ inputs.extras_container }}
+          BUILD: ${{ inputs.build_container }}
+        run: |
+          echo "extras_host=${EXTRAS%%/*}" >> "$GITHUB_OUTPUT"
+          echo "build_host=${BUILD%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker authentication (source)
         if: inputs.use_container == true || inputs.inject_extras == true
         uses: ./.github/actions/docker-auth
         with:
-          username: ${{ secrets.NVCR_USERNAME }}
-          token: ${{ secrets.NVCR_TOKEN }}
+          registry: ${{ steps.registry-hosts.outputs.extras_host || 'nvcr.io' }}
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # the build container ref points at the target registry after a rebuild;
+      # log in there too when it is a different host.
+      - name: Setup Docker authentication (target)
+        if: inputs.target_login == true && inputs.use_container == true && inputs.build_container != '' && steps.registry-hosts.outputs.build_host != steps.registry-hosts.outputs.extras_host
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ steps.registry-hosts.outputs.build_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
       - name: Pull carbide-extras container
         if: inputs.inject_extras == true && inputs.extras_container != ''
@@ -162,6 +217,18 @@ jobs:
         run: |
           echo "Pulling build container: ${{ inputs.build_container }}"
           docker pull ${{ inputs.build_container }}
+
+      - name: Log out of source registry
+        env:
+          EXTRAS: ${{ inputs.extras_container }}
+          BUILD: ${{ inputs.build_container }}
+        run: |
+          # Later build tasks pull public images from the same host (e.g.
+          # nvcr.io/nvidia/doca in the bfb flow); a scoped credential denies
+          # those pulls while anonymous access succeeds. All authenticated
+          # pulls are done at this point.
+          if [ -n "${BUILD}" ]; then docker logout "${BUILD%%/*}" 2>/dev/null || true; fi
+          if [ -n "${EXTRAS}" ]; then docker logout "${EXTRAS%%/*}" 2>/dev/null || true; fi
 
       - name: Set up environment variables
         run: |
@@ -296,13 +363,48 @@ jobs:
             exit 1
           fi
 
+      # The build-artifacts containers ship sccache but never point it anywhere,
+      # so the Rust compile inside them started cold on every run -- 3m36s of the
+      # bfb critical path. These are the same credentials the release image
+      # builds hand to BuildKit. The sentinel keeps the value non-empty so the
+      # in-container check can tell "no backend" from "malformed endpoint".
+      - name: Expose Actions cache credentials to the container build
+        if: inputs.use_container == true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN || '';
+            const url = process.env.ACTIONS_RESULTS_URL || '';
+            if (token) core.setSecret(token);
+            core.exportVariable('BUILD_ACTIONS_RUNTIME_TOKEN', token || 'unavailable');
+            core.exportVariable('BUILD_ACTIONS_RESULTS_URL', url || 'unavailable');
+            core.info(`In-container sccache backend: ${token && url ? 'enabled' : 'disabled'}`);
+
       # Run build in container mode (for boot artifacts)
       - name: Run cargo make task (container mode)
         if: inputs.use_container == true
+        env:
+          # Only main publishes; every other ref reads what main left behind.
+          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
         run: |
+          # dev/docker/sccache-cache.sh reads its credentials from /run/secrets
+          # because that is where BuildKit puts them. Staging the same three
+          # files here lets the container reuse that script rather than carry a
+          # second copy of the backend-selection logic.
+          SCCACHE_SECRETS="$(mktemp -d)"
+          # These runners are not guaranteed to be ephemeral, so the token must
+          # not outlive the step that needs it.
+          trap 'rm -rf "${SCCACHE_SECRETS}"' EXIT
+          printf '%s' "${BUILD_ACTIONS_RESULTS_URL}" > "${SCCACHE_SECRETS}/actions_results_url"
+          printf '%s' "${BUILD_ACTIONS_RUNTIME_TOKEN}" > "${SCCACHE_SECRETS}/actions_runtime_token"
+          printf '%s' "${SCCACHE_GHA_RW_MODE}" > "${SCCACHE_SECRETS}/sccache_gha_rw_mode"
+          chmod 600 "${SCCACHE_SECRETS}"/*
+
           # Set up environment variables for container (matches GitLab CI global variables)
           ENV_ARGS="-e CARGO_HOME=/workspace/cargo"
           ENV_ARGS="$ENV_ARGS -e CARGO_INCREMENTAL=0"
+          ENV_ARGS="$ENV_ARGS -e RUSTC_WRAPPER=sccache"
+          ENV_ARGS="$ENV_ARGS -e SCCACHE_DIR=/workspace/cache/sccache"
           ENV_ARGS="$ENV_ARGS -e CACHE_DIRECTORY=/workspace/cache"
           ENV_ARGS="$ENV_ARGS -e APT_CACHE_DIR=/workspace/apt"
           ENV_ARGS="$ENV_ARGS -e LOGNAME=root"
@@ -318,7 +420,7 @@ jobs:
           echo "FORGE_CA=prod"
           echo "============================================"
 
-          EXTRA_DOCKER_ARGS=""
+          EXTRA_DOCKER_ARGS="-v ${SCCACHE_SECRETS}:/run/secrets:ro"
           if [[ "${{ inputs.cargo_make_task }}" == "build-boot-artifacts-bfb-ci" ]]; then
             # bfb build runs `docker pull/save` (see pxe/Makefile.toml tasks.bfb-hbn-pull/export).
             # Allow docker CLI inside the build container to talk to the host Docker daemon.
@@ -350,7 +452,7 @@ jobs:
             -w /workspace \
             ${ENV_ARGS} \
             ${{ inputs.build_container }} \
-            bash -c "git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} ${{ inputs.cargo_make_task }}"
+            bash -c ". /workspace/dev/docker/sccache-cache.sh && sccache_setup && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} ${{ inputs.cargo_make_task }} && sccache_report"
 
       # Run build directly on runner (for ephemeral images with mkosi)
       - name: Run cargo make task (shell mode)
@@ -381,91 +483,39 @@ jobs:
 
           echo "Build completed!"
 
-      - name: Verify generated artifacts (informational only)
-        continue-on-error: true  # Don't fail build - matches GitLab CI behavior (no verification step)
+      # Only main saves this cache. Pull requests restore main's copy through the
+      # restore-keys prefix above but cannot add one of their own: entries are
+      # ref-scoped, so concurrent pull requests starting cold each used to store
+      # a byte-identical duplicate, crowding out main's sccache.
+      #
+      # Saved on failure too: the packages mkosi downloaded are valid whether or
+      # not the image build that followed succeeded.
+      - name: Save mkosi package cache
+        if: ${{ !cancelled() && inputs.build_type == 'ephemeral' && github.ref == 'refs/heads/main' && steps.mkosi-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: pxe/.mkosi-package-cache
+          key: ${{ steps.mkosi-cache.outputs.cache-primary-key }}
+
+      # Activate the runtime prepared above only after both build paths finish.
+      # This exports the matching Python library directory beside its PATH.
+      - name: Activate Python for output validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Validate output contract
+        env:
+          ARCH: ${{ inputs.arch }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+          REPOSITORY_ROOT: ${{ github.workspace }}
         run: |
-          echo "============================================"
-          echo "Checking generated artifacts (informational)"
-          echo "GitLab CI has no verification - uploads whatever exists with 'when: always'"
-          echo "This check provides debug info but won't fail the build"
-          echo "============================================"
-
-          # Expected files match GitLab CI artifact paths
-          if [[ "${{ inputs.build_type }}" == "boot" ]]; then
-            if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
-              EXPECTED_FILES=(
-                "pxe/static/blobs/internal/x86_64/ipxe.efi"
-                "target/debug/nico-admin-cli"
-                # target/debs/* checked separately
-              )
-            else
-              # Full list from GitLab CI lines 608-615
-              EXPECTED_FILES=(
-                "pxe/static/blobs/internal/aarch64/ipxe.efi"
-                "pxe/static/blobs/internal/aarch64/carbide.efi"
-                "pxe/static/blobs/internal/aarch64/carbide.root"
-                "pxe/static/blobs/internal/aarch64/preingestion.bfb"
-                "pxe/static/blobs/internal/aarch64/forge.bfb"
-                "pxe/static/blobs/internal/apt"
-                "target/aarch64-unknown-linux-gnu/release/forge-scout"
-                # target/debs/* checked separately
-              )
-            fi
-          elif [[ "${{ inputs.build_type }}" == "ephemeral" ]]; then
-            if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
-              EXPECTED_FILES=(
-                "pxe/static/blobs/internal/x86_64/scout.efi"
-                "pxe/static/blobs/internal/x86_64/scout.squashfs"
-                "pxe/static/blobs/internal/x86_64/qcow-imager.efi"
-                # target/debs/* checked separately
-              )
-            else
-              EXPECTED_FILES=(
-                "pxe/static/blobs/internal/aarch64/scout.efi"
-                "pxe/static/blobs/internal/aarch64/scout.squashfs"
-                "pxe/static/blobs/internal/aarch64/qcow-imager.efi"
-                # pxe/mkosi.profiles/scout-x86_64/mkosi.extra/build-output/* checked separately
-                # target/debs/* checked separately
-              )
-            fi
-          fi
-
-          echo ""
-          echo "Checking individual files:"
-          MISSING_COUNT=0
-          for file in "${EXPECTED_FILES[@]}"; do
-            if [[ -f "$file" ]] || [[ -d "$file" ]]; then
-              if [[ -f "$file" ]]; then
-                size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
-                echo "  ✓ Found: $file (${size} bytes)"
-              else
-                echo "  ✓ Found: $file (directory)"
-              fi
-            else
-              echo "  ⚠️  Missing: $file"
-              MISSING_COUNT=$((MISSING_COUNT + 1))
-            fi
-          done
-
-          # Check for .deb files
-          if ls target/debs/*.deb >/dev/null 2>&1; then
-            DEB_COUNT=$(ls target/debs/*.deb 2>/dev/null | wc -l)
-            echo "  ✓ Found: target/debs/*.deb (${DEB_COUNT} files)"
-          else
-            echo "  ⚠️  Missing: target/debs/*.deb"
-            MISSING_COUNT=$((MISSING_COUNT + 1))
-          fi
-
-          echo ""
-          echo "============================================"
-          if [[ $MISSING_COUNT -eq 0 ]]; then
-            echo "✅ All expected artifacts found"
-          else
-            echo "⚠️  ${MISSING_COUNT} expected artifact(s) missing"
-            echo "Note: Some artifacts may be disabled (e.g., BFB build)"
-            echo "This is informational only - build continues"
-          fi
-          echo "============================================"
+          python3 .github/ci/validate_boot_outputs.py \
+            --cargo-make-task "${CARGO_MAKE_TASK}" \
+            --build-type "${BUILD_TYPE}" \
+            --arch "${ARCH}" \
+            --root "${REPOSITORY_ROOT}"
 
       - name: Verify mnv_cli exists in built scout image
         if: inputs.build_type == 'ephemeral' && inputs.inject_extras == true
@@ -486,43 +536,62 @@ jobs:
             exit 1
           fi
 
-      - name: Collect artifacts metadata
-        id: collect-artifacts
-        run: |
-          # Determine artifacts based on build type and architecture
-          # Note: Lists match GitLab CI artifact paths; upload step uses if-no-files-found: warn
-          # so missing files (like BFB artifacts when disabled) won't fail the build
-          if [[ "${{ inputs.build_type }}" == "boot" ]]; then
-            if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
-              ARTIFACTS='["pxe/static/blobs/internal/x86_64/ipxe.efi", "target/debug/nico-admin-cli", "target/debs/*"]'
-            else
-              # Lists all expected BFB artifacts even though some may not be generated (BFB build is disabled)
-              # This matches GitLab CI behavior where artifact paths are listed but upload succeeds if files don't exist
-              ARTIFACTS='["pxe/static/blobs/internal/aarch64/secure-boot-pk.pem", "pxe/static/blobs/internal/aarch64/ipxe.efi", "pxe/static/blobs/internal/aarch64/carbide.efi", "pxe/static/blobs/internal/aarch64/carbide.root", "pxe/static/blobs/internal/aarch64/preingestion.bfb", "pxe/static/blobs/internal/aarch64/forge.bfb", "pxe/static/blobs/internal/apt", "target/aarch64-unknown-linux-gnu/release/forge-scout", "target/debs/*"]'
-            fi
-          else
-            if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
-              ARTIFACTS='["pxe/static/blobs/internal/x86_64/scout.efi", "pxe/static/blobs/internal/x86_64/scout.squashfs", "pxe/static/blobs/internal/x86_64/qcow-imager.efi", "target/debs/*"]'
-            else
-              ARTIFACTS='["pxe/static/blobs/internal/aarch64/scout.efi", "pxe/static/blobs/internal/aarch64/scout.squashfs", "pxe/static/blobs/internal/aarch64/qcow-imager.efi", "pxe/mkosi.profiles/scout-x86_64/mkosi.extra/build-output/*", "target/debs/*"]'
-            fi
-          fi
-
-          echo "paths=${ARTIFACTS}" >> $GITHUB_OUTPUT
-          echo "Artifacts to upload: ${ARTIFACTS}"
-
+      # Upload production artifacts only after the validator and every other
+      # applicable check pass. Boot failures remain in the Actions step logs;
+      # ephemeral failures also upload `build.log` through the separate
+      # best-effort step below.
+      #
+      # Upload the files used by later jobs. The package-scout task writes
+      # forge-scout to `target/debs/`; the ephemeral job downloads that deb
+      # (x86_64 still downloads the full boot bundle), and
+      # `copy-forge-scout-*` in `pxe/Makefile.toml` copies the deb
+      # into mkosi staging. `Dockerfile.release-artifacts-*` consumes
+      # `pxe/static/blobs/internal/`. Excluding the rest of the cargo target tree
+      # and `mkosi.profiles` staging inputs removes ~14 GB of upload/download
+      # from the critical path. Keep the unstripped aarch64 forge-scout binary
+      # so crashes from the shipped image can still be symbolicated.
+      #
+      # `compression-level: 0` avoids re-deflating squashfs, BFB, and EFI files
+      # that are already compressed. `if-no-files-found` checks the path list as
+      # a whole; the validator above is what requires each contract entry.
       - name: Upload artifacts
-        if: always()  # Upload artifacts even if build fails (matches GitLab CI 'when: always')
+        if: ${{ success() && inputs.build_type != 'package' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.build_type }}-artifacts-${{ inputs.arch }}-${{ github.run_id }}
           path: |
             pxe/static/blobs/
-            target/debug/nico-admin-cli
             target/debs/
-            target/aarch64-unknown-linux-gnu/
-            pxe/mkosi.profiles/
-          if-no-files-found: warn
+            target/aarch64-unknown-linux-gnu/release/forge-scout
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      # The package build's deliverable is the `.deb` set alone, not the
+      # unstripped binary (its symbolication copy ships in the boot artifact).
+      # Staged under a directory that reproduces the repo-relative layout,
+      # same pattern as the bluefield binaries in ci.yaml: upload-artifact
+      # roots the archive at the least common ancestor of what it matched, so
+      # uploading `target/debs/` directly would drop the `target/` prefix the
+      # pxe copy-forge-scout tasks expect after download.
+      - name: Stage package artifacts for upload
+        if: ${{ success() && inputs.build_type == 'package' }}
+        run: |
+          mkdir -p package-artifacts-dir/target
+          cp -r target/debs package-artifacts-dir/target/debs
+
+      # `.deb` payloads are already compressed, so `compression-level: 0`.
+      # The name matches the release-artifacts download pattern
+      # (`*-<arch>-<run_id>`), which is harmless: the carrier images COPY only
+      # `pxe/static/blobs/`.
+      - name: Upload package artifacts
+        if: ${{ success() && inputs.build_type == 'package' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build_type }}-artifacts-${{ inputs.arch }}-${{ github.run_id }}
+          path: package-artifacts-dir/
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 1
 
       - name: Upload build log on failure

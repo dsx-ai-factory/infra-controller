@@ -1,0 +1,31 @@
+# Server cert for the OTEL gateway's OTLP receiver (otel-receiver.forge:443 — the name the
+# DPU-side collector ships dialing, part of the .forge DPU-compat DNS zone).
+# Issued by the site CA issuer (a ca-type ClusterIssuer backed by the site root secret) so the leaf is
+# signed DIRECTLY by the site root — exactly what the DPU trusts. On a BlueField DPU:
+#   /etc/otelcol-contrib/certs/ca.pem        = the site root CA, self-signed
+#   /etc/otelcol-contrib/certs/otel-cert.pem = DPU client cert, issued by that same site root
+# So: server cert -> site-issuer (leaf issuer = site-root). The resulting secret's ca.crt IS site-root, which
+# the gateway also uses as its OTLP client_ca_file to verify the DPU's site-root-signed client cert.
+# A dev-CA issuer (e.g. a local development CA) is NOT trusted by the DPU and produces
+# "x509: certificate signed by unknown authority" on the DPU side.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: otel-receiver-tls
+  namespace: otel
+spec:
+  secretName: otel-receiver-tls
+  duration: 720h0m0s
+  renewBefore: 360h0m0s
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  dnsNames:
+    - otel-receiver.forge          # SAN the DPU dials (unbound A record -> OTEL_RECEIVER_VIP).
+                                   # install-observability.sh rewrites this from OTEL_RECEIVER_DNS
+                                   # if your site uses a different name.
+  issuerRef:
+    kind: ClusterIssuer
+    name: site-issuer              # must be the ca-issuer backed by the CA the DPUs trust;
+                                   # install-observability.sh rewrites from SITE_CA_ISSUER.
+    group: cert-manager.io

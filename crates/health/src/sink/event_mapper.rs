@@ -19,15 +19,38 @@ use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-#[allow(dead_code)] // used by OtlpSink in the next commit
-pub trait RedfishEventMapper: Send + Sync {
+use super::LogRecord;
+
+#[cfg(not(feature = "bench-hooks"))]
+pub(crate) trait RedfishEventMapper: Send + Sync {
+    /// Returns the latest-wins queue key for one log record.
+    ///
+    /// Decoded protobuf notifications use their payload hash. Redfish state
+    /// notifications share a resource key. Periodic entries use their
+    /// service, entry ID, and fingerprint. SSE records prefer the event ID,
+    /// then the linked log entry URI, then the event record URI plus an optional
+    /// occurrence fingerprint. Other records use message or body content as a fallback.
     fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String;
 }
 
-#[allow(dead_code)] // used by OtlpSink in the next commit
+#[cfg(feature = "bench-hooks")]
+pub trait RedfishEventMapper: Send + Sync {
+    /// Returns the latest-wins queue key for one log record.
+    ///
+    /// Decoded protobuf notifications use their payload hash. Redfish state
+    /// notifications share a resource key. Periodic entries use their
+    /// service, entry ID, and fingerprint. SSE records prefer the event ID,
+    /// then the linked log entry URI, then the event record URI plus an optional
+    /// occurrence fingerprint. Other records use message or body content as a fallback.
+    fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String;
+}
+
+#[cfg(not(feature = "bench-hooks"))]
+pub(crate) struct OpenBmcEventMapper;
+
+#[cfg(feature = "bench-hooks")]
 pub struct OpenBmcEventMapper;
 
-#[allow(dead_code)]
 impl OpenBmcEventMapper {
     fn find_attr<'a>(attributes: &'a [(Cow<'static, str>, String)], key: &str) -> Option<&'a str> {
         attributes
@@ -52,7 +75,75 @@ impl OpenBmcEventMapper {
 
 impl RedfishEventMapper for OpenBmcEventMapper {
     fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String {
+        // The decoded protobuf represents the complete notification. Its hash
+        // keeps distinct notifications separate while retaining latest-wins
+        // replacement for exact duplicates.
+        if let Some(payload) =
+            Self::find_attr(attributes, LogRecord::DECODED_PROTOBUF_PAYLOAD_ATTRIBUTE)
+        {
+            return format!("{bmc_id}|protobuf|{}", Self::hash_string(payload));
+        }
+
         let message_id = Self::find_attr(attributes, "message_id").unwrap_or("");
+
+        // Content distinguishes reused numeric IDs after a reset; exact retries
+        // keep the same queue key. Periodic occurrences precede state coalescing.
+        if let (Some(service_id), Some(entry_id), Some(fingerprint)) = (
+            Self::find_attr(attributes, "service_id").filter(|value| !value.is_empty()),
+            Self::find_attr(attributes, "entry_id").filter(|value| !value.is_empty()),
+            Self::find_attr(attributes, "entry_fingerprint"),
+        ) {
+            return format!("{bmc_id}|redfish-entry|{service_id}|{entry_id}|{fingerprint}");
+        }
+
+        // State notifications share a resource key so a later state replaces
+        // the queued state for that resource.
+        if message_id.contains("SensorThreshold") {
+            let resource = Self::first_message_arg(attributes);
+            return format!("{bmc_id}|SensorThreshold|{resource}");
+        }
+
+        if message_id.starts_with("ResourceEvent.") && message_id.contains("ResourceStatusChanged")
+        {
+            let resource = Self::first_message_arg(attributes);
+            return format!("{bmc_id}|ResourceStatusChanged|{resource}");
+        }
+
+        // A periodic LogEntry ID is unique within its LogService, so both
+        // fields identify one occurrence.
+        if let (Some(service_id), Some(entry_id)) = (
+            Self::find_attr(attributes, "service_id").filter(|value| !value.is_empty()),
+            Self::find_attr(attributes, "entry_id").filter(|value| !value.is_empty()),
+        ) {
+            return format!("{bmc_id}|redfish-entry|{service_id}|{entry_id}");
+        }
+
+        // An SSE EventId identifies the delivered event and takes precedence
+        // over an optional link to its LogEntry.
+        if let Some(event_id) =
+            Self::find_attr(attributes, "event_id").filter(|value| !value.is_empty())
+        {
+            return format!("{bmc_id}|redfish-event|{event_id}");
+        }
+
+        // SSE events without an EventId use the linked LogEntry URI.
+        if let Some(log_entry_id) =
+            Self::find_attr(attributes, "log_entry_id").filter(|value| !value.is_empty())
+        {
+            return format!("{bmc_id}|redfish-entry|{log_entry_id}");
+        }
+
+        // EventRecord URIs may repeat across SSE payloads. A source fingerprint
+        // distinguishes changed occurrence fields while exact replays coalesce.
+        if let Some(event_record_id) =
+            Self::find_attr(attributes, "event_record_id").filter(|value| !value.is_empty())
+        {
+            if let Some(fingerprint) = Self::find_attr(attributes, "event_record_fingerprint") {
+                return format!("{bmc_id}|redfish-event-record|{event_record_id}|{fingerprint}");
+            }
+
+            return format!("{bmc_id}|redfish-event-record|{event_record_id}");
+        }
 
         if message_id.is_empty() {
             let body = Self::find_attr(attributes, "body").unwrap_or("");
@@ -60,16 +151,6 @@ impl RedfishEventMapper for OpenBmcEventMapper {
         }
 
         let resource = Self::first_message_arg(attributes);
-
-        if message_id.contains("SensorThreshold") {
-            return format!("{bmc_id}|SensorThreshold|{resource}");
-        }
-
-        if message_id.starts_with("ResourceEvent.") && message_id.contains("ResourceStatusChanged")
-        {
-            return format!("{bmc_id}|ResourceStatusChanged|{resource}");
-        }
-
         format!("{bmc_id}|{message_id}|{resource}")
     }
 }
@@ -77,6 +158,10 @@ impl RedfishEventMapper for OpenBmcEventMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Attrs = &'static [(&'static str, &'static str)];
+
+    use carbide_test_support::value_scenarios;
 
     fn attrs(pairs: &[(&str, &str)]) -> Vec<(Cow<'static, str>, String)> {
         pairs
@@ -96,6 +181,8 @@ mod tests {
                     "OpenBMC.0.1.SensorThresholdWarningLowGoingHigh",
                 ),
                 ("message_args", r#"["HGX_GPU_0_Temp_1","3.96","-0.05"]"#),
+                ("service_id", "/redfish/v1/Systems/1/LogServices/EventLog"),
+                ("entry_id", "41"),
             ]),
         );
         let key_low = mapper.queue_key(
@@ -106,8 +193,11 @@ mod tests {
                     "OpenBMC.0.1.SensorThresholdWarningHighGoingLow",
                 ),
                 ("message_args", r#"["HGX_GPU_0_Temp_1","3.96","-0.05"]"#),
+                ("service_id", "/redfish/v1/Systems/1/LogServices/EventLog"),
+                ("entry_id", "42"),
             ]),
         );
+
         assert_eq!(key_high, key_low);
         assert!(key_high.contains("SensorThreshold"));
         assert!(key_high.contains("HGX_GPU_0_Temp_1"));
@@ -124,6 +214,7 @@ mod tests {
                     "ResourceEvent.1.0.ResourceStatusChangedCritical",
                 ),
                 ("message_args", r#"["leakage1"]"#),
+                ("event_id", "event-41"),
             ]),
         );
         let key_ok = mapper.queue_key(
@@ -131,8 +222,10 @@ mod tests {
             &attrs(&[
                 ("message_id", "ResourceEvent.1.0.ResourceStatusChangedOK"),
                 ("message_args", r#"["leakage1"]"#),
+                ("event_id", "event-42"),
             ]),
         );
+
         assert_eq!(key_critical, key_ok);
         assert!(key_critical.contains("ResourceStatusChanged"));
         assert!(key_critical.contains("leakage1"));
@@ -162,6 +255,78 @@ mod tests {
             ]),
         );
         assert_ne!(key_gpu0, key_gpu1);
+    }
+
+    #[test]
+    fn ordinary_occurrences_use_stable_redfish_identifiers() {
+        value_scenarios!(run = |(left, right): (Attrs, Attrs)| {
+            let mapper = OpenBmcEventMapper;
+            let left = mapper.queue_key("10.85.14.144", &attrs(left));
+            let right = mapper.queue_key("10.85.14.144", &attrs(right));
+
+            left == right
+        };
+            "periodic entry IDs are scoped by log service" {
+                (&[("service_id", "EventLog"), ("entry_id", "41")][..],
+                 &[("service_id", "Journal"), ("entry_id", "41")][..]) => false,
+            }
+
+            "reused periodic ID with a different fingerprint is a distinct occurrence" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "old")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "new")][..]) => false,
+            }
+
+            "replayed periodic entry retains its queue key" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "same")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "same")][..]) => true,
+            }
+
+            "state-pattern MessageId does not coalesce periodic occurrences" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "old"),
+                   ("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"GPU0\"]")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "new"),
+                   ("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"GPU0\"]")][..]) => false,
+            }
+
+            "periodic entry identity takes precedence over its event ID" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("event_id", "event-1")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("event_id", "event-2")][..]) => true,
+            }
+
+            "SSE events use their event ID" {
+                (&[("event_id", "event-41")][..], &[("event_id", "event-42")][..]) => false,
+            }
+
+            "SSE event ID takes precedence over its log entry link" {
+                (&[("event_id", "event-41"), ("log_entry_id", "entry-1")][..],
+                 &[("event_id", "event-41"), ("log_entry_id", "entry-2")][..]) => true,
+            }
+
+            "SSE events fall back to their log entry link" {
+                (&[("log_entry_id", "entry-1")][..],
+                 &[("log_entry_id", "entry-2")][..]) => false,
+            }
+
+            "empty SSE event IDs use the log entry link" {
+                (&[("event_id", ""), ("log_entry_id", "entry-1")][..],
+                 &[("event_id", ""), ("log_entry_id", "entry-2")][..]) => false,
+            }
+
+            "SSE events fall back to their event record URI" {
+                (&[("event_record_id", "record-1")][..],
+                 &[("event_record_id", "record-2")][..]) => false,
+            }
+
+            "SSE state notifications retain latest-wins resource keys" {
+                (&[("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"resource\"]"), ("event_record_id", "record-1"), ("event_record_fingerprint", "old")][..],
+                 &[("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"resource\"]"), ("event_record_id", "record-1"), ("event_record_fingerprint", "new")][..]) => true,
+            }
+
+            "SSE log entry links take precedence over event record URIs" {
+                (&[("log_entry_id", "entry-1"), ("event_record_id", "record-1")][..],
+                 &[("log_entry_id", "entry-1"), ("event_record_id", "record-2")][..]) => true,
+            }
+        );
     }
 
     #[test]

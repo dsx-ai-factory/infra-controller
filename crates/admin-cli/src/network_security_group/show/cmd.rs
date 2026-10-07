@@ -25,7 +25,7 @@ use crate::rpc::ApiClient;
 /// Show one or more NSGs.
 /// If only a single NSG is found, verbose output is used
 /// automatically.
-pub async fn show(
+pub(super) async fn show(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

@@ -32,6 +32,8 @@ metadata:
   name: {{ $alias.namespace }}
   annotations:
     "helm.sh/resource-policy": keep
+    # Argo CD ignores helm.sh/resource-policy; this is its equivalent fuse.
+    argocd.argoproj.io/sync-options: Prune=false
     nico.nvidia.com/purpose: "legacy-compat namespace for nico-api aliases"
   labels:
     {{- include "nico-api.labels" $ | nindent 4 }}

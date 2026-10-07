@@ -57,7 +57,7 @@ impl MetaDataIdentitySigner for FmdsState {
 
         let forge_client_config = self.forge_client_config.as_ref().ok_or_else(|| {
             tonic::Status::failed_precondition(
-                "Forge client TLS is not configured; cannot sign machine identity",
+                "forge client TLS is not configured; cannot sign machine identity",
             )
         })?;
         let snap = self.machine_identity.load();

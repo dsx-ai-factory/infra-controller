@@ -20,12 +20,25 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ModelError;
+use crate::ib_partition::PartitionKey;
 
 pub const DEFAULT_IB_FABRIC_NAME: &str = "default";
 
 // Not implemented yet
 // pub const IBNETWORK_DEFAULT_MEMBERSHIP: IBPortMembership = IBPortMembership::Full;
 // pub const IBNETWORK_DEFAULT_INDEX0: bool = true;
+
+/// `IbMembership` identifies one PKey membership through its fabric and port
+/// GUID.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IbMembership {
+    /// Fabric containing the membership.
+    pub fabric: String,
+    /// Partition key containing the membership.
+    pub pkey: PartitionKey,
+    /// Port GUID associated with the partition key.
+    pub guid: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IBNetwork {

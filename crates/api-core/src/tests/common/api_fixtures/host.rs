@@ -17,7 +17,9 @@
 
 //! Contains host related fixtures
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
+};
 use db::{ObjectColumnFilter, network_prefix};
 use model::hardware_info::HardwareInfo;
 use model::machine::MachineState::UefiSetup;
@@ -35,28 +37,31 @@ use super::tpm_attestation::{AK_NAME_SERIALIZED, AK_PUB_SERIALIZED, EK_PUB_SERIA
 use crate::tests::common::api_fixtures::{TestEnv, TestMachine, forge_agent_control};
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
-pub const GB200_COMPUTE_TRAY_1_INFO_JSON: &[u8] = include_bytes!(
+pub(in crate::tests) const GB200_COMPUTE_TRAY_1_INFO_JSON: &[u8] = include_bytes!(
     "../../../../../api-model/src/hardware_info/test_data/gb200_compute_tray_1_info.json"
 );
-pub const GB200_COMPUTE_TRAY_2_INFO_JSON: &[u8] = include_bytes!(
+#[allow(dead_code)]
+pub(in crate::tests) const GB200_COMPUTE_TRAY_2_INFO_JSON: &[u8] = include_bytes!(
     "../../../../../api-model/src/hardware_info/test_data/gb200_compute_tray_2_info.json"
 );
-pub const GB200_COMPUTE_TRAY_3_INFO_JSON: &[u8] = include_bytes!(
+pub(in crate::tests) const GB200_COMPUTE_TRAY_3_INFO_JSON: &[u8] = include_bytes!(
     "../../../../../api-model/src/hardware_info/test_data/gb200_compute_tray_3_info.json"
 );
-pub const GB200_COMPUTE_TRAY_4_INFO_JSON: &[u8] = include_bytes!(
+#[allow(dead_code)]
+pub(in crate::tests) const GB200_COMPUTE_TRAY_4_INFO_JSON: &[u8] = include_bytes!(
     "../../../../../api-model/src/hardware_info/test_data/gb200_compute_tray_4_info.json"
 );
-pub const GB200_COMPUTE_TRAY_5_INFO_JSON: &[u8] = include_bytes!(
+#[allow(dead_code)]
+pub(in crate::tests) const GB200_COMPUTE_TRAY_5_INFO_JSON: &[u8] = include_bytes!(
     "../../../../../api-model/src/hardware_info/test_data/gb200_compute_tray_5_info.json"
 );
 /// Uses the `discover_dhcp` API to discover a Host with a certain MAC address
 ///
 /// Returns the created `machine_interface_id`
-pub async fn host_discover_dhcp(
+pub(in crate::tests) async fn host_discover_dhcp(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
 ) -> MachineInterfaceId {
     let mut txn = env.pool.begin().await.unwrap();
     let loopback_ip = super::dpu::loopback_ip(&mut txn, dpu_machine_id).await;
@@ -69,7 +74,7 @@ pub async fn host_discover_dhcp(
         &mut txn,
         ObjectColumnFilter::One(
             network_prefix::SegmentIdColumn,
-            &predicted_host.interfaces[0].segment_id,
+            &predicted_host.status.interfaces[0].segment_id,
         ),
     )
     .await
@@ -93,11 +98,11 @@ pub async fn host_discover_dhcp(
 
 /// Emulates Host Machine Discovery (submitting hardware information) for the
 /// Host that uses a certain `machine_interface_id`
-pub async fn host_discover_machine(
+pub(in crate::tests) async fn host_discover_machine(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
     machine_interface_id: MachineInterfaceId,
-) -> MachineId {
+) -> StableHostMachineId {
     let mut discovery_info = DiscoveryInfo::try_from(HardwareInfo::from(host_config)).unwrap();
 
     discovery_info.attest_key_info = Some(AttestKeyInfo {
@@ -118,10 +123,14 @@ pub async fn host_discover_machine(
         .unwrap()
         .into_inner();
 
-    response.machine_id.expect("machine_id must be set")
+    response
+        .machine_id
+        .expect("machine_id must be set")
+        .try_into()
+        .unwrap()
 }
 
-pub async fn host_discover_machine_with_reporter(
+pub(in crate::tests) async fn host_discover_machine_with_reporter(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
     machine_interface_id: MachineInterfaceId,
@@ -152,8 +161,8 @@ pub async fn host_discover_machine_with_reporter(
     response.machine_id.expect("machine_id must be set")
 }
 
-pub async fn host_uefi_setup(env: &TestEnv, host_machine_id: &MachineId) {
-    let machine = TestMachine::new(*host_machine_id, env.api.clone());
+pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: HostMachineId) {
+    let machine = TestMachine::new(host_machine_id, env.api.clone());
 
     // Wait until we are past through the last UefiSetupState and then assert we went through all
     const MAX_ITERATIONS: usize = 20;
@@ -172,6 +181,8 @@ pub async fn host_uefi_setup(env: &TestEnv, host_machine_id: &MachineId) {
                         machine_state: UefiSetup {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: None,
+                                credential_version: (state != UefiSetupState::SetUefiPassword)
+                                    .then_some(0),
                                 uefi_setup_state: state.clone(),
                             },
                         },
@@ -187,7 +198,7 @@ pub async fn host_uefi_setup(env: &TestEnv, host_machine_id: &MachineId) {
             return;
         }
 
-        let response = forge_agent_control(env, *host_machine_id).await;
+        let response = forge_agent_control(env, host_machine_id).await;
         assert!(matches!(response.action, Some(Action::Noop(_))));
         assert_eq!(response.legacy_action, LegacyAction::Noop as i32);
     }

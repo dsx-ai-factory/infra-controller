@@ -22,9 +22,9 @@ use super::TestEnv;
 use crate::api::rpc::forge_server::Forge;
 use crate::api::rpc::{IbPartitionConfig, IbPartitionCreationRequest};
 
-pub const DEFAULT_TENANT: &str = "Tenant1";
+pub(in crate::tests) const DEFAULT_TENANT: &str = "Tenant1";
 
-pub async fn create_ib_partition(
+pub(in crate::tests) async fn create_ib_partition(
     env: &TestEnv,
     name: String,
     tenant: String,

@@ -19,15 +19,17 @@
 
 use std::sync::Arc;
 
+use carbide_instrument::emit;
 use carbide_secrets::credentials::CredentialReader;
 use mqttea::QoS;
 use mqttea::client::{ClientOptions, MqtteaClient};
 use mqttea::registry::JsonRegistration;
 use tokio::sync::mpsc;
 
+use crate::DsxConsumerError;
 use crate::config::{MqttAuthMode, MqttConfig};
 use crate::messages::{LeakMetadata, ValueMessage};
-use crate::{ConsumerMetrics, DsxConsumerError};
+use crate::metrics::{DroppedMessageType, MessageDropped, MessageReceived};
 
 /// Message types received from MQTT.
 #[derive(Debug, Clone)]
@@ -42,15 +44,18 @@ pub enum MqttMessage {
     },
 }
 
-/// Connect to MQTT and return a receiver for incoming messages.
+/// Connect to MQTT and return the processing channel's sender and receiver.
 ///
-/// Sets up the MQTT client, registers message handlers, subscribes to topics,
-/// and connects. Returns a receiver that yields messages with drop-on-overflow.
+/// Sets up the MQTT client, registers message handlers and the client's
+/// queue/publish/connection metrics on the meter, subscribes to topics,
+/// and connects. Returns a sender handle (for the caller to observe the
+/// channel's pending depth) alongside the receiver that yields messages with
+/// drop-on-overflow.
 pub async fn connect(
     config: &MqttConfig,
-    metrics: ConsumerMetrics,
+    meter: &opentelemetry::metrics::Meter,
     credential_reader: Arc<dyn CredentialReader>,
-) -> Result<mpsc::Receiver<MqttMessage>, DsxConsumerError> {
+) -> Result<(mpsc::Sender<MqttMessage>, mpsc::Receiver<MqttMessage>), DsxConsumerError> {
     let (tx, rx) = mpsc::channel(config.queue_capacity);
 
     // QoS 0 is the recommended setting for DSX Exchange integrations.
@@ -73,6 +78,7 @@ pub async fn connect(
     let client = MqtteaClient::new(&config.endpoint, config.port, &client_id, Some(options))
         .await
         .map_err(|e| DsxConsumerError::Mqtt(e.to_string()))?;
+    client.register_metrics(meter, "dsx_exchange_consumer");
 
     // Register message types with distinct suffix patterns.
     // mqttea converts simple strings to suffix regex: "Metadata" -> "/Metadata$"
@@ -90,13 +96,13 @@ pub async fn connect(
     client
         .on_message::<LeakMetadata, _, _>({
             let tx = tx.clone();
-            let metrics = metrics.clone();
             move |_client, metadata, topic| {
-                metrics.record_message_received();
+                emit(MessageReceived);
                 let msg = MqttMessage::Metadata { topic, metadata };
                 if tx.try_send(msg).is_err() {
-                    metrics.record_message_dropped();
-                    tracing::warn!("Message queue full, dropping metadata message");
+                    emit(MessageDropped {
+                        message_type: DroppedMessageType::Metadata,
+                    });
                 }
                 std::future::ready(())
             }
@@ -105,14 +111,18 @@ pub async fn connect(
 
     // Register handler for value messages
     client
-        .on_message::<ValueMessage, _, _>(move |_client, value, topic| {
-            metrics.record_message_received();
-            let msg = MqttMessage::Value { topic, value };
-            if tx.try_send(msg).is_err() {
-                metrics.record_message_dropped();
-                tracing::warn!("Message queue full, dropping value message");
+        .on_message::<ValueMessage, _, _>({
+            let tx = tx.clone();
+            move |_client, value, topic| {
+                emit(MessageReceived);
+                let msg = MqttMessage::Value { topic, value };
+                if tx.try_send(msg).is_err() {
+                    emit(MessageDropped {
+                        message_type: DroppedMessageType::Value,
+                    });
+                }
+                std::future::ready(())
             }
-            std::future::ready(())
         })
         .await;
 
@@ -133,7 +143,7 @@ pub async fn connect(
 
     tracing::info!("MQTT consumer connected");
 
-    Ok(rx)
+    Ok((tx, rx))
 }
 
 async fn build_credentials_provider(

@@ -6,17 +6,22 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/encoding/protojson"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -34,6 +39,8 @@ const (
 	DpuExtensionServiceStatusReady = "Ready"
 	// DpuExtensionServiceStatusError is the status of a DpuExtensionService that is in error mode
 	DpuExtensionServiceStatusError = "Error"
+	// DpuExtensionServiceStatusUpdating indicates that the DpuExtensionService is being updated on the Site
+	DpuExtensionServiceStatusUpdating = "Updating"
 	// DpuExtensionServiceStatusDeleting indicates that the DpuExtensionService is being deleted
 	DpuExtensionServiceStatusDeleting = "Deleting"
 
@@ -47,6 +54,7 @@ var (
 		DpuExtensionServiceStatusPending:  true,
 		DpuExtensionServiceStatusReady:    true,
 		DpuExtensionServiceStatusError:    true,
+		DpuExtensionServiceStatusUpdating: true,
 		DpuExtensionServiceStatusDeleting: true,
 	}
 
@@ -61,12 +69,83 @@ var (
 
 	// DpuExtensionServiceServiceTypeKubernetesPod indicates an extension service running as a Kubernetes pod
 	DpuExtensionServiceServiceTypeKubernetesPod = "KubernetesPod"
+	// DpuExtensionServiceServiceTypeDpfHelmChart indicates an extension service managed as a DPF Helm chart
+	DpuExtensionServiceServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
 
 	// DpuExtensionServiceServiceTypeMap is a map of valid service types for the DpuExtensionService model
 	DpuExtensionServiceServiceTypeMap = map[string]bool{
 		DpuExtensionServiceServiceTypeKubernetesPod: true,
+		DpuExtensionServiceServiceTypeDpfHelmChart:  true,
 	}
 )
+
+// dpuExtensionServiceLifecycleStatePrefix is the proto enum value prefix that Core omits from the lifecycle envelope
+const dpuExtensionServiceLifecycleStatePrefix = "DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_"
+
+// DpuExtensionServiceDpuTargetFromProto maps Core's DPU target enum to its REST representation.
+func DpuExtensionServiceDpuTargetFromProto(target *corev1.DpuExtensionServiceDpuTarget) (*string, error) {
+	if target == nil {
+		return nil, nil
+	}
+
+	var value string
+	switch *target {
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY:
+		value = DpuExtensionServiceDpuTargetPrimary
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE:
+		value = DpuExtensionServiceDpuTargetAllActive
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL:
+		value = DpuExtensionServiceDpuTargetAll
+	default:
+		return nil, fmt.Errorf("unrecognized DPU target %d", *target)
+	}
+
+	return &value, nil
+}
+
+// DpuExtensionServiceStatusFromLifecycleStatus maps Core's reconciliation state
+// onto a DpuExtensionService status. Core carries the state as a JSON envelope
+// rather than the proto enum, so an absent or unrecognized state is an error.
+func DpuExtensionServiceStatusFromLifecycleStatus(lifecycleStatus *corev1.LifecycleStatus) (string, error) {
+	if lifecycleStatus == nil {
+		return "", errors.New("lifecycle status is not set")
+	}
+
+	var envelope struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(lifecycleStatus.State), &envelope); err != nil {
+		return "", fmt.Errorf("failed to parse lifecycle state %q: %w", lifecycleStatus.State, err)
+	}
+
+	state, ok := corev1.DpuExtensionServiceLifecycleState_value[dpuExtensionServiceLifecycleStatePrefix+strings.ToUpper(envelope.State)]
+	if !ok {
+		return "", fmt.Errorf("unrecognized lifecycle state %q", envelope.State)
+	}
+
+	switch corev1.DpuExtensionServiceLifecycleState(state) {
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_CREATING:
+		return DpuExtensionServiceStatusPending, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_READY:
+		return DpuExtensionServiceStatusReady, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_UPDATING:
+		return DpuExtensionServiceStatusUpdating, nil
+	// Deleted stays Deleting because the projection lives until inventory omits the service
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETING,
+		corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETED:
+		return DpuExtensionServiceStatusDeleting, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_FAILED:
+		return DpuExtensionServiceStatusError, nil
+	default:
+		return "", fmt.Errorf("unmapped lifecycle state %q", envelope.State)
+	}
+}
 
 // DpuExtensionServiceVersionInfo is a data structure to capture information for a specific DPU Extension Service version
 type DpuExtensionServiceVersionInfo struct {
@@ -81,12 +160,12 @@ type DpuExtensionServiceVersionInfo struct {
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages
 type DpuExtensionServiceObservability struct {
-	*cwssaws.DpuExtensionServiceObservability
+	*corev1.DpuExtensionServiceObservability
 }
 
 func (o *DpuExtensionServiceObservability) UnmarshalJSON(b []byte) error {
 	if o.DpuExtensionServiceObservability == nil {
-		o.DpuExtensionServiceObservability = &cwssaws.DpuExtensionServiceObservability{}
+		o.DpuExtensionServiceObservability = &corev1.DpuExtensionServiceObservability{}
 	}
 
 	// protoJsonUnmarshalOptions is set to ignore unknown fields.
@@ -107,7 +186,7 @@ func (o *DpuExtensionServiceObservability) MarshalJSON() ([]byte, error) {
 }
 
 // FromProto populates version info from the site-agent protobuf form.
-func (vi *DpuExtensionServiceVersionInfo) FromProto(protoVersionInfo *cwssaws.DpuExtensionServiceVersionInfo, fallbackTime time.Time) {
+func (vi *DpuExtensionServiceVersionInfo) FromProto(protoVersionInfo *corev1.DpuExtensionServiceVersionInfo, fallbackTime time.Time) {
 	if vi == nil || protoVersionInfo == nil {
 		return
 	}
@@ -142,6 +221,7 @@ type DpuExtensionService struct {
 	Name            string                          `bun:"name,notnull"`
 	Description     *string                         `bun:"description"`
 	ServiceType     string                          `bun:"service_type,notnull"`
+	DpuTarget       *string                         `bun:"dpu_target"`
 	SiteID          uuid.UUID                       `bun:"site_id,type:uuid,notnull,pk"`
 	Site            *Site                           `bun:"rel:belongs-to,join:site_id=id"`
 	TenantID        uuid.UUID                       `bun:"tenant_id,type:uuid,notnull"`
@@ -153,14 +233,14 @@ type DpuExtensionService struct {
 	IsMissingOnSite bool                            `bun:"is_missing_on_site,notnull,default:false"`
 	Created         time.Time                       `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated         time.Time                       `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted         time.Time                       `bun:"deleted,nullzero,default:null"`
+	Deleted         *time.Time                      `bun:"deleted,soft_delete"`
 	CreatedBy       uuid.UUID                       `bun:"created_by,type:uuid,notnull"`
 }
 
 // ToDeletionRequestProto builds the workflow request that asks a Site to
 // delete this DPU Extension Service.
-func (des *DpuExtensionService) ToDeletionRequestProto() *cwssaws.DeleteDpuExtensionServiceRequest {
-	return &cwssaws.DeleteDpuExtensionServiceRequest{
+func (des *DpuExtensionService) ToDeletionRequestProto() *corev1.DeleteDpuExtensionServiceRequest {
+	return &corev1.DeleteDpuExtensionServiceRequest{
 		ServiceId: des.ID.String(),
 	}
 }
@@ -169,8 +249,8 @@ func (des *DpuExtensionService) ToDeletionRequestProto() *cwssaws.DeleteDpuExten
 // Site to delete a single version of this DPU Extension Service. Shares
 // the `DeleteDpuExtensionServiceRequest` proto with the whole-service
 // delete; the populated `Versions` field is what scopes the request.
-func (des *DpuExtensionService) ToVersionDeletionRequestProto(versionID string) *cwssaws.DeleteDpuExtensionServiceRequest {
-	return &cwssaws.DeleteDpuExtensionServiceRequest{
+func (des *DpuExtensionService) ToVersionDeletionRequestProto(versionID string) *corev1.DeleteDpuExtensionServiceRequest {
+	return &corev1.DeleteDpuExtensionServiceRequest{
 		ServiceId: des.ID.String(),
 		Versions:  []string{versionID},
 	}
@@ -205,6 +285,7 @@ type DpuExtensionServiceCreateInput struct {
 	Name                  string
 	Description           *string
 	ServiceType           string
+	DpuTarget             *string
 	SiteID                uuid.UUID
 	TenantID              uuid.UUID
 	Version               *string
@@ -224,6 +305,8 @@ type DpuExtensionServiceFilterInput struct {
 	Versions               []string
 	Statuses               []string
 	SearchQuery            *string
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 // DpuExtensionServiceUpdateInput is used to update a DpuExtensionService object
@@ -231,6 +314,7 @@ type DpuExtensionServiceUpdateInput struct {
 	DpuExtensionServiceID uuid.UUID
 	Name                  *string
 	Description           *string
+	DpuTarget             *string
 	Version               *string
 	VersionInfo           *DpuExtensionServiceVersionInfo
 	ActiveVersions        []string
@@ -244,6 +328,8 @@ type DpuExtensionServiceClearInput struct {
 	Description           bool
 	Version               bool
 	VersionInfo           bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // DpuExtensionServiceDAO is an interface for interacting with the DpuExtensionService model
@@ -266,18 +352,14 @@ type DpuExtensionServiceDAO interface {
 type DpuExtensionServiceSQLDAO struct {
 	dbSession *db.Session
 	DpuExtensionServiceDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new DpuExtensionService
-func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceCreateInput) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceCreateInput) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Create")
-	if desDAOSpan != nil {
-		defer desDAOSpan.End()
-
-		dessd.tracerSpan.SetAttribute(desDAOSpan, "name", input.Name)
-	}
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Create")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("name", input.Name))
 
 	var id uuid.UUID
 	if input.DpuExtensionServiceID != nil {
@@ -291,6 +373,7 @@ func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 		Name:           input.Name,
 		Description:    input.Description,
 		ServiceType:    input.ServiceType,
+		DpuTarget:      input.DpuTarget,
 		SiteID:         input.SiteID,
 		TenantID:       input.TenantID,
 		Version:        input.Version,
@@ -315,14 +398,11 @@ func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 
 // GetByID returns a DpuExtensionService by ID and SiteID
 // returns db.ErrDoesNotExist error if the record is not found
-func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.GetByID")
-	if desDAOSpan != nil {
-		defer desDAOSpan.End()
-
-		dessd.tracerSpan.SetAttribute(desDAOSpan, "id", id.String())
-	}
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.GetByID")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("id", id.String()))
 
 	des := &DpuExtensionService{}
 
@@ -347,12 +427,10 @@ func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if page.OrderBy is nil, then records are ordered by column specified in DpuExtensionServiceOrderByDefault in ascending order
-func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceFilterInput, page paginator.PageInput, includeRelations []string) ([]DpuExtensionService, int, error) {
+func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceFilterInput, page paginator.PageInput, includeRelations []string) (_ []DpuExtensionService, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.GetAll")
-	if desDAOSpan != nil {
-		defer desDAOSpan.End()
-	}
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.GetAll")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
 
 	dess := []DpuExtensionService{}
 	if filter.DpuExtensionServiceIDs != nil && len(filter.DpuExtensionServiceIDs) == 0 {
@@ -360,45 +438,28 @@ func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	}
 
 	query := db.GetIDB(tx, dessd.dbSession).NewSelect().Model(&dess)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if filter.DpuExtensionServiceIDs != nil {
 		query = query.Where("des.id IN (?)", bun.In(filter.DpuExtensionServiceIDs))
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "dpu_extension_service_ids", len(filter.DpuExtensionServiceIDs))
-		}
 	}
 
 	if len(filter.Names) > 0 {
 		query = query.Where("des.name IN (?)", bun.In(filter.Names))
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "names", filter.Names)
-		}
 	}
 
 	if len(filter.ServiceTypes) > 0 {
 		query = query.Where("des.service_type IN (?)", bun.In(filter.ServiceTypes))
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "service_types", filter.ServiceTypes)
-		}
 	}
 
 	if len(filter.SiteIDs) > 0 {
 		query = query.Where("des.site_id IN (?)", bun.In(filter.SiteIDs))
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "site_ids", len(filter.SiteIDs))
-		}
 	}
 
 	if len(filter.TenantIDs) > 0 {
 		query = query.Where("des.tenant_id IN (?)", bun.In(filter.TenantIDs))
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "tenant_ids", len(filter.TenantIDs))
-		}
 	}
 
 	if len(filter.Versions) > 0 {
@@ -407,10 +468,6 @@ func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 
 	if len(filter.Statuses) > 0 {
 		query = query.Where("des.status IN (?)", bun.In(filter.Statuses))
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "statuses", len(filter.Statuses))
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -422,10 +479,7 @@ func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 				WhereOr("des.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("des.status ILIKE ?", "%"+searchQuery+"%")
 		})
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(desDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -453,14 +507,11 @@ func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 
 // Update updates specified fields of an existing DpuExtensionService
 // The updated fields are assumed to be set to non-null values
-func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceUpdateInput) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceUpdateInput) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Update")
-	if desDAOSpan != nil {
-		defer desDAOSpan.End()
-
-		dessd.tracerSpan.SetAttribute(desDAOSpan, "id", input.DpuExtensionServiceID.String())
-	}
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Update")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("id", input.DpuExtensionServiceID.String()))
 
 	des := &DpuExtensionService{
 		ID: input.DpuExtensionServiceID,
@@ -471,10 +522,7 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Name != nil {
 		des.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "name", *input.Name)
-		}
+		cotel.SetAttribute(desDAOSpan, attribute.String("name", *input.Name))
 	}
 
 	if input.Description != nil {
@@ -482,13 +530,15 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		updatedFields = append(updatedFields, "description")
 	}
 
+	if input.DpuTarget != nil {
+		des.DpuTarget = input.DpuTarget
+		updatedFields = append(updatedFields, "dpu_target")
+	}
+
 	if input.Version != nil {
 		des.Version = input.Version
 		updatedFields = append(updatedFields, "version")
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "version", *input.Version)
-		}
+		cotel.SetAttribute(desDAOSpan, attribute.String("version", *input.Version))
 	}
 
 	if input.VersionInfo != nil {
@@ -504,25 +554,19 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Status != nil {
 		des.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "status", input.Status)
-		}
 	}
 
 	if input.IsMissingOnSite != nil {
 		des.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-
-		if desDAOSpan != nil {
-			dessd.tracerSpan.SetAttribute(desDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
-		}
 	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID).Exec(ctx)
+		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -537,12 +581,10 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 }
 
 // Clear clears the specified fields of a DpuExtensionService object
-func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceClearInput) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceClearInput) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Clear")
-	if desDAOSpan != nil {
-		defer desDAOSpan.End()
-	}
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Clear")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
 
 	des := &DpuExtensionService{
 		ID: input.DpuExtensionServiceID,
@@ -565,10 +607,22 @@ func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 		updatedFields = append(updatedFields, "version_info")
 	}
 
+	if input.Deleted {
+		des.Deleted = nil
+
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID).Exec(ctx)
+		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -585,14 +639,11 @@ func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 // Delete deletes a DpuExtensionService by ID
 // error is returned only if there is a db error
 // if the object being deleted doesn't exist, error is not returned
-func (dessd DpuExtensionServiceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (dessd DpuExtensionServiceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Delete")
-	if desDAOSpan != nil {
-		defer desDAOSpan.End()
-
-		dessd.tracerSpan.SetAttribute(desDAOSpan, "id", id.String())
-	}
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Delete")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("id", id.String()))
 
 	_, err := db.GetIDB(tx, dessd.dbSession).NewDelete().Model((*DpuExtensionService)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
@@ -605,7 +656,6 @@ func (dessd DpuExtensionServiceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 // NewDpuExtensionServiceDAO returns a new DpuExtensionServiceDAO
 func NewDpuExtensionServiceDAO(dbSession *db.Session) DpuExtensionServiceDAO {
 	return &DpuExtensionServiceSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

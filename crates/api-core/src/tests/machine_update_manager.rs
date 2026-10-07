@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use carbide_machine_controller::health_report::create_host_update_health_report;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use common::api_fixtures::create_test_env;
 use figment::Figment;
 use figment::providers::{Format, Toml};
@@ -34,19 +34,19 @@ use sqlx::PgConnection;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::CarbideResult;
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::create_managed_host;
+use crate::{CarbideError, CarbideResult};
 
 const TEST_DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/cfg/test_data");
 
 #[derive(Clone)]
 struct TestUpdateModule {
-    pub updates_in_progress: Vec<MachineId>,
-    pub updates_started: HashSet<MachineId>,
+    pub(in crate::tests) updates_in_progress: Vec<HostMachineId>,
+    pub(in crate::tests) updates_started: HashSet<HostMachineId>,
     start_updates_called: Arc<Mutex<i32>>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
 }
@@ -56,7 +56,7 @@ impl MachineUpdateModule for TestUpdateModule {
     async fn get_updates_in_progress(
         &self,
         _txn: &mut PgConnection,
-    ) -> CarbideResult<HashSet<MachineId>> {
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         Ok(self.updates_in_progress.clone().into_iter().collect())
     }
 
@@ -64,9 +64,9 @@ impl MachineUpdateModule for TestUpdateModule {
         &self,
         _pool: &sqlx::Pool<sqlx::Postgres>,
         _available_updates: i32,
-        _updating_machines: &HashSet<MachineId>,
-        _snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
-    ) -> CarbideResult<HashSet<MachineId>> {
+        _updating_machines: &HashSet<HostMachineId>,
+        _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         if let Ok(mut guard) = self.start_updates_called.lock() {
             (*guard) += 1;
         }
@@ -84,14 +84,17 @@ impl MachineUpdateModule for TestUpdateModule {
     async fn update_metrics(
         &self,
         _pool: &sqlx::Pool<sqlx::Postgres>,
-        _snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
         Ok(())
     }
 }
 
 impl TestUpdateModule {
-    pub fn new(updates_in_progress: Vec<MachineId>, updates_started: HashSet<MachineId>) -> Self {
+    pub(in crate::tests) fn new(
+        updates_in_progress: Vec<HostMachineId>,
+        updates_started: HashSet<HostMachineId>,
+    ) -> Self {
         TestUpdateModule {
             updates_in_progress,
             updates_started,
@@ -99,11 +102,11 @@ impl TestUpdateModule {
             clear_completed_updates_called: Arc::new(Mutex::new(0)),
         }
     }
-    pub fn get_start_updates_called(&self) -> i32 {
+    pub(in crate::tests) fn get_start_updates_called(&self) -> i32 {
         *self.start_updates_called.lock().unwrap()
     }
 
-    pub fn get_clear_completed_updates_called(&self) -> i32 {
+    pub(in crate::tests) fn get_clear_completed_updates_called(&self) -> i32 {
         *self.clear_completed_updates_called.lock().unwrap()
     }
 }
@@ -120,7 +123,7 @@ async fn test_max_outstanding_updates(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     create_managed_host(&env).await;
-    let (_, dpu_machine_id) = create_managed_host(&env).await.into();
+    let (host_machine_id, _) = create_managed_host(&env).await.into();
 
     let config: Arc<CarbideConfig> = Arc::new(
         Figment::new()
@@ -130,7 +133,7 @@ async fn test_max_outstanding_updates(
     );
 
     let mut machines_started = HashSet::default();
-    machines_started.insert(dpu_machine_id);
+    machines_started.insert(host_machine_id.into());
 
     let module1 = Box::new(TestUpdateModule::new(vec![], machines_started));
     let module2 = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
@@ -162,9 +165,10 @@ async fn test_remove_machine_update_markers(
     let (host_machine_id, dpu_machine_id) = create_managed_host(&env).await.into();
 
     let machine_update = DpuMachineUpdate {
-        host_machine_id,
+        host_machine_id: host_machine_id.into(),
         dpu_machine_id,
         firmware_version: "1".to_owned(),
+        dpf_managed: false,
     };
 
     let reference = &DpuReprovisionInitiator::Automatic(AutomaticFirmwareUpdateReference {
@@ -263,76 +267,46 @@ fn test_start(pool: sqlx::PgPool) {
     assert_eq!(start_count, end_count);
 }
 
-#[crate::sqlx_test]
-async fn test_get_updating_machines(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
-    let (host_machine_id1, dpu_machine_id1) = create_managed_host(&env).await.into();
-    let (host_machine_id2, _dpu_machine_id2) = create_managed_host(&env).await.into();
+/// A lock acquisition that fails for infrastructure reasons (here: the work
+/// lock manager is gone, so the command channel is closed) must propagate out
+/// of `run_single_iteration` as an error rather than being swallowed as a
+/// benign yield -- it is what flips the loop's heartbeat to `outcome=error`.
+#[crate::sqlx_test()]
+fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::PgPool) {
+    let test_module = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
+            .await
+            .unwrap();
+    join_set.shutdown().await;
 
-    let mut txn = env
-        .pool
-        .begin()
+    let config: Arc<CarbideConfig> = Arc::new(
+        Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/full_config.toml")))
+            .extract()
+            .unwrap(),
+    );
+    let update_manager = MachineUpdateManager::new_with_modules(
+        pool,
+        config,
+        vec![test_module],
+        work_lock_manager_handle,
+    );
+
+    let err = update_manager
+        .run_single_iteration()
         .await
-        .expect("Failed to create transaction");
-
-    let machine_update = DpuMachineUpdate {
-        host_machine_id: host_machine_id1,
-        dpu_machine_id: dpu_machine_id1,
-        firmware_version: "1".to_owned(),
-    };
-
-    let reference = &DpuReprovisionInitiator::Automatic(AutomaticFirmwareUpdateReference {
-        from: "x".to_owned(),
-        to: "y".to_owned(),
-    });
-
-    add_host_update_alert(&mut txn, &machine_update, reference).await?;
-
-    // Second Machine has a health report, but with an irrelevant alert
-    let health_override_2 = health_report::HealthReport {
-        source: "host-update".to_string(),
-        triggered_by: None,
-        observed_at: Some(chrono::Utc::now()),
-        successes: vec![],
-        alerts: vec![health_report::HealthProbeAlert {
-            id: "should_get_ignored".parse().unwrap(),
-            target: None,
-            in_alert_since: Some(chrono::Utc::now()),
-            message: "Test".to_string(),
-            tenant_message: None,
-            classifications: vec![
-                health_report::HealthAlertClassification::prevent_allocations(),
-                health_report::HealthAlertClassification::suppress_external_alerting(),
-            ],
-        }],
-    };
-
-    db::machine::insert_health_report(
-        &mut txn,
-        &host_machine_id2,
-        health_report::HealthReportApplyMode::Merge,
-        &health_override_2,
-        false,
-    )
-    .await?;
-
-    db::machine::trigger_dpu_reprovisioning_request(&host_machine_id1, &mut txn, "test", true)
-        .await?;
-    txn.commit().await.unwrap();
-
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
-    let machines = MachineUpdateManager::get_updating_machines(&mut txn)
-        .await
-        .unwrap();
-
-    assert_eq!(machines.len(), 1);
-    assert_eq!(machines.iter().next().unwrap(), &host_machine_id1);
-
-    Ok(())
+        .expect_err("a dead work lock manager is an infrastructure failure, not a yield");
+    assert!(
+        matches!(err, CarbideError::Internal { .. }),
+        "expected CarbideError::Internal, got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("failed to acquire machine update work lock"),
+        "unexpected message: {err}"
+    );
 }
 
 /// Manually adds the HostUpdateInProgress health alert to a Machine

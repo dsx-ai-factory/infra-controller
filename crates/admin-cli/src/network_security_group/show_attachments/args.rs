@@ -29,14 +29,14 @@ Include objects inheriting the group from a parent:
     --include-indirect
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "network security group ID to query")]
-    pub id: String,
+    pub(super) id: String,
 
     #[clap(
         short = 'a',
         long,
         help = "include indirect relationships (objects that are inheriting the NSG from a parent object)"
     )]
-    pub include_indirect: bool,
+    pub(super) include_indirect: bool,
 }

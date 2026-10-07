@@ -15,11 +15,10 @@
  * limitations under the License.
  */
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use mac_address::MacAddress;
 use uuid::Uuid;
-
-use crate::errors::CarbideCliError;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -35,23 +34,31 @@ Show one expected machine by id:
     $ nico-admin-cli expected-machine show --id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(None),
-        help = "BMC MAC address of the expected machine to show. Leave unset for all."
+        help = "BMC MAC address of the expected machine to show. Omit both this address and --id to list all expected machines."
     )]
-    pub bmc_mac_address: Option<MacAddress>,
+    bmc_mac_address: Option<MacAddress>,
 
-    #[clap(long, help = "ID (UUID) of the expected machine to show.")]
-    pub id: Option<Uuid>,
+    #[clap(
+        long,
+        help = "ID (UUID) of the expected machine to show. Cannot be combined with a BMC MAC address."
+    )]
+    id: Option<Uuid>,
 }
 
-impl TryFrom<&Args> for Option<::rpc::forge::ExpectedMachineRequest> {
-    type Error = CarbideCliError;
+impl TryFrom<Args> for Option<::rpc::forge::ExpectedMachineRequest> {
+    type Error = clap::Error;
 
-    fn try_from(args: &Args) -> Result<Self, Self::Error> {
-        match (&args.bmc_mac_address, &args.id) {
-            (Some(_), Some(_)) => Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id")),
+    fn try_from(args: Args) -> Result<Self, Self::Error> {
+        match (args.bmc_mac_address, args.id) {
+            (Some(_), Some(_)) => Err(Args::command()
+                .bin_name("nico-admin-cli expected-machine show")
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "cannot specify both a BMC MAC address and --id; provide only one",
+                )),
             (None, Some(id)) => Ok(Some(::rpc::forge::ExpectedMachineRequest {
                 bmc_mac_address: String::new(),
                 id: Some(::rpc::common::Uuid {

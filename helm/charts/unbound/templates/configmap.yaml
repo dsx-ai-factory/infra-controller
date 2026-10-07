@@ -39,7 +39,11 @@ data:
     {{- $name := .name }}
     {{- $ttl := .ttl | default 300 }}
     {{- range .addresses }}
+    {{- if contains ":" (toString .) }}
+        local-data: "{{ $name }} {{ $ttl }} IN AAAA {{ . }}"
+    {{- else }}
         local-data: "{{ $name }} {{ $ttl }} IN A {{ . }}"
+    {{- end }}
     {{- end }}
     {{- end }}
   {{- end }}

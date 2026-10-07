@@ -28,18 +28,55 @@ Apply a devenv config using VPC prefixes:
     $ nico-admin-cli dev-env config apply ./devenv_config.toml --mode vpc-prefix
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         help = "Path to devenv config file. Usually this is in forged repo at envs/local-dev/site/site-controller/files/generated/devenv_config.toml"
     )]
-    pub path: String,
+    pub(super) path: String,
 
-    #[clap(long, short, help = "Vpc prefix or network segment?")]
-    pub mode: NetworkChoice,
+    #[clap(
+        long,
+        short,
+        help = "VPC prefix, tenant network segment, or HostInband segment?"
+    )]
+    pub(super) mode: NetworkChoice,
 }
 
 #[derive(ValueEnum, Parser, Debug, Clone, PartialEq)]
-pub enum NetworkChoice {
+pub(super) enum NetworkChoice {
     NetworkSegment,
     VpcPrefix,
+    /// Flat VPC plus HostInband segment for hosts with no DPU.
+    HostInbandSegment,
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+    use clap::ValueEnum;
+
+    use super::NetworkChoice;
+
+    #[test]
+    fn network_choice_value_enum() {
+        scenarios!(
+            run = |value| NetworkChoice::from_str(value, false).map_err(drop);
+            "network-segment" {
+                "network-segment" => Yields(NetworkChoice::NetworkSegment),
+            }
+
+            "vpc-prefix" {
+                "vpc-prefix" => Yields(NetworkChoice::VpcPrefix),
+            }
+
+            "host-inband-segment" {
+                "host-inband-segment" => Yields(NetworkChoice::HostInbandSegment),
+            }
+
+            "invalid value" {
+                "invalid" => Fails,
+            }
+        );
+    }
 }

@@ -16,7 +16,9 @@
  */
 use ::rpc::forge as rpc;
 use config_version::ConfigVersion;
-use db::{self, ObjectColumnFilter, WithTransaction, instance, nvl_logical_partition};
+use db::{
+    self, ConditionalWrite, ObjectColumnFilter, WithTransaction, instance, nvl_logical_partition,
+};
 use futures_util::FutureExt;
 use model::nvl_logical_partition::NewLogicalPartition;
 use tonic::{Request, Response, Status};
@@ -204,12 +206,12 @@ pub(crate) async fn update(
 
     let config = req
         .config
-        .ok_or_else(|| CarbideError::InvalidArgument("Config must be provided".to_string()))?;
+        .ok_or_else(|| CarbideError::InvalidArgument("config must be provided".to_string()))?;
 
     let metadata: model::metadata::Metadata = config
         .metadata
         .clone()
-        .ok_or_else(|| CarbideError::InvalidArgument("Metadata must be provided".to_string()))?
+        .ok_or_else(|| CarbideError::InvalidArgument("metadata must be provided".to_string()))?
         .try_into()?;
     metadata.validate(true).map_err(CarbideError::from)?;
 
@@ -237,7 +239,7 @@ pub(crate) async fn update(
 
     if config.tenant_organization_id != partition.tenant_organization_id.to_string() {
         return Err(CarbideError::InvalidArgument(
-            "Tenant organization ID should not be updated".to_string(),
+            "tenant organization ID should not be updated".to_string(),
         )
         .into());
     }
@@ -258,12 +260,20 @@ pub(crate) async fn update(
 
     let name = metadata.name;
     let description = metadata.description;
-    let resp = db::nvl_logical_partition::update(&partition, name, description, &mut txn)
-        .await
-        .map(|_| rpc::NvLinkLogicalPartitionUpdateResult {})
-        .map(Response::new)?;
+    match db::nvl_logical_partition::update(&partition, name, description, &mut txn).await? {
+        ConditionalWrite::Applied(_) => {}
+        ConditionalWrite::NotApplied(nvl_logical_partition::LogicalPartitionNotCurrent) => {
+            // A missing partition here was removed after the initial lookup, so
+            // report it as a concurrent change just like a changed `config_version`.
+            return Err(CarbideError::ConcurrentModificationError(
+                "LogicalPartition",
+                partition.config_version.to_string(),
+            )
+            .into());
+        }
+    }
 
     txn.commit().await?;
 
-    Ok(resp)
+    Ok(Response::new(rpc::NvLinkLogicalPartitionUpdateResult {}))
 }

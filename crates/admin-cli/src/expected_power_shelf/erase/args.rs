@@ -25,7 +25,7 @@ Erase all expected power shelf records (requires explicit confirmation):
     $ nico-admin-cli expected-power-shelf erase --confirm
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "Confirm that you want to erase all records.")]
-    pub confirm: bool,
+    pub(super) confirm: bool,
 }

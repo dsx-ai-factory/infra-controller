@@ -30,7 +30,7 @@ NICo provisions hosts and assigns them to tenants as instances via API. Building
 |---|---|
 | Tenant isolation at the DPU layer (Ethernet via HBN) | Leaf switch, spine switch, and router configuration |
 | InfiniBand partition assignment via UFM APIs | UFM deployment and management |
-| NVLink partition management via NMX-M APIs | NMX-M deployment and management |
+| NVLink partition management via NMX-C APIs | NMX-C deployment and management |
 | BGP route advertisement from DPUs | Physical underlay design and cabling |
 
 NICo enforces isolation without reconfiguring physical switches — the underlay is expected to be stable and pre-configured. NICo does not install or manage Cumulus Linux on switches, UFM, or network observability tools such as NetQ.

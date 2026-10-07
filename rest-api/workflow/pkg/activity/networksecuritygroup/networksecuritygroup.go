@@ -6,7 +6,6 @@ package networksecuritygroup
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -16,8 +15,9 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
@@ -32,7 +32,7 @@ type ManageNetworkSecurityGroup struct {
 // Activity functions
 
 // UpdateNetworkSecurityGroupsInDB is a Temporal activity that takes a collection of NetworkSecurityGroup data pushed by Site Agent and updates the DB
-func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context.Context, siteID uuid.UUID, networkSecurityGroupInventory *cwssaws.NetworkSecurityGroupInventory) error {
+func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context.Context, siteID uuid.UUID, networkSecurityGroupInventory *corev1.NetworkSecurityGroupInventory) error {
 	logger := log.With().Str("Activity", "UpdateNetworkSecurityGroupsInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -42,7 +42,7 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 		return errors.New("UpdateNetworkSecurityGroupsInDB called with nil inventory")
 	}
 
-	if networkSecurityGroupInventory.InventoryStatus == cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if networkSecurityGroupInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
@@ -106,7 +106,7 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 			// tenants, so if we see a tenant we don't know about, we'll
 			// query and cache it.
 			if !foundTenant {
-				tenants, err := tenantDAO.GetAllByOrg(ctx, nil, controllerNetworkSecurityGroup.TenantOrganizationId, nil)
+				tenants, _, err := tenantDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{controllerNetworkSecurityGroup.TenantOrganizationId}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to query for tenant ID for " + controllerNetworkSecurityGroup.TenantOrganizationId)
 					return err
@@ -155,6 +155,15 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 			//			but this isn't expensive.
 			reportedNetworkSecurityGroupIDMap[networkSecurityGroup.ID] = true
 
+			// A row written since the Site collected this inventory holds changes the snapshot
+			// cannot know about, including rules set through the API, so writing the reported
+			// values over them would lose those edits.
+			if site.IsTimeWithinStaleInventoryThreshold(networkSecurityGroup.Updated) {
+				slogger.Info().Msg("not updating NetworkSecurityGroup yet because it changed more recently than the inventory interval")
+
+				continue
+			}
+
 			if networkSecurityGroup.Version != controllerNetworkSecurityGroup.Version {
 				// If the record coming in from site is known to cloud but site
 				// reports a different version, time to update cloud.
@@ -192,7 +201,7 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 	// and the call to this function was a one-shot with all inventory,
 	// and reportedNetworkSecurityGroupIDMap was populated while processing the unpaged
 	// inventory.
-	if networkSecurityGroupInventory.InventoryPage == nil || networkSecurityGroupInventory.InventoryPage.TotalPages == 0 || (networkSecurityGroupInventory.InventoryPage.CurrentPage == networkSecurityGroupInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(networkSecurityGroupInventory.GetInventoryPage()) {
 
 		// Clear out any that don't exist on site.
 		for _, networkSecurityGroup := range existingNetworkSecurityGroupIDMap {
@@ -206,7 +215,7 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 				// inventory, so make sure the object has existed for at least as
 				// long as our inventory interval with a little buffer to make
 				// sure we aren't in lock-step.
-				if time.Since(networkSecurityGroup.Created) < cwutil.InventoryReceiptInterval+(time.Second*5) {
+				if site.IsTimeWithinStaleInventoryThreshold(networkSecurityGroup.Created) {
 					slogger.Info().Msg("not going to delete yet because group is newer than the inventory interval")
 
 					continue

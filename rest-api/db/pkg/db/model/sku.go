@@ -9,19 +9,24 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
 	// SkuRelationName is the relation name for the Sku model
 	SkuRelationName = "Sku"
 	// names of order by fields
+	SkuOrderByID      = "id"
 	SkuOrderByCreated = "created"
 	skuOrderByUpdated = "updated"
 	// SkuOrderByDefault default field to be used for ordering when none specified
@@ -30,7 +35,7 @@ const (
 
 var (
 	// SkuOrderByFields is a list of valid order by fields for the SKU model
-	SkuOrderByFields = []string{SkuOrderByCreated, skuOrderByUpdated}
+	SkuOrderByFields = []string{SkuOrderByID, SkuOrderByCreated, skuOrderByUpdated}
 	// SkuRelatedEntities is a list of valid relation by fields for the Sku model
 	SkuRelatedEntities = map[string]bool{
 		SiteRelationName: true,
@@ -41,7 +46,7 @@ var (
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages
 type SkuComponents struct {
-	*cwssaws.SkuComponents
+	*corev1.SkuComponents
 }
 
 // Equal reports whether two `*SkuComponents` wrappers carry the same
@@ -51,7 +56,7 @@ type SkuComponents struct {
 // `cmp.Equal`, etc.) so callers can write `s.Equal(other)` instead of
 // reaching for a free helper.
 func (s *SkuComponents) Equal(other *SkuComponents) bool {
-	var sp, op *cwssaws.SkuComponents
+	var sp, op *corev1.SkuComponents
 	if s != nil {
 		sp = s.SkuComponents
 	}
@@ -63,7 +68,7 @@ func (s *SkuComponents) Equal(other *SkuComponents) bool {
 
 func (s *SkuComponents) UnmarshalJSON(b []byte) error {
 	if s.SkuComponents == nil {
-		s.SkuComponents = &cwssaws.SkuComponents{}
+		s.SkuComponents = &corev1.SkuComponents{}
 	}
 
 	return protoJsonUnmarshalOptions.Unmarshal(b, s)
@@ -80,50 +85,55 @@ type SKU struct {
 	ID                   string         `bun:"id,pk"`
 	SiteID               uuid.UUID      `bun:"site_id,type:uuid,notnull"`
 	Site                 *Site          `bun:"rel:belongs-to,join:site_id=id"`
-	DeviceType           *string        `bun:"device_type"` // NOTE: can be added once available in nico.proto
+	Description          string         `bun:"description,notnull,default:''"`
+	SchemaVersion        uint32         `bun:"schema_version,notnull,default:0"`
+	DeviceType           *string        `bun:"device_type"`
 	Components           *SkuComponents `bun:"components,type:jsonb"`
 	AssociatedMachineIds []string       `bun:"associated_machines,type:text[],default:'{}'"`
 	Created              time.Time      `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated              time.Time      `bun:"updated,nullzero,notnull,default:current_timestamp"`
 }
 
-// ToProto converts this SKU into its workflow proto representation.
-// Used as the canonical entity-to-proto conversion; SKU has no API
-// Create/Update request shapes (the Site is the source of truth for
-// SKU data, so the cloud API exposes read-only handlers), so this
-// receiver is the only `ToProto` the model carries.
+// ToProto converts the REST database projection into its Core SKU representation.
 //
-// Fields that exist on the proto but not on the DB row
-// (`Description`, the proto-level `Created` timestamp, `SchemaVersion`)
-// are intentionally omitted — the DB does not carry the data to fill
-// them, and no current caller depends on them. `SiteID` is on the
-// model but not on the proto, so it is also dropped on the wire (the
-// receiving side reconstructs it from context, mirroring `FromProto`).
-func (sk *SKU) ToProto() *cwssaws.Sku {
-	proto := &cwssaws.Sku{
-		Id:         sk.ID,
-		DeviceType: sk.DeviceType,
+// SiteID is omitted because it is not carried by the Core SKU message; callers
+// supply it separately to FromProto.
+func (sk *SKU) ToProto() *corev1.Sku {
+	proto := &corev1.Sku{
+		Id:            sk.ID,
+		Description:   &sk.Description,
+		SchemaVersion: sk.SchemaVersion,
+		DeviceType:    sk.DeviceType,
+	}
+	if !sk.Created.IsZero() {
+		proto.Created = timestamppb.New(sk.Created)
 	}
 	if sk.Components != nil {
 		proto.Components = sk.Components.SkuComponents
 	}
 	if sk.AssociatedMachineIds != nil {
-		machineIDs := make([]*cwssaws.MachineId, 0, len(sk.AssociatedMachineIds))
+		machineIDs := make([]*corev1.MachineId, 0, len(sk.AssociatedMachineIds))
 		for _, id := range sk.AssociatedMachineIds {
-			machineIDs = append(machineIDs, &cwssaws.MachineId{Id: id})
+			machineIDs = append(machineIDs, &corev1.MachineId{Id: id})
 		}
 		proto.AssociatedMachineIds = machineIDs
 	}
 	return proto
 }
 
-// FromProto populates this SKU from a workflow proto reported by a Site.
-// A nil proto is a no-op. This is the inverse of `ToProto`; `siteID`
-// is supplied by the caller because it isn't carried on the proto.
+// FromProto populates the REST database projection from a Core SKU returned by
+// inventory synchronization or an immediate REST mutation. A nil proto is a
+// no-op. This is the inverse of ToProto; siteID is supplied by the caller
+// because it is not carried on the Core SKU message.
 //
 // Field-level contract:
 //   - `sk.ID` is overwritten with `proto.Id` (callers pre-validate
 //     non-empty IDs at the activity layer).
+//   - `Description` uses the protobuf default when absent, so a nil Core
+//     description clears any stale REST projection value.
+//   - `Created` is normalized to REST DB precision when Core supplies a valid
+//     timestamp and is zero otherwise so create and update callers can apply
+//     their respective fallback semantics.
 //   - `Components` mirrors the proto: stays nil when `proto.Components`
 //     is nil, otherwise wraps it, so the activity layer can distinguish
 //     "not provided" from "explicitly set".
@@ -131,13 +141,19 @@ func (sk *SKU) ToProto() *cwssaws.Sku {
 //     skipping entries with empty IDs. Stays nil when the proto's list
 //     is nil so the activity layer can distinguish "not provided" from
 //     "explicitly empty".
-func (sk *SKU) FromProto(proto *cwssaws.Sku, siteID uuid.UUID) {
+func (sk *SKU) FromProto(proto *corev1.Sku, siteID uuid.UUID) {
 	if proto == nil {
 		return
 	}
 	sk.ID = proto.Id
 	sk.SiteID = siteID
+	sk.Description = proto.GetDescription()
+	sk.SchemaVersion = proto.SchemaVersion
 	sk.DeviceType = proto.DeviceType
+	sk.Created = time.Time{}
+	if proto.Created != nil && proto.Created.IsValid() {
+		sk.Created = proto.Created.AsTime().UTC().Round(time.Microsecond)
+	}
 	if proto.Components != nil {
 		sk.Components = &SkuComponents{SkuComponents: proto.Components}
 	} else {
@@ -158,19 +174,25 @@ func (sk *SKU) FromProto(proto *cwssaws.Sku, siteID uuid.UUID) {
 
 // SkuCreateInput input parameters for Create method
 type SkuCreateInput struct {
-	SkuID                string // NICo is the source of truth: id must always be provided on creation.
+	SkuID                string // Core is authoritative, so the ID must be provided when creating its REST projection.
 	SiteID               uuid.UUID
+	Description          string
+	SchemaVersion        uint32
 	Components           *SkuComponents
 	DeviceType           *string
 	AssociatedMachineIds []string
+	Created              *time.Time
 }
 
 // SkuUpdateInput input parameters for Update method
 type SkuUpdateInput struct {
 	SkuID                string
+	Description          *string
+	SchemaVersion        *uint32
 	Components           *SkuComponents
 	DeviceType           *string
 	AssociatedMachineIds []string
+	Created              *time.Time
 }
 
 // SkuFilterInput input parameters for Filter method
@@ -187,8 +209,11 @@ var _ bun.BeforeAppendModelHook = (*SKU)(nil)
 func (s *SKU) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 	switch query.(type) {
 	case *bun.InsertQuery:
-		s.Created = db.GetCurTime()
-		s.Updated = db.GetCurTime()
+		now := db.GetCurTime()
+		if s.Created.IsZero() {
+			s.Created = now
+		}
+		s.Updated = now
 	case *bun.UpdateQuery:
 		s.Updated = db.GetCurTime()
 	}
@@ -221,24 +246,26 @@ type SkuDAO interface {
 type SkuSQLDAO struct {
 	dbSession *db.Session
 	SkuDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new SKU from the given parameters
 // SKU comes from NICo, so SkuID is required
-func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (*SKU, error) {
+func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Create")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Create")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
 
 	sk := &SKU{
 		ID:                   input.SkuID,
 		SiteID:               input.SiteID,
+		Description:          input.Description,
+		SchemaVersion:        input.SchemaVersion,
 		DeviceType:           input.DeviceType,
 		Components:           input.Components,
 		AssociatedMachineIds: input.AssociatedMachineIds,
+	}
+	if input.Created != nil && !input.Created.IsZero() {
+		sk.Created = input.Created.UTC().Round(time.Microsecond)
 	}
 
 	_, err := db.GetIDB(tx, ssd.dbSession).NewInsert().Model(sk).Exec(ctx)
@@ -251,13 +278,11 @@ func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput
 
 // Get returns a SKU by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (*SKU, error) {
+func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Get")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", id)
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Get")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", id))
 
 	sk := &SKU{}
 
@@ -275,31 +300,19 @@ func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (*SKU, error
 }
 
 // setQueryWithFilter populates the lookup query based on specified filter
-func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.SelectQuery, skuDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.SelectQuery, skuDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if len(filter.SiteIDs) > 0 {
 		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 	if len(filter.SkuIDs) > 0 {
 		query = query.Where("id IN (?)", bun.In(filter.SkuIDs))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "sku_ids", filter.SkuIDs)
-		}
 	}
 	if len(filter.DeviceTypes) > 0 {
 		query = query.Where("device_type IN (?)", bun.In(filter.DeviceTypes))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "device_types", filter.DeviceTypes)
-		}
 	}
 	if len(filter.AssociatedMachineIds) > 0 {
 		// For array type, use overlap '&&' with a typed array literal to work with COUNT.
 		query = query.Where("sk.associated_machines && ARRAY[?]::text[]", bun.In(filter.AssociatedMachineIds))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "associated_machine_ids", filter.AssociatedMachineIds)
-		}
 	}
 
 	return query, nil
@@ -308,12 +321,10 @@ func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.Select
 // GetAll returns all SKUs with optional filters
 // If orderBy is nil, then records are ordered by column specified
 // in SkuOrderByDefault in ascending order
-func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error) {
+func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) (_ []SKU, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.GetAll")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.GetAll")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
 
 	skus := []SKU{}
 
@@ -343,16 +354,28 @@ func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInpu
 }
 
 // Update updates specified fields of an existing SKU
-func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error) {
+func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Update")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", input.SkuID)
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Update")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", input.SkuID))
 
 	sk := &SKU{ID: input.SkuID}
 	updatedFields := []string{}
+	if input.Created != nil && !input.Created.IsZero() {
+		sk.Created = input.Created.UTC().Round(time.Microsecond)
+		updatedFields = append(updatedFields, "created")
+	}
+
+	if input.Description != nil {
+		sk.Description = *input.Description
+		updatedFields = append(updatedFields, "description")
+	}
+
+	if input.SchemaVersion != nil {
+		sk.SchemaVersion = *input.SchemaVersion
+		updatedFields = append(updatedFields, "schema_version")
+	}
 
 	if input.Components != nil {
 		sk.Components = input.Components
@@ -385,13 +408,11 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 }
 
 // Delete deletes a SKU by ID
-func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) error {
+func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Delete")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", id)
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Delete")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", id))
 
 	sk := &SKU{ID: id}
 
@@ -406,7 +427,6 @@ func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) error {
 // NewSkuDAO returns a new SkuDAO
 func NewSkuDAO(dbSession *db.Session) SkuDAO {
 	return &SkuSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

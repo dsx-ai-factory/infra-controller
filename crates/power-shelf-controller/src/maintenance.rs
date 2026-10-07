@@ -27,8 +27,10 @@ use component_manager::power_shelf_manager::{
 use db::power_shelf as db_power_shelf;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
-use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfMaintenanceOperation};
-use sqlx::PgPool;
+use model::power_shelf::{
+    PowerShelf, PowerShelfControllerState, PowerShelfMaintenanceOperation,
+    PowerShelfMaintenanceRequest,
+};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -41,61 +43,73 @@ pub async fn handle_maintenance(
     state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-    let operation = match &state.controller_state.value {
-        PowerShelfControllerState::Maintenance { operation } => *operation,
-        _ => unreachable!("handle_maintenance called with non-Maintenance state"),
+    let PowerShelfControllerState::Maintenance { operation, request } =
+        &state.controller_state.value
+    else {
+        unreachable!("handle_maintenance called with non-Maintenance state");
     };
+    let request = request.as_ref();
 
     match operation {
         PowerShelfMaintenanceOperation::PowerOn => {
-            handle_power_on(power_shelf_id, state, ctx).await
+            handle_power_on(power_shelf_id, state, request, ctx).await
         }
-        PowerShelfMaintenanceOperation::PowerOff => {
-            handle_power_off(power_shelf_id, state, ctx).await
+        PowerShelfMaintenanceOperation::PowerOff { graceful } => {
+            handle_power_off(power_shelf_id, state, request, ctx, *graceful).await
         }
     }
 }
 
 async fn handle_power_on(
     power_shelf_id: &PowerShelfId,
-    state: &mut PowerShelf,
+    state: &PowerShelf,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(
         power_shelf_id = %power_shelf_id,
         "PowerShelf maintenance: PowerOn"
     );
-    invoke_power_operation(power_shelf_id, state, ctx, PowerAction::On, "PowerOn").await
+    invoke_power_operation(
+        power_shelf_id,
+        state,
+        request,
+        ctx,
+        PowerAction::On,
+        "PowerOn",
+    )
+    .await
 }
 
 async fn handle_power_off(
     power_shelf_id: &PowerShelfId,
-    state: &mut PowerShelf,
+    state: &PowerShelf,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
+    let action = if graceful {
+        PowerAction::GracefulShutdown
+    } else {
+        PowerAction::ForceOff
+    };
     tracing::info!(
         power_shelf_id = %power_shelf_id,
+        graceful,
         "PowerShelf maintenance: PowerOff"
     );
-    invoke_power_operation(
-        power_shelf_id,
-        state,
-        ctx,
-        PowerAction::ForceOff,
-        "PowerOff",
-    )
-    .await
+    invoke_power_operation(power_shelf_id, state, request, ctx, action, "PowerOff").await
 }
 
 /// Common driver for component-manager-backed power maintenance operations.
 /// Builds a `PowerShelfEndpoint` with the power shelf's BMC connection details
 /// and dispatches `power_control` against the configured backend. Returns to
 /// `Ready` on success or transitions to `Error` on failure. In both terminal
-/// cases the `power_shelf_maintenance_requested` row is cleared so the
-/// controller does not re-enter `Maintenance` on the next iteration.
+/// cases only the completed request is cleared. A replacement remains pending.
 async fn invoke_power_operation(
     power_shelf_id: &PowerShelfId,
     state: &PowerShelf,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     action: PowerAction,
     operation_label: &'static str,
@@ -103,6 +117,7 @@ async fn invoke_power_operation(
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         return finish_maintenance_with_error(
             power_shelf_id,
+            request,
             ctx,
             format!(
                 "PowerShelf {} maintenance ({}): component manager not configured",
@@ -115,6 +130,7 @@ async fn invoke_power_operation(
     let Some(rack_id) = state.rack_id.as_ref() else {
         return finish_maintenance_with_error(
             power_shelf_id,
+            request,
             ctx,
             format!(
                 "PowerShelf {} maintenance ({}): power shelf has no rack association",
@@ -127,7 +143,6 @@ async fn invoke_power_operation(
     let endpoint = match build_power_shelf_endpoint(
         power_shelf_id,
         state,
-        &ctx.services.db_pool,
         ctx.services.credential_manager.as_ref(),
     )
     .await
@@ -136,6 +151,7 @@ async fn invoke_power_operation(
         Err(cause) => {
             return finish_maintenance_with_error(
                 power_shelf_id,
+                request,
                 ctx,
                 format!(
                     "PowerShelf {} maintenance ({}): {}",
@@ -169,12 +185,13 @@ async fn invoke_power_operation(
                     backend = component_manager.power_shelf.name(),
                     "Power shelf power control succeeded; returning PowerShelf to Ready"
                 );
-                let mut txn = ctx.services.db_pool.begin().await?;
-                db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id)
-                    .await?;
-                return Ok(
-                    StateHandlerOutcome::transition(PowerShelfControllerState::Ready).with_txn(txn),
-                );
+                return finish_maintenance(
+                    power_shelf_id,
+                    request,
+                    ctx,
+                    PowerShelfControllerState::Ready,
+                )
+                .await;
             }
 
             let summary = result
@@ -192,7 +209,7 @@ async fn invoke_power_operation(
                 "PowerShelf {} maintenance ({}): power control failed: {}",
                 power_shelf_id, operation_label, summary
             );
-            finish_maintenance_with_error(power_shelf_id, ctx, cause).await
+            finish_maintenance_with_error(power_shelf_id, request, ctx, cause).await
         }
         Err(error) => {
             let cause = format!(
@@ -207,18 +224,18 @@ async fn invoke_power_operation(
                 error = %error,
                 "Power shelf power control transport error",
             );
-            finish_maintenance_with_error(power_shelf_id, ctx, cause).await
+            finish_maintenance_with_error(power_shelf_id, request, ctx, cause).await
         }
     }
 }
 
 /// Build the `PowerShelfEndpoint` describing this power shelf for component
-/// manager power operations. Resolves the BMC IP from the database and BMC
-/// credentials via the credential manager.
+/// manager power operations. The BMC MAC/IP come from the `bmc_info` carried on
+/// the loaded `PowerShelf` model (resolved by the power-shelf load query); BMC
+/// credentials are resolved via the credential manager.
 pub(super) async fn build_power_shelf_endpoint(
     power_shelf_id: &PowerShelfId,
     state: &PowerShelf,
-    db_pool: &PgPool,
     credential_manager: &dyn CredentialManager,
 ) -> Result<PowerShelfEndpoint, String> {
     let bmc_mac = state.bmc_mac_address.ok_or_else(|| {
@@ -228,42 +245,34 @@ pub(super) async fn build_power_shelf_endpoint(
         )
     })?;
 
-    let bmc_ip = lookup_power_shelf_bmc_ip(db_pool, power_shelf_id, bmc_mac).await?;
+    let pmc_ip = state
+        .bmc_info
+        .as_ref()
+        .and_then(|info| info.ip)
+        .ok_or_else(|| {
+            format!(
+                "no BMC IP found for power shelf {} (bmc_mac {})",
+                power_shelf_id, bmc_mac
+            )
+        })?;
     let credentials = lookup_bmc_credentials(credential_manager, bmc_mac).await?;
 
     Ok(PowerShelfEndpoint {
-        pmc_ip: bmc_ip
-            .parse()
-            .map_err(|error| format!("invalid BMC IP {bmc_ip}: {error}"))?,
+        pmc_ip,
         pmc_mac: bmc_mac,
         pmc_vendor: PowerShelfVendor::DEFAULT,
         pmc_credentials: credentials,
     })
 }
 
-/// Fetch the power shelf's BMC IP via the underlay machine_interfaces path.
-async fn lookup_power_shelf_bmc_ip(
-    db_pool: &PgPool,
-    power_shelf_id: &PowerShelfId,
-    bmc_mac: MacAddress,
-) -> Result<String, String> {
-    let rows = db_power_shelf::find_bmc_info_by_power_shelf_ids(db_pool, &[*power_shelf_id])
-        .await
-        .map_err(|error| format!("failed to look up BMC info: {}", error))?;
-
-    rows.into_iter()
-        .find(|row| row.power_shelf_id == *power_shelf_id)
-        .map(|row| row.pmc_ip.to_string())
-        .ok_or_else(|| {
-            format!(
-                "no BMC IP found for power shelf {} (bmc_mac {})",
-                power_shelf_id, bmc_mac
-            )
-        })
-}
-
-/// Resolve BMC root credentials for the given MAC, falling back to the
-/// site-wide root credentials if no per-MAC override exists.
+/// Resolve the per-device BMC root credentials for the given MAC.
+///
+/// Per-device secrets are the authoritative source of truth for a device's BMC
+/// password (every device NICo owns is recorded on the site-wide credential at
+/// ingestion and stamped into its own per-MAC secret). There is deliberately no
+/// site-wide fallback: a missing per-MAC secret means the device has not been
+/// (re)ingested, and silently authenticating with the rotating site-wide
+/// credential would mask that and break once the site rotates.
 async fn lookup_bmc_credentials(
     credential_manager: &dyn CredentialManager,
     bmc_mac: MacAddress,
@@ -273,42 +282,60 @@ async fn lookup_bmc_credentials(
             bmc_mac_address: bmc_mac,
         },
     };
-    let creds = match credential_manager.get_credentials(&bmc_key).await {
-        Ok(Some(creds)) => Some(creds),
-        Ok(None) => None,
-        Err(error) => {
-            return Err(format!(
-                "failed to read BMC credentials for {}: {}",
-                bmc_mac, error
-            ));
-        }
-    };
-
-    match creds {
-        Some(creds) => Ok(creds),
-        None => {
-            let sitewide_key = CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::SiteWideRoot,
-            };
-            credential_manager
-                .get_credentials(&sitewide_key)
-                .await
-                .map_err(|error| format!("failed to read site-wide BMC credentials: {}", error))?
-                .ok_or_else(|| format!("no BMC credentials configured for {} or sitewide", bmc_mac))
-        }
+    match credential_manager.get_credentials(&bmc_key).await {
+        Ok(Some(creds)) => Ok(creds),
+        Ok(None) => Err(format!(
+            "no per-device BMC credentials configured for {bmc_mac}; the device must be (re)ingested"
+        )),
+        Err(error) => Err(format!(
+            "failed to read BMC credentials for {bmc_mac}: {error}"
+        )),
     }
 }
 
-/// Clear the pending maintenance request and transition to `Error` with the
-/// given cause. Clearing the request is what breaks the
-/// `Error -> Ready -> Maintenance -> Error` loop on persistent failures and
-/// forces the operator to explicitly re-request maintenance to retry.
+/// Acknowledge the failed request so it does not retry indefinitely. A newer
+/// request remains available to the `Error` state's maintenance admission.
 async fn finish_maintenance_with_error(
     power_shelf_id: &PowerShelfId,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     cause: String,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
+    finish_maintenance(
+        power_shelf_id,
+        request,
+        ctx,
+        PowerShelfControllerState::Error { cause },
+    )
+    .await
+}
+
+async fn finish_maintenance(
+    power_shelf_id: &PowerShelfId,
+    request: Option<&PowerShelfMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
+    next_state: PowerShelfControllerState,
+) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
+    let Some(request) = request else {
+        // Older saved states cannot identify the request that started this
+        // operation. Preserve the pending request, even if that repeats work.
+        tracing::warn!(
+            %power_shelf_id,
+            "Maintenance completed without its original request; preserving pending maintenance"
+        );
+        return Ok(StateHandlerOutcome::transition(next_state));
+    };
+
     let mut txn = ctx.services.db_pool.begin().await?;
-    db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id).await?;
-    Ok(StateHandlerOutcome::transition(PowerShelfControllerState::Error { cause }).with_txn(txn))
+    if let db::ConditionalWrite::NotApplied(reason) =
+        db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id, request)
+            .await?
+    {
+        tracing::debug!(
+            %power_shelf_id,
+            ?reason,
+            "Completed maintenance request is no longer pending"
+        );
+    }
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }

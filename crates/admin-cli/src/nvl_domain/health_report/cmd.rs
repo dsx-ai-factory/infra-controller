@@ -32,7 +32,7 @@ const MESSAGE_WRAP_WIDTH: usize = 60;
 const TARGET_WRAP_WIDTH: usize = 36;
 
 /// Handles NVLink domain health-report CLI subcommands.
-pub async fn handle_health_report(
+pub(super) async fn handle_health_report(
     command: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

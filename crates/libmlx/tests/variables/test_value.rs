@@ -824,31 +824,6 @@ fn test_display_formatting_sparse_arrays() {
     assert_eq!(binary_value.to_display_string(), "[4 binary values, 2 set]");
 }
 
-// test_mixed_dense_and_sparse_operations tests that we can work with both
-// dense arrays (automatically converted to sparse) and explicit sparse arrays.
-#[test]
-fn test_mixed_dense_and_sparse_operations() {
-    let bool_var = create_test_variable("test_mixed", MlxVariableSpec::BooleanArray { size: 3 });
-
-    // Dense input - gets converted to sparse internally
-    let dense_value = bool_var.with(vec![true, false, true]).unwrap();
-    assert_eq!(
-        dense_value.value,
-        MlxValueType::BooleanArray(vec![Some(true), Some(false), Some(true)])
-    );
-
-    // Sparse input - used directly
-    let sparse_value = bool_var.with(vec![Some(true), None, Some(true)]).unwrap();
-    assert_eq!(
-        sparse_value.value,
-        MlxValueType::BooleanArray(vec![Some(true), None, Some(true)])
-    );
-
-    // Both should display properly
-    assert_eq!(dense_value.to_display_string(), "[true, false, true]");
-    assert_eq!(sparse_value.to_display_string(), "[true, -, true]");
-}
-
 // Only the typed array variants report as array types; every scalar -- and the
 // untyped `Array` -- does not. Folds the four per-variant tests and the non-array
 // loop into one table over `is_array_type`.

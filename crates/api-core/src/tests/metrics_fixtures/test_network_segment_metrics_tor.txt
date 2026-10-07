@@ -1,12 +1,6 @@
-# HELP carbide_available_ips_count The total number of available ips in the site
+# HELP carbide_available_ips_count Number of available IPs per network segment
 # TYPE carbide_available_ips_count gauge
 carbide_available_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="tor"} 253
-# HELP carbide_ib_monitor_ufm_changes_applied_total The amount of changes that have been performed at UFM
-# TYPE carbide_ib_monitor_ufm_changes_applied_total counter
-carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="bind_guid_to_pkey",status="error"} 0
-carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="bind_guid_to_pkey",status="ok"} 0
-carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="unbind_guid_from_pkey",status="error"} 0
-carbide_ib_monitor_ufm_changes_applied_total{fabric="default",operation="unbind_guid_from_pkey",status="ok"} 0
 # HELP carbide_machines_enqueuer_iteration_latency_milliseconds The overall time it took to enqueue state handling tasks for all carbide_machines in the system
 # TYPE carbide_machines_enqueuer_iteration_latency_milliseconds histogram
 carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="0"} 0
@@ -85,28 +79,28 @@ carbide_machines_iteration_latency_milliseconds_bucket{le="10000"} 2
 carbide_machines_iteration_latency_milliseconds_bucket{le="+Inf"} 2
 carbide_machines_iteration_latency_milliseconds_sum 19.73192
 carbide_machines_iteration_latency_milliseconds_count 2
-# HELP carbide_machines_object_tasks_completed_total The amount of object handling tasks that have been completed for objects of type carbide_machines
+# HELP carbide_machines_object_tasks_completed_total Number of object handling tasks completed for objects of type carbide_machines
 # TYPE carbide_machines_object_tasks_completed_total counter
 carbide_machines_object_tasks_completed_total 2
-# HELP carbide_machines_object_tasks_dispatched_total The amount of types that object handling tasks that have been dequeued and dispatched for processing for objects of type carbide_machines
+# HELP carbide_machines_object_tasks_dispatched_total Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_machines
 # TYPE carbide_machines_object_tasks_dispatched_total counter
 carbide_machines_object_tasks_dispatched_total 2
-# HELP carbide_machines_object_tasks_enqueued_total The amount of types that object handling tasks that have been freshly enqueued for objects of type carbide_machines
+# HELP carbide_machines_object_tasks_enqueued_total Number of object handling tasks freshly enqueued for objects of type carbide_machines
 # TYPE carbide_machines_object_tasks_enqueued_total counter
 carbide_machines_object_tasks_enqueued_total 1
-# HELP carbide_machines_object_tasks_requeued_total The amount of object handling tasks that have been requeued for objects of type carbide_machines
+# HELP carbide_machines_object_tasks_requeued_total Number of object handling tasks requeued for objects of type carbide_machines
 # TYPE carbide_machines_object_tasks_requeued_total counter
 carbide_machines_object_tasks_requeued_total 1
-# HELP carbide_machines_per_state The number of carbide_machines in the system with a given state
+# HELP carbide_machines_per_state Number of carbide_machines in the system with a given state
 # TYPE carbide_machines_per_state gauge
 carbide_machines_per_state{fresh="true",state="deleting",substate="drainallocatedips"} 1
-# HELP carbide_machines_per_state_above_sla The number of carbide_machines in the system which had been longer in a state than allowed per SLA
+# HELP carbide_machines_per_state_above_sla Number of carbide_machines currently in a state longer than the SLA allows
 # TYPE carbide_machines_per_state_above_sla gauge
 carbide_machines_per_state_above_sla{fresh="true",state="deleting",substate="drainallocatedips"} 0
-# HELP carbide_machines_state_entered_total The amount of types that objects of type carbide_machines have entered a certain state
+# HELP carbide_machines_state_entered_total Number of times objects of type carbide_machines have entered a certain state
 # TYPE carbide_machines_state_entered_total counter
 carbide_machines_state_entered_total{state="deleting",substate="drainallocatedips"} 1
-# HELP carbide_machines_state_exited_total The amount of types that objects of type carbide_machines have exited a certain state
+# HELP carbide_machines_state_exited_total Number of times objects of type carbide_machines have exited a certain state
 # TYPE carbide_machines_state_exited_total counter
 carbide_machines_state_exited_total{state="ready",substate=""} 1
 # HELP carbide_machines_time_in_state_seconds The amount of time objects of type carbide_machines have spent in a certain state
@@ -129,10 +123,10 @@ carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substat
 carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="+Inf"} 1
 carbide_machines_time_in_state_seconds_sum{next_state="deleting",next_substate="drainallocatedips",state="ready",substate=""} 0.092357396
 carbide_machines_time_in_state_seconds_count{next_state="deleting",next_substate="drainallocatedips",state="ready",substate=""} 1
-# HELP carbide_machines_total The total number of carbide_machines in the system
+# HELP carbide_machines_total Number of carbide_machines in the system
 # TYPE carbide_machines_total gauge
 carbide_machines_total{fresh="true"} 1
-# HELP carbide_machines_with_state_handling_errors_per_state The number of carbide_machines in the system with a given state that failed state handling
+# HELP carbide_machines_with_state_handling_errors_per_state Number of state-handling errors for carbide_machines in a given state
 # TYPE carbide_machines_with_state_handling_errors_per_state gauge
 carbide_machines_with_state_handling_errors_per_state{error="any",fresh="true",state="deleting",substate="drainallocatedips"} 0
 # HELP carbide_nvlink_partition_monitor_nmxc_changes_applied_total Number of changes requested to NMX-C
@@ -149,7 +143,7 @@ carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove_de
 carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="update",status="completed"} 0
 carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="update",status="failed"} 0
 carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="update",status="timedout"} 0
-# HELP carbide_reserved_ips_count The total number of reserved ips in the site
+# HELP carbide_reserved_ips_count Number of reserved IPs per network segment
 # TYPE carbide_reserved_ips_count gauge
 carbide_reserved_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="tor"} 1
 # HELP carbide_site_explorer_create_machines Whether site-explorer machine creation is enabled (1) or disabled (0)
@@ -158,6 +152,6 @@ carbide_site_explorer_create_machines 1
 # HELP carbide_site_explorer_enabled Whether site-explorer is enabled (1) or paused (0)
 # TYPE carbide_site_explorer_enabled gauge
 carbide_site_explorer_enabled 1
-# HELP carbide_total_ips_count The total number of ips in the site
+# HELP carbide_total_ips_count Number of IPs per network segment
 # TYPE carbide_total_ips_count gauge
 carbide_total_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="tor"} 256

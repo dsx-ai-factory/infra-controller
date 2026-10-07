@@ -31,12 +31,12 @@ Filter by name:
     $ nico-admin-cli logical-partition show --name my-partition
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(""),
         help = "Optional, Logical Partition ID to search for"
     )]
-    pub id: String,
+    pub(super) id: String,
     #[clap(short, long, help = "Optional, Logical Partition Name to search for")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
 }

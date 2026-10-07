@@ -5,8 +5,8 @@ package pagination
 
 import (
 	"fmt"
+	"math"
 	"regexp"
-	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
@@ -18,6 +18,13 @@ import (
 const (
 	// MaxPageSize is the maximum page size allowed
 	MaxPageSize = 100
+
+	// MaxPageNumber is the maximum page number allowed. It bounds PageNumber so
+	// that the largest offset Validate can derive, (MaxPageNumber-1) *
+	// MaxPageSize, still fits the int32 every consumer narrows Offset to. Past
+	// that the narrowed offset wraps to an unrelated or negative value and the
+	// response reports a page it does not contain.
+	MaxPageNumber = math.MaxInt32 / MaxPageSize
 
 	// ResponseHeaderName describes the header name for the pagination response
 	ResponseHeaderName = "X-Pagination"
@@ -50,10 +57,11 @@ func (pr *PageRequest) Validate(orderByFields []string) error {
 	err := validation.ValidateStruct(pr,
 		validation.Field(&pr.PageNumber,
 			validation.Min(1).Error("must be greater than 0"),
+			validation.Max(MaxPageNumber).Error(fmt.Sprintf("must be less than or equal to: %v", MaxPageNumber)),
 		),
 		validation.Field(&pr.PageSize,
 			validation.Min(1).Error("must be greater than 0"),
-			validation.Max(MaxPageSize).Error(fmt.Sprintf("must be less that or equal to: %v", MaxPageSize)),
+			validation.Max(MaxPageSize).Error(fmt.Sprintf("must be less than or equal to: %v", MaxPageSize)),
 		),
 		validation.Field(&pr.OrderByStr,
 			validation.Match(regexp.MustCompile(OrderByRegex)).Error(fmt.Sprintf("must be in the format of field_%v or field_%v", cdbp.OrderAscending, cdbp.OrderDescending)),
@@ -82,23 +90,17 @@ func (pr *PageRequest) Validate(orderByFields []string) error {
 			return fmt.Errorf("orderBy fields must be provided as an argument")
 		}
 
-		comps := strings.Split(*pr.OrderByStr, "_")
-		compsLen := len(comps)
-		if compsLen == 0 {
-			return fmt.Errorf("orderBy input %v is not valid", *pr.OrderByStr)
-		}
-		// last one should be directionality ASC/DESC and everything else is the name
-		order := comps[compsLen-1]
-		field := strings.ToLower(strings.Join(comps[:compsLen-1], "_"))
-
-		if !cdb.IsStrInSlice(field, orderByFields) {
-			return fmt.Errorf("orderBy field %v is not valid", field)
+		orderBy := &cdbp.OrderBy{}
+		err = orderBy.FromAPIRequest(*pr.OrderByStr)
+		if err != nil {
+			return err
 		}
 
-		pr.OrderBy = &cdbp.OrderBy{
-			Field: field,
-			Order: order,
+		if !cdb.IsStrInSlice(orderBy.Field, orderByFields) {
+			return fmt.Errorf("orderBy field %v is not valid", orderBy.Field)
 		}
+
+		pr.OrderBy = orderBy
 	}
 
 	return nil

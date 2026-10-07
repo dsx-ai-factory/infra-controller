@@ -15,11 +15,20 @@
  * limitations under the License.
  */
 
+use ::rpc::forge::InterfaceDeleteQuery;
+
 use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn handle_delete(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    api_client.0.delete_interface(args.interface_id).await?;
+pub(super) async fn handle_delete(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+    // Clap's ArgGroup guarantees exactly one of these is set.
+    api_client
+        .0
+        .delete_interface(InterfaceDeleteQuery {
+            id: args.interface_id,
+            mac_address: args.mac_address.map(|mac| mac.to_string()),
+        })
+        .await?;
     Ok(())
 }

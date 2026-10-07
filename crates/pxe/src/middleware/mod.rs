@@ -20,10 +20,10 @@ use axum::http::uri::PathAndQuery;
 use axum::http::{Request, Uri};
 use axum::response::Response;
 
-pub mod logging;
-pub mod metrics;
+pub(super) mod logging;
+pub(super) mod metrics;
 
-pub async fn normalize_url<B>(mut request: Request<B>) -> Request<B> {
+pub(super) async fn normalize_url<B>(mut request: Request<B>) -> Request<B> {
     let uri = request.uri_mut();
     if let Some(p_q) = uri.path_and_query() {
         let path_and_query = p_q.to_string();
@@ -38,7 +38,7 @@ pub async fn normalize_url<B>(mut request: Request<B>) -> Request<B> {
 }
 
 // Converts content-length -> Content-Length to work with BMC http-download FW 24.07
-pub async fn fix_content_length_header<B>(mut response: Response<B>) -> Response<B> {
+pub(super) async fn fix_content_length_header<B>(mut response: Response<B>) -> Response<B> {
     if let Some(value) = response.headers_mut().remove("content-length") {
         response.headers_mut().insert("Content-Length", value);
     }
@@ -60,13 +60,13 @@ mod test {
 
     use super::*;
     #[tokio::test]
-    pub async fn test_url_normalize() {
+    async fn test_url_normalize() {
         let request = Request::builder()
-            .uri("http://localhost:8080/api/v0/cloud-init//user-data")
+            .uri("http://localhost:8080/api/v0/cloud-init//dpu/user-data")
             .body(())
             .unwrap();
         let result = normalize_url(request).await;
-        assert_eq!(result.uri().path(), "/api/v0/cloud-init/user-data");
+        assert_eq!(result.uri().path(), "/api/v0/cloud-init/dpu/user-data");
     }
 
     #[tokio::test]

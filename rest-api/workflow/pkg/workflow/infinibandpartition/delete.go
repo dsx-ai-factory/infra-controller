@@ -12,7 +12,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 )
@@ -43,8 +43,8 @@ func DeleteInfiniBandPartitionByID(ctx workflow.Context, ibpID uuid.UUID) error 
 
 	var ibPartitionManager ibpActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionDeletionRequest{
-		Id: &cwssaws.IBPartitionId{Value: ibpID.String()},
+	request := &corev1.IBPartitionDeletionRequest{
+		Id: &corev1.IBPartitionId{Value: ibpID.String()},
 	}
 
 	err := workflow.ExecuteActivity(ctx, ibPartitionManager.DeleteInfiniBandPartitionOnSite, request).Get(ctx, nil)

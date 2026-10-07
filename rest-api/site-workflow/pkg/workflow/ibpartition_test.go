@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
@@ -83,9 +83,9 @@ func (cipbv2ts *CreateIBPartitionV2TestSuite) AfterTest(suiteName, testName stri
 func (cipbv2ts *CreateIBPartitionV2TestSuite) Test_CreateIBPartitionV2_Success() {
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionCreationRequest{
-		Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.IBPartitionConfig{
+	request := &corev1.IBPartitionCreationRequest{
+		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.IBPartitionConfig{
 			Name:                 "the_name",
 			TenantOrganizationId: "the_org",
 		},
@@ -104,9 +104,9 @@ func (cipbv2ts *CreateIBPartitionV2TestSuite) Test_CreateIBPartitionV2_Success()
 func (cipbv2ts *CreateIBPartitionV2TestSuite) Test_CreateIBPartitionV2_Failure() {
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionCreationRequest{
-		Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.IBPartitionConfig{
+	request := &corev1.IBPartitionCreationRequest{
+		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.IBPartitionConfig{
 			Name:                 "the_name",
 			TenantOrganizationId: "the_org",
 		},
@@ -146,8 +146,8 @@ func (cipbv2ts *DeleteIBPartitionV2TestSuite) AfterTest(suiteName, testName stri
 func (cipbv2ts *DeleteIBPartitionV2TestSuite) Test_DeleteIBPartitionV2_Success() {
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionDeletionRequest{
-		Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.IBPartitionDeletionRequest{
+		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	// Mock DeleteInfiniBandPartitionOnSite activity
@@ -163,8 +163,8 @@ func (cipbv2ts *DeleteIBPartitionV2TestSuite) Test_DeleteIBPartitionV2_Success()
 func (cipbv2ts *DeleteIBPartitionV2TestSuite) Test_DeleteIBPartitionV2_Failure() {
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionDeletionRequest{
-		Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.IBPartitionDeletionRequest{
+		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -201,9 +201,9 @@ func (uibpv2ts *UpdateIBPartitionV2TestSuite) AfterTest(suiteName, testName stri
 func (uibpv2ts *UpdateIBPartitionV2TestSuite) Test_UpdateIBPartitionV2_Success() {
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionUpdateRequest{
-		Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.IBPartitionConfig{
+	request := &corev1.IBPartitionUpdateRequest{
+		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.IBPartitionConfig{
 			Name:                 "the_name",
 			TenantOrganizationId: "the_org",
 		},
@@ -220,9 +220,9 @@ func (uibpv2ts *UpdateIBPartitionV2TestSuite) Test_UpdateIBPartitionV2_Success()
 func (uibpv2ts *UpdateIBPartitionV2TestSuite) Test_UpdateIBPartitionV2_Failure() {
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
-	request := &cwssaws.IBPartitionUpdateRequest{
-		Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.IBPartitionConfig{
+	request := &corev1.IBPartitionUpdateRequest{
+		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.IBPartitionConfig{
 			Name:                 "the_name",
 			TenantOrganizationId: "the_org",
 		},

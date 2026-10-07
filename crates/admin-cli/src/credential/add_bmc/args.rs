@@ -34,20 +34,20 @@ Add a per-BMC root credential for a specific MAC address:
     --mac-address 00:11:22:33:44:55
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         long,
         require_equals(true),
         required(true),
         help = "The BMC Credential kind"
     )]
-    pub kind: BmcCredentialType,
+    kind: BmcCredentialType,
     #[clap(long, required(true), help = "The password of BMC")]
-    pub password: String,
+    password: String,
     #[clap(long, help = "The username of BMC")]
-    pub username: Option<String>,
+    username: Option<String>,
     #[clap(long, help = "The MAC address of the BMC")]
-    pub mac_address: Option<MacAddress>,
+    mac_address: Option<MacAddress>,
 }
 
 impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
@@ -60,6 +60,7 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password,
             mac_address: args.mac_address.map(|mac| mac.to_string()),
             vendor: None,
+            credential_name: None,
         })
     }
 }

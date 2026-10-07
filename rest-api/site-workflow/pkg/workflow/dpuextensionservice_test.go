@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
@@ -86,14 +86,14 @@ func (s *CreateDpuExtensionServiceTestSuite) AfterTest(suiteName, testName strin
 func (s *CreateDpuExtensionServiceTestSuite) Test_CreateDpuExtensionService_Success() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.CreateDpuExtensionServiceRequest{
+	request := &corev1.CreateDpuExtensionServiceRequest{
 		ServiceId:            util.GetStrPtr("test-service-id"),
 		ServiceName:          "test-service-name",
-		ServiceType:          cwssaws.DpuExtensionServiceType_KUBERNETES_POD,
+		ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
 		TenantOrganizationId: "test-tenant-org-id",
 	}
 
-	expectedResult := &cwssaws.DpuExtensionService{
+	expectedResult := &corev1.DpuExtensionService{
 		ServiceId:            *request.ServiceId,
 		ServiceName:          request.ServiceName,
 		ServiceType:          request.ServiceType,
@@ -109,7 +109,7 @@ func (s *CreateDpuExtensionServiceTestSuite) Test_CreateDpuExtensionService_Succ
 	s.True(s.env.IsWorkflowCompleted())
 	s.NoError(s.env.GetWorkflowError())
 
-	var result *cwssaws.DpuExtensionService
+	var result *corev1.DpuExtensionService
 	s.env.GetWorkflowResult(&result)
 
 	s.Equal(result.ServiceId, *request.ServiceId)
@@ -121,7 +121,7 @@ func (s *CreateDpuExtensionServiceTestSuite) Test_CreateDpuExtensionService_Succ
 func (s *CreateDpuExtensionServiceTestSuite) Test_CreateDpuExtensionService_Failure() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.CreateDpuExtensionServiceRequest{
+	request := &corev1.CreateDpuExtensionServiceRequest{
 		ServiceId:            util.GetStrPtr("test-service-id"),
 		ServiceName:          "test-service-name",
 		TenantOrganizationId: "test-tenant-org-id",
@@ -161,13 +161,13 @@ func (s *UpdateDpuExtensionServiceTestSuite) AfterTest(suiteName, testName strin
 func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionService_Success() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.UpdateDpuExtensionServiceRequest{
+	request := &corev1.UpdateDpuExtensionServiceRequest{
 		ServiceId:   "test-service-id",
 		ServiceName: util.GetStrPtr("updated-service-name"),
 		Description: util.GetStrPtr("updated-service-description"),
 	}
 
-	expectedResult := &cwssaws.DpuExtensionService{
+	expectedResult := &corev1.DpuExtensionService{
 		ServiceId:   request.ServiceId,
 		ServiceName: *request.ServiceName,
 		Description: *request.Description,
@@ -182,7 +182,7 @@ func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionService_Succ
 	s.True(s.env.IsWorkflowCompleted())
 	s.NoError(s.env.GetWorkflowError())
 
-	var result *cwssaws.DpuExtensionService
+	var result *corev1.DpuExtensionService
 	s.env.GetWorkflowResult(&result)
 
 	s.Equal(result.ServiceId, request.ServiceId)
@@ -193,7 +193,7 @@ func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionService_Succ
 func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionService_Failure() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.UpdateDpuExtensionServiceRequest{
+	request := &corev1.UpdateDpuExtensionServiceRequest{
 		ServiceId:   "test-service-id",
 		ServiceName: util.GetStrPtr("updated-service-name"),
 		Description: util.GetStrPtr("updated-service-description"),
@@ -233,7 +233,7 @@ func (s *DeleteDpuExtensionServiceTestSuite) AfterTest(suiteName, testName strin
 func (s *DeleteDpuExtensionServiceTestSuite) Test_DeleteDpuExtensionService_Success() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.DeleteDpuExtensionServiceRequest{
+	request := &corev1.DeleteDpuExtensionServiceRequest{
 		ServiceId: "test-service-id",
 	}
 
@@ -250,7 +250,7 @@ func (s *DeleteDpuExtensionServiceTestSuite) Test_DeleteDpuExtensionService_Succ
 func (s *DeleteDpuExtensionServiceTestSuite) Test_DeleteDpuExtensionService_Failure() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.DeleteDpuExtensionServiceRequest{
+	request := &corev1.DeleteDpuExtensionServiceRequest{
 		ServiceId: "test-service-id",
 	}
 
@@ -288,11 +288,11 @@ func (s *GetDpuExtensionServiceVersionsInfoTestSuite) AfterTest(suiteName, testN
 func (s *GetDpuExtensionServiceVersionsInfoTestSuite) Test_GetDpuExtensionServiceVersionsInfo_Success() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.GetDpuExtensionServiceVersionsInfoRequest{
+	request := &corev1.GetDpuExtensionServiceVersionsInfoRequest{
 		ServiceId: "test-service-id",
 	}
 
-	versionInfo := &cwssaws.DpuExtensionServiceVersionInfo{
+	versionInfo := &corev1.DpuExtensionServiceVersionInfo{
 		Version:       "V1-T1234567890",
 		Data:          "test data",
 		HasCredential: false,
@@ -301,8 +301,8 @@ func (s *GetDpuExtensionServiceVersionsInfoTestSuite) Test_GetDpuExtensionServic
 
 	// Mock GetDpuExtensionServiceVersionsInfoOnSite activity
 	s.env.RegisterActivity(dpuExtensionServiceManager.GetDpuExtensionServiceVersionsInfoOnSite)
-	s.env.OnActivity(dpuExtensionServiceManager.GetDpuExtensionServiceVersionsInfoOnSite, mock.Anything, mock.Anything).Return(&cwssaws.DpuExtensionServiceVersionInfoList{
-		VersionInfos: []*cwssaws.DpuExtensionServiceVersionInfo{
+	s.env.OnActivity(dpuExtensionServiceManager.GetDpuExtensionServiceVersionsInfoOnSite, mock.Anything, mock.Anything).Return(&corev1.DpuExtensionServiceVersionInfoList{
+		VersionInfos: []*corev1.DpuExtensionServiceVersionInfo{
 			versionInfo,
 		},
 	}, nil)
@@ -312,7 +312,7 @@ func (s *GetDpuExtensionServiceVersionsInfoTestSuite) Test_GetDpuExtensionServic
 	s.True(s.env.IsWorkflowCompleted())
 	s.NoError(s.env.GetWorkflowError())
 
-	var result *cwssaws.DpuExtensionServiceVersionInfoList
+	var result *corev1.DpuExtensionServiceVersionInfoList
 	s.env.GetWorkflowResult(&result)
 
 	s.Equal(1, len(result.VersionInfos))
@@ -325,7 +325,7 @@ func (s *GetDpuExtensionServiceVersionsInfoTestSuite) Test_GetDpuExtensionServic
 func (s *GetDpuExtensionServiceVersionsInfoTestSuite) Test_GetDpuExtensionServiceVersionsInfo_Failure() {
 	var dpuExtensionServiceManager iActivity.ManageDpuExtensionService
 
-	request := &cwssaws.GetDpuExtensionServiceVersionsInfoRequest{
+	request := &corev1.GetDpuExtensionServiceVersionsInfoRequest{
 		ServiceId: "test-service-id",
 	}
 

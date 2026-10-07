@@ -4,7 +4,9 @@
 
 This is a **prescriptive, BYO-Kubernetes bring-up guide** for the NICo REST cloud components. It encodes the **order of operations**, the **exact manifest paths** from this repository, and what you must configure for your environment.
 
-> **Experimental:** This software is a preview release. Features, APIs, and configurations may change without notice. Thoroughly test in non-critical environments before production use.
+> The software is provided "as is" without warranties of any kind. Features,
+> APIs, and configurations may change in future releases. For production
+> deployments, please test thoroughly in non-critical environments first.
 
 ### Deployment topology
 
@@ -17,7 +19,7 @@ This guide covers the cloud-hosted topology — deploying the REST control plane
 
 All manifests live under `deploy/kustomize/` with the following structure:
 
-```
+```text
 deploy/kustomize/
 ├── base/                 # Reusable base manifests (not applied directly)
 │   ├── api/              # nico-rest-api
@@ -64,7 +66,7 @@ deploy/kustomize/
 
 ## Order of Operations
 
-```
+```text
 1.  Create namespaces
 2.  Create CA signing secret            ← prerequisite for nico-rest-cert-manager
 3.  Deploy PostgreSQL
@@ -91,6 +93,7 @@ kubectl apply -f deploy/kustomize/base/temporal-helm/namespace.yaml
 ```
 
 **Files:**
+
 - `deploy/kustomize/base/postgres/namespace.yaml` — creates `postgres` namespace
 - `deploy/kustomize/base/temporal-helm/namespace.yaml` — creates `temporal` namespace
 
@@ -108,7 +111,7 @@ The CA certificate is the trust anchor for the entire deployment. Every TLS cert
 
 ### Required secret shape
 
-```
+```text
 Secret name: ca-signing-secret  (type: kubernetes.io/tls)
 Namespaces:  `nico-rest`  and  `cert-manager`
 Keys:
@@ -169,7 +172,7 @@ A single-replica PostgreSQL 14 StatefulSet that hosts all databases for the NICo
 | `base/postgres/namespace.yaml` | `postgres` namespace |
 | `base/postgres/admin-creds.yaml` | Secret `admin-creds` — postgres superuser password |
 | `base/postgres/init-configmap.yaml` | ConfigMap `postgres-init` — SQL init script |
-| `base/postgres/statefulset.yaml` | StatefulSet `postgres` — `postgres:14.4-alpine`, 1Gi PVC |
+| `base/postgres/statefulset.yaml` | StatefulSet `postgres` — `postgres:14.4-alpine`, 10Gi PVC |
 | `base/postgres/service.yaml` | ClusterIP Service on port 5432 — DNS: `postgres.postgres` |
 | `base/postgres/adminer.yaml` | Optional Adminer web UI |
 
@@ -202,7 +205,7 @@ kubectl rollout status statefulset/postgres -n postgres
 
 Keycloak is the **reference OIDC identity provider** for the NICo REST API. It handles authentication and issues JWTs that the API validates on every request. It is pre-loaded with the `nico-dev` realm via an imported realm ConfigMap, which includes the `nico-api` client, realm roles, and a set of pre-seeded dev users.
 
-Users of NICo can also bring their own OpenID/OAuth JWT Provider, see [Auth docs](https://github.com/NVIDIA/infra-controller/rest-api/tree/main/auth) for more details.
+Users of NICo can also bring their own OpenID/OAuth JWT Provider, see [Auth docs](https://github.com/dsx-ai-factory/infra-controller/tree/main/rest-api/auth) for more details.
 
 ### Manifests
 
@@ -255,7 +258,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 |---|---|
 | `base/cert-manager/deployment.yaml` | Deployment `nico-rest-cert-manager` — mounts `ca-signing-secret` |
 | `base/cert-manager/service.yaml` | ClusterIP Service — ports 8000 (https) and 8001 (http) |
-| `base/cert-manager/rbac.yaml` | ServiceAccount + Role/RoleBinding — needs read/write access to Secrets and ConfigMaps |
+| `base/cert-manager/rbac.yaml` | ServiceAccount only — `credsmgr` never calls the Kubernetes API, so it carries no Role and disables token automount |
 
 ### CLI flags (set in `deployment.yaml`)
 
@@ -329,7 +332,7 @@ The `common/` base provides all shared secrets and cert-manager `Certificate` re
 
 This cert-manager `Certificate` is issued by `nico-rest-ca-issuer` and stored in the secret `temporal-client-cloud-certs`. It covers the following DNS names, allowing the API and both workers to authenticate to Temporal as the same logical client identity:
 
-```
+```text
 temporal-client, nico-rest-api, cloud-worker, site-worker
 ```
 
@@ -649,9 +652,14 @@ temporal:
     keyPath: /var/secrets/temporal/certs/tls.key
     caPath: /var/secrets/temporal/certs/ca.crt
   encryptionKeyPath: /var/secrets/temporal/encryption-key
+
+siteManager:
+  svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
 ```
 
 Each deployment sets `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE` environment variables that override the config file values at runtime.
+
+The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its Site Agent Temporal certificate is within `10` days of expiry. If it is empty, the daily rotation run fails without rotating any Site.
 
 ### Secrets mounted at runtime
 
@@ -702,7 +710,8 @@ The site agent bootstrap flow is:
 
 | Variable | Default | Description |
 |---|---|---|
-| `NICO_ADDRESS` | `nico-rest-mock-core:11079` | NICo/NICo gRPC endpoint — **set this to your Core gRPC server address in production** |
+| `CORE_GRPC_ADDRESS` | `""` (empty) | NICo Core gRPC endpoint — **set this to your Core gRPC server address in production**. Empty falls back to the binary's in-cluster default; the local kind flow injects the mock-core address via the Makefile. |
+| `CORE_GRPC_SEC_OPT` | `0` | Core gRPC security mode (`0` insecure, `1` server TLS, `2` mutual TLS) |
 | `CLUSTER_ID` | `00000000-0000-4000-8000-000000000001` | Site UUID — **must match a registered site** |
 | `TEMPORAL_HOST` | `temporal-frontend.temporal` | Temporal frontend host |
 | `TEMPORAL_PORT` | `7233` | Temporal frontend port |
@@ -710,8 +719,9 @@ The site agent bootstrap flow is:
 | `TEMPORAL_PUBLISH_NAMESPACE` | `site` | Temporal namespace for publishing (site-side workflows) |
 | `TEMPORAL_SUBSCRIBE_NAMESPACE` | `00000000-0000-4000-8000-000000000001` | Per-site Temporal namespace — **must match site UUID** |
 | `TEMPORAL_SUBSCRIBE_QUEUE` | `00000000-0000-4000-8000-000000000001` | Per-site Temporal queue — **must match site UUID** |
-| `TEMPORAL_INVENTORY_SCHEDULE` | `@every 3m` | How often the agent reports hardware inventory |
+| `TEMPORAL_INVENTORY_SCHEDULE` | `@every 3m` | How often the agent reports hardware inventory, as an `@every <duration>` schedule. The agent reports this interval to Cloud as staleness window. A schedule slower than `5m`, or in any other format, is rejected at startup |
 | `TEMPORAL_CERT_PATH` | `/etc/temporal-certs` | Path to mounted Temporal TLS certs |
+| `BOOTSTRAP_SECRET_NAME` | `site-registration` | Name of the registration Secret mounted at `/etc/sitereg`. When Cloud rotates the Temporal certificate, the Site Agent writes the new OTP to this Secret's `otp` key. The binary falls back to `bootstrap-info` when it is unset |
 
 ### Secrets mounted at runtime
 
@@ -724,9 +734,11 @@ The site agent bootstrap flow is:
 ### SPIFFE gRPC certificate
 
 The `certificate.yaml` resource issues a cert-manager `Certificate` with SPIFFE URI:
-```
+
+```text
 spiffe://nico.local/nico-rest/sa/nico-rest-site-agent
 ```
+
 This is the client identity the site agent presents when connecting to the NICo core gRPC API.
 
 ### Configuring a site for bootstrap
@@ -794,22 +806,26 @@ make docker-build IMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.0
 ### Authenticate and push
 
 **AWS ECR:**
+
 ```bash
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin 123456789.dkr.ecr.us-east-1.amazonaws.com
 ```
 
 **Google Artifact Registry:**
+
 ```bash
 gcloud auth configure-docker
 ```
 
 **Azure Container Registry:**
+
 ```bash
 az acr login --name myregistry
 ```
 
 **Push after building:**
+
 ```bash
 REGISTRY=my-registry.example.com/nico
 TAG=v1.0.0
@@ -860,7 +876,7 @@ kubectl kustomize --load-restrictor LoadRestrictionsNone \
 
 | Overlay | What it deploys |
 |---|---|
-| `overlays/cert-manager` | `nico-rest-cert-manager` Deployment + Service + RBAC |
+| `overlays/cert-manager` | `nico-rest-cert-manager` Deployment + Service + ServiceAccount |
 | `overlays/api` | `nico-rest-api` Deployment + Services + ConfigMap |
 | `overlays/workflow` | `nico-rest-cloud-worker` + `nico-rest-site-worker` Deployments + ConfigMap |
 | `overlays/site-manager` | `nico-rest-site-manager` Deployment + Service + Certificate + RBAC |
@@ -892,7 +908,7 @@ Or run commands directly for scripting:
 nicocli --config ~/.nico/config.yaml site list
 ```
 
-See [cli/README.md](cli/README.md) for the full configuration reference and command list.
+See [cli/README.md](../cli/README.md) for the full configuration reference and command list.
 
 ### Getting an access token
 

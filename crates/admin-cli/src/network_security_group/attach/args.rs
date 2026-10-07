@@ -32,21 +32,21 @@ Attach it to a single instance:
     --instance-id abcdef01-2345-6789-abcd-ef0123456789
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'n', long, help = "Network security group ID to attach")]
-    pub id: String,
+    pub(super) id: String,
 
     #[clap(
         short = 'v',
         long,
         help = "Optional, VPC ID that should have the network security group applied"
     )]
-    pub vpc_id: Option<VpcId>,
+    pub(super) vpc_id: Option<VpcId>,
 
     #[clap(
         short = 'i',
         long,
         help = "Optional, Instance ID that should have the network security group applied"
     )]
-    pub instance_id: Option<InstanceId>,
+    pub(super) instance_id: Option<InstanceId>,
 }

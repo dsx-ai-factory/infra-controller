@@ -11,7 +11,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
 	cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
@@ -23,6 +22,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/firmwarecomponents"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -77,6 +77,8 @@ func Descriptor() cmcatalog.Descriptor {
 		},
 		RequiredProviders: []string{nicoprovider.ProviderName},
 		Capabilities: capability.CapabilitySet{
+			capability.CapabilityDecommissionControl,
+			capability.CapabilityDecommissionStatus,
 			capability.CapabilityFirmwareControl,
 			capability.CapabilityFirmwareStatus,
 			capability.CapabilityInjectExpectation,
@@ -99,12 +101,12 @@ func (m *Manager) Descriptor() cmcatalog.Descriptor {
 	return Descriptor()
 }
 
-func powerShelfIDsProto(ids []string) *pb.PowerShelfIdList {
-	pbIDs := make([]*pb.PowerShelfId, len(ids))
+func powerShelfIDsProto(ids []string) *corev1.PowerShelfIdList {
+	pbIDs := make([]*corev1.PowerShelfId, len(ids))
 	for i, id := range ids {
-		pbIDs[i] = &pb.PowerShelfId{Id: id}
+		pbIDs[i] = &corev1.PowerShelfId{Id: id}
 	}
-	return &pb.PowerShelfIdList{Ids: pbIDs}
+	return &corev1.PowerShelfIdList{Ids: pbIDs}
 }
 
 // ensureRackOperable is the per-Manager policy gate for disruptive
@@ -122,6 +124,21 @@ func powerShelfIDsProto(ids []string) *pb.PowerShelfIdList {
 //
 // Shelves not associated with a rack in Core are skipped with a warning
 // (see the equivalent NVSwitch helper for the reasoning).
+// ensureTargetOperable keeps readiness resolution separate from API targeting.
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
+	if !target.UsesMACAddresses() {
+		return m.ensureRackOperable(ctx, target.Identifiers, op, override)
+	}
+	if m.readiness == nil {
+		return nil
+	}
+	if override {
+		log.Warn().Strs("management_macs", target.Identifiers).Str("operation", string(op)).Msg("Readiness check bypassed by override_readiness_check")
+		return nil
+	}
+	return m.readiness.WaitForManagementMACsReady(ctx, target.Type, target.Identifiers, op)
+}
+
 func (m *Manager) ensureRackOperable(
 	ctx context.Context,
 	shelfIDs []string,
@@ -211,32 +228,38 @@ func (m *Manager) PowerControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureRackOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
-	var action pb.SystemPowerControl
+	var action corev1.SystemPowerControl
 	switch info.Operation {
 	case operations.PowerOperationPowerOn, operations.PowerOperationForcePowerOn:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_ON
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_ON
 	case operations.PowerOperationPowerOff:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_SHUTDOWN
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_SHUTDOWN
 	case operations.PowerOperationForcePowerOff:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF
-	case operations.PowerOperationRestart:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF
+	case operations.PowerOperationRestart, operations.PowerOperationWarmReset:
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART
 	case operations.PowerOperationForceRestart:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART
 	default:
 		return fmt.Errorf("unsupported power operation for PowerShelf: %v", info.Operation)
 	}
 
-	req := &pb.ComponentPowerControlRequest{
-		Target: &pb.ComponentPowerControlRequest_PowerShelfIds{
-			PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.ComponentPowerControlRequest{
 		Action:                action,
 		BypassStateController: info.OverrideReadinessCheck,
+	}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.ComponentPowerControlRequest_PowerShelfPmcMacs{
+			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.ComponentPowerControlRequest_PowerShelfIds{
+			PowerShelfIds: powerShelfIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
@@ -245,8 +268,8 @@ func (m *Manager) PowerControl(
 	}
 
 	for _, r := range resp.GetResults() {
-		if r.GetStatus() != pb.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("power control failed for %s: %s", r.GetComponentId(), r.GetError())
+		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			return fmt.Errorf("power control failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -263,10 +286,15 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &pb.GetComponentInventoryRequest{
-		Target: &pb.GetComponentInventoryRequest_PowerShelfIds{
-			PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentInventoryRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentInventoryRequest_PowerShelfPmcMacs{
+			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentInventoryRequest_PowerShelfIds{
+			PowerShelfIds: powerShelfIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentInventory(ctx, req)
@@ -274,16 +302,13 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("GetComponentInventory failed: %w", err)
 	}
 
-	result := make(map[string]operations.PowerStatus, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
-		result[id] = operations.PowerStatusUnknown
-	}
-
+	result := make(map[string]operations.PowerStatus, target.Len())
 	for _, entry := range resp.GetEntries() {
-		compID := entry.GetResult().GetComponentId()
-		if ps := nicoprovider.ExtractPowerState(entry.GetReport()); ps != operations.PowerStatusUnknown {
-			result[compID] = ps
+		if entry.GetResult() == nil || entry.GetResult().GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			continue
 		}
+		compID := nicoprovider.ResultIdentifier(entry.GetResult(), target.UsesMACAddresses())
+		result[compID] = nicoprovider.ExtractPowerState(entry.GetReport())
 	}
 
 	return result, nil
@@ -304,7 +329,7 @@ func (m *Manager) FirmwareControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureRackOperable(ctx, target.ComponentIDs, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -316,18 +341,25 @@ func (m *Manager) FirmwareControl(
 		// Preserve historical behavior: when the caller does not specify a
 		// subset, only PMC is updated. Once the component manager supports
 		// "update everything in the bundle" semantics we can drop this.
-		subComponents = []pb.PowerShelfComponent{pb.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC}
+		subComponents = []corev1.PowerShelfComponent{corev1.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC}
 	}
 
-	req := &pb.UpdateComponentFirmwareRequest{
-		Target: &pb.UpdateComponentFirmwareRequest_PowerShelves{
-			PowerShelves: &pb.UpdatePowerShelfFirmwareTarget{
-				PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-				Components:    subComponents,
-			},
+	powerShelfTarget := &corev1.UpdatePowerShelfFirmwareTarget{Components: subComponents}
+	if target.UsesMACAddresses() {
+		powerShelfTarget.PmcMacs = &corev1.MacAddressList{MacAddresses: target.Identifiers}
+	} else {
+		powerShelfTarget.PowerShelfIds = powerShelfIDsProto(target.Identifiers)
+	}
+	req := &corev1.UpdateComponentFirmwareRequest{
+		Target: &corev1.UpdateComponentFirmwareRequest_PowerShelves{
+			PowerShelves: powerShelfTarget,
 		},
 		TargetVersion:         info.TargetVersion,
+		ForceUpdate:           info.OverrideVersionCheck,
 		BypassStateController: info.OverrideReadinessCheck,
+	}
+	if info.AccessToken != "" {
+		req.AccessToken = &info.AccessToken
 	}
 
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
@@ -336,8 +368,8 @@ func (m *Manager) FirmwareControl(
 	}
 
 	for _, r := range resp.GetResults() {
-		if r.GetStatus() != pb.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("firmware update failed for %s: %s", r.GetComponentId(), r.GetError())
+		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -360,10 +392,15 @@ func (m *Manager) GetFirmwareStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &pb.GetComponentFirmwareStatusRequest{
-		Target: &pb.GetComponentFirmwareStatusRequest_PowerShelfIds{
-			PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentFirmwareStatusRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_PowerShelfPmcMacs{
+			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_PowerShelfIds{
+			PowerShelfIds: powerShelfIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
@@ -373,7 +410,7 @@ func (m *Manager) GetFirmwareStatus(
 
 	result := make(map[string]operations.FirmwareUpdateStatus, len(resp.GetStatuses()))
 	for _, s := range resp.GetStatuses() {
-		compID := s.GetResult().GetComponentId()
+		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		result[compID] = operations.FirmwareUpdateStatus{
 			ComponentID: compID,
 			State:       nicoprovider.MapFirmwareState(s.GetState()),
@@ -381,4 +418,73 @@ func (m *Manager) GetFirmwareStatus(
 	}
 
 	return result, nil
+}
+
+// Decommission initiates decommissioning of the target power shelves via NICo.
+func (m *Manager) Decommission(
+	ctx context.Context,
+	target common.Target,
+	_ operations.DecommissionTaskInfo,
+) error {
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("target is invalid: %w", err)
+	}
+
+	for _, shelfID := range target.Identifiers {
+		if err := m.nicoClient.DecommissionPowerShelf(ctx, shelfID); err != nil {
+			return fmt.Errorf("DecommissionPowerShelf failed for %s: %w", shelfID, err)
+		}
+	}
+
+	log.Info().
+		Strs("shelf_ids", target.Identifiers).
+		Msg("Decommission initiated for PowerShelf components")
+	return nil
+}
+
+// GetDecommissionStatus returns the current decommission state for each
+// target power shelf, keyed by shelf ID.
+func (m *Manager) GetDecommissionStatus(
+	ctx context.Context,
+	target common.Target,
+) (map[string]string, error) {
+	if err := target.Validate(); err != nil {
+		return nil, fmt.Errorf("target is invalid: %w", err)
+	}
+
+	states, err := m.nicoClient.FindPowerShelfControllerStates(ctx, target.Identifiers)
+	if err != nil {
+		return nil, fmt.Errorf("FindPowerShelfControllerStates: %w", err)
+	}
+
+	// Ensure every requested component is present in the result.
+	result := make(map[string]string, len(target.Identifiers))
+	for _, id := range target.Identifiers {
+		if s, ok := states[id]; ok {
+			result[id] = normalizeDecommissionState(s)
+		} else {
+			result[id] = ""
+		}
+	}
+	return result, nil
+}
+
+// normalizeDecommissionState converts Core's persisted power-shelf-controller
+// JSON into the status vocabulary used by the Flow decommission waiter.
+func normalizeDecommissionState(raw string) string {
+	var state struct {
+		State                string `json:"state"`
+		DecommissioningState struct {
+			State string `json:"state"`
+		} `json:"decommissioning_state"`
+	}
+	if err := json.Unmarshal([]byte(raw), &state); err != nil ||
+		state.State != "decommissioning" ||
+		state.DecommissioningState.State == "" {
+		return raw
+	}
+	if state.DecommissioningState.State == "decommissioned" {
+		return "Decommissioned"
+	}
+	return "Decommissioning/" + state.DecommissioningState.State
 }

@@ -18,35 +18,32 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use carbide_utils::arch::CpuArchitecture;
 use mac_address::MacAddress;
-use rpc::machine_discovery::{BlockDevice, CpuInfo, DiscoveryInfo, DmiData, DpuData};
-use rpc::{NetworkInterface, PciDeviceProperties};
 use serde_json::json;
 
-use crate::{BootOptionKind, Callbacks, LogService, LogServices, hw, redfish};
+use crate::{BootOptionKind, Callbacks, hw, redfish};
 
-pub struct Bluefield3<'a> {
-    pub product_serial_number: Cow<'a, str>,
-    pub host_mac_address: MacAddress,
-    pub bmc_mac_address: MacAddress,
-    pub oob_mac_address: Option<MacAddress>,
-    pub mode: Mode,
-    pub firmware_versions: FirmwareVersions,
+pub(crate) struct Bluefield3<'a> {
+    pub(crate) product_serial_number: Cow<'a, str>,
+    pub(crate) host_mac_address: MacAddress,
+    pub(crate) bmc_mac_address: MacAddress,
+    pub(crate) oob_mac_address: Option<MacAddress>,
+    pub(crate) mode: Mode,
+    pub(crate) firmware_versions: FirmwareVersions,
 }
 
-pub enum Mode {
+pub(crate) enum Mode {
     // P/N 900-9D3B6-00CN-PA0. Installed on WIWYNN GB200s / Lenovo GB300s.
     B3240ColdAisle,
     // P/N 900-9D3B4-00CC-EA0 & 900-9D3B6-00CV-AA0
     SuperNIC { nic_mode: bool },
 }
 
-pub struct FirmwareVersions {
-    pub bmc: String,
-    pub uefi: String,
-    pub dpu_nic: String,
-    pub erot: String,
+pub(crate) struct FirmwareVersions {
+    pub(crate) bmc: String,
+    pub(crate) uefi: String,
+    pub(crate) dpu_nic: String,
+    pub(crate) erot: String,
 }
 
 impl Bluefield3<'_> {
@@ -60,7 +57,7 @@ impl Bluefield3<'_> {
         }
     }
 
-    pub fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
+    pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
         redfish::chassis::ChassisConfig {
             chassis: vec![
                 redfish::chassis::SingleChassisConfig {
@@ -111,7 +108,10 @@ impl Bluefield3<'_> {
         }
     }
 
-    pub fn system_config(&self, callbacks: Arc<dyn Callbacks>) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(
+        &self,
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "Bluefield";
         let boot_opt_builder = |id: &str, kind| {
             redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
@@ -150,13 +150,14 @@ impl Bluefield3<'_> {
                     .uefi_device_path(&format!("MAC({mocked_mac_no_colons},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
                     .build(),
             ]
-        })).collect();
+        })).collect::<Vec<_>>();
 
         redfish::computer_system::Config {
             systems: vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed("Bluefield"),
                 manufacturer: Some(Cow::Borrowed("Nvidia")),
                 model: Some(Cow::Borrowed("BlueField-3 DPU")),
+                bios_version: None,
                 eth_interfaces: Some(eth_interfaces),
                 chassis: vec!["Bluefield_BMC".into()],
                 serial_number: Some(self.product_serial_number.to_string().into()),
@@ -175,22 +176,23 @@ impl Bluefield3<'_> {
                         }))
                         .build(),
                 ),
-                log_services: Some(Arc::new(Bf3LogServices {
-                    event_log: DpuEventLog {
-                        // Simulate that we always completed reboot
-                        // when requested. Better implementation
-                        // should work together with power control...
-                        entries: vec!["DPU Warm Reset".to_string()],
-                    },
-                })),
+                log_services: Some(redfish::log_service::LogServices::event_log([
+                    "DPU Warm Reset",
+                ])),
                 storage: None,
                 processors: None,
+                memory: None,
+                serial_console: Some(hw::openbmc::enabled_serial_console()),
                 secure_boot_available: true,
             }],
         }
     }
 
-    pub fn manager_config(&self) -> redfish::manager::Config {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
+    pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {
                 id: "Bluefield_BMC",
@@ -203,13 +205,14 @@ impl Bluefield3<'_> {
                     .build(),
                 ]),
                 host_interfaces: None,
+                serial_interfaces: None,
                 firmware_version: Some("BF-23.10-4"),
                 oem: None,
             }],
         }
     }
 
-    pub fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
+    pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
         let base_mac = self.base_mac().to_string().replace(':', "");
         let sys_image = format!(
             "{}:{}00:00{}:{}",
@@ -235,10 +238,11 @@ impl Bluefield3<'_> {
             .into_iter()
             .map(|b| b.build())
             .collect(),
+            ..Default::default()
         }
     }
 
-    pub fn host_nic(&self) -> hw::nic::Nic<'static> {
+    pub(crate) fn host_nic(&self) -> hw::nic::Nic<'static> {
         hw::nic::Nic {
             mac_address: self.host_mac_address,
             // This how it represented on host with number of trailing
@@ -251,11 +255,10 @@ impl Bluefield3<'_> {
             ),
             part_number: Some(self.part_number().into()),
             firmware_version: Some(self.firmware_versions.dpu_nic.clone().into()),
-            is_mat_dpu: true,
         }
     }
 
-    pub fn host_nic_h100_variant(&self) -> hw::nic::Nic<'static> {
+    pub(super) fn host_nic_h100_variant(&self) -> hw::nic::Nic<'static> {
         hw::nic::Nic {
             mac_address: self.host_mac_address,
             // This how it represented on host with number of trailing
@@ -266,85 +269,6 @@ impl Bluefield3<'_> {
             description: None,
             part_number: Some(format!("{}       ", self.part_number()).into()),
             firmware_version: Some(self.firmware_versions.dpu_nic.clone().into()),
-            is_mat_dpu: true,
-        }
-    }
-
-    pub fn discovery_info(&self) -> DiscoveryInfo {
-        DiscoveryInfo {
-            network_interfaces: vec![],
-            infiniband_interfaces: vec![],
-            cpu_info: vec![CpuInfo {
-                model: "Cortex-A78AE".into(),
-                vendor: "ARM".into(),
-                sockets: 1,
-                cores: 16,
-                threads: 16,
-            }],
-            block_devices: std::iter::once(BlockDevice {
-                model: "KBG40ZPZ128G TOSHIBA MEMORY".into(),
-                revision: "AEGA0103".into(),
-                serial: "FAKESERNUM0".into(),
-                device_type: "disk".into(),
-            })
-            .chain((0..3).map(|_| BlockDevice {
-                model: "NO_MODEL".into(),
-                revision: "NO_REVISION".into(),
-                serial: "NO_SERIAL".into(),
-                device_type: "disk".into(),
-            }))
-            .collect(),
-            machine_type: CpuArchitecture::Aarch64.to_string(),
-            machine_arch: Some(rpc::utils::cpu_architecture_to_rpc(
-                CpuArchitecture::Aarch64,
-            )),
-            nvme_devices: vec![],
-            dmi_data: Some(DmiData {
-                board_name: "Bluefield-3 DPU".into(),
-                board_version: "AG".into(),
-                bios_version: "4.13.0-26-g337fea6bfd".into(),
-                bios_date: "Nov  3 2025".into(),
-                product_serial: self.product_serial_number.to_string(),
-                board_serial: "Unspecified Base Board Serial Number".into(),
-                chassis_serial: "Unspecified Chassis Board Serial Number".into(),
-                product_name: "BlueField-3 DPU".into(),
-                sys_vendor: "Nvidia".into(),
-            }),
-            dpu_info: Some(DpuData {
-                part_number: self.part_number().into(),
-                part_description: format!("NVIDIA Bluefield-3 {}", self.part_number()),
-                product_version: self.firmware_versions.dpu_nic.clone(),
-                factory_mac_address: self.base_mac().to_string(),
-                firmware_version: self.firmware_versions.dpu_nic.clone(),
-                firmware_date: "11.11.2025".into(),
-                switches: vec![],
-            }),
-            gpus: vec![],
-            memory_devices: vec![],
-            tpm_ek_certificate: None,
-            tpm_description: None,
-            ..Default::default()
-        }
-    }
-
-    pub fn host_nic_discovery_info(
-        &self,
-        path: &str,
-        slot: &str,
-        numa_node: i32,
-    ) -> NetworkInterface {
-        NetworkInterface {
-            mac_address: self.host_mac_address.to_string(),
-            pci_properties: Some(PciDeviceProperties {
-                vendor: "Mellanox Technologies".into(),
-                device: "MT43244 BlueField-3 integrated ConnectX-7 network controller".into(),
-                path: path.into(),
-                numa_node,
-                description: Some(
-                    "MT43244 BlueField-3 integrated ConnectX-7 network controller".into(),
-                ),
-                slot: Some(slot.into()),
-            }),
         }
     }
 
@@ -372,42 +296,5 @@ impl Bluefield3<'_> {
             Mode::SuperNIC { nic_mode: true } => "9009D3B400CCEA",
             Mode::SuperNIC { nic_mode: false } => "9009D3B600CVAA",
         }
-    }
-}
-
-struct DpuEventLog {
-    entries: Vec<String>,
-}
-
-impl LogService for DpuEventLog {
-    fn id(&self) -> &str {
-        "EventLog"
-    }
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                redfish::log_service::event_entry(collection, &idx.to_string())
-                    .message(entry)
-                    // These are not required by specification but
-                    // required by libredfish. Making it happy. However, in future
-                    // we may want to simulate these fields as well.
-                    .severity("OK")
-                    .created("2026-02-12T02:06:58+00:00")
-                    .build()
-            })
-            .collect()
-    }
-}
-
-struct Bf3LogServices {
-    event_log: DpuEventLog,
-}
-
-impl LogServices for Bf3LogServices {
-    fn services(&self) -> Vec<&(dyn LogService + '_)> {
-        vec![&self.event_log as &dyn LogService]
     }
 }

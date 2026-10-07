@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use model::bmc_info::BmcInfo;
@@ -28,6 +29,9 @@ use sqlx::PgConnection;
 use super::DatabaseError;
 use crate::DatabaseResult;
 use crate::db_read::DbReader;
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 async fn update(
     txn: &mut PgConnection,
@@ -42,7 +46,7 @@ async fn update(
         %machine_id,
         "Discovery data for machine already exists. Updating now.",
     );
-    let query = "UPDATE machine_topologies SET topology=jsonb_set(topology, '{discovery_data}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING *";
+    let query = "UPDATE machine_topologies SET topology=jsonb_set(topology, '{discovery_data}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING machine_id, topology, created, updated, topology_update_needed";
     let res = sqlx::query_as(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(&discovery_data))
@@ -58,12 +62,13 @@ pub async fn create_or_update(
     machine_id: &MachineId,
     hardware_info: &HardwareInfo,
 ) -> DatabaseResult<MachineTopology> {
-    let topology_data = find_latest_by_machine_ids(txn, &[*machine_id]).await?;
-    let topology_data = topology_data.get(machine_id);
+    let machine_id = machine_id.to_machine_id();
+    let topology_data = find_latest_by_machine_ids(txn, &[machine_id]).await?;
+    let topology_data = topology_data.get(&machine_id);
 
     if let Some(topology) = topology_data {
         if topology.topology_update_needed {
-            return update(txn, machine_id, hardware_info).await;
+            return update(txn, &machine_id, hardware_info).await;
         }
         return Ok(topology.clone());
     }
@@ -87,7 +92,7 @@ pub async fn create_or_update(
         "Discovery data for machine did not exist. Creating now.",
     );
 
-    let query = "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING *";
+    let query = "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING machine_id, topology, created, updated, topology_update_needed";
     let res = sqlx::query_as(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(&topology_data))
@@ -128,8 +133,9 @@ pub async fn create_or_update_with_bom_validation(
         let age = Utc::now() - topology.updated;
         if bom_validation_enabled && age > TimeDelta::days(1) {
             tracing::debug!(
-                "Received inventory update from {}, bom_validation is enabled, existing data is old, updating",
-                machine_id
+                machine_id = %machine_id,
+                inventory_age_days = age.num_days(),
+                "Received stale inventory update while BOM validation is enabled",
             );
             set_topology_update_needed(txn, machine_id, true).await?;
         }
@@ -168,29 +174,50 @@ pub async fn update_firmware_version_by_machine_id(
     Ok(())
 }
 
-pub async fn find_by_machine_ids(
+/// Lock every topology row for a machine.
+///
+/// Site Explorer updates topology rows before the corresponding
+/// `explored_endpoints` row. Callers that touch both tables must acquire them
+/// in the same order to avoid deadlocks.
+pub async fn lock_by_machine_id(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, Vec<MachineTopology>>, DatabaseError> {
+    machine_id: &MachineId,
+) -> DatabaseResult<()> {
+    let query = "SELECT machine_id FROM machine_topologies WHERE machine_id = $1 FOR UPDATE";
+    sqlx::query(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
+// TODO: should this be HostMachineId-only instead of an arbitrary machine type?
+pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
+    txn: &mut PgConnection,
+    machine_ids: &[ID],
+) -> Result<HashMap<ID, Vec<MachineTopology>>, DatabaseError> {
     // TODO: Actually this shouldn't be able to return multiple entries,
     // since there is a check in create that for existing interfaces
     // But due to race conditions we can likely still have multiple of those interfaces
     let str_ids: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
-    let query = "SELECT * FROM machine_topologies WHERE machine_id=ANY($1)";
+    let query = "SELECT machine_id, topology, created, updated, topology_update_needed FROM machine_topologies WHERE machine_id=ANY($1)";
     let topologies = sqlx::query_as(query)
         .bind(str_ids)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()
-        .into_group_map_by(|t: &MachineTopology| t.machine_id);
+        .filter_map(|t: MachineTopology| Some((ID::try_from(t.machine_id).ok()?, t)))
+        .into_group_map();
     Ok(topologies)
 }
 
-pub async fn find_latest_by_machine_ids(
+pub async fn find_latest_by_machine_ids<ID: MachineIdSubtypeTrait>(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, MachineTopology>, DatabaseError> {
+    machine_ids: &[ID],
+) -> Result<HashMap<ID, MachineTopology>, DatabaseError> {
     // TODO: So far this just moved code around
     // This way of doing fetching the latest topology is inefficient, because it will still fetch all
     // information. We can change the query - however if we store information
@@ -230,10 +257,40 @@ pub async fn find_machine_id_by_bmc_ip(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-pub async fn find_machine_id_by_bmc_mac(
+/// Returns every BMC IP address that already belongs to an ingested machine.
+///
+/// Same predicate as [`find_machine_id_by_bmc_ip`] without the address filter, so
+/// membership here is equivalent to that lookup returning `Some`. Callers that
+/// need the answer for many addresses use this to avoid one round trip each.
+///
+/// The result is a snapshot: it does not track machines ingested after the read.
+pub async fn find_all_ingested_bmc_ips(
+    txn: impl DbReader<'_>,
+) -> Result<HashSet<IpAddr>, DatabaseError> {
+    // `machine_interface_addresses.address` is UNIQUE and constrained to a bare
+    // host address, so no DISTINCT is needed and each row decodes into `IpAddr`.
+    let query = r#"
+        SELECT mia.address
+        FROM machine_interfaces mi
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE mi.interface_type = 'Bmc'
+            AND mi.machine_id IS NOT NULL
+    "#;
+    let rows: Vec<(IpAddr,)> = sqlx::query_as(query)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(rows.into_iter().map(|(addr,)| addr).collect())
+}
+
+pub async fn find_machine_id_by_bmc_mac<ID>(
     txn: &mut PgConnection,
     mac_address: mac_address::MacAddress,
-) -> Result<Option<MachineId>, DatabaseError> {
+) -> Result<Option<ID>, DatabaseError>
+where
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     let query = r#"
         SELECT machine_id
         FROM machine_interfaces
@@ -241,25 +298,34 @@ pub async fn find_machine_id_by_bmc_mac(
             AND machine_id IS NOT NULL
             AND mac_address = $1::macaddr
     "#;
-    sqlx::query_as(query)
+    let machine_id: Option<MachineId> = sqlx::query_as(query)
         .bind(mac_address)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(machine_id.map(ID::try_from).transpose()?)
 }
 
+/// `find_machine_bmc_pairs` matches BMC addresses by IP value and returns
+/// PostgreSQL's formatted address text. Invalid or unknown inputs do not match.
 pub async fn find_machine_bmc_pairs(
     txn: impl DbReader<'_>,
-    bmc_ips: Vec<String>,
+    bmc_ips: &[String],
 ) -> Result<Vec<(MachineId, String)>, DatabaseError> {
+    // `machine_interface_addresses_host_address_check` requires /32 or /128,
+    // so `inet` equality compares complete host addresses. Keep `host()` in
+    // the result: saved Redfish actions use that text to look up their chassis
+    // serials when they are applied.
     let query = r#"
         SELECT mi.machine_id, host(mia.address)
         FROM machine_interfaces mi
         JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
         WHERE mi.interface_type = 'Bmc'
             AND mi.machine_id IS NOT NULL
-            AND host(mia.address) = ANY($1)
+            AND mia.address = ANY($1)
     "#;
+    let bmc_ips: Vec<IpAddr> = bmc_ips.iter().filter_map(|ip| ip.parse().ok()).collect();
     sqlx::query_as(query)
         .bind(bmc_ips)
         .fetch_all(txn)
@@ -274,10 +340,15 @@ pub async fn find_machine_bmc_pairs(
 /// The BMC IP is returned as `Option<String>`:
 /// - `Some(ip)` if the topology has a valid BMC IP
 /// - `None` if the linked interface exists but has no BMC IP (caller can log/handle this case)
-pub async fn find_machine_bmc_pairs_by_machine_id(
+pub async fn find_machine_bmc_pairs_by_machine_id<ID>(
     txn: &mut PgConnection,
-    machine_ids: Vec<MachineId>,
-) -> Result<Vec<(MachineId, Option<String>)>, DatabaseError> {
+    machine_ids: Vec<ID>,
+) -> Result<Vec<(ID, Option<String>)>, DatabaseError>
+where
+    ID: MachineIdSubtypeTrait,
+    ID: TryFrom<MachineId>,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     let query = r#"
         SELECT DISTINCT ON (mi.machine_id) mi.machine_id, host(mia.address)
         FROM machine_interfaces mi
@@ -286,13 +357,25 @@ pub async fn find_machine_bmc_pairs_by_machine_id(
             AND mi.machine_id = ANY($1)
         ORDER BY mi.machine_id, family(mia.address), mia.address
     "#;
-    sqlx::query_as(query)
-        .bind(machine_ids)
+    let results: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)
+        .bind(
+            machine_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+        )
         .fetch_all(txn)
         .await
         .map_err(|e| {
             DatabaseError::new("machine_topologies find_machine_bmc_pairs_by_machine_id", e)
+        })?;
+
+    Ok(results
+        .into_iter()
+        .map(|(machine_id, host)| {
+            Ok::<_, <ID as TryFrom<MachineId>>::Error>((ID::try_from(machine_id)?, host))
         })
+        .collect::<Result<Vec<_>, <ID as TryFrom<MachineId>>::Error>>()?)
 }
 
 /// Find any topology with a product, chassis, or board serial number exactly matching the input.
@@ -379,4 +462,105 @@ pub async fn set_topology_update_needed(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use carbide_uuid::machine::{MachineIdSource, MachineInterfaceId, MachineType};
+    use carbide_uuid::network::NetworkSegmentId;
+    use model::machine::ManagedHostState;
+
+    use super::*;
+
+    /// The batch read has to select exactly the addresses for which the
+    /// single-address lookup returns `Some`, because callers substitute set
+    /// membership for that lookup. Covers each way a row can miss the predicate:
+    /// a BMC with no machine, and a non-BMC interface that does have one.
+    #[crate::sqlx_test]
+    async fn ingested_bmc_ips_match_the_single_address_lookup(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) VALUES ('ingested-bmc', 'V1-T0')
+             RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        // (interface_type, owned by a machine, address)
+        let rows = [
+            ("Bmc", true, "192.0.2.1"),
+            ("Bmc", true, "192.0.2.2"),
+            // Discovered but not yet ingested.
+            ("Bmc", false, "192.0.2.3"),
+            // An ingested machine's data interface is not a BMC endpoint.
+            ("Data", true, "192.0.2.4"),
+        ];
+
+        for (index, (interface_type, owned, address)) in rows.iter().enumerate() {
+            let machine_id = if *owned {
+                let mut hash = [0u8; 32];
+                hash[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                let id = MachineId::new(
+                    MachineIdSource::ProductBoardChassisSerial,
+                    hash,
+                    MachineType::Host,
+                );
+                // Use the production helper: `machines` has NOT NULL columns
+                // without defaults, so a hand-rolled INSERT drifts from the schema.
+                crate::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 1)
+                    .await?;
+                Some(id)
+            } else {
+                None
+            };
+
+            let interface_id: MachineInterfaceId = sqlx::query_scalar(
+                "INSERT INTO machine_interfaces
+                     (segment_id, mac_address, primary_interface, hostname, interface_type,
+                      machine_id, association_type)
+                 VALUES ($1, $2::macaddr, false, $3, $4::interface_type, $5,
+                         CASE WHEN $5 IS NULL THEN 'None' ELSE 'Machine' END::association_type)
+                 RETURNING id",
+            )
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:00:0{index}"))
+            .bind(format!("ingested-bmc-{index}"))
+            .bind(interface_type)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO machine_interface_addresses (interface_id, address)
+                 VALUES ($1, $2::inet)",
+            )
+            .bind(interface_id)
+            .bind(address)
+            .execute(txn.as_mut())
+            .await?;
+        }
+
+        let batch = find_all_ingested_bmc_ips(txn.as_mut()).await?;
+
+        for (_, _, address) in rows {
+            let single = find_machine_id_by_bmc_ip(txn.as_mut(), address).await?;
+            let ip: IpAddr = address.parse()?;
+            assert_eq!(
+                batch.contains(&ip),
+                single.is_some(),
+                "batch and single-address lookup disagree for {address}"
+            );
+        }
+
+        // Guard against both sides agreeing only because both are empty.
+        assert_eq!(batch.len(), 2);
+
+        txn.rollback().await?;
+        Ok(())
+    }
 }

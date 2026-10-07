@@ -21,7 +21,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Builder;
 use crate::{BootOptionKind, redfish};
 
-pub fn collection(system_id: &str) -> redfish::Collection<'static> {
+pub(super) fn collection(system_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!(
         "{}/BootOptions",
         redfish::computer_system::resource(system_id).odata_id
@@ -33,7 +33,7 @@ pub fn collection(system_id: &str) -> redfish::Collection<'static> {
     }
 }
 
-pub fn resource<'a>(system_id: &str, boot_option_id: &'a str) -> redfish::Resource<'a> {
+pub(crate) fn resource<'a>(system_id: &str, boot_option_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("{}/{boot_option_id}", collection(system_id).odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -43,7 +43,7 @@ pub fn resource<'a>(system_id: &str, boot_option_id: &'a str) -> redfish::Resour
     }
 }
 
-pub fn builder(resource: &redfish::Resource, kind: BootOptionKind) -> BootOptionBuilder {
+pub(crate) fn builder(resource: &redfish::Resource, kind: BootOptionKind) -> BootOptionBuilder {
     BootOptionBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
@@ -52,23 +52,23 @@ pub fn builder(resource: &redfish::Resource, kind: BootOptionKind) -> BootOption
     }
 }
 
-pub struct BootOption {
-    pub id: Cow<'static, str>,
-    pub reference: Option<String>,
-    pub kind: BootOptionKind,
+pub(crate) struct BootOption {
+    pub(crate) id: Cow<'static, str>,
+    pub(crate) reference: Option<String>,
+    pub(crate) kind: BootOptionKind,
     value: serde_json::Value,
 }
 
 impl BootOption {
-    pub fn boot_reference(&self) -> &str {
+    pub(crate) fn boot_reference(&self) -> &str {
         self.reference.as_deref().unwrap_or(&self.id)
     }
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
     }
 }
 
-pub struct BootOptionBuilder {
+pub(crate) struct BootOptionBuilder {
     id: Cow<'static, str>,
     reference: Option<String>,
     value: serde_json::Value,
@@ -87,29 +87,29 @@ impl Builder for BootOptionBuilder {
 }
 
 impl BootOptionBuilder {
-    pub fn display_name(self, value: &str) -> Self {
+    pub(crate) fn display_name(self, value: &str) -> Self {
         self.add_str_field("DisplayName", value)
     }
 
-    pub fn boot_option_reference(self, value: &str) -> Self {
+    pub(crate) fn boot_option_reference(self, value: &str) -> Self {
         let mut result = self.add_str_field("BootOptionReference", value);
         result.reference = Some(value.to_string());
         result
     }
 
-    pub fn uefi_device_path(self, value: &str) -> Self {
+    pub(crate) fn uefi_device_path(self, value: &str) -> Self {
         self.add_str_field("UefiDevicePath", value)
     }
 
-    pub fn alias(self, value: &str) -> Self {
+    pub(crate) fn alias(self, value: &str) -> Self {
         self.add_str_field("Alias", value)
     }
 
-    pub fn odata_etag(self, value: &str) -> Self {
+    pub(crate) fn odata_etag(self, value: &str) -> Self {
         self.add_str_field("@odata.etag", value)
     }
 
-    pub fn build(self) -> BootOption {
+    pub(crate) fn build(self) -> BootOption {
         BootOption {
             id: self.id,
             reference: self.reference,

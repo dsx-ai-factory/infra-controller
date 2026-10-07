@@ -127,9 +127,9 @@ impl<IO: StateControllerIO> StateController<IO> {
                 .run_single_iteration(std::time::Duration::MAX, allow_requeue)
                 .await
             {
-                tracing::error!(%err, "State processor iteration error");
+                tracing::error!(error = %err, "State processor iteration error");
             }
-            if self.processor.in_flight.is_empty() {
+            if self.processor.object_tasks.is_empty() {
                 break;
             }
         }
@@ -140,14 +140,14 @@ impl<IO: StateControllerIO> StateController<IO> {
 
 #[derive(Debug, thiserror::Error)]
 enum IterationError {
-    #[error("Unable to perform database transaction: {0}")]
+    #[error("unable to perform database transaction: {0}")]
     TransactionError(#[from] sqlx::Error),
-    #[error("Unable to perform database transaction: {0}")]
+    #[error("unable to perform database transaction: {0}")]
     DatabaseError(#[from] DatabaseError),
-    #[error("Unable to acquire lock and start iteration")]
+    #[error("unable to acquire lock and start iteration")]
     LockError,
     #[error("A task panicked: {0}")]
     Panic(#[from] tokio::task::JoinError),
-    #[error("State handler error: {0}")]
+    #[error("state handler error: {0}")]
     StateHandlerError(#[from] StateHandlerError),
 }

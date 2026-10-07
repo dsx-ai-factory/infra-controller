@@ -15,5 +15,5 @@
  * limitations under the License.
  */
 
-pub mod idrac;
-pub mod network_device_function;
+pub(crate) mod idrac;
+pub(crate) mod network_device_function;

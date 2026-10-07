@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn set_uefi_password(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn set_uefi_password(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let response = api_client.0.set_host_uefi_password(data).await?;
     println!(
         "successfully set UEFI password for host (jid: {:#?})",

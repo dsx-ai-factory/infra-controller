@@ -21,12 +21,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod health_report;
+mod intrusion_events;
 mod leak_events;
+mod nmxc_domain_state;
 mod rack_leak;
 pub use health_report::HealthReportProcessor;
+pub use intrusion_events::BmcIntrusionEventProcessor;
 pub use leak_events::LeakEventProcessor;
+pub use nmxc_domain_state::NmxcDomainStateProcessor;
 pub use rack_leak::RackLeakProcessor;
 
+use crate::HealthError;
 use crate::metrics::{ComponentMetrics, MetricsManager};
 use crate::sink::{CollectorEvent, DataSink, EventContext};
 
@@ -104,14 +109,34 @@ impl DataSink for EventProcessingPipeline {
         "event_processing_pipeline"
     }
 
-    fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+    fn prune_metrics(
+        &self,
+        context: &EventContext,
+        metric_type: Option<&str>,
+        labels: &[crate::metrics::MetricLabel],
+        unit: Option<&str>,
+        label_names: Option<&[&str]>,
+    ) {
+        self.sink
+            .prune_metrics(context, metric_type, labels, unit, label_names);
+    }
+
+    fn prune_metric_key(&self, context: &EventContext, key: &str, metric_type: &str, unit: &str) {
+        self.sink.prune_metric_key(context, key, metric_type, unit);
+    }
+
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), HealthError> {
         let mut queue = VecDeque::from(vec![PendingEvent {
             event: Cow::Borrowed(event),
             blocked_processors: vec![false; self.processors.len()],
         }]);
 
         while let Some(current) = queue.pop_front() {
-            self.sink.handle_event(context, &current.event);
+            self.sink.try_handle_event(context, &current.event)?;
             self.next_events(
                 context,
                 &current.event,
@@ -119,6 +144,8 @@ impl DataSink for EventProcessingPipeline {
                 &mut queue,
             );
         }
+
+        Ok(())
     }
 }
 
@@ -144,8 +171,50 @@ mod tests {
             "counting_sink"
         }
 
-        fn handle_event(&self, _context: &EventContext, _event: &CollectorEvent) {
+        fn try_handle_event(
+            &self,
+            _context: &EventContext,
+            _event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
             self.counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct PruneCountingSink(Arc<AtomicUsize>);
+
+    impl DataSink for PruneCountingSink {
+        fn sink_type(&self) -> &'static str {
+            "prune_counting_sink"
+        }
+
+        fn prune_metrics(
+            &self,
+            _context: &EventContext,
+            _metric_type: Option<&str>,
+            _labels: &[crate::metrics::MetricLabel],
+            _unit: Option<&str>,
+            _label_names: Option<&[&str]>,
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn prune_metric_key(
+            &self,
+            _context: &EventContext,
+            _key: &str,
+            _metric_type: &str,
+            _unit: &str,
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn try_handle_event(
+            &self,
+            _context: &EventContext,
+            _event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            Ok(())
         }
     }
 
@@ -174,11 +243,12 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             metadata: None,
             rack_id: None,
+            labels: Default::default(),
         }
     }
 
@@ -214,5 +284,27 @@ mod tests {
 
         assert_eq!(processor_counter.load(Ordering::SeqCst), 1);
         assert_eq!(sink_counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn processor_pipeline_forwards_metric_pruning() {
+        let processor_counter = Arc::new(AtomicUsize::new(0));
+        let prune_counter = Arc::new(AtomicUsize::new(0));
+
+        let metrics_manager =
+            Arc::new(MetricsManager::new("test").expect("should create metrics manager"));
+
+        let pipeline = EventProcessingPipeline::new(
+            vec![Arc::new(SelfReemittingProcessor {
+                counter: processor_counter,
+            })],
+            Arc::new(PruneCountingSink(prune_counter.clone())),
+            metrics_manager,
+        );
+
+        pipeline.prune_metrics(&context(), Some("temperature"), &[], None, None);
+        pipeline.prune_metric_key(&context(), "reading", "temperature", "celsius");
+
+        assert_eq!(prune_counter.load(Ordering::SeqCst), 2);
     }
 }

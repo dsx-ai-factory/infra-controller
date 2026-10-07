@@ -5,9 +5,14 @@ edition.workspace = true
 description = "Carbide Site Explorer"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_site_explorer"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [features]
 default = []
@@ -15,16 +20,21 @@ test-support = []
 
 [dependencies]
 bmc-explorer = { path = "../bmc-explorer" }
+bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-firmware = { path = "../firmware" }
 carbide-health-report = { path = "../health-report" }
+carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi" }
+carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-network = { path = "../network" }
+carbide-rack = { path = "../rack", default-features = false }
 carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
+component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version" }
 
 # these are alphabetized
@@ -36,9 +46,9 @@ futures-util = { workspace = true }
 itertools = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
-librms = { workspace = true }
 mac_address = { workspace = true }
 opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -51,15 +61,23 @@ thiserror = { workspace = true }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }
+bmc-mock = { path = "../bmc-mock" }
+opentelemetry-prometheus = { workspace = true }
+prometheus = { workspace = true }
+
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-harness = { path = "../test-harness" }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-rpc = { path = "../rpc", features = ["test-support"] }
 carbide-site-explorer = { path = ".", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+component-manager = { path = "../component-manager", features = ["test-support"] }
 
 tokio = { workspace = true, features = ["macros", "rt"] }
 tonic = { workspace = true }

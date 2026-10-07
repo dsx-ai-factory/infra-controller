@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use model::metadata::{LabelFilter, Metadata};
 
 use crate as rpc;
@@ -30,11 +31,7 @@ impl From<Metadata> for rpc::Metadata {
                 .iter()
                 .map(|(key, value)| rpc::forge::Label {
                     key: key.clone(),
-                    value: if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.clone())
-                    },
+                    value: value.clone().none_if_empty(),
                 })
                 .collect(),
         }

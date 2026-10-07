@@ -39,14 +39,14 @@ pub struct ForgeResolveConf {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ResolverError {
-    #[error("Could not read resolv.conf at {path}: {error}")]
+    #[error("could not read resolv.conf at {path}: {error}")]
     CouldNotReadResolvConf { path: PathBuf, error: io::Error },
-    #[error("Could not parse resolv.conf at {path}: {error}")]
+    #[error("could not parse resolv.conf at {path}: {error}")]
     CouldNotParseResolvConf {
         path: PathBuf,
         error: resolv_conf::ParseError,
     },
-    #[error("Error resolving host {string}: {error}")]
+    #[error("error resolving host {string}: {error}")]
     InvalidHostString {
         string: String,
         error: hickory_resolver::proto::ProtoError,

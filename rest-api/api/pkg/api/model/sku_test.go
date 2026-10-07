@@ -4,15 +4,18 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewAPISku(t *testing.T) {
@@ -21,6 +24,7 @@ func TestNewAPISku(t *testing.T) {
 	}
 
 	siteID := uuid.New()
+	description := "Test SKU description"
 	deviceType := "test-device-type"
 	associatedMachineIds := []string{"machine-1", "machine-2"}
 	createdTime := time.Now()
@@ -30,6 +34,8 @@ func TestNewAPISku(t *testing.T) {
 	dbSku := &cdbm.SKU{
 		ID:                   "test-sku-id",
 		SiteID:               siteID,
+		Description:          description,
+		SchemaVersion:        5,
 		DeviceType:           &deviceType,
 		AssociatedMachineIds: associatedMachineIds,
 		Created:              createdTime,
@@ -52,10 +58,11 @@ func TestNewAPISku(t *testing.T) {
 			want: &APISku{
 				ID:                   dbSku.ID,
 				SiteID:               siteID.String(),
+				Description:          description,
+				SchemaVersion:        5,
 				DeviceType:           &deviceType,
 				AssociatedMachineIds: associatedMachineIds,
-				Created:              createdTime,
-				Updated:              updatedTime,
+				Created:              &createdTime,
 			},
 		},
 		{
@@ -83,10 +90,11 @@ func TestNewAPISku(t *testing.T) {
 			// Compare basic fields
 			assert.Equal(t, tt.want.ID, got.ID)
 			assert.Equal(t, tt.want.SiteID, got.SiteID)
+			assert.Equal(t, tt.want.Description, got.Description)
+			assert.Equal(t, tt.want.SchemaVersion, got.SchemaVersion)
 			assert.Equal(t, tt.want.DeviceType, got.DeviceType)
 			assert.Equal(t, tt.want.AssociatedMachineIds, got.AssociatedMachineIds)
 			assert.Equal(t, tt.want.Created, got.Created)
-			assert.Equal(t, tt.want.Updated, got.Updated)
 		})
 	}
 }
@@ -100,7 +108,7 @@ func TestNewAPISkuComponents(t *testing.T) {
 
 	// Test with empty input
 	t.Run("test new API SKU Components with empty input", func(t *testing.T) {
-		result := NewAPISkuComponents(&cwssaws.SkuComponents{})
+		result := NewAPISkuComponents(&corev1.SkuComponents{})
 		assert.NotNil(t, result)
 		assert.Nil(t, result.Cpus)
 		assert.Nil(t, result.Gpus)
@@ -114,6 +122,9 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 	deviceType := "gpu-server"
 	createdTime := time.Now()
 	updatedTime := time.Now()
+	minStorageSizeMb := uint32(7_600_000)
+	maxStorageSizeMb := uint32(7_800_000)
+	pciPattern := `^/devices/pci.*/nvme$`
 
 	t.Run("complete GPU server with all component types", func(t *testing.T) {
 		dbSku := &cdbm.SKU{
@@ -122,8 +133,8 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 			DeviceType:           &deviceType,
 			AssociatedMachineIds: []string{"machine-001", "machine-002", "machine-003"},
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "Intel",
 							Model:       "Xeon Platinum 8480+",
@@ -131,7 +142,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       2,
 						},
 					},
-					Gpus: []*cwssaws.SkuComponentGpu{
+					Gpus: []*corev1.SkuComponentGpu{
 						{
 							Vendor:      "NVIDIA",
 							Model:       "H100 SXM5",
@@ -139,26 +150,29 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       8,
 						},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 65536,
 							MemoryType: "DDR5",
 							Count:      16,
 						},
 					},
-					Storage: []*cwssaws.SkuComponentStorage{
+					Storage: []*corev1.SkuComponentStorage{
 						{
-							Vendor:     "Samsung",
-							Model:      "PM9A3",
-							CapacityMb: 7680000,
-							Count:      4,
+							Vendor:      "Samsung",
+							Model:       "PM9A3",
+							CapacityMb:  7680000,
+							Count:       4,
+							MinSizeMb:   &minStorageSizeMb,
+							MaxSizeMb:   &maxStorageSizeMb,
+							PciPatterns: []string{pciPattern},
 						},
 					},
-					Chassis: &cwssaws.SkuComponentChassis{
+					Chassis: &corev1.SkuComponentChassis{
 						Vendor: "Supermicro",
 						Model:  "SYS-420GP-TNR",
 					},
-					Tpm: &cwssaws.SkuComponentTpm{
+					Tpm: &corev1.SkuComponentTpm{
 						Vendor:  "Infineon",
 						Version: "2.0",
 					},
@@ -199,10 +213,13 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 
 		// Validate Storage
 		assert.Len(t, result.Components.Storage, 1)
-		assert.Equal(t, "Samsung", result.Components.Storage[0].Vendor)
+		assert.Equal(t, cutil.GetPtr("Samsung"), result.Components.Storage[0].Vendor)
 		assert.Equal(t, "PM9A3", result.Components.Storage[0].Model)
-		assert.Equal(t, uint32(7680000), result.Components.Storage[0].CapacityMb)
+		assert.Equal(t, cutil.GetPtr(uint32(7680000)), result.Components.Storage[0].CapacityMb)
 		assert.Equal(t, uint32(4), result.Components.Storage[0].Count)
+		assert.Equal(t, &minStorageSizeMb, result.Components.Storage[0].MinSizeMiB)
+		assert.Equal(t, &maxStorageSizeMb, result.Components.Storage[0].MaxSizeMiB)
+		assert.Equal(t, []string{pciPattern}, result.Components.Storage[0].PciPatterns)
 
 		// Validate Chassis
 		assert.NotNil(t, result.Components.Chassis)
@@ -222,8 +239,8 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 			DeviceType:           &deviceType,
 			AssociatedMachineIds: []string{"machine-010"},
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "AMD",
 							Model:       "EPYC 9654",
@@ -231,7 +248,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       2,
 						},
 					},
-					Gpus: []*cwssaws.SkuComponentGpu{
+					Gpus: []*corev1.SkuComponentGpu{
 						{
 							Vendor:      "NVIDIA",
 							Model:       "A100 80GB",
@@ -245,14 +262,14 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       4,
 						},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 32768,
 							MemoryType: "DDR5",
 							Count:      32,
 						},
 					},
-					Chassis: &cwssaws.SkuComponentChassis{
+					Chassis: &corev1.SkuComponentChassis{
 						Vendor: "Dell",
 						Model:  "PowerEdge XE9680",
 					},
@@ -282,8 +299,8 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "Intel",
 							Model:       "Xeon Gold 6438N",
@@ -291,14 +308,14 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       2,
 						},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 65536,
 							MemoryType: "DDR5 ECC",
 							Count:      8,
 						},
 					},
-					Storage: []*cwssaws.SkuComponentStorage{
+					Storage: []*corev1.SkuComponentStorage{
 						{
 							Vendor:     "Samsung",
 							Model:      "PM1733",
@@ -312,7 +329,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:      4,
 						},
 					},
-					Chassis: &cwssaws.SkuComponentChassis{
+					Chassis: &corev1.SkuComponentChassis{
 						Vendor: "HPE",
 						Model:  "ProLiant DL380 Gen11",
 					},
@@ -328,15 +345,15 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 		assert.Len(t, result.Components.Storage, 2)
 
 		// Validate first storage type
-		assert.Equal(t, "Samsung", result.Components.Storage[0].Vendor)
+		assert.Equal(t, cutil.GetPtr("Samsung"), result.Components.Storage[0].Vendor)
 		assert.Equal(t, "PM1733", result.Components.Storage[0].Model)
-		assert.Equal(t, uint32(15360000), result.Components.Storage[0].CapacityMb)
+		assert.Equal(t, cutil.GetPtr(uint32(15360000)), result.Components.Storage[0].CapacityMb)
 		assert.Equal(t, uint32(24), result.Components.Storage[0].Count)
 
 		// Validate second storage type
-		assert.Equal(t, "Intel", result.Components.Storage[1].Vendor)
+		assert.Equal(t, cutil.GetPtr("Intel"), result.Components.Storage[1].Vendor)
 		assert.Equal(t, "P5520", result.Components.Storage[1].Model)
-		assert.Equal(t, uint32(7680000), result.Components.Storage[1].CapacityMb)
+		assert.Equal(t, cutil.GetPtr(uint32(7680000)), result.Components.Storage[1].CapacityMb)
 		assert.Equal(t, uint32(4), result.Components.Storage[1].Count)
 
 		// Validate memory configuration
@@ -351,8 +368,8 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "AMD",
 							Model:       "EPYC 9754",
@@ -360,7 +377,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       2,
 						},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 131072,
 							MemoryType: "DDR5-4800",
@@ -372,7 +389,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:      12,
 						},
 					},
-					Storage: []*cwssaws.SkuComponentStorage{
+					Storage: []*corev1.SkuComponentStorage{
 						{
 							Vendor:     "Micron",
 							Model:      "9400 PRO",
@@ -380,11 +397,11 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:      2,
 						},
 					},
-					Chassis: &cwssaws.SkuComponentChassis{
+					Chassis: &corev1.SkuComponentChassis{
 						Vendor: "Lenovo",
 						Model:  "ThinkSystem SR665 V3",
 					},
-					Tpm: &cwssaws.SkuComponentTpm{
+					Tpm: &corev1.SkuComponentTpm{
 						Vendor:  "Infineon",
 						Version: "2.0",
 					},
@@ -419,8 +436,8 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "Intel",
 							Model:       "Xeon D-2796NT",
@@ -428,7 +445,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       1,
 						},
 					},
-					Gpus: []*cwssaws.SkuComponentGpu{
+					Gpus: []*corev1.SkuComponentGpu{
 						{
 							Vendor:      "NVIDIA",
 							Model:       "T4",
@@ -436,14 +453,14 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:       2,
 						},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 32768,
 							MemoryType: "DDR4-3200",
 							Count:      4,
 						},
 					},
-					Storage: []*cwssaws.SkuComponentStorage{
+					Storage: []*corev1.SkuComponentStorage{
 						{
 							Vendor:     "Kingston",
 							Model:      "DC1000B",
@@ -451,11 +468,11 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 							Count:      2,
 						},
 					},
-					Chassis: &cwssaws.SkuComponentChassis{
+					Chassis: &corev1.SkuComponentChassis{
 						Vendor: "Cisco",
 						Model:  "UCS C220 M6",
 					},
-					Tpm: &cwssaws.SkuComponentTpm{
+					Tpm: &corev1.SkuComponentTpm{
 						Vendor:  "Infineon",
 						Version: "2.0",
 					},
@@ -483,7 +500,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 
 		// Validate compact storage
 		assert.Len(t, result.Components.Storage, 1)
-		assert.Equal(t, uint32(960000), result.Components.Storage[0].CapacityMb)
+		assert.Equal(t, cutil.GetPtr(uint32(960000)), result.Components.Storage[0].CapacityMb)
 	})
 }
 
@@ -616,7 +633,6 @@ func TestNewAPISkuEdgeCases(t *testing.T) {
 		result := NewAPISku(dbSku)
 		assert.NotNil(t, result)
 		assert.True(t, result.Created.IsZero())
-		assert.True(t, result.Updated.IsZero())
 	})
 }
 
@@ -632,8 +648,8 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "Intel",
 							Model:       "Test CPU",
@@ -641,7 +657,7 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 							Count:       0,
 						},
 					},
-					Gpus: []*cwssaws.SkuComponentGpu{
+					Gpus: []*corev1.SkuComponentGpu{
 						{
 							Vendor:      "NVIDIA",
 							Model:       "Test GPU",
@@ -671,15 +687,15 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Memory: []*cwssaws.SkuComponentMemory{
+				SkuComponents: &corev1.SkuComponents{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 4294967295, // max uint32
 							MemoryType: "DDR5",
 							Count:      4294967295,
 						},
 					},
-					Storage: []*cwssaws.SkuComponentStorage{
+					Storage: []*corev1.SkuComponentStorage{
 						{
 							Vendor:     "Test",
 							Model:      "Large Storage",
@@ -707,8 +723,8 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "Intel®",
 							Model:       "Xeon® Platinum 8480+ (Sapphire Rapids)",
@@ -716,7 +732,7 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 							Count:       2,
 						},
 					},
-					Chassis: &cwssaws.SkuComponentChassis{
+					Chassis: &corev1.SkuComponentChassis{
 						Vendor: "HPE™",
 						Model:  "ProLiant DL380 Gen11 (2U)",
 					},
@@ -740,8 +756,8 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{
 							Vendor:      "",
 							Model:       "",
@@ -749,7 +765,7 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 							Count:       1,
 						},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{
 							CapacityMb: 32768,
 							MemoryType: "",
@@ -776,28 +792,28 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 			SiteID:     siteID,
 			DeviceType: &deviceType,
 			Components: &cdbm.SkuComponents{
-				SkuComponents: &cwssaws.SkuComponents{
-					Cpus: []*cwssaws.SkuComponentCpu{
+				SkuComponents: &corev1.SkuComponents{
+					Cpus: []*corev1.SkuComponentCpu{
 						{Vendor: "Intel", Model: "CPU1", ThreadCount: 64, Count: 1},
 						{Vendor: "Intel", Model: "CPU2", ThreadCount: 128, Count: 1},
 						{Vendor: "AMD", Model: "CPU3", ThreadCount: 192, Count: 2},
 					},
-					Gpus: []*cwssaws.SkuComponentGpu{
+					Gpus: []*corev1.SkuComponentGpu{
 						{Vendor: "NVIDIA", Model: "GPU1", TotalMemory: "40GB", Count: 2},
 						{Vendor: "NVIDIA", Model: "GPU2", TotalMemory: "80GB", Count: 4},
 						{Vendor: "AMD", Model: "GPU3", TotalMemory: "64GB", Count: 2},
 					},
-					Memory: []*cwssaws.SkuComponentMemory{
+					Memory: []*corev1.SkuComponentMemory{
 						{CapacityMb: 32768, MemoryType: "DDR4", Count: 8},
 						{CapacityMb: 65536, MemoryType: "DDR5", Count: 8},
 						{CapacityMb: 131072, MemoryType: "DDR5", Count: 4},
 					},
-					Storage: []*cwssaws.SkuComponentStorage{
+					Storage: []*corev1.SkuComponentStorage{
 						{Vendor: "Samsung", Model: "SSD1", CapacityMb: 960000, Count: 4},
 						{Vendor: "Intel", Model: "SSD2", CapacityMb: 3840000, Count: 2},
 						{Vendor: "Micron", Model: "SSD3", CapacityMb: 7680000, Count: 2},
 					},
-					Tpm: &cwssaws.SkuComponentTpm{
+					Tpm: &corev1.SkuComponentTpm{
 						Vendor:  "Infineon",
 						Version: "2.0",
 					},
@@ -823,7 +839,7 @@ func TestAPISkuComponentsWithSpecialValues(t *testing.T) {
 		assert.Equal(t, uint32(32768), result.Components.Memory[0].CapacityMb)
 
 		assert.Len(t, result.Components.Storage, 3)
-		assert.Equal(t, "Samsung", result.Components.Storage[0].Vendor)
+		assert.Equal(t, cutil.GetPtr("Samsung"), result.Components.Storage[0].Vendor)
 
 		assert.NotNil(t, result.Components.Tpm)
 		assert.Equal(t, "Infineon", result.Components.Tpm.Vendor)
@@ -875,4 +891,351 @@ func TestAPISkuSummaryEdgeCases(t *testing.T) {
 		assert.NotNil(t, result)
 		assert.Equal(t, specialType, *result.DeviceType)
 	})
+}
+
+func TestAPISkuCreateRequest(t *testing.T) {
+	t.Run("converts to proto", func(t *testing.T) {
+		deviceType := "gpu-server"
+		req := APISkuCreateRequest{
+			SiteID:      uuid.NewString(),
+			ID:          "dgx-h100",
+			Description: cutil.GetPtr("DGX H100"),
+			DeviceType:  &deviceType,
+			Components:  testAPISkuComponents(),
+		}
+
+		require.NoError(t, req.Validate())
+		proto := req.ToProto()
+		require.Len(t, proto.Skus, 1)
+		sku := proto.Skus[0]
+		assert.Equal(t, "dgx-h100", sku.Id)
+		assert.Equal(t, "DGX H100", sku.GetDescription())
+		assert.Equal(t, CoreSkuSchemaVersion, sku.SchemaVersion)
+		assert.Equal(t, "gpu-server", sku.GetDeviceType())
+		require.NotNil(t, sku.Components)
+		require.NotNil(t, sku.Components.Chassis)
+		assert.Equal(t, "x86_64", sku.Components.Chassis.Architecture)
+		require.Len(t, sku.Components.InfinibandDevices, 1)
+		assert.Equal(t, []uint32{1}, sku.Components.InfinibandDevices[0].InactiveDevices)
+		require.Len(t, sku.Components.Storage, 1)
+		assert.Empty(t, sku.Components.Storage[0].Vendor)
+		assert.Zero(t, sku.Components.Storage[0].CapacityMb)
+		assert.Equal(t, "informational-model", sku.Components.Storage[0].Model)
+		assert.Equal(t, cutil.GetPtr(uint32(3_600_000)), sku.Components.Storage[0].MinSizeMb)
+		assert.Equal(t, cutil.GetPtr(uint32(3_900_000)), sku.Components.Storage[0].MaxSizeMb)
+		assert.Equal(t, []string{`^/devices/pci.*/nvme$`}, sku.Components.Storage[0].PciPatterns)
+	})
+
+	t.Run("preserves omitted description in proto", func(t *testing.T) {
+		req := APISkuCreateRequest{
+			SiteID:     uuid.NewString(),
+			ID:         "dgx-h100",
+			Components: testAPISkuComponents(),
+		}
+
+		require.NoError(t, req.Validate())
+		proto := req.ToProto()
+		require.Len(t, proto.Skus, 1)
+		assert.Nil(t, proto.Skus[0].Description)
+	})
+
+	t.Run("validates required fields", func(t *testing.T) {
+		req := APISkuCreateRequest{SiteID: "not-a-uuid", ID: ""}
+		assert.Error(t, req.Validate())
+	})
+
+	t.Run("rejects inverted storage size range", func(t *testing.T) {
+		components := testAPISkuComponents()
+		components.Storage[0].MinSizeMiB = cutil.GetPtr(uint32(4_000_000))
+		components.Storage[0].MaxSizeMiB = cutil.GetPtr(uint32(3_800_000))
+		req := APISkuCreateRequest{
+			SiteID:     uuid.NewString(),
+			ID:         "dgx-h100",
+			Components: components,
+		}
+
+		err := req.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "minSizeMiB: must be less than or equal to maxSizeMiB")
+	})
+
+	for _, test := range []struct {
+		name string
+		min  *uint32
+		max  *uint32
+	}{
+		{name: "accepts equal storage size bounds", min: cutil.GetPtr(uint32(3_800_000)), max: cutil.GetPtr(uint32(3_800_000))},
+		{name: "accepts only minimum size", min: cutil.GetPtr(uint32(3_800_000))},
+		{name: "accepts only maximum size", max: cutil.GetPtr(uint32(4_000_000))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			components := testAPISkuComponents()
+			components.Storage[0].MinSizeMiB = test.min
+			components.Storage[0].MaxSizeMiB = test.max
+			req := APISkuCreateRequest{
+				SiteID:     uuid.NewString(),
+				ID:         "dgx-h100",
+				Components: components,
+			}
+
+			assert.NoError(t, req.Validate())
+		})
+	}
+}
+
+func TestNewAPISkuFromCreateRequest_OmittedDescription(t *testing.T) {
+	response := NewAPISkuFromCreateRequest(APISkuCreateRequest{}, "dgx-h100", uuid.NewString())
+
+	assert.Empty(t, response.Description)
+}
+
+func TestAPISku_MarshalJSON(t *testing.T) {
+	response := APISku{
+		Components: &APISkuComponents{
+			Storage: []APISkuStorage{{}},
+		},
+	}
+
+	encoded, err := json.Marshal(response)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"id":"",
+		"siteId":"",
+		"description":"",
+		"schemaVersion":0,
+		"deviceType":null,
+		"associatedMachineIds":null,
+		"components":{
+			"cpus":null,
+			"gpus":null,
+			"memory":null,
+			"storage":[{
+				"vendor":null,
+				"model":"",
+				"capacityMb":null,
+				"count":0,
+				"minSizeMiB":null,
+				"maxSizeMiB":null,
+				"pciPatterns":null
+			}],
+			"chassis":null,
+			"ethernetDevices":null,
+			"infinibandDevices":null,
+			"tpm":null
+		},
+		"created":null
+	}`, string(encoded))
+}
+
+func TestAPISkuStorage_Validate(t *testing.T) {
+	t.Run("accepts schema version 5 fields", func(t *testing.T) {
+		var storage APISkuStorage
+		err := json.Unmarshal([]byte(`{
+			"model":"informational-model",
+			"count":2,
+			"minSizeMiB":3600000,
+			"maxSizeMiB":3900000,
+			"pciPatterns":["^/devices/pci.*/nvme$"]
+		}`), &storage)
+		require.NoError(t, err)
+		require.NoError(t, storage.Validate())
+		assert.Equal(t, "informational-model", storage.Model)
+		assert.Equal(t, uint32(2), storage.Count)
+		assert.Equal(t, cutil.GetPtr(uint32(3_600_000)), storage.MinSizeMiB)
+		assert.Equal(t, cutil.GetPtr(uint32(3_900_000)), storage.MaxSizeMiB)
+		assert.Equal(t, []string{`^/devices/pci.*/nvme$`}, storage.PciPatterns)
+	})
+
+	for name, body := range map[string]string{
+		"rejects read-only vendor":     `{"model":"legacy","count":1,"vendor":""}`,
+		"rejects read-only capacityMb": `{"model":"legacy","count":1,"capacityMb":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var storage APISkuStorage
+			err := json.Unmarshal([]byte(body), &storage)
+			require.NoError(t, err)
+
+			err = storage.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "read-only")
+		})
+	}
+}
+
+func TestAPISkuComponents_Validate(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		ethernetDevices []APISkuEthernetDevice
+		wantErr         bool
+	}{
+		{
+			name: "accepts omitted ethernet devices",
+		},
+		{
+			name:            "accepts empty ethernet devices",
+			ethernetDevices: []APISkuEthernetDevice{},
+		},
+		{
+			name: "rejects non-empty ethernet devices",
+			ethernetDevices: []APISkuEthernetDevice{
+				{
+					Vendor:      "Mellanox Technologies",
+					Model:       "MT2892 Family [ConnectX-6 Dx]",
+					Count:       2,
+					IsConnected: true,
+				},
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			components := testAPISkuComponents()
+			components.EthernetDevices = test.ethernetDevices
+
+			err := components.Validate()
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "ethernetDevices")
+				assert.Contains(t, err.Error(), "read-only")
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestAPISkuRequests_UnmarshalJSON(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		var request APISkuCreateRequest
+		err := json.Unmarshal([]byte(`{
+			"siteId":"60189e9c-7d12-438c-b9ca-6998d9c364b1",
+			"id":"sku-1",
+			"description":"description",
+			"deviceType":"gpu",
+			"components":{}
+		}`), &request)
+
+		require.NoError(t, err)
+		assert.Equal(t, "60189e9c-7d12-438c-b9ca-6998d9c364b1", request.SiteID)
+		assert.Equal(t, "sku-1", request.ID)
+		assert.Equal(t, "description", *request.Description)
+		assert.Equal(t, "gpu", *request.DeviceType)
+		require.NotNil(t, request.Components)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		var request APISkuUpdateRequest
+		err := json.Unmarshal([]byte(`{
+			"description":"description",
+			"deviceType":"gpu",
+			"components":{}
+		}`), &request)
+
+		require.NoError(t, err)
+		assert.Equal(t, "description", *request.Description)
+		assert.Equal(t, "gpu", *request.DeviceType)
+		require.NotNil(t, request.Components)
+	})
+
+}
+
+func TestAPISkuUpdateRequest(t *testing.T) {
+	t.Run("converts metadata update to proto", func(t *testing.T) {
+		description := "updated description"
+		req := APISkuUpdateRequest{
+			SkuID:       "dgx-h100",
+			Description: &description,
+		}
+		existing := &corev1.Sku{
+			Id:                   "dgx-h100",
+			Description:          cutil.GetPtr("old description"),
+			SchemaVersion:        4,
+			DeviceType:           cutil.GetPtr("gpu-server"),
+			Components:           testAPISkuComponents().ToProto(),
+			AssociatedMachineIds: []*corev1.MachineId{{Id: "machine-1"}},
+		}
+
+		require.NoError(t, req.Validate())
+		metadata := req.ToMetadataProto()
+		assert.Equal(t, "dgx-h100", metadata.SkuId)
+		assert.Equal(t, "updated description", metadata.GetDescription())
+
+		updated := req.ApplyMetadataToProto(existing)
+		assert.Equal(t, "updated description", updated.GetDescription())
+		assert.Equal(t, uint32(4), updated.SchemaVersion)
+		assert.Equal(t, "gpu-server", updated.GetDeviceType())
+		assert.Equal(t, existing.Components, updated.Components)
+		assert.Equal(t, existing.AssociatedMachineIds, updated.AssociatedMachineIds)
+		assert.NotSame(t, existing, updated)
+	})
+
+	t.Run("replaces components using current schema version", func(t *testing.T) {
+		description := "updated description"
+		req := APISkuUpdateRequest{
+			SkuID:       "dgx-h100",
+			Description: &description,
+			Components:  testAPISkuComponents(),
+		}
+		existing := &corev1.Sku{
+			Id:                   "dgx-h100",
+			Description:          cutil.GetPtr("old description"),
+			SchemaVersion:        CoreSkuSchemaVersion,
+			DeviceType:           cutil.GetPtr("gpu-server"),
+			Components:           testAPISkuComponents().ToProto(),
+			AssociatedMachineIds: []*corev1.MachineId{{Id: "machine-1"}},
+		}
+
+		require.NoError(t, req.Validate())
+		updated := req.ToReplacementProto(existing)
+		assert.Equal(t, "updated description", updated.GetDescription())
+		assert.Equal(t, CoreSkuSchemaVersion, updated.SchemaVersion)
+		assert.Equal(t, req.Components.ToProto(), updated.Components)
+		assert.Equal(t, existing.AssociatedMachineIds, updated.AssociatedMachineIds)
+		assert.NotSame(t, existing, updated)
+	})
+
+	t.Run("requires a mutable field", func(t *testing.T) {
+		req := APISkuUpdateRequest{}
+		assert.Error(t, req.Validate())
+	})
+
+	t.Run("rejects inverted storage size range", func(t *testing.T) {
+		components := testAPISkuComponents()
+		components.Storage[0].MinSizeMiB = cutil.GetPtr(uint32(4_000_000))
+		components.Storage[0].MaxSizeMiB = cutil.GetPtr(uint32(3_800_000))
+		req := APISkuUpdateRequest{Components: components}
+
+		err := req.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "minSizeMiB: must be less than or equal to maxSizeMiB")
+	})
+}
+
+func testAPISkuComponents() *APISkuComponents {
+	return &APISkuComponents{
+		Chassis: &APISkuChassis{
+			Vendor:       "NVIDIA",
+			Model:        "DGX H100",
+			Architecture: "x86_64",
+		},
+		Cpus: []APISkuCpu{{
+			Vendor:      "Intel",
+			Model:       "Xeon",
+			ThreadCount: 112,
+			Count:       2,
+		}},
+		Storage: []APISkuStorage{{
+			Model:       "informational-model",
+			Count:       2,
+			MinSizeMiB:  cutil.GetPtr(uint32(3_600_000)),
+			MaxSizeMiB:  cutil.GetPtr(uint32(3_900_000)),
+			PciPatterns: []string{`^/devices/pci.*/nvme$`},
+		}},
+		InfinibandDevices: []APISkuInfinibandDevice{{
+			Vendor:          "NVIDIA",
+			Model:           "ConnectX-7",
+			Count:           2,
+			InactiveDevices: []uint32{1},
+		}},
+	}
 }

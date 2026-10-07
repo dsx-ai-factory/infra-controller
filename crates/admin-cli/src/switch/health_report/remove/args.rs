@@ -27,7 +27,7 @@ Remove a health report source from a switch (source name from `health-report sho
     internal-maintenance
 
 ")]
-pub struct Args {
-    pub switch_id: SwitchId,
-    pub report_source: String,
+pub(crate) struct Args {
+    pub(super) switch_id: SwitchId,
+    pub(super) report_source: String,
 }

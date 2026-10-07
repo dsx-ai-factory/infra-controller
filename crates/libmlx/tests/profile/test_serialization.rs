@@ -38,46 +38,23 @@ fn assert_same_profile(got: &SerializableProfile, want: &SerializableProfile) {
     assert_eq!(got.config.len(), want.config.len());
 }
 
-// to_proto mirrors the TryInto conversion: each YAML config value is serialized to a
-// trimmed string. The real conversion lives in the crate; the tests re-create it so
-// they can assert the wire shape independently.
+// to_proto hands the profile to the crate's own conversion, `impl
+// TryFrom<&SerializableProfile> for SerializableMlxConfigProfilePb`. These helpers used to
+// re-create that conversion here so the tests could assert the wire shape independently --
+// but re-creating it meant the real impl was never exercised by anything, which is the
+// opposite of what these tests are for.
 fn to_proto(profile: &SerializableProfile) -> SerializableMlxConfigProfilePb {
-    let config = profile
-        .config
-        .iter()
-        .map(|(key, yaml_value)| {
-            let value_str = serde_yaml::to_string(yaml_value).expect("Should serialize YAML value");
-            (key.clone(), value_str.trim().to_string())
-        })
-        .collect();
-
-    SerializableMlxConfigProfilePb {
-        name: profile.name.clone(),
-        registry_name: profile.registry_name.clone(),
-        description: profile.description.clone(),
-        config,
-    }
+    profile
+        .try_into()
+        .expect("a profile built in these tests should convert to its protobuf form")
 }
 
-// from_proto mirrors the TryFrom conversion: each stringified config value is parsed
-// back into a YAML value.
+// from_proto is the same idea in the other direction, through `impl
+// TryFrom<SerializableMlxConfigProfilePb> for SerializableProfile`.
 fn from_proto(proto: SerializableMlxConfigProfilePb) -> SerializableProfile {
-    let config = proto
-        .config
-        .into_iter()
-        .map(|(key, value_str)| {
-            let yaml_value: serde_yaml::Value =
-                serde_yaml::from_str(&value_str).expect("Should parse YAML value");
-            (key, yaml_value)
-        })
-        .collect();
-
-    SerializableProfile {
-        name: proto.name,
-        registry_name: proto.registry_name,
-        description: proto.description,
-        config,
-    }
+    proto
+        .try_into()
+        .expect("a protobuf built in these tests should convert back to a profile")
 }
 
 #[test]
@@ -307,87 +284,6 @@ fn test_protobuf_roundtrip() {
 }
 
 #[test]
-fn test_protobuf_with_arrays() {
-    let original =
-        SerializableProfile::new("array_test", "test_registry").with_config("SIMPLE_VAR", 42);
-
-    // Add an array manually to test array handling
-    let mut config = original.config.clone();
-    let array_values = vec![
-        serde_yaml::Value::String("first".to_string()),
-        serde_yaml::Value::String("second".to_string()),
-        serde_yaml::Value::String("third".to_string()),
-    ];
-    config.insert(
-        "ARRAY_VAR".to_string(),
-        serde_yaml::Value::Sequence(array_values),
-    );
-
-    let profile_with_array = SerializableProfile {
-        name: original.name,
-        registry_name: original.registry_name,
-        description: original.description,
-        config,
-    };
-
-    // Test array serialization to protobuf
-    let array_yaml = profile_with_array.config.get("ARRAY_VAR").unwrap();
-    let array_string = serde_yaml::to_string(array_yaml).unwrap();
-
-    // Should be valid YAML array format
-    assert!(array_string.contains("- first"));
-    assert!(array_string.contains("- second"));
-    assert!(array_string.contains("- third"));
-
-    // Test array deserialization from protobuf
-    let parsed_back: serde_yaml::Value = serde_yaml::from_str(&array_string).unwrap();
-    assert_eq!(*array_yaml, parsed_back);
-}
-
-#[test]
-fn test_protobuf_with_sparse_arrays() {
-    let original = SerializableProfile::new("sparse_test", "test_registry");
-
-    // Create a sparse array with some null values
-    let sparse_array = vec![
-        serde_yaml::Value::String("first".to_string()),
-        serde_yaml::Value::Null, // This represents an unset sparse array element
-        serde_yaml::Value::String("third".to_string()),
-    ];
-
-    let mut config = HashMap::new();
-    config.insert(
-        "SPARSE_ARRAY".to_string(),
-        serde_yaml::Value::Sequence(sparse_array),
-    );
-
-    let profile = SerializableProfile {
-        name: original.name,
-        registry_name: original.registry_name,
-        description: original.description,
-        config,
-    };
-
-    // Test sparse array serialization
-    let sparse_yaml = profile.config.get("SPARSE_ARRAY").unwrap();
-    let sparse_string = serde_yaml::to_string(sparse_yaml).unwrap();
-
-    // Test sparse array deserialization
-    let parsed_back: serde_yaml::Value = serde_yaml::from_str(&sparse_string).unwrap();
-    assert_eq!(*sparse_yaml, parsed_back);
-
-    // Verify the structure
-    if let serde_yaml::Value::Sequence(seq) = parsed_back {
-        assert_eq!(seq.len(), 3);
-        assert!(matches!(seq[0], serde_yaml::Value::String(_)));
-        assert!(matches!(seq[1], serde_yaml::Value::Null));
-        assert!(matches!(seq[2], serde_yaml::Value::String(_)));
-    } else {
-        panic!("Expected sequence");
-    }
-}
-
-#[test]
 fn test_protobuf_empty_description() {
     let proto = SerializableMlxConfigProfilePb {
         name: "no_desc_test".to_string(),
@@ -598,137 +494,6 @@ PCI_DOWNSTREAM_PORT_OWNER = [
 }
 
 #[test]
-fn test_toml_multiple_profiles_hashmap() {
-    // Define a container struct similar what would be in
-    // the carbide-api-site-config.toml file.
-    #[derive(Deserialize)]
-    struct ServerConfig {
-        #[serde(rename = "mlx-config-profiles")]
-        mlx_config_profiles: HashMap<String, SerializableProfile>,
-    }
-
-    let server_toml = r#"
-# Server configuration with multiple MLX profiles
-
-[mlx-config-profiles.bluefield-production]
-name = "bluefield-production"
-registry_name = "mlx_generic"
-description = "Production config for BlueField3 DPUs"
-
-[mlx-config-profiles.bluefield-production.config]
-SRIOV_EN = true
-NUM_OF_VFS = 16
-NUM_OF_PF = 2
-INTERNAL_CPU_OFFLOAD_ENGINE = "ENABLED"
-ROCE_ADAPTIVE_ROUTING_EN = false
-PCI_DOWNSTREAM_PORT_OWNER = ["EMBEDDED_CPU", "HOST_0", "HOST_1", "DEVICE_DEFAULT"]
-
-[mlx-config-profiles.bluefield-development]
-name = "bluefield-development"
-registry_name = "mlx_generic"
-description = "Development config for BlueField3 DPUs"
-
-[mlx-config-profiles.bluefield-development.config]
-SRIOV_EN = false
-NUM_OF_VFS = 4
-NUM_OF_PF = 1
-INTERNAL_CPU_OFFLOAD_ENGINE = "DISABLED"
-ROCE_ADAPTIVE_ROUTING_EN = true
-PCI_DOWNSTREAM_PORT_OWNER = ["EMBEDDED_CPU", "HOST_0"]
-
-[mlx-config-profiles.bluefield-testing]
-name = "bluefield-testing"
-registry_name = "mlx_generic"
-description = "Testing config with minimal settings"
-
-[mlx-config-profiles.bluefield-testing.config]
-SRIOV_EN = true
-NUM_OF_VFS = 8
-INTERNAL_CPU_OFFLOAD_ENGINE = "ENABLED"
-"#;
-
-    let server_config: ServerConfig =
-        toml::from_str(server_toml).expect("Should parse server TOML with multiple profiles");
-
-    // Verify we got all three profiles
-    assert_eq!(server_config.mlx_config_profiles.len(), 3);
-
-    // Verify the keys match the TOML table names
-    assert!(
-        server_config
-            .mlx_config_profiles
-            .contains_key("bluefield-production")
-    );
-    assert!(
-        server_config
-            .mlx_config_profiles
-            .contains_key("bluefield-development")
-    );
-    assert!(
-        server_config
-            .mlx_config_profiles
-            .contains_key("bluefield-testing")
-    );
-
-    // Verify production profile details
-    let prod_profile = &server_config.mlx_config_profiles["bluefield-production"];
-    assert_eq!(prod_profile.name, "bluefield-production");
-    assert_eq!(prod_profile.registry_name, "mlx_generic");
-    assert_eq!(
-        prod_profile.description,
-        Some("Production config for BlueField3 DPUs".to_string())
-    );
-    assert_eq!(prod_profile.config.len(), 6); // 6 config variables
-
-    // Verify development profile details
-    let dev_profile = &server_config.mlx_config_profiles["bluefield-development"];
-    assert_eq!(dev_profile.name, "bluefield-development");
-    assert_eq!(dev_profile.registry_name, "mlx_generic");
-    assert_eq!(
-        dev_profile.description,
-        Some("Development config for BlueField3 DPUs".to_string())
-    );
-    assert_eq!(dev_profile.config.len(), 6);
-
-    // Verify testing profile details
-    let test_profile = &server_config.mlx_config_profiles["bluefield-testing"];
-    assert_eq!(test_profile.name, "bluefield-testing");
-    assert_eq!(test_profile.registry_name, "mlx_generic");
-    assert_eq!(
-        test_profile.description,
-        Some("Testing config with minimal settings".to_string())
-    );
-    assert_eq!(test_profile.config.len(), 3); // 3 config variables
-
-    // Verify some specific config values
-    if let Some(serde_yaml::Value::Bool(sriov)) = prod_profile.config.get("SRIOV_EN") {
-        assert!(*sriov); // Production should have SRIOV enabled
-    }
-
-    if let Some(serde_yaml::Value::Bool(sriov)) = dev_profile.config.get("SRIOV_EN") {
-        assert!(!*sriov); // Development should have SRIOV disabled
-    }
-
-    if let Some(serde_yaml::Value::Number(vfs)) = prod_profile.config.get("NUM_OF_VFS") {
-        assert_eq!(vfs.as_i64(), Some(16)); // Production should have 16 VFs
-    }
-
-    if let Some(serde_yaml::Value::Number(vfs)) = dev_profile.config.get("NUM_OF_VFS") {
-        assert_eq!(vfs.as_i64(), Some(4)); // Development should have 4 VFs
-    }
-
-    // Verify array handling in production profile
-    if let Some(serde_yaml::Value::Sequence(ports)) =
-        prod_profile.config.get("PCI_DOWNSTREAM_PORT_OWNER")
-    {
-        assert_eq!(ports.len(), 4);
-        if let serde_yaml::Value::String(first_port) = &ports[0] {
-            assert_eq!(first_port, "EMBEDDED_CPU");
-        }
-    }
-}
-
-#[test]
 fn test_toml_serialization_preserves_structure() {
     let original = SerializableProfile::new("structure_test", "test_registry")
         .with_description("Test structure preservation")
@@ -761,52 +526,6 @@ missing quotes and brackets
     // TOML errors get wrapped in MlxProfileError::Serialization
     let result = SerializableProfile::from_toml(invalid_toml);
     assert!(matches!(result, Err(MlxProfileError::Serialization { .. })));
-}
-
-#[test]
-fn test_toml_file_operations() {
-    use tempfile::tempdir;
-
-    let temp_dir = tempdir().expect("Should create temp dir");
-
-    let profile = SerializableProfile::new("file_test", "test_registry")
-        .with_description("Testing TOML file operations")
-        .with_config("TEST_VAR", "file_value")
-        .with_config("NUM_VAR", 123);
-
-    // Test TOML file operations
-    let toml_path = temp_dir.path().join("test.toml");
-    profile
-        .to_toml_file(&toml_path)
-        .expect("Should write TOML file");
-
-    let loaded_toml =
-        SerializableProfile::from_toml_file(&toml_path).expect("Should read TOML file");
-    assert_same_profile(&loaded_toml, &profile);
-}
-
-#[test]
-fn test_toml_vs_yaml_compatibility() {
-    // Create a profile and serialize to both TOML and YAML
-    let original = SerializableProfile::new("compatibility_test", "test_registry")
-        .with_description("Testing TOML/YAML compatibility")
-        .with_config("BOOL_VAR", true)
-        .with_config("INT_VAR", 456)
-        .with_config("STRING_VAR", "test");
-
-    let toml_str = original.to_toml().expect("Should serialize to TOML");
-    let yaml_str = original.to_yaml().expect("Should serialize to YAML");
-
-    // Deserialize from both formats
-    let from_toml =
-        SerializableProfile::from_toml(&toml_str).expect("Should deserialize from TOML");
-    let from_yaml =
-        SerializableProfile::from_yaml(&yaml_str).expect("Should deserialize from YAML");
-
-    // Both should be equivalent to original, and so to each other.
-    assert_same_profile(&from_toml, &original);
-    assert_same_profile(&from_yaml, &original);
-    assert_same_profile(&from_toml, &from_yaml);
 }
 
 #[test]

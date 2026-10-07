@@ -74,6 +74,10 @@ func TestExternalUsability(t *testing.T) {
 	_ = client.GetExpectedComponentsResult{}
 	_ = client.ValidateComponentsResult{}
 	_ = client.ListTasksResult{}
+	_ = (*client.Client).UpgradeFirmwareByNVLDomainIDs
+	_ = (*client.Client).UpgradeFirmwareByNVLDomainNames
+	_ = (*client.Client).PowerControlByNVLDomainIDs
+	_ = (*client.Client).PowerControlByNVLDomainNames
 
 	// Verify enum types from types package
 	_ = types.ComponentTypeCompute

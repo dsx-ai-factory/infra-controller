@@ -14,7 +14,7 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
@@ -41,12 +41,12 @@ func (s *UpdateInstanceTypeTestSuite) Test_UpdateInstanceType_Success() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.UpdateInstanceTypeRequest{
+	request := &corev1.UpdateInstanceTypeRequest{
 		Id: uuid.NewString(),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -71,12 +71,12 @@ func (s *UpdateInstanceTypeTestSuite) Test_UpdateInstanceType_Failure() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.UpdateInstanceTypeRequest{
+	request := &corev1.UpdateInstanceTypeRequest{
 		Id: uuid.NewString(),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -122,12 +122,12 @@ func (s *CreateInstanceTypeTestSuite) Test_CreateInstanceType_Success() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.CreateInstanceTypeRequest{
+	request := &corev1.CreateInstanceTypeRequest{
 		Id: util.GetStrPtr(uuid.NewString()),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -152,12 +152,12 @@ func (s *CreateInstanceTypeTestSuite) Test_CreateInstanceType_Failure() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.CreateInstanceTypeRequest{
+	request := &corev1.CreateInstanceTypeRequest{
 		Id: util.GetStrPtr(uuid.NewString()),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -200,7 +200,7 @@ func (s *DeleteInstanceTypeTestSuite) AfterTest(suiteName, testName string) {
 func (s *DeleteInstanceTypeTestSuite) Test_DeleteInstanceType_Success() {
 	var instanceTypeManager iActivity.ManageInstanceType
 
-	request := &cwssaws.DeleteInstanceTypeRequest{
+	request := &corev1.DeleteInstanceTypeRequest{
 		Id: uuid.NewString(),
 	}
 
@@ -217,7 +217,7 @@ func (s *DeleteInstanceTypeTestSuite) Test_DeleteInstanceType_Success() {
 func (s *DeleteInstanceTypeTestSuite) Test_DeleteInstanceType_Failure() {
 	var machineManager iActivity.ManageInstanceType
 
-	request := &cwssaws.DeleteInstanceTypeRequest{
+	request := &corev1.DeleteInstanceTypeRequest{
 		Id: uuid.NewString(),
 	}
 
@@ -255,7 +255,7 @@ func (s *AssociateMachinesWithInstanceTypeTestSuite) AfterTest(suiteName, testNa
 func (s *AssociateMachinesWithInstanceTypeTestSuite) Test_AssociateMachinesWithInstanceType_Success() {
 	var instanceTypeManager iActivity.ManageInstanceType
 
-	request := &cwssaws.AssociateMachinesWithInstanceTypeRequest{
+	request := &corev1.AssociateMachinesWithInstanceTypeRequest{
 		InstanceTypeId: uuid.NewString(),
 		MachineIds:     []string{uuid.NewString()},
 	}
@@ -273,7 +273,7 @@ func (s *AssociateMachinesWithInstanceTypeTestSuite) Test_AssociateMachinesWithI
 func (s *AssociateMachinesWithInstanceTypeTestSuite) Test_AssociateMachinesWithInstanceType_Failure() {
 	var machineManager iActivity.ManageInstanceType
 
-	request := &cwssaws.AssociateMachinesWithInstanceTypeRequest{
+	request := &corev1.AssociateMachinesWithInstanceTypeRequest{
 		InstanceTypeId: uuid.NewString(),
 		MachineIds:     []string{uuid.NewString()},
 	}
@@ -312,7 +312,7 @@ func (s *RemoveMachineInstanceTypeAssociationTestSuite) AfterTest(suiteName, tes
 func (s *RemoveMachineInstanceTypeAssociationTestSuite) Test_RemoveMachineInstanceTypeAssociation_Success() {
 	var instanceTypeManager iActivity.ManageInstanceType
 
-	request := &cwssaws.RemoveMachineInstanceTypeAssociationRequest{
+	request := &corev1.RemoveMachineInstanceTypeAssociationRequest{
 		MachineId: uuid.NewString(),
 	}
 
@@ -329,7 +329,7 @@ func (s *RemoveMachineInstanceTypeAssociationTestSuite) Test_RemoveMachineInstan
 func (s *RemoveMachineInstanceTypeAssociationTestSuite) Test_RemoveMachineInstanceTypeAssociation_Failure() {
 	var machineManager iActivity.ManageInstanceType
 
-	request := &cwssaws.RemoveMachineInstanceTypeAssociationRequest{
+	request := &corev1.RemoveMachineInstanceTypeAssociationRequest{
 		MachineId: uuid.NewString(),
 	}
 

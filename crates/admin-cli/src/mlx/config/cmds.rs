@@ -21,129 +21,116 @@ use prettytable::{Cell, Row, Table};
 use rpc::protos::mlx_device as mlx_device_pb;
 
 use super::super::{
-    CliContext, print_comparison_result_csv, print_comparison_result_table, print_sync_result_csv,
+    print_comparison_result_csv, print_comparison_result_table, print_sync_result_csv,
     print_sync_result_table, wrap_text,
 };
-use super::args::{
-    ConfigCommand, ConfigCompareCommand, ConfigQueryCommand, ConfigSetCommand, ConfigSyncCommand,
-};
+use super::args::{ConfigCompareCommand, ConfigQueryCommand, ConfigSetCommand, ConfigSyncCommand};
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
-// dispatch routes config subcommands to its handlers.
-pub async fn dispatch(
-    command: ConfigCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    match command {
-        ConfigCommand::Query(cmd) => handle_query(cmd, ctxt).await,
-        ConfigCommand::Set(cmd) => handle_set(cmd, ctxt).await,
-        ConfigCommand::Sync(cmd) => handle_sync(cmd, ctxt).await,
-        ConfigCommand::Compare(cmd) => handle_compare(cmd, ctxt).await,
+impl Run for ConfigQueryCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminConfigQueryRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_config_query(request).await?;
+
+        let query_result_pb = response
+            .query_result
+            .ok_or_else(|| CarbideCliError::GenericError("no query result returned".to_string()))?;
+
+        let query_result: QueryResult = query_result_pb.try_into()?;
+
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&query_result)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&query_result)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_query_result_table(&query_result);
+            }
+            OutputFormat::Csv => {
+                println!("CSV not supported yet")
+            }
+        }
+
+        Ok(())
     }
 }
-async fn handle_query(
-    cmd: ConfigQueryCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminConfigQueryRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_config_query(request).await?;
 
-    let query_result_pb = response
-        .query_result
-        .ok_or_else(|| CarbideCliError::GenericError("no query result returned".to_string()))?;
+impl Run for ConfigSetCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminConfigSetRequest = self.try_into()?;
+        let response = ctx.api_client.0.mlx_admin_config_set(request).await?;
 
-    let query_result: QueryResult = query_result_pb.try_into()?;
-
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&query_result)?);
-        }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&query_result)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_query_result_table(&query_result);
-        }
-        OutputFormat::Csv => {
-            println!("CSV not supported yet")
-        }
+        println!(
+            "Successfully applied {} variable assignments.",
+            response.total_applied
+        );
+        Ok(())
     }
-
-    Ok(())
 }
 
-async fn handle_set(cmd: ConfigSetCommand, ctxt: &mut CliContext<'_, '_>) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminConfigSetRequest = cmd.try_into()?;
-    let response = ctxt.grpc_conn.0.mlx_admin_config_set(request).await?;
+impl Run for ConfigSyncCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminConfigSyncRequest = self.try_into()?;
+        let response = ctx.api_client.0.mlx_admin_config_sync(request).await?;
 
-    println!(
-        "Successfully applied {} variable assignments.",
-        response.total_applied
-    );
-    Ok(())
+        let sync_result_pb = response
+            .sync_result
+            .ok_or_else(|| CarbideCliError::GenericError("no sync result returned".to_string()))?;
+
+        let sync_result: SyncResult = sync_result_pb.try_into()?;
+
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&sync_result)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&sync_result)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_sync_result_table(&sync_result);
+            }
+            OutputFormat::Csv => {
+                print_sync_result_csv(&sync_result);
+            }
+        }
+
+        Ok(())
+    }
 }
 
-async fn handle_sync(
-    cmd: ConfigSyncCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminConfigSyncRequest = cmd.try_into()?;
-    let response = ctxt.grpc_conn.0.mlx_admin_config_sync(request).await?;
+impl Run for ConfigCompareCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminConfigCompareRequest = self.try_into()?;
+        let response = ctx.api_client.0.mlx_admin_config_compare(request).await?;
 
-    let sync_result_pb = response
-        .sync_result
-        .ok_or_else(|| CarbideCliError::GenericError("no sync result returned".to_string()))?;
+        let comparison_result_pb = response.comparison_result.ok_or_else(|| {
+            CarbideCliError::GenericError("no comparison result returned".to_string())
+        })?;
 
-    let sync_result: SyncResult = sync_result_pb.try_into()?;
+        let comparison_result: ComparisonResult = comparison_result_pb.try_into()?;
 
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&sync_result)?);
+        // Output the comparison result in the requested format.
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&comparison_result)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&comparison_result)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_comparison_result_table(&comparison_result);
+            }
+            OutputFormat::Csv => {
+                print_comparison_result_csv(&comparison_result);
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&sync_result)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_sync_result_table(&sync_result);
-        }
-        OutputFormat::Csv => {
-            print_sync_result_csv(&sync_result);
-        }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
-async fn handle_compare(
-    cmd: ConfigCompareCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminConfigCompareRequest = cmd.try_into()?;
-    let response = ctxt.grpc_conn.0.mlx_admin_config_compare(request).await?;
-
-    let comparison_result_pb = response.comparison_result.ok_or_else(|| {
-        CarbideCliError::GenericError("no comparison result returned".to_string())
-    })?;
-
-    let comparison_result: ComparisonResult = comparison_result_pb.try_into()?;
-
-    // Output the comparison result in the requested format.
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&comparison_result)?);
-        }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&comparison_result)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_comparison_result_table(&comparison_result);
-        }
-        OutputFormat::Csv => {
-            print_comparison_result_csv(&comparison_result);
-        }
-    }
-
-    Ok(())
 }
 
 // print_query_result_table displays a QueryResult in ASCII table format.

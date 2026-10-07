@@ -33,7 +33,7 @@ pub enum MlxRunnerError {
     // CommandExecution is returned when mlxconfig command
     // execution failed.
     #[error(
-        "Command execution failed: {command}\nExit code: {exit_code:?}\nStdout: {stdout}\nStderr: {stderr}"
+        "command execution failed: {command}\nexit code: {exit_code:?}\nstdout: {stdout}\nstderr: {stderr}"
     )]
     CommandExecution {
         command: String,
@@ -44,7 +44,7 @@ pub enum MlxRunnerError {
 
     // JsonParsing is returned when mlxconfig JSON response
     // parsing failed.
-    #[error("Failed to parse JSON response: {error}\nContent: {content}")]
+    #[error("failed to parse JSON response: {error}\ncontent: {content}")]
     JsonParsing {
         content: String,
         error: serde_json::Error,
@@ -52,13 +52,13 @@ pub enum MlxRunnerError {
 
     // VariableNotFound is returned when a targeted variable
     // is not found in the targeted registry.
-    #[error("Variable '{variable_name}' not found in registry")]
+    #[error("variable '{variable_name}' not found in registry")]
     VariableNotFound { variable_name: String },
 
     // ArraySizeMismatch is returned when there is an array size
     // mismatch between what the device expects and what the
     // registry has defined the variable's array size as.
-    #[error("Array size mismatch for '{variable_name}': expected {expected}, found {found}")]
+    #[error("array size mismatch for '{variable_name}': expected {expected}, found {found}")]
     ArraySizeMismatch {
         variable_name: String,
         expected: usize,
@@ -67,7 +67,7 @@ pub enum MlxRunnerError {
 
     // ValueConversion is returned when there is a value converting
     // the returned value into the value defined for the variable.
-    #[error("Value conversion failed for '{variable_name}' with value '{value}': {error}")]
+    #[error("value conversion failed for '{variable_name}' with value '{value}': {error}")]
     ValueConversion {
         variable_name: String,
         value: String,
@@ -76,7 +76,7 @@ pub enum MlxRunnerError {
 
     // TempFileError is returned when there is an issue working with
     // the JSON temporary file at a given path.
-    #[error("Temporary file error at '{path}': {error}")]
+    #[error("temporary file error at '{path}': {error}")]
     TempFileError {
         path: PathBuf,
         error: std::io::Error,
@@ -84,38 +84,38 @@ pub enum MlxRunnerError {
 
     // Timeout is returned when the mlxconfig command execution
     // has exceeded the configured timeout (in seconds).
-    #[error("Command timed out after {duration:?}: {command}")]
+    #[error("command timed out after {duration:?}: {command}")]
     Timeout { command: String, duration: Duration },
 
     // ConfirmationDeclined is returned when an operation is
     // being run in interactive mode (e.g. reference CLI, scout,
     // DPU agent, etc), and the user declined a prompt used to
     // verify a destructive operation.
-    #[error("User declined confirmation for destructive variables: {variables:?}")]
+    #[error("user declined confirmation for destructive variables: {variables:?}")]
     ConfirmationDeclined { variables: Vec<String> },
 
     // InvalidArrayIndex is returned when the string "API" is
     // being used to configure a given variable array index,
     // and the format being used is invalid -- this is basically
     // just a string parsing error.
-    #[error("Invalid array index syntax in '{variable_name}': expected format 'VAR[index]'")]
+    #[error("invalid array index syntax in '{variable_name}': expected format 'VAR[index]'")]
     InvalidArrayIndex { variable_name: String },
 
     // NoDeviceFound is reutrned when no device info is found
     // in the mlxconfig JSON response.
-    #[error("No device found in mlxconfig JSON response")]
+    #[error("no device found in mlxconfig JSON response")]
     NoDeviceFound,
 
     // DeviceMismatch is returned when there is a mismatch
     // between the requested device and the device found.
-    #[error("Device mismatch: expected '{expected}', found '{actual}'")]
+    #[error("device mismatch: expected '{expected}', found '{actual}'")]
     DeviceMismatch { expected: String, actual: String },
 
     // Io is just a generic I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Generic runner error: {0}")]
+    #[error("generic runner error: {0}")]
     GenericError(String),
 }
 

@@ -1,1 +1,1 @@
-https://github.com/open-telemetry/opentelemetry-collector/releases/download/cmd%2Fbuilder%2Fv${VERSION}/ocb_${VERSION}_linux_${PLATFORM}
+https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv${VERSION}/ocb_${VERSION}_linux_${PLATFORM}

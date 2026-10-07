@@ -303,8 +303,50 @@ spec:
                               pf:
                                 description: The PF definition
                                 properties:
+                                  nicSelector:
+                                    description: NICSelector defines the NIC selected
+                                      for the PF interface
+                                    properties:
+                                      controllerNumber:
+                                        description: |-
+                                          ControllerNumber specifies the controller number that will be used to find the matching representor on the DPU.
+                                          A value of 0 targets the local controller, >=1 targets external controllers with the specified number. If unspecified controller number 1 is used.
+                                          In case of a DPU/NIC with socket direct or MultiHost, the user should specify the controller number explicitly
+                                        format: int32
+                                        maximum: 255
+                                        minimum: 0
+                                        type: integer
+                                      pci:
+                                        description: PCI is the PCI selector. valid
+                                          only for selector type pci
+                                        properties:
+                                          address:
+                                            description: Address is the PCI address
+                                              of any of the NIC's Embedded CPU PFs
+                                              (ECPFs)
+                                            pattern: ^[0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]{1}$
+                                            type: string
+                                        required:
+                                        - address
+                                        type: object
+                                      type:
+                                        description: Type is the type of selector
+                                          to be used to identify the NIC.
+                                        enum:
+                                        - dpu
+                                        - pci
+                                        type: string
+                                    required:
+                                    - type
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: for type=pci, pci must be set
+                                      rule: (self.type == 'dpu') || (self.type ==
+                                        'pci' && has(self.pci))
                                   pfID:
                                     description: The PF ID
+                                    maximum: 255
+                                    minimum: 0
                                     type: integer
                                   virtualNetwork:
                                     description: VirtualNetwork is the VirtualNetwork
@@ -360,14 +402,58 @@ spec:
                               vf:
                                 description: The VF definition
                                 properties:
+                                  nicSelector:
+                                    description: NICSelector defines the NIC selected
+                                      for the VF interface
+                                    properties:
+                                      controllerNumber:
+                                        description: |-
+                                          ControllerNumber specifies the controller number that will be used to find the matching representor on the DPU.
+                                          A value of 0 targets the local controller, >=1 targets external controllers with the specified number. If unspecified controller number 1 is used.
+                                          In case of a DPU/NIC with socket direct or MultiHost, the user should specify the controller number explicitly
+                                        format: int32
+                                        maximum: 255
+                                        minimum: 0
+                                        type: integer
+                                      pci:
+                                        description: PCI is the PCI selector. valid
+                                          only for selector type pci
+                                        properties:
+                                          address:
+                                            description: Address is the PCI address
+                                              of any of the NIC's Embedded CPU PFs
+                                              (ECPFs)
+                                            pattern: ^[0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]{1}$
+                                            type: string
+                                        required:
+                                        - address
+                                        type: object
+                                      type:
+                                        description: Type is the type of selector
+                                          to be used to identify the NIC.
+                                        enum:
+                                        - dpu
+                                        - pci
+                                        type: string
+                                    required:
+                                    - type
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: for type=pci, pci must be set
+                                      rule: (self.type == 'dpu') || (self.type ==
+                                        'pci' && has(self.pci))
                                   parentInterfaceRef:
                                     description: The parent interface reference
                                     type: string
                                   pfID:
                                     description: The PF ID
+                                    maximum: 255
+                                    minimum: 0
                                     type: integer
                                   vfID:
                                     description: The VF ID
+                                    maximum: 255
+                                    minimum: 0
                                     type: integer
                                   virtualNetwork:
                                     description: VirtualNetwork is the VirtualNetwork
@@ -399,11 +485,8 @@ spec:
                             - interfaceType
                             type: object
                             x-kubernetes-validations:
-                            - message: '`for interfaceType=vlan, vlan must be set;
-                                for interfaceType=pf, pf must be set; for interfaceType=vf,
-                                vf must be set; for interfaceType=physical, physical
-                                must be set; for interfaceType=service, service must
-                                be set; for interfaceType=patch, patch must be set`'
+                            - messageExpression: '''for interfaceType='' + self.interfaceType
+                                + '', '' + self.interfaceType + '' must be set'''
                               rule: (self.interfaceType == 'vlan' && has(self.vlan))
                                 || (self.interfaceType == 'pf' && has(self.pf)) ||
                                 (self.interfaceType == 'vf' && has(self.vf)) || (self.interfaceType

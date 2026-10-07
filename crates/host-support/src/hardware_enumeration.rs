@@ -31,7 +31,7 @@ use base64::prelude::*;
 use carbide_utils::{BF2_PRODUCT_NAME, BF3_PRODUCT_NAME};
 use libudev::Device;
 use procfs::{CpuInfo, FromRead};
-use rpc::machine_discovery::MemoryDevice;
+use rpc::machine_discovery::{MemoryDevice, MemoryDeviceGroup};
 use tracing::warn;
 use uname::uname;
 
@@ -42,7 +42,7 @@ mod tpm;
 /// Path where the init container writes the hardware snapshot, and the containerized agent reads it from.
 pub const HW_CACHE_PATH: &str = "/data/hw_output.json";
 
-const PCI_SUBCLASS: &str = "ID_PCI_SUBCLASS_FROM_DATABASE";
+pub(crate) const PCI_SUBCLASS: &str = "ID_PCI_SUBCLASS_FROM_DATABASE";
 const PCI_DEV_PATH: &str = "DEVPATH";
 const PCI_MODEL: &str = "ID_MODEL_FROM_DATABASE";
 const PCI_SLOT_NAME: &str = "PCI_SLOT_NAME";
@@ -56,15 +56,17 @@ const NVIDIA_VENDOR_DRIVER: &str = "nvidia";
 
 #[derive(thiserror::Error, Debug)]
 pub enum HardwareEnumerationError {
-    #[error("Hardware enumeration error: {0}")]
+    #[error("hardware enumeration error: {0}")]
     GenericError(String),
-    #[error("Udev failed with error: {0}")]
+    #[error("udev failed with error: {0}")]
     UdevError(#[from] libudev::Error),
-    #[error("Udev string {0} is not a valid MAC address")]
+    #[error("udev string {0} is not a valid MAC address")]
     InvalidMacAddress(String),
     #[error("{0}")]
     UnsupportedCpuArchitecture(String),
-    #[error("Command error {0}")]
+    #[error("discovered memory device count {total} exceeds maximum of {max}")]
+    MemoryDeviceCountExceeded { total: u64, max: u32 },
+    #[error("command error {0}")]
     CmdError(#[from] CmdError),
 }
 
@@ -154,7 +156,7 @@ fn convert_udev_to_mac(udev: String) -> Result<String, HardwareEnumerationError>
     Ok(mac)
 }
 
-fn convert_property_to_string<'a>(
+pub fn convert_property_to_string<'a>(
     name: &'a str,
     default_value: &'a str,
     device: &'a Device,
@@ -225,15 +227,55 @@ fn get_numa_node_from_syspath(syspath: Option<&Path>) -> Result<i32, HardwareEnu
     })
 }
 
+// Total capacity of an NVMe controller in MB, summed across its block
+// namespaces. The `size` sysattr on a block device is a count of 512-byte
+// sectors (1 MB == 2048 sectors). Returns None when no namespace size can be
+// read, so callers can treat size as "unknown" rather than zero.
+fn get_nvme_size_mb(context: &libudev::Context, controller: &Device) -> Option<u32> {
+    let mut enumerator = libudev::Enumerator::new(context).ok()?;
+    enumerator.match_subsystem("block").ok()?;
+    enumerator.match_parent(controller).ok()?;
+
+    let mut total_sectors = 0_u64;
+    let mut found_namespace = false;
+    for ns in enumerator.scan_devices().ok()? {
+        // Only whole-namespace disks. `match_parent` walks the full block
+        // subtree, so without this a partitioned drive would have its
+        // partition sizes summed on top of the namespace size, inflating
+        // the reported capacity.
+        if ns.property_value("DEVTYPE").and_then(|v| v.to_str()) != Some("disk") {
+            continue;
+        }
+        found_namespace = true;
+        let sectors = ns
+            .attribute_value("size")
+            .and_then(|v| v.to_str())
+            .and_then(|v| v.trim().parse::<u64>().ok())?;
+        total_sectors = total_sectors.checked_add(sectors)?;
+    }
+    if !found_namespace {
+        return None;
+    }
+    u32::try_from(total_sectors / 2048).ok()
+}
+
 // discovery all the non-DPU IB devices
 pub fn discovery_ibs() -> HardwareEnumerationResult<Vec<rpc_discovery::InfinibandInterface>> {
     let device_debug_log = |device: &Device| {
-        tracing::debug!("SysPath - {:?}", device.syspath());
+        tracing::debug!(syspath = ?device.syspath(), "SysPath");
         for p in device.properties() {
-            tracing::trace!("Property - {:?} - {:?}", p.name(), p.value());
+            tracing::trace!(
+                property_name = ?p.name(),
+                property_value = ?p.value(),
+                "Property"
+            );
         }
         for a in device.attributes() {
-            tracing::trace! {"attribute - {:?} - {:?}", a.name(), a.value()}
+            tracing::trace! {
+                attribute_name = ?a.name(),
+                attribute_value = ?a.value(),
+                "attribute"
+            }
         }
     };
 
@@ -249,9 +291,9 @@ pub fn discovery_ibs() -> HardwareEnumerationResult<Vec<rpc_discovery::Infiniban
             Ok(properties_ext) => properties_ext,
             Err(e) => {
                 tracing::error!(
-                    "Failed to enumerate properties of device {:?}: {}",
-                    device.devpath(),
-                    e
+                    device_path = ?device.devpath(),
+                    error = %e,
+                    "Failed to enumerate properties of device"
                 );
                 continue;
             }
@@ -408,9 +450,13 @@ fn enumerate_hardware_inner(
 
     for device in devices {
         let sys_path = device.syspath();
-        tracing::debug!("SysPath - {:?}", sys_path);
+        tracing::debug!(syspath = ?sys_path, "SysPath");
         for p in device.properties() {
-            tracing::trace!("net device property - {:?} - {:?}", p.name(), p.value());
+            tracing::trace!(
+                property_name = ?p.name(),
+                property_value = ?p.value(),
+                "net device property"
+            );
         }
         //for a in device.attributes() {
         //    tracing::trace!("attribute - {:?} - {:?}", a.name(), a.value());
@@ -423,15 +469,15 @@ fn enumerate_hardware_inner(
                 Ok(properties_ext) => properties_ext,
                 Err(e) => {
                     tracing::error!(
-                        "Failed to enumerate properties of device {:?}: {}",
-                        device.devpath(),
-                        e
+                        device_path = ?device.devpath(),
+                        error = %e,
+                        "Failed to enumerate properties of device"
                     );
                     continue;
                 }
             };
 
-            tracing::trace!("properties: {:?}", properties_ext);
+            tracing::trace!(?properties_ext, "properties");
 
             // discovery DPU and non ib capable device
             // Note:
@@ -562,7 +608,7 @@ fn enumerate_hardware_inner(
             }
             CpuArchitecture::Unknown => {
                 tracing::error!(
-                    cpu_num,
+                    cpu_number = cpu_num,
                     arch = info.machine,
                     "CPU has unsupported architecture. Ignoring."
                 );
@@ -598,11 +644,11 @@ fn enumerate_hardware_inner(
         // skip the device if its hidden
         if convert_sysattr_to_string("hidden", &device).is_ok_and(|v| v == "1") {
             tracing::info!(
-                "Ignoring hidden device {}",
-                device
+                syspath = device
                     .syspath()
                     .and_then(|v| v.to_str())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                "Ignoring hidden device"
             );
             continue;
         }
@@ -610,11 +656,11 @@ fn enumerate_hardware_inner(
         // skip the device if its removable
         if convert_sysattr_to_string("removable", &device).is_ok_and(|v| v != "0") {
             tracing::info!(
-                "Ignoring removable device {}",
-                device
+                syspath = device
                     .syspath()
                     .and_then(|v| v.to_str())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                "Ignoring removable device"
             );
             continue;
         }
@@ -623,11 +669,11 @@ fn enumerate_hardware_inner(
             .is_ok_and(|v| v.contains("virtual"))
         {
             tracing::info!(
-                "Ignoring virtual device {}",
-                device
+                syspath = device
                     .syspath()
                     .and_then(|v| v.to_str())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                "Ignoring virtual device"
             );
             continue;
         }
@@ -667,12 +713,17 @@ fn enumerate_hardware_inner(
             .filter(|v| !v.contains("virtual"))
             .is_some()
         {
+            let pci_path = convert_property_to_string(PCI_DEV_PATH, "", &device)
+                .ok()
+                .map(|v| v.to_string());
             nvmes.push(rpc_discovery::NvmeDevice {
                 model: convert_sysattr_to_string("model", &device)?.to_string(),
                 firmware_rev: convert_sysattr_to_string("firmware_rev", &device)?.to_string(),
                 serial: convert_sysattr_to_string("serial", &device)?
                     .trim()
                     .to_string(),
+                size_mb: get_nvme_size_mb(&context, &device),
+                pci_path,
             });
         }
     }
@@ -687,7 +738,7 @@ fn enumerate_hardware_inner(
     // There is only expected to be a single set, and we don't want to
     // accidentally overwrite it with other data
     if let Some(device) = devices.next() {
-        tracing::debug!("DMI device syspath: {:?}", device.syspath());
+        tracing::debug!(syspath = ?device.syspath(), "DMI device syspath");
 
         // e.g. 'DRAM'. We will use this later if smbios fails.
         backup_ram_type = device
@@ -714,9 +765,9 @@ fn enumerate_hardware_inner(
             dmi.product_name = convert_sysattr_to_string("product_name", &device)?.to_string();
             if cpu_part == BF3_CPU_PART && dmi.product_name == BF2_PRODUCT_NAME {
                 tracing::info!(
-                    "Overriding product name {} with {}",
-                    dmi.product_name,
-                    BF3_PRODUCT_NAME
+                    product_name = dmi.product_name.as_str(),
+                    new_product_name = BF3_PRODUCT_NAME,
+                    "Overriding product name"
                 );
                 dmi.product_name = BF3_PRODUCT_NAME.to_owned();
             }
@@ -747,7 +798,7 @@ fn enumerate_hardware_inner(
             )));
         }
         Err(e) => {
-            tracing::error!("Could not read TPM EK certificate: {:?}", e);
+            tracing::error!(error = ?e, "Could not read TPM EK certificate");
             None
         }
     };
@@ -756,7 +807,7 @@ fn enumerate_hardware_inner(
         "https://www.mellanox.com" | "Nvidia" => match dpu::get_dpu_info() {
             Ok(dpu_data) => Some(dpu_data),
             Err(e) => {
-                tracing::error!("Could not get DPU data: {:?}", e);
+                tracing::error!(error = ?e, "Could not get DPU data");
                 None
             }
         },
@@ -818,7 +869,9 @@ fn enumerate_hardware_inner(
         }
         Err(err) => {
             warn!(
-                "Could not discover host memory using smbios device, using {mem_info_path}: {err}"
+                memory_info_path = mem_info_path,
+                error = %err,
+                "Could not discover host memory using smbios device"
             );
             let meminfo = std::fs::read_to_string(mem_info_path).map_err(|e| {
                 HardwareEnumerationError::GenericError(format!("Err reading {mem_info_path}: {e}"))
@@ -832,19 +885,22 @@ fn enumerate_hardware_inner(
         }
     }
 
-    tracing::debug!("Discovered Disks: {:?}", disks);
+    tracing::debug!(?disks, "Discovered Disks");
     if !cpus.is_empty() {
-        tracing::debug!("Discovered CPUs[0]: {:?}", cpus[0]);
+        tracing::debug!(cpu = ?cpus[0], "Discovered CPUs[0]");
     }
-    tracing::debug!("Discovered NICS: {:?}", nics);
-    tracing::debug!("Discovered IBS: {:?}", ibs);
-    tracing::debug!("Discovered NVMES: {:?}", nvmes);
-    tracing::debug!("Discovered DMI: {:?}", dmi);
-    tracing::debug!("Discovered GPUs: {:?}", gpus);
-    tracing::debug!("Discovered Machine Architecture: {}", info.machine.as_str());
-    tracing::debug!("Discovered DPU: {:?}", dpu_vpd);
+    tracing::debug!(?nics, "Discovered NICS");
+    tracing::debug!(?ibs, "Discovered IBS");
+    tracing::debug!(?nvmes, "Discovered NVMES");
+    tracing::debug!(?dmi, "Discovered DMI");
+    tracing::debug!(?gpus, "Discovered GPUs");
+    tracing::debug!(
+        architecture = info.machine.as_str(),
+        "Discovered Machine Architecture"
+    );
+    tracing::debug!(dpu_vpd = ?dpu_vpd, "Discovered DPU");
     if let Some(cert) = tpm_ek_certificate.as_ref() {
-        tracing::debug!("TPM EK certificate (base64): {}", cert);
+        tracing::debug!(certificate = cert.as_str(), "TPM EK certificate (base64)");
     }
 
     Ok(rpc_discovery::DiscoveryInfo {
@@ -859,10 +915,35 @@ fn enumerate_hardware_inner(
         tpm_ek_certificate,
         dpu_info: dpu_vpd,
         gpus,
-        memory_devices,
+        #[allow(deprecated)]
+        memory_devices: vec![],
+        memory_device_groups: condense_rpc_memory_devices(memory_devices)?,
         tpm_description: None,
         attest_key_info: None,
     })
+}
+
+/// Rolls up a flat list of RPC [`MemoryDevice`]s into [`MemoryDeviceGroup`]s, merging consecutive
+/// devices with the same `(size_mb, mem_type)` into a single group.
+///
+/// Fails if the total device count exceeds [`MemoryDeviceGroup::MAX_REHYDRATE_COUNT`], so a
+/// malformed SMBIOS table can't produce discovery data that only fails later, at RPC conversion.
+fn condense_rpc_memory_devices(
+    devices: Vec<MemoryDevice>,
+) -> Result<Vec<MemoryDeviceGroup>, HardwareEnumerationError> {
+    let groups = devices.into_iter().map(|device| MemoryDeviceGroup {
+        size_mb: device.size_mb,
+        mem_type: device.mem_type,
+        count: 1,
+    });
+    carbide_utils::memory_device_group::condense_memory_device_groups(
+        groups,
+        MemoryDeviceGroup::MAX_REHYDRATE_COUNT,
+        |total| HardwareEnumerationError::MemoryDeviceCountExceeded {
+            total,
+            max: MemoryDeviceGroup::MAX_REHYDRATE_COUNT,
+        },
+    )
 }
 
 /// Path where the host's `/proc/cpuinfo` is bind-mounted inside the init container.
@@ -933,7 +1014,7 @@ pub async fn enumerate_and_save_hardware()
     }
 
     tracing::error!(
-        last_error = %last_err,
+        error = %last_err,
         "Init container failed to generate hardware info. Try to delete the pod to recover."
     );
 
@@ -1454,6 +1535,53 @@ mod tests {
                     dpu_info: Some(Default::default()),
                     ..Default::default()
                 } => Yields(()),
+            }
+        );
+    }
+
+    #[test]
+    fn condense_rpc_memory_devices_cases() {
+        scenarios!(
+            run = |devices| condense_rpc_memory_devices(devices).map_err(drop);
+
+            "empty input yields empty output" {
+                vec![] => Yields(vec![]),
+            }
+
+            "identical consecutive devices are merged" {
+                vec![
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                ] => Yields(vec![MemoryDeviceGroup { size_mb: Some(16384), mem_type: Some("DDR5".into()), count: 3 }]),
+            }
+
+            "non-consecutive identical devices are not merged" {
+                vec![
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                    MemoryDevice { size_mb: Some(32768), mem_type: Some("DDR4".into()) },
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                ] => Yields(vec![
+                    MemoryDeviceGroup { size_mb: Some(16384), mem_type: Some("DDR5".into()), count: 1 },
+                    MemoryDeviceGroup { size_mb: Some(32768), mem_type: Some("DDR4".into()), count: 1 },
+                    MemoryDeviceGroup { size_mb: Some(16384), mem_type: Some("DDR5".into()), count: 1 },
+                ]),
+            }
+
+            "total exactly at the max is accepted" {
+                (0..rpc::machine_discovery::MemoryDeviceGroup::MAX_REHYDRATE_COUNT)
+                    .map(|_| MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) })
+                    .collect::<Vec<_>>() => Yields(vec![MemoryDeviceGroup {
+                        size_mb: Some(16384),
+                        mem_type: Some("DDR5".into()),
+                        count: rpc::machine_discovery::MemoryDeviceGroup::MAX_REHYDRATE_COUNT,
+                    }]),
+            }
+
+            "total above the max is rejected" {
+                (0..rpc::machine_discovery::MemoryDeviceGroup::MAX_REHYDRATE_COUNT + 1)
+                    .map(|_| MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) })
+                    .collect::<Vec<_>>() => Fails,
             }
         );
     }

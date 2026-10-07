@@ -5,10 +5,10 @@
 default_to_workspace = false
 
 [env]
-# DOCA_REPO_URL = "https://github.com/NVIDIA/doca-platform.git"
-# DOCA_BRANCH = "v0.1.0-carbide-47c105e2-nightly"
-DOCA_REPO_URL = "https://gitlab-master.nvidia.com/doca-platform-foundation/doca-platform-foundation"
-DOCA_BRANCH = "v26.4.0-rc.4"
+DOCA_REPO_URL = "https://github.com/NVIDIA/doca-platform.git"
+DOCA_BRANCH = "v0.1.0-carbide-47c105e2-nightly"
+# Comment out DOCA_COMMIT when a tag/branch exists.
+DOCA_COMMIT = "53fec54d1036248e5278f6b7ada00cff45c82c6f"
 DOCA_CLONE_DIR = "${CARGO_MAKE_WORKING_DIRECTORY}/doca-platform"
 CRD_SOURCE_PATH = "${DOCA_CLONE_DIR}/deploy/charts/dpf-operator/templates/crds"
 CRD_DEST_PATH = "${CARGO_MAKE_WORKING_DIRECTORY}/crds"
@@ -16,23 +16,33 @@ CRD_DEST_PATH = "${CARGO_MAKE_WORKING_DIRECTORY}/crds"
 [tasks.clone-doca]
 description = "Clone NVIDIA doca-platform repository"
 script = '''
-if [ -d "${DOCA_CLONE_DIR}" ]; then
-    echo "doca-platform already exists, skipping clone"
-else
-    echo "Cloning NVIDIA doca-platform repository..."
+set -eu
+rm -rf "${DOCA_CLONE_DIR}"
+echo "Cloning NVIDIA doca-platform repository..."
+if [ -z "${DOCA_COMMIT}" ]; then
     git clone --depth 1 --branch ${DOCA_BRANCH} ${DOCA_REPO_URL} "${DOCA_CLONE_DIR}"
-    echo "Repository cloned"
+else
+    # Fetch the commit directly: nightly commits often live on histories that
+    # are not reachable from the default branch, so cloning and deepening the
+    # default branch alone cannot resolve them.
+    git init -q "${DOCA_CLONE_DIR}"
+    git -C "${DOCA_CLONE_DIR}" remote add origin ${DOCA_REPO_URL}
+    git -C "${DOCA_CLONE_DIR}" fetch --depth 1 origin "${DOCA_COMMIT}"
+    git -C "${DOCA_CLONE_DIR}" checkout --detach FETCH_HEAD
 fi
+echo "Repository cloned"
 '''
 
 [tasks.refresh-crds]
 description = "Refresh committed CRD YAML files from NVIDIA DOCA Platform"
 dependencies = ["clone-doca"]
 script = '''
+set -eu
 mkdir -p "${CRD_DEST_PATH}"
 rm -f "${CRD_DEST_PATH}"/*.yaml
 cp "${CRD_SOURCE_PATH}"/*.yaml "${CRD_DEST_PATH}/"
 echo "CRD YAML files refreshed"
+[ -d "${DOCA_CLONE_DIR}" ] && rm -rf "${DOCA_CLONE_DIR}"
 '''
 
 [tasks.verify]

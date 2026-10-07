@@ -25,12 +25,16 @@ on:
   pull_request:
     paths:
       - 'fern/**'
+      - 'docs/**'
+      - 'RELEASE.md'
       - '.github/workflows/fern-docs-ci.yml'
   push:
     branches:
       - 'pull-request/[0-9]+'
     paths:
       - 'fern/**'
+      - 'docs/**'
+      - 'RELEASE.md'
       - '.github/workflows/fern-docs-ci.yml'
 
 permissions:
@@ -43,11 +47,13 @@ jobs:
     if: >-
       (github.event_name == 'push' && contains(github.ref, 'refs/heads/pull-request/'))
       || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -32,9 +32,9 @@ Show a remediation including its script body:
     $ nico-admin-cli dpu-remediation show 12345678-1234-5678-90ab-cdef01234567 --display-script
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The remediation id to query, if not provided defaults to all")]
-    pub id: Option<RemediationId>,
+    pub(super) id: Option<RemediationId>,
     #[clap(long, action)]
-    pub display_script: bool,
+    pub(super) display_script: bool,
 }

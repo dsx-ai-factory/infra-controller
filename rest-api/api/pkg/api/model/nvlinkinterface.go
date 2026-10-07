@@ -15,7 +15,7 @@ import (
 
 var (
 	// Time when nvLinklogicalPartitionId attribute will be deprecated
-	nvLinkLogicalPartitionIDDeprecationTime, _ = time.Parse(time.RFC1123, "Thu, 09 Jul 2026 00:00:00 UTC")
+	nvLinkLogicalPartitionIDDeprecationTime = time.Date(2026, time.September, 10, 0, 0, 0, 0, time.UTC)
 
 	// Deprecations for the NVLinkInterface model
 	nvLinkLogicalPartitionIDDeprecations = []DeprecatedEntity{

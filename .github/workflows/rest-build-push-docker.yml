@@ -6,6 +6,11 @@ name: Build and Push Docker Images
 on:
   workflow_call:
     inputs:
+      ngc_path:
+        description: 'NGC org/team for resource uploads (empty = skip)'
+        required: false
+        type: string
+        default: ''
       runner:
         description: "Runner type for the build jobs"
         required: false
@@ -46,6 +51,10 @@ on:
         required: false
         default: ""
         type: string
+      helm_version:
+        description: "Helm chart version pre-computed by the prepare step (e.g. 2.0.0-rc.14)"
+        required: true
+        type: string
     secrets:
       NVCR_USERNAME:
         description: "NVIDIA Container Registry username (typically '$oauthtoken')"
@@ -53,12 +62,22 @@ on:
       NVCR_TOKEN:
         description: "NVIDIA Container Registry API token"
         required: false
+      NICO_TARGET_REGISTRY_USERNAME:
+        description: "Username for the push target registry (falls back to NVCR_USERNAME)"
+        required: false
+      NICO_TARGET_REGISTRY_TOKEN:
+        description: "Token for the push target registry (falls back to NVCR_TOKEN)"
+        required: false
+      NICO_NGC_TOKEN:
+        description: "Key for NGC helm/resource uploads (falls back to NVCR_TOKEN)"
+        required: false
 
 jobs:
   build-nico-rest-api:
     name: Build nico-rest-api
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-api
       binary_name: api
@@ -71,12 +90,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-rest-db:
     name: Build nico-rest-db
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-db
       binary_name: migrations
@@ -89,12 +115,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-rest-site-manager:
     name: Build nico-rest-site-manager
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-site-manager
       binary_name: sitemgr
@@ -107,12 +140,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-rest-workflow:
     name: Build nico-rest-workflow
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-workflow
       binary_name: workflow
@@ -125,12 +165,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-rest-site-agent:
     name: Build nico-rest-site-agent
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-site-agent
       binary_name: site-agent
@@ -143,12 +190,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-rest-cert-manager:
     name: Build nico-rest-cert-manager
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-cert-manager
       binary_name: credsmgr
@@ -161,12 +215,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-flow:
     name: Build nico-flow
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-flow
       binary_name: flow
@@ -179,12 +240,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-psm:
     name: Build nico-psm
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-psm
       binary_name: psm
@@ -197,12 +265,19 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   build-nico-nsm:
     name: Build nico-nsm
     uses: ./.github/workflows/rest-build-push-service.yml
     with:
+      ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-nsm
       binary_name: nsm
@@ -215,11 +290,45 @@ jobs:
       push_enabled: ${{ inputs.push_enabled }}
       is_main_branch: ${{ inputs.is_main_branch }}
       release_tag: ${{ inputs.release_tag }}
-    secrets: inherit
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
+  build-nico-mcp:
+    name: Build nico-mcp
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-mcp
+      binary_name: nico-mcp
+      binary_path: /app/nico-mcp
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-mcp
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  # Was GitHub-hosted because this markdown-only job spent `75s` waiting for an
+  # enterprise runner to do `3s` of work. Hosted waits now reach `~8m`, and being
+  # last in the run means a hosted queue holds the whole run open.
   build-summary:
     name: Build Summary
-    runs-on: ${{ inputs.runner }}
+    runs-on: linux-amd64-cpu4
     needs:
       - build-nico-rest-api
       - build-nico-rest-db
@@ -230,7 +339,8 @@ jobs:
       - build-nico-flow
       - build-nico-psm
       - build-nico-nsm
-    if: always()
+      - build-nico-mcp
+    if: ${{ !cancelled() }}
     outputs:
       build_artifacts: ${{ steps.aggregate.outputs.artifacts }}
 
@@ -278,6 +388,7 @@ jobs:
           echo "7. \`nico-flow:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
           echo "8. \`nico-psm:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
           echo "9. \`nico-nsm:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "10. \`nico-mcp:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.push_enabled }}" = "true" ]; then
             echo "## Binary Artifacts Uploaded" >> $GITHUB_STEP_SUMMARY
@@ -294,6 +405,7 @@ jobs:
           echo "- nico-flow: \`${{ needs.build-nico-flow.result }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- nico-psm: \`${{ needs.build-nico-psm.result }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- nico-nsm: \`${{ needs.build-nico-nsm.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-mcp: \`${{ needs.build-nico-mcp.result }}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Aggregate outputs
         id: aggregate
@@ -353,31 +465,15 @@ jobs:
               "image_ref": "${{ needs.build-nico-nsm.outputs.image_ref }}",
               "binary_resource": "${{ needs.build-nico-nsm.outputs.ngc_binary_resource }}",
               "image_resource": "${{ needs.build-nico-nsm.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-mcp",
+              "image_ref": "${{ needs.build-nico-mcp.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-mcp.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-mcp.outputs.ngc_image_resource }}"
             }
           ]
           EOF
 
           ARTIFACTS=$(jq -c . artifacts.json)
           echo "artifacts=$ARTIFACTS" >> $GITHUB_OUTPUT
-
-  security-container-scan-summary:
-    name: Container Scan Summary
-    runs-on: ${{ inputs.runner }}
-    needs:
-      - build-nico-rest-api
-      - build-nico-rest-db
-      - build-nico-rest-site-manager
-      - build-nico-rest-workflow
-      - build-nico-rest-site-agent
-      - build-nico-rest-cert-manager
-      - build-nico-flow
-      - build-nico-psm
-      - build-nico-nsm
-    if: always()
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - uses: NVIDIA/dsx-github-actions/.github/actions/security-container-scan-aggregate@739847ddf00fda38916504ef84e1f504eac3158f
-        with:
-          post-pr-comment: 'true'

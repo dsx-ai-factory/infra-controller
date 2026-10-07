@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 # TODO: rename to carbide_dpu_agent_utils in source
 [lib]

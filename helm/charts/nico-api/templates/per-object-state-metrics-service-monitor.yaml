@@ -1,0 +1,13 @@
+{{- if and (include "nico-api.perObjectStateMetricsActive" .) .Values.perObjectStateMetricsServiceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "nico-api.name" . }}-object-metrics
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+    app: {{ include "nico-api.name" . }}
+    prometheus: nico-monitoring
+spec:
+  {{- include "nico-api.serviceMonitorSpec" (dict "name" (printf "%s-object-metrics" (include "nico-api.name" .)) "port" "http" "monitor" .Values.perObjectStateMetricsServiceMonitor "namespace" (include "nico-api.namespace" .)) | nindent 2 }}
+{{- end }}

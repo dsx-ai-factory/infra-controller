@@ -20,10 +20,23 @@ spec:
     spec:
       imagePullSecrets:
         - name: image-pull-secret
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
         - name: api
           image: nico-rest-api
           imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 8388
               name: http
@@ -45,6 +58,8 @@ spec:
             - name: temporal-tls-certs
               mountPath: /var/secrets/temporal/certs
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "128Mi"
@@ -65,6 +80,10 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
       volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp, including the spill from oversized multipart requests.
+        - name: tmp
+          emptyDir: {}
         - name: config
           configMap:
             name: nico-rest-api-config

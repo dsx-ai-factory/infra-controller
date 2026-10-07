@@ -27,12 +27,15 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 # switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SWITCH-001", slot_number = 7, tray_index = 3 }
 # power_shelf = { id = "fps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-POWER-SHELF-001" }
 
-[endpoint_sources.carbide_api]
+[endpoint_sources.nico_api]
 enabled = false
 
 [processors.leak_detection]
 enabled = true
 minimum_alerts_per_report = 2
+
+[collectors.metrics]
+enabled = true
 
 [processors.rack_leak]
 leaking_tray_threshold = 1

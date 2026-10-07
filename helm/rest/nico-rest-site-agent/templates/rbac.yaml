@@ -19,9 +19,15 @@ metadata:
   labels:
     {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
 rules:
+  # Secret volumes are mounted by the kubelet without pod RBAC. The Site Agent
+  # API client only gets and updates the configured registration and Temporal
+  # Secrets.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    resourceNames:
+      - {{ .Values.secrets.siteRegistration | quote }}
+      - {{ .Values.secrets.temporalClientCerts | quote }}
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

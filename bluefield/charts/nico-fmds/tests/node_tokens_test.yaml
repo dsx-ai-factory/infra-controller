@@ -1,0 +1,190 @@
+suite: node-auth token mode
+templates:
+  - daemonset.yaml
+tests:
+  # The point of token mode is that the machine private key is not reachable
+  # from this pod at all. The key sits beside the root CA in certsDir, and the
+  # container runs as UID 0, so a read-only mount of that directory would not
+  # be enough -- the volume must be absent entirely.
+  - it: should not mount the credentials directory anywhere in token mode
+    set:
+      image:
+        repository: test
+        tag: test
+      useNodeTokens: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+            readOnly: true
+
+  # pub/ is mounted as a directory, not as a subPath of the CA file: the agent
+  # installs the CA by atomic rename, and a subPath mount would pin the old
+  # inode so a rotation never reached a running pod.
+  - it: should mount only the published CA directory and the agent socket
+    set:
+      image:
+        repository: test
+        tag: test
+      useNodeTokens: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs-pub
+            mountPath: /opt/forge/pub
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-agent-run
+            mountPath: /opt/forge/run
+            readOnly: true
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 2
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs-pub
+            hostPath:
+              path: /opt/forge/pub
+              type: DirectoryOrCreate
+      # The socket mount is useless without the volume backing it, and a mount
+      # naming a volume that does not exist fails the pod at admission rather
+      # than here — so pin the pair, not just the mount.
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-agent-run
+            hostPath:
+              path: /opt/forge/run
+              type: DirectoryOrCreate
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+
+  - it: should read the CA from pub/ and authenticate with a token, not a cert
+    set:
+      image:
+        repository: test
+        tag: test
+      useNodeTokens: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --root-ca=/opt/forge/pub/forge_root.pem
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --node-token-socket=/opt/forge/run/agent.sock
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --client-cert=/opt/forge/machine_cert.pem
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --client-key=/opt/forge/machine_cert.key
+
+  # The init container gates the main one; in token mode it has no business
+  # waiting on the machine cert/key, which may never arrive in this pod.
+  - it: should wait only for the published CA in token mode
+    set:
+      image:
+        repository: test
+        tag: test
+      useNodeTokens: true
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/opt/forge/pub/forge_root\.pem'
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'machine_cert\.key'
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: nico-certs-pub
+            mountPath: /opt/forge/pub
+            readOnly: true
+      - lengthEqual:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          count: 1
+
+  # Token mode pins the paths to the agent's defaults, because the agent has no
+  # flag for them and DPF gives it no config file. Rendering fmds elsewhere
+  # would leave the init container waiting for a CA that is never published, so
+  # the chart refuses at template time rather than at 3am.
+  - it: should refuse a certsDir override in token mode
+    set:
+      image:
+        repository: test
+        tag: test
+      useNodeTokens: true
+      certsDir: /srv/creds
+    asserts:
+      - failedTemplate:
+          errorMessage: 'useNodeTokens requires the dpu-agent''s default certsDir (/opt/forge); got "/srv/creds". The agent has no way to be told otherwise, so fmds would wait for a CA that is never published.'
+
+  - it: should refuse a rootCaFile override in token mode
+    set:
+      image:
+        repository: test
+        tag: test
+      useNodeTokens: true
+      rootCaFile: site_root.pem
+    asserts:
+      - failedTemplate:
+          errorMessage: 'useNodeTokens requires the dpu-agent''s default rootCaFile (forge_root.pem); got "site_root.pem". The agent publishes under its own filename, so fmds would wait for a file that is never created.'
+
+  # The same overrides stay available in cert mode, where fmds reads the
+  # credentials itself and nothing has to agree with the agent.
+  - it: should still honour certsDir in cert mode
+    set:
+      image:
+        repository: test
+        tag: test
+      certsDir: /srv/creds
+      rootCaFile: site_root.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --root-ca=/srv/creds/site_root.pem
+
+  # mTLS remains the default, and must not acquire the token-mode plumbing.
+  - it: should keep the credentials mount and no pub volume by default
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs-pub
+            hostPath:
+              path: /opt/forge/pub
+              type: DirectoryOrCreate
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --node-token-socket=/opt/forge/run/agent.sock

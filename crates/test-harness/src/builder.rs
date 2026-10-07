@@ -30,10 +30,12 @@ use tokio_util::sync::CancellationToken;
 use crate::resource_pool::ResourcePoolBuilder;
 use crate::{ApiHandle, TestHarness};
 
+type ApiBuilderFn = Box<dyn FnOnce(TestApiBuilder) -> TestApiBuilder + 'static>;
+
 pub struct TestHarnessBuilder {
     pub(crate) db_pool: PgPool,
     pub(crate) test_meter: Option<TestMeter>,
-    pub(crate) api: Option<ApiHandle>,
+    pub(crate) api_builder_fn: Option<ApiBuilderFn>,
     pub(crate) pools: Option<HashMap<String, ResourcePoolDef>>,
 }
 
@@ -45,11 +47,21 @@ impl TestHarnessBuilder {
         }
     }
 
+    pub fn with_api_builder_fn(
+        self,
+        f: impl FnOnce(TestApiBuilder) -> TestApiBuilder + 'static,
+    ) -> TestHarnessBuilder {
+        Self {
+            api_builder_fn: Some(Box::new(f)),
+            ..self
+        }
+    }
+
     pub async fn build(self) -> TestHarness {
         let test_meter = self.test_meter.unwrap_or_default();
-        let api = match self.api {
-            Some(v) => v,
-            None => Self::build_default_api(self.pools, self.db_pool, &test_meter).await,
+        let api = match self.api_builder_fn {
+            Some(f) => Self::build_api(self.pools, self.db_pool, &test_meter, f).await,
+            None => Self::build_api(self.pools, self.db_pool, &test_meter, |b| b).await,
         };
 
         TestHarness {
@@ -59,10 +71,11 @@ impl TestHarnessBuilder {
         }
     }
 
-    async fn build_default_api(
+    async fn build_api(
         resource_pools: Option<HashMap<String, ResourcePoolDef>>,
         db_pool: PgPool,
         test_meter: &TestMeter,
+        f: impl FnOnce(TestApiBuilder) -> TestApiBuilder,
     ) -> ApiHandle {
         let cancel_token = CancellationToken::new();
         let mut join_set = JoinSet::new();
@@ -90,9 +103,13 @@ impl TestHarnessBuilder {
         .await
         .expect("work_lock_manager failed to start: no available connections?");
 
-        let api = TestApiBuilder::new(db_pool, common_pools, work_lock_manager_handle)
-            .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
-            .build();
+        let api = f(TestApiBuilder::new(
+            db_pool,
+            common_pools,
+            work_lock_manager_handle,
+        ))
+        .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
+        .build();
         ApiHandle {
             api: Arc::new(api),
             _drop_guard: cancel_token.clone().drop_guard(),

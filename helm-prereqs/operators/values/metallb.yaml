@@ -33,3 +33,11 @@ prometheus:
       additionalLabels: {}
   prometheusRule:
     enabled: false
+
+# CRD management disabled: setup.sh applies the rendered CRDs itself
+# (server-side, idempotently) on EVERY run, before the helmfile sync. Helm
+# must not manage them because MetalLB's cert rotator takes SSA ownership of
+# the conversion-webhook caBundle after install, so a helm-managed CRD
+# upgrade conflicts on every re-sync.
+crds:
+  enabled: false

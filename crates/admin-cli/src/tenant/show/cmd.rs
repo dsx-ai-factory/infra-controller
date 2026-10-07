@@ -61,7 +61,7 @@ pub(crate) fn convert_tenants_to_table(
 }
 
 /// Show one or more tenants.
-pub async fn show(
+pub(super) async fn show(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

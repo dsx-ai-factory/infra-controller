@@ -1,0 +1,2 @@
+execution_timeout_seconds = 7200
+artifact_download_timeout_seconds = 600

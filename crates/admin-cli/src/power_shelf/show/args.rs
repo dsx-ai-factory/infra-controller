@@ -28,7 +28,7 @@ Show one power shelf by ID or name:
     $ nico-admin-cli power-shelf show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Power shelf ID or name to show (leave empty for all)")]
-    pub identifier: Option<String>,
+    pub(super) identifier: Option<String>,
 }

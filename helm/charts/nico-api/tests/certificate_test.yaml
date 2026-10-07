@@ -5,6 +5,9 @@ release:
   namespace: nico-system
 tests:
   - it: generates dnsNames and uris from serviceName and namespace by default
+    set:
+      # Clear the default extraDnsNames to test pure generated behavior
+      certificate.extraDnsNames: []
     asserts:
       - isKind:
           of: Certificate
@@ -20,6 +23,15 @@ tests:
           path: spec.uris
           value:
             - spiffe://nico.local/nico-system/sa/nico-api
+
+  - it: includes carbide-api.forge in extraDnsNames by default for backwards compatibility
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-api.nico-system.svc.cluster.local
+            - nico-api.nico-system
+            - carbide-api.forge
 
   - it: appends extraDnsNames and extraUris to the generated lists
     set:
@@ -65,6 +77,8 @@ tests:
       certificate:
         uris:
           - spiffe://custom.local/nico-system/sa/nico-api
+      # Clear extraDnsNames to test uris override in isolation
+      certificate.extraDnsNames: []
     asserts:
       - equal:
           path: spec.uris
@@ -94,6 +108,8 @@ tests:
     set:
       certificate:
         includeShortDnsName: false
+        # Clear extraDnsNames to test short name behavior in isolation
+        extraDnsNames: []
     asserts:
       - equal:
           path: spec.dnsNames
@@ -104,6 +120,8 @@ tests:
     set:
       certificate:
         includeShortDnsName: "false"
+        # Clear extraDnsNames to test short name behavior in isolation
+        extraDnsNames: []
     asserts:
       - equal:
           path: spec.dnsNames
@@ -113,6 +131,8 @@ tests:
   - it: nameOverride flips the certificate resource name, dnsNames, and SPIFFE URI to the override
     set:
       nameOverride: carbide-api
+      # Clear extraDnsNames to test nameOverride behavior in isolation
+      certificate.extraDnsNames: []
     asserts:
       - equal:
           path: metadata.name
@@ -131,6 +151,8 @@ tests:
     set:
       certificate:
         spiffeServiceName: elektra-site-agent
+        # Clear extraDnsNames to test spiffeServiceName behavior in isolation
+        extraDnsNames: []
     asserts:
       - equal:
           path: spec.uris
@@ -146,6 +168,8 @@ tests:
     set:
       certificate:
         identityNamespace: forge-system
+        # Clear extraDnsNames to test identityNamespace behavior in isolation
+        extraDnsNames: []
     asserts:
       - equal:
           path: spec.commonName

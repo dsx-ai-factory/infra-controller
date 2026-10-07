@@ -30,7 +30,8 @@
 
 <input type="text" id="dns-filter" placeholder="Filter by name, type, value, or zone..." style="width: 100%; padding: 8px; margin-bottom: 8px; box-sizing: border-box;">
 
-<table class="sortable overview" id="dns-records-table">
+<!-- Opt out of the global auto-filter (table_filter.js): this table ships its own #dns-filter above. -->
+<table class="sortable overview" id="dns-records-table" data-no-auto-filter>
 	<thead>
 		<tr>
 			<th>FQDN</th>

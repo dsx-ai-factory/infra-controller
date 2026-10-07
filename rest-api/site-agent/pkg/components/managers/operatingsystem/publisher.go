@@ -31,6 +31,37 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(osImageInventoryManager.DiscoverOsImageInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("OperatingSystem: Successfully registered DiscoverOsImageInventory activity")
 
-	api.RegisterCron()
-	return nil
+	// Register DiscoverOperatingSystemInventory workflow + activity (iPXE / Templated
+	// iPXE OS definitions collected from nico-core and published to the cloud).
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterWorkflow(sww.DiscoverOperatingSystemInventory)
+	ManagerAccess.Data.EB.Log.Info().Msg("OperatingSystem: Successfully registered DiscoverOperatingSystemInventory workflow")
+
+	operatingSystemInventoryManager := swa.NewManageOperatingSystemInventory(swa.ManageInventoryConfig{
+		SiteID:                uuid.MustParse(ManagerAccess.Conf.EB.Temporal.ClusterID),
+		CoreGrpcAtomicClient:  ManagerAccess.Data.EB.Managers.CoreGrpc.Client,
+		TemporalPublishClient: ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
+		TemporalPublishQueue:  ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,
+		SitePageSize:          InventoryCarbidePageSize,
+		CloudPageSize:         InventoryCloudPageSize,
+	})
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(operatingSystemInventoryManager.DiscoverOperatingSystemInventory)
+	ManagerAccess.Data.EB.Log.Info().Msg("OperatingSystem: Successfully registered DiscoverOperatingSystemInventory activity")
+
+	// Register DiscoverIpxeTemplateInventory workflow + activity (PUBLIC iPXE templates
+	// collected from nico-core and published to the cloud).
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterWorkflow(sww.DiscoverIpxeTemplateInventory)
+	ManagerAccess.Data.EB.Log.Info().Msg("OperatingSystem: Successfully registered DiscoverIpxeTemplateInventory workflow")
+
+	ipxeTemplateInventoryManager := swa.NewManageIpxeTemplateInventory(swa.ManageInventoryConfig{
+		SiteID:                uuid.MustParse(ManagerAccess.Conf.EB.Temporal.ClusterID),
+		CoreGrpcAtomicClient:  ManagerAccess.Data.EB.Managers.CoreGrpc.Client,
+		TemporalPublishClient: ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
+		TemporalPublishQueue:  ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,
+		SitePageSize:          InventoryCarbidePageSize,
+		CloudPageSize:         InventoryCloudPageSize,
+	})
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(ipxeTemplateInventoryManager.DiscoverIpxeTemplateInventory)
+	ManagerAccess.Data.EB.Log.Info().Msg("OperatingSystem: Successfully registered DiscoverIpxeTemplateInventory activity")
+
+	return api.RegisterCron()
 }

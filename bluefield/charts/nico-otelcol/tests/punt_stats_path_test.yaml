@@ -1,0 +1,26 @@
+# The punt_stats receiver must read the file the punt-stats-helper sidecar writes.
+suite: punt_stats receiver path
+templates: [configmap.yaml, daemonset.yaml]
+tests:
+  - it: defaults the receiver to the helper destination path
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'file_path: /var/run/punt-stats/punt\n'
+        template: configmap.yaml
+
+  - it: follows an overridden puntStatsHelper.dstPath
+    set:
+      puntStatsHelper.dstPath: /var/run/punt-stats/custom
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'file_path: /var/run/punt-stats/custom\n'
+        template: configmap.yaml
+
+  - it: rejects a puntStatsHelper.dstPath outside the shared mount
+    set:
+      puntStatsHelper.dstPath: /tmp/punt
+    asserts:
+      - failedTemplate:
+          errorPattern: dstPath

@@ -48,25 +48,49 @@ spec:
           metadata:
             type: object
           spec:
+            description: BlueFieldSpec defines the desired state of BlueFieldSoftware.
             properties:
+              nicFw:
+                description: |-
+                  NicFw points to the NIC firmware binary used for E/W NIC firmware updates.
+                  Use this when a specific NIC firmware binary is required and is not included in the
+                  platform PLDM firmware bundle.
+                  In production, prefer using PlatformPldmFwBundle.
+                minLength: 1
+                type: string
               osIso:
+                description: OS ISO points to the OS ISO used by DPU OS installation
+                  flow.
+                minLength: 1
+                type: string
+              platformPldmFwBundle:
+                description: |-
+                  PlatformPldmFwBundle points to the platform PLDM firmware bundle used for E/W NIC
+                  firmware updates.
+                minLength: 1
                 type: string
               pldmFwBundle:
-                type: string
-              tmpFwComponents:
-                properties:
-                  astraNicFw:
-                    type: string
-                  bmcErot:
-                    type: string
-                  bmcFw:
-                    type: string
-                  graceErot:
-                    type: string
-                  graceFw:
-                    type: string
+                additionalProperties:
+                  type: string
+                description: |-
+                  PldmFwBundle maps each PSID to the PLDM firmware bundle URL used for that DPU model's
+                  baseline firmware updates. Each PSID's bundle is a complete PLDM package for that device.
+                  Keys are matched case-insensitively against the BMC-reported DPUDevice status PSID.
+                minProperties: 1
                 type: object
+                x-kubernetes-validations:
+                - message: pldmFwBundle entries must have non-empty PSID keys and
+                    non-empty bundle URLs
+                  rule: self.all(k, size(k) > 0 && size(self[k]) > 0)
+            required:
+            - osIso
             type: object
+            x-kubernetes-validations:
+            - message: BlueFieldSpec is immutable
+              rule: self == oldSelf
+            - message: nicFw and platformPldmFwBundle are mutually exclusive; set
+                only one
+              rule: '!(has(self.nicFw) && has(self.platformPldmFwBundle))'
           status:
             default:
               phase: Initializing
@@ -134,20 +158,25 @@ spec:
                 description: DownloadedComponents tracks which components have been
                   successfully downloaded
                 properties:
-                  astraNicFw:
-                    type: string
-                  bmcErot:
-                    type: string
-                  bmcFW:
-                    type: string
-                  graceErot:
-                    type: string
-                  graceFw:
+                  nicFw:
+                    description: |-
+                      NicFw is the local path of the E/W NIC firmware binary, either downloaded from
+                      spec.nicFw or unpacked from the platform PLDM firmware bundle.
                     type: string
                   osIso:
+                    description: OsIso is the local path of the downloaded OS ISO.
+                    type: string
+                  platformPldmFwBundle:
+                    description: PlatformPldmFwBundle is the local path of the downloaded
+                      platform PLDM firmware bundle.
                     type: string
                   pldmFwBundle:
-                    type: string
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PldmFwBundle maps each PSID to the local path of its downloaded PLDM firmware bundle.
+                      Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                    type: object
                 type: object
               observedGeneration:
                 description: ObservedGeneration records the Generation observed on
@@ -160,6 +189,7 @@ spec:
                 enum:
                 - Initializing
                 - Downloading
+                - Extracting
                 - Ready
                 - Deleting
                 - Error
@@ -167,36 +197,56 @@ spec:
               versions:
                 description: Versions tracks the versions of the components
                 properties:
-                  fwBundleVersion:
+                  bluefieldSoftwareVersions:
+                    additionalProperties:
+                      description: BluefieldDeviceVersions holds firmware versions
+                        extracted from a single PSID's PLDM bundle.
+                      properties:
+                        bfNicFwVersion:
+                          description: BFNicFwVersion is the BlueField NIC firmware
+                            version shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        bmcErotVersion:
+                          description: BMCErotVersion is the BMC ERoT (External Root
+                            of Trust) firmware version shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        bmcVersion:
+                          description: BMCVersion is the DPU BMC firmware version
+                            shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        sbiosVersion:
+                          description: SBIOSVersion is the DPU SBIOS firmware version
+                            shipped in the bundle.
+                          minLength: 1
+                          type: string
+                      type: object
+                    description: |-
+                      BluefieldSoftwareVersions maps each PSID to the firmware versions from that device's
+                      PLDM bundle. Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                    type: object
+                  doca:
+                    description: DOCA is the formatted, user-facing DOCA version derived
+                      from the OS ISO.
+                    type: string
+                  ewNicFwVersion:
+                    description: |-
+                      EWNicFwVersion is the E/W NIC firmware version taken from the platform PLDM bundle.
+                      It is not keyed by PSID because a BlueFieldSoftware carries a single platform bundle.
                     type: string
                   osISOVersion:
+                    description: OSISOVersion is the raw DOCA version for the OS ISO,
+                      taken from the ISO filename
                     type: string
-                  tmpFwComponentsVersions:
-                    properties:
-                      astraNicFwVersion:
-                        type: string
-                      bmcErotVersion:
-                        type: string
-                      bmcFwVersion:
-                        type: string
-                      graceErotVersion:
-                        type: string
-                      graceFwVersion:
-                        type: string
-                    type: object
-                required:
-                - tmpFwComponentsVersions
                 type: object
-                x-kubernetes-validations:
-                - message: fwBundleVersion is immutable
-                  rule: self.fwBundleVersion == oldSelf.fwBundleVersion
-                - message: osISOVersion is immutable
-                  rule: self.osISOVersion == oldSelf.osISOVersion
-                - message: tmpFwComponentsVersions is immutable
-                  rule: self.tmpFwComponentsVersions == oldSelf.tmpFwComponentsVersions
             required:
             - phase
             type: object
+            x-kubernetes-validations:
+            - message: versions cannot be removed once set
+              rule: '!has(oldSelf.versions) || has(self.versions)'
         type: object
         x-kubernetes-validations:
         - message: name length can't be bigger than 187 chars

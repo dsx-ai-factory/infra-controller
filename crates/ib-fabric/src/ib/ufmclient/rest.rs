@@ -36,16 +36,16 @@ use thiserror::Error;
 use crate::ib::ufmclient::UFMCert;
 
 #[derive(Error, Debug)]
-pub enum RestError {
-    #[error("Invalid configuration: '{0}'")]
+pub(super) enum RestError {
+    #[error("invalid configuration: '{0}'")]
     InvalidConfig(String),
-    #[error("Response body can not be deserialized: {body}")]
+    #[error("response body can not be deserialized: {body}")]
     MalformedResponse {
         status_code: u16,
         body: String,
         headers: Box<http::HeaderMap>,
     },
-    #[error("Failed to execute HTTP request: {0}")]
+    #[error("failed to execute HTTP request: {0}")]
     HttpConnectionError(String),
     #[error("HTTP error code {status_code}")]
     HttpError {
@@ -56,7 +56,7 @@ pub enum RestError {
     /// This error type is just needed because UFM in some cases does not return a 404 status
     /// code but a 200 status code with a body containing {}
     #[error(
-        "Resource at path {path} was not found. UFM returned: '{body}'. Status code: {status_code}"
+        "resource at path {path} was not found. UFM returned: '{body}'. status code: {status_code}"
     )]
     NotFound {
         path: String,
@@ -75,7 +75,7 @@ impl From<hyper::Error> for RestError {
 const REST_TIME_OUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
-pub enum RestScheme {
+pub(super) enum RestScheme {
     Http,
     Https,
 }
@@ -99,15 +99,15 @@ impl Display for RestScheme {
     }
 }
 
-pub struct RestClientConfig {
-    pub address: String,
-    pub port: Option<u16>,
-    pub scheme: RestScheme,
-    pub auth_info: String,
-    pub base_path: String,
+pub(super) struct RestClientConfig {
+    pub(super) address: String,
+    pub(super) port: Option<u16>,
+    pub(super) scheme: RestScheme,
+    pub(super) auth_info: String,
+    pub(super) base_path: String,
 }
 
-pub struct RestClient {
+pub(super) struct RestClient {
     base_url: String,
     auth_info: String,
     scheme: RestScheme,
@@ -116,7 +116,7 @@ pub struct RestClient {
 }
 
 impl RestClient {
-    pub fn new(conf: &RestClientConfig) -> Result<RestClient, RestError> {
+    pub(super) fn new(conf: &RestClientConfig) -> Result<RestClient, RestError> {
         let mut auth_info = conf.auth_info.clone().trim().to_string();
         let mut auto_cert: Option<UFMCert> = None;
 
@@ -292,7 +292,7 @@ impl RestClient {
         })
     }
 
-    pub async fn get<'a, T: serde::de::DeserializeOwned>(
+    pub(super) async fn get<'a, T: serde::de::DeserializeOwned>(
         &'a self,
         path: &'a str,
     ) -> Result<(T, ResponseDetails), RestError> {
@@ -322,7 +322,7 @@ impl RestClient {
     }
 
     /// Performs a HTTP GET request anad returns the response directly without trying to deserialize it
-    pub async fn get_raw<'a>(
+    pub(super) async fn get_raw<'a>(
         &'a self,
         path: &'a str,
     ) -> Result<(String, ResponseDetails), RestError> {
@@ -330,7 +330,7 @@ impl RestClient {
         Ok((resp.body, resp.details))
     }
 
-    pub async fn list<'a, T: serde::de::DeserializeOwned>(
+    pub(super) async fn list<'a, T: serde::de::DeserializeOwned>(
         &'a self,
         path: &'a str,
     ) -> Result<(T, ResponseDetails), RestError> {
@@ -350,13 +350,17 @@ impl RestClient {
         Ok((data, resp.details))
     }
 
-    pub async fn post(&self, path: &str, data: String) -> Result<ResponseDetails, RestError> {
+    pub(super) async fn post(
+        &self,
+        path: &str,
+        data: String,
+    ) -> Result<ResponseDetails, RestError> {
         let resp = self.execute_request(Method::POST, path, Some(data)).await?;
 
         Ok(resp.details)
     }
 
-    pub async fn put(&self, path: &str, data: String) -> Result<ResponseDetails, RestError> {
+    pub(super) async fn put(&self, path: &str, data: String) -> Result<ResponseDetails, RestError> {
         let resp = self.execute_request(Method::PUT, path, Some(data)).await?;
 
         Ok(resp.details)
@@ -415,14 +419,14 @@ impl RestClient {
     }
 }
 
-pub struct ResponseDetails {
-    pub status_code: u16,
-    pub headers: http::HeaderMap,
+pub(in crate::ib) struct ResponseDetails {
+    pub(in crate::ib) status_code: u16,
+    pub(in crate::ib) headers: http::HeaderMap,
 }
 
 struct ExecuteRequestResult {
-    pub body: String,
-    pub details: ResponseDetails,
+    body: String,
+    details: ResponseDetails,
 }
 
 // Wrap ClientConfig::builder_with_provider() with defaults

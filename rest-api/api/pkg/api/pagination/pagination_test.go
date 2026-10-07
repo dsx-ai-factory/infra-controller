@@ -4,6 +4,7 @@
 package pagination
 
 import (
+	"math"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -90,6 +91,32 @@ func TestPageRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "test Page Request validate success, largest page number and size",
+			fields: fields{
+				PageNumber: cutil.GetPtr(MaxPageNumber),
+				PageSize:   cutil.GetPtr(MaxPageSize),
+			},
+			args: args{
+				orderByFields: []string{"name"},
+			},
+			want: &PageRequest{
+				Offset: cutil.GetPtr((MaxPageNumber - 1) * MaxPageSize),
+				Limit:  cutil.GetPtr(MaxPageSize),
+			},
+			wantErr: false,
+		},
+		{
+			name: "test Page Request validate error, page number too large",
+			fields: fields{
+				PageNumber: cutil.GetPtr(MaxPageNumber + 1),
+				PageSize:   cutil.GetPtr(MaxPageSize),
+			},
+			args: args{
+				orderByFields: []string{"name"},
+			},
+			wantErr: true,
+		},
+		{
 			name: "test Page Request validate error, invalid order by",
 			fields: fields{
 				PageNumber: cutil.GetPtr(-1),
@@ -138,6 +165,10 @@ func TestPageRequest_Validate(t *testing.T) {
 
 			assert.Equal(t, *tt.want.Offset, *pr.Offset)
 			assert.Equal(t, *tt.want.Limit, *pr.Limit)
+
+			// Consumers narrow Offset to int32; MaxPageNumber exists to keep
+			// every accepted request inside that range.
+			assert.LessOrEqual(t, *pr.Offset, math.MaxInt32)
 
 			if tt.want.OrderBy != nil {
 				assert.Equal(t, tt.want.OrderBy.Field, pr.OrderBy.Field)

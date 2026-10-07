@@ -36,6 +36,7 @@ Typically, a `/27` pool is used for services running on the control plane cluste
 | Item | Detail |
 |---|---|
 | IPs per host | 1 (host BMC) + 2 per DPU (DPU ARM OS + DPU BMC) |
+| IPs for MNNVL racks | 3 per switch (BMC + 2 NVOS) + 1 per power shelf PMC |
 | Managed by | NICo (can be split across multiple pools) |
 
 <Warning>Out-of-band (OOB) switches must have a DHCP relay pointing to the NICo DHCP service (refer to the [BMC and Out-of-Band Setup](bmc-oob-setup.md) page for more details).</Warning>
@@ -103,7 +104,7 @@ Standardized common route targets:
 
 | Route-Target | Purpose |
 |---|---|
-| `:50100` | Control-Plane / Service VIPs — exported by site controller DPUs |
+| `:50100` | Control-Plane / Service VIPs — exported by site controller DPUs (or ToR, if site controller nodes have no DPUs) |
 | `:50200` | Internal tenant routes |
 | `:50300` | Maintenance network routes |
 | `:50400` | Admin network routes |
@@ -117,6 +118,18 @@ These are defaults and can be changed, as long as all components agree on the va
 - Site controllers exporting `:50100` must import `:50200` through `:50500` to reach all managed endpoints.
 
 <Note>While many deployments align the route target number with the VNI for administrative simplicity, the routing policy is strictly governed by the route target import/export configuration, not the VNI itself.</Note>
+
+## NICo Pod Network Reachability
+
+NICo's control plane pods (DHCP, DNS, API, PXE, SSH console, and others) must be externally reachable from the networks they serve. Regardless of whether site controller nodes have DPUs, these pods must be routable to and from:
+
+- DPU BMCs and Host BMCs of managed machines
+- The admin network
+- Tenant VPCs
+
+The reference architecture is MetalLB advertising L3 LoadBalancer VIPs to the site controller's DPU uplinks (if DPUs are present) or directly to the ToR switches (if site controller nodes have no DPUs).
+
+For better traffic isolation and routing, configure the endpoints for NICo pods (whether exposed as `LoadBalancer` objects or otherwise) as route-tagged prefixes and import them into the admin and VPC routing profiles. See [VPC Routing Profiles](../../manuals/vpc/vpc_routing_profiles.md).
 
 ## Switch Configuration
 
@@ -144,7 +157,7 @@ Use one physical NIC carrying the following:
 
 ### Option 2: Dual-homed Uplink (Reference Design)
 
-This design requires the DPU to be in DPU mode on site controllers.
+This design uses the site controller's DPU (if present) in DPU mode.
 
 - The site controller typically uses a single DPU/NIC with two uplinks, each cabled to a different ToR switch participating in BGP unnumbered.
 - Both links carry management and Kubernetes traffic; isolation is done via VLANs/VRFs and policy, not by dedicating one NIC to management and one to the data plane.

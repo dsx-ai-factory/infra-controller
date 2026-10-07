@@ -19,7 +19,7 @@ use carbide_uuid::machine::MachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Set the Name or Description of the Machine")]
     Set(MachineMetadataCommandSet),
     #[clap(about = "Show the Metadata of the Machine")]
@@ -40,9 +40,9 @@ Show a machine's metadata:
     $ nico-admin-cli machine metadata show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct MachineMetadataCommandShow {
+pub(crate) struct MachineMetadataCommandShow {
     #[clap(help = "The machine which should get updated metadata")]
-    pub machine: MachineId,
+    pub(super) machine: MachineId,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -54,13 +54,13 @@ Set a machine's name and description:
     --name gpu-node-01 --description \"Rack 4, tray 2\"
 
 ")]
-pub struct MachineMetadataCommandSet {
+pub(crate) struct MachineMetadataCommandSet {
     #[clap(help = "The machine which should get updated metadata")]
-    pub machine: MachineId,
+    pub(super) machine: MachineId,
     #[clap(long, help = "The updated name of the Machine")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
     #[clap(long, help = "The updated description of the Machine")]
-    pub description: Option<String>,
+    pub(super) description: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -75,13 +75,13 @@ Add a key/value label:
     --key rack --value 4
 
 ")]
-pub struct MachineMetadataCommandAddLabel {
+pub(crate) struct MachineMetadataCommandAddLabel {
     #[clap(help = "The machine which should get updated metadata")]
-    pub machine: MachineId,
+    pub(super) machine: MachineId,
     #[clap(long, help = "The key to add")]
-    pub key: String,
+    pub(super) key: String,
     #[clap(long, help = "The optional value to add")]
-    pub value: Option<String>,
+    pub(super) value: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -93,11 +93,11 @@ Remove one or more labels by key:
     --keys rack --keys edge
 
 ")]
-pub struct MachineMetadataCommandRemoveLabels {
+pub(crate) struct MachineMetadataCommandRemoveLabels {
     #[clap(help = "The machine which should get updated metadata")]
-    pub machine: MachineId,
+    pub(super) machine: MachineId,
     #[clap(long, help = "The keys to remove")]
-    pub keys: Vec<String>,
+    pub(super) keys: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -112,9 +112,9 @@ Overwrite the machine's metadata with the expected-machine's values:
     --replace-all
 
 ")]
-pub struct MachineMetadataCommandFromExpectedMachine {
+pub(crate) struct MachineMetadataCommandFromExpectedMachine {
     #[clap(help = "The machine which should get updated metadata")]
-    pub machine: MachineId,
+    pub(super) machine: MachineId,
     /// Whether to fully replace the Metadata that is currently stored on the Machine.
     /// - If not set, existing Metadata on the Machine will not be touched by executing
     ///   the command:
@@ -127,5 +127,5 @@ pub struct MachineMetadataCommandFromExpectedMachine {
     ///   they would if the Machine would get freshly ingested.
     ///   Metadata that is currently set on the Machine will be overridden.
     #[clap(long, verbatim_doc_comment)]
-    pub replace_all: bool,
+    pub(super) replace_all: bool,
 }

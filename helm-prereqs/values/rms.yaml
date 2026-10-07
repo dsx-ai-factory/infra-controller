@@ -1,0 +1,58 @@
+# =============================================================================
+# NICo site values for the NVIDIA Rack Manager Service (rack-manager) chart.
+# Applied by setup.sh phase 5c on top of the chart defaults. Image repository,
+# tag, and pull secret are passed on the command line from NICO_RMS_* env vars.
+#
+# Upstream chart defaults that are wrong for a NICo site are overridden here:
+#   - ServiceMonitor and Grafana dashboard default ON upstream and fail the
+#     install without prometheus-operator CRDs / a Grafana sidecar. setup.sh
+#     re-enables the ServiceMonitor when --with-observability is set.
+#   - dropDatabaseOnUninstall defaults ON upstream: a pre-delete hook that
+#     drops the RMS database and pulls postgres:15-alpine from Docker Hub.
+#   - The chart's TLS material is read once at startup and never reloaded, so
+#     the certificate lifetime is raised from the upstream 30 days to 1 year.
+#     Renewal still requires a rollout restart of rms-api-server.
+# =============================================================================
+
+# Fixed: NICo Core dials rms-api-server.rack-manager by name, and the
+# helm-prereqs ESO sync targets the same namespace. The chart renders into
+# .Values.namespace (NOT the helm -n flag), so setup.sh sets both.
+namespace: rack-manager
+createNamespace: false   # setup.sh creates and labels it for the ESO sync
+
+# mTLS via cert-manager, issued from the same CA that signs nico-api's SPIFFE
+# cert. RMS validates client certificates against this Secret's ca.crt, which
+# is what admits nico-api with zero extra configuration.
+certificates:
+  enabled: true
+  issuerRef:
+    name: vault-nico-issuer
+    kind: ClusterIssuer
+  duration: 8760h0m0s     # 1 year — RMS does not reload TLS material on renewal
+  renewBefore: 720h0m0s   # 30 days: leaves a wide window to restart the pod
+
+apiServer:
+  tls:
+    enabled: true
+    caEnabled: true
+  serviceMonitor:
+    enabled: false   # requires prometheus-operator CRDs; setup.sh flips this on with --with-observability
+
+# The RMS database lives on the shared nico-pg-cluster; the rms database and
+# rms.nico user are created by nico-prereqs (postgresql.yaml, rms.enabled) and
+# the credentials Secret is projected into this namespace by rms-db-eso.
+databaseMode: external
+database:
+  host: nico-pg-cluster.postgres.svc.cluster.local
+  port: "5432"
+  name: rms
+  credentialsSecret: rms.nico.nico-pg-cluster.credentials
+
+# Never drop the RMS database on `helm uninstall`: the pre-delete hook would
+# destroy state on any release re-create, and its hardcoded postgres:15-alpine
+# image is unreachable from mirror-only sites.
+dropDatabaseOnUninstall: false
+
+grafana:
+  dashboard:
+    enabled: false

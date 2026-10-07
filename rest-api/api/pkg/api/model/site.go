@@ -57,8 +57,12 @@ type APISiteCapabilitiesUpdateRequest struct {
 	NativeNetworking          *bool `json:"nativeNetworking"`
 	NetworkSecurityGroup      *bool `json:"networkSecurityGroup"`
 	NVLinkPartition           *bool `json:"nvLinkPartition"`
-	Flow                      *bool `json:"flow"`
 	ImageBasedOperatingSystem *bool `json:"imageBasedOperatingSystem"`
+	DPSPowerManagement        *bool `json:"dpsPowerManagement"`
+	// Flow and VpcSlaac are accepted by the binder so update attempts can be rejected
+	// explicitly. Site config inventory is the only writer for these fields.
+	Flow     *bool `json:"flow"`
+	VpcSlaac *bool `json:"vpcSlaac"`
 }
 
 func (ascur APISiteCapabilitiesUpdateRequest) ToSiteConfig(existing *cdbm.SiteConfig) *cdbm.SiteConfig {
@@ -79,12 +83,12 @@ func (ascur APISiteCapabilitiesUpdateRequest) ToSiteConfig(existing *cdbm.SiteCo
 		cfg.NVLinkPartition = *ascur.NVLinkPartition
 	}
 
-	if ascur.Flow != nil {
-		cfg.Flow = *ascur.Flow
-	}
-
 	if ascur.ImageBasedOperatingSystem != nil {
 		cfg.ImageBasedOperatingSystem = *ascur.ImageBasedOperatingSystem
+	}
+
+	if ascur.DPSPowerManagement != nil {
+		cfg.DPSPowerManagement = *ascur.DPSPowerManagement
 	}
 
 	return cfg
@@ -131,6 +135,12 @@ func (asur APISiteUpdateRequest) Validate(isProvider bool, isTenant bool) error 
 			validation.Field(&asur.SerialConsoleIdleTimeout, validation.Min(1).Error("value must be greater than 0")),
 			validation.Field(&asur.SerialConsoleMaxSessionLength, validation.Min(1).Error("value must be greater than 0")),
 		)
+		if err == nil && asur.Capabilities != nil {
+			err = validation.ValidateStruct(asur.Capabilities,
+				validation.Field(&asur.Capabilities.Flow, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
+				validation.Field(&asur.Capabilities.VpcSlaac, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
+			)
+		}
 	} else {
 		// Request is not from a user with Provider role, reject updates to fields that can only be set by Provider
 		err = validation.ValidateStruct(&asur,
@@ -235,6 +245,8 @@ type APISite struct {
 	Contact *APISiteContact `json:"contact"`
 	// MachineStats holds machine counts by status for a site
 	MachineStats *APISiteMachineStats `json:"machineStats"`
+	// GpuStats holds GPU summary stats grouped by GPU type for a site
+	GpuStats *[]APIMachineGPUStats `json:"gpuStats"`
 	// Capabilities holds the capabilities, currently for use
 	// as site-level feature flagging.
 	Capabilities *APISiteCapabilities `json:"capabilities"`
@@ -316,6 +328,8 @@ type APISiteCapabilities struct {
 	NVLinkPartition           bool `json:"nvLinkPartition"`
 	Flow                      bool `json:"flow"`
 	ImageBasedOperatingSystem bool `json:"imageBasedOperatingSystem"`
+	VpcSlaac                  bool `json:"vpcSlaac"`
+	DPSPowerManagement        bool `json:"dpsPowerManagement"`
 }
 
 func siteConfigToAPISiteCapabilities(cfg *cdbm.SiteConfig) *APISiteCapabilities {
@@ -327,6 +341,8 @@ func siteConfigToAPISiteCapabilities(cfg *cdbm.SiteConfig) *APISiteCapabilities 
 		apiCaps.NVLinkPartition = cfg.NVLinkPartition
 		apiCaps.Flow = cfg.Flow
 		apiCaps.ImageBasedOperatingSystem = cfg.ImageBasedOperatingSystem
+		apiCaps.VpcSlaac = cfg.VpcSlaac
+		apiCaps.DPSPowerManagement = cfg.DPSPowerManagement
 	}
 
 	return apiCaps

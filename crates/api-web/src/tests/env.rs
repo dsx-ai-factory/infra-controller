@@ -15,13 +15,20 @@
  * limitations under the License.
  */
 
+use std::sync::Arc;
+
+use carbide_api_core::test_support::fixture_config::{
+    FixtureDefault as _, ManagedHostConfigExt as _,
+};
+use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_test_harness::dns::TestDomain;
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
-use model::machine::ManagedHostState;
+use model::test_support::ManagedHostConfig;
 
-pub struct TestEnv {
-    pub test_harness: TestHarness,
+pub(crate) struct TestEnv {
+    pub(super) test_harness: TestHarness,
+    pub(super) redfish_sim: Arc<RedfishSim>,
     site_explorer: TestSiteExplorer,
     domain: TestDomain,
     underlay_segment: TestNetworkSegment,
@@ -29,13 +36,15 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    pub async fn new(pool: PgPool) -> Self {
+    pub(crate) async fn new(pool: PgPool) -> Self {
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_pool = Arc::clone(&redfish_sim);
         let test_harness = TestHarness::builder(pool)
+            .with_api_builder_fn(move |builder| builder.with_redfish_pool(redfish_pool))
             .with_resource_pools(
                 ResourcePoolBuilder::default()
                     .with_vlan_ids(1, 64)
                     .with_vnis(10001, 10064)
-                    .with_secondary_vtep_ip("192.0.7.0/24")
                     .build(),
             )
             .build()
@@ -47,6 +56,7 @@ impl TestEnv {
         let site_explorer = test_harness.default_test_site_explorer();
         Self {
             test_harness,
+            redfish_sim,
             site_explorer,
             domain,
             underlay_segment,
@@ -54,31 +64,33 @@ impl TestEnv {
         }
     }
 
-    pub fn api(&self) -> &Api {
+    pub(crate) fn api(&self) -> &Api {
         self.test_harness.api()
     }
 
-    pub fn domain(&self) -> &TestDomain {
+    pub(super) fn domain(&self) -> &TestDomain {
         &self.domain
     }
 
-    pub async fn create_ready_managed_host(&self, dpu_count: usize) -> TestManagedHost {
-        let mut host = self
+    pub(crate) async fn create_ready_managed_host(
+        &self,
+        dpu_count: usize,
+    ) -> (TestManagedHost, TestManagedHostBuildData) {
+        let (mut host, build_data) = self
             .test_harness
             .managed_host_builder(&self.site_explorer, self.underlay_segment)
-            .with_dpu_count(dpu_count)
+            .with_config(ManagedHostConfig::default().with_dpu_count(dpu_count))
             .build()
             .await;
 
-        host.discover_host_primary_iface(self.api(), self.admin_segment)
+        host.host.discover_primary_iface(self.admin_segment).await;
+        for dpu in &host.dpus {
+            dpu.discover_oob_iface(self.underlay_segment).await;
+        }
+        host.report_dpu_network_status().await;
+        host.insert_empty_host_health_report("test-harness-health")
             .await;
-        host.discover_dpu_oob_ifaces(self.api(), self.admin_segment)
-            .await;
-        host.report_dpu_network_status(self.api()).await;
-        host.insert_empty_host_health_report(self.api(), "test-harness-health")
-            .await;
-        host.advance_host_state(&self.test_harness, ManagedHostState::Ready)
-            .await;
-        host
+        host.advance_to_converged_ready().await;
+        (host, build_data)
     }
 }

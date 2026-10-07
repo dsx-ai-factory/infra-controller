@@ -15,35 +15,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM build-container-localdev AS builder
-
-ENV CARGO_HOME=/cargo-home
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-ENV CARGO_TARGET_DIR=/cargo-target
-
-WORKDIR /workspace
-
-COPY . .
-
-RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=locked \
-  --mount=type=cache,id=nico-devspace-cargo-target,target=/cargo-target,sharing=locked \
-  cargo build -p carbide-machine-a-tron --bin machine-a-tron --locked && \
-  mkdir -p /artifacts && \
-  cp /cargo-target/debug/machine-a-tron /artifacts/machine-a-tron
+FROM nico-devspace-core-artifacts AS artifacts
 
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
+  ipmitool \
   iproute2 \
   iputils-ping \
   libssl3 \
   libudev1 \
+  openipmi \
   && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/machine-a-tron/bin /opt/machine-a-tron/templates /tmp/machine-a-tron-data
+RUN mkdir -p /opt/machine-a-tron/bin /tmp/machine-a-tron-data
 
-COPY --from=builder /artifacts/machine-a-tron /opt/machine-a-tron/bin/machine-a-tron
-COPY crates/machine-a-tron/templates /opt/machine-a-tron/templates
+COPY --from=artifacts /artifacts/machine-a-tron /opt/machine-a-tron/bin/machine-a-tron
 COPY crates/bmc-mock/dell_poweredge_r750.tar.gz /opt/machine-a-tron/dell_poweredge_r750.tar.gz
 COPY crates/bmc-mock/nvidia_dpu.tar.gz /opt/machine-a-tron/nvidia_dpu.tar.gz

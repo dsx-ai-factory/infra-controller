@@ -22,7 +22,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn handle_update(
+pub(super) async fn handle_update(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

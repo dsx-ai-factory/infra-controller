@@ -20,11 +20,15 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-credential-rotation = { path = "../credential-rotation", default-features = false }
 carbide-health-metrics = { path = "../health-metrics", default-features = false }
+carbide-health-report = { path = "../health-report", default-features = false }
+carbide-redfish = { path = "../redfish", default-features = false }
 carbide-rack = { path = "../rack", default-features = false }
 carbide-secrets = { path = "../secrets", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
@@ -40,6 +44,20 @@ mac_address = { workspace = true }
 opentelemetry = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
+carbide-rack = { path = "../rack", features = ["test-support"] }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
+carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-test-harness = { path = "../test-harness" }
+state-controller = { path = "../state-controller", features = ["test-support"] }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

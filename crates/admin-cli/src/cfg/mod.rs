@@ -14,8 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-pub mod cli_options;
-pub mod dispatch;
-pub mod measurement;
-pub mod run;
-pub mod runtime;
+pub(crate) mod cli_options;
+pub(crate) mod dispatch;
+pub(crate) mod measurement;
+pub(crate) mod run;
+pub(crate) mod runtime;

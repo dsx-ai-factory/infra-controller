@@ -14,16 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+use carbide_uuid::machine::InvalidMachineType;
 use db::DatabaseError;
 use model::errors::ModelError;
 use model::site_explorer::EndpointExplorationError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SiteExplorerError {
-    #[error("Database error: {0}")]
+    #[error("database error: {0}")]
     DatabaseError(#[from] DatabaseError),
-    #[error("Model error: {0}")]
+    #[error("model error: {0}")]
     ModelError(#[from] ModelError),
     #[error("{kind} already exists: {id}")]
     AlreadyFoundError {
@@ -39,7 +39,7 @@ pub enum SiteExplorerError {
         /// The ID of the resource that was not found
         id: String,
     },
-    #[error("Argument is invalid: {0}")]
+    #[error("argument is invalid: {0}")]
     InvalidArgument(String),
     #[error("EndpointExplorationError for {action}: {err}")]
     EndpointExplorationError {
@@ -47,14 +47,36 @@ pub enum SiteExplorerError {
         /// Actual endpiing exploration error.
         err: EndpointExplorationError,
     },
-    #[error("Internal error: {message}")]
+    #[error("internal error: {message}")]
     Internal { message: String },
+
+    // This error is temporary while parts of the codebase migrate to using HostMachineId for places
+    // where only predicted and stable host ID's are acceptable. Any time it is raised is a bug in
+    // the code, so report the caller
+    #[error("bug: invalid machine ID at {location}: {error}")]
+    InvalidHostMachineId {
+        location: &'static std::panic::Location<'static>,
+        error: InvalidMachineType,
+    },
+}
+
+impl From<InvalidMachineType> for SiteExplorerError {
+    #[track_caller]
+    fn from(err: InvalidMachineType) -> Self {
+        Self::invalid_host_machine_id(err)
+    }
 }
 
 impl SiteExplorerError {
     /// Creates a `Internal` error with the given error message
     pub fn internal(message: String) -> Self {
         Self::Internal { message }
+    }
+
+    #[track_caller]
+    pub fn invalid_host_machine_id(error: InvalidMachineType) -> Self {
+        let location = std::panic::Location::caller();
+        Self::InvalidHostMachineId { location, error }
     }
 }
 

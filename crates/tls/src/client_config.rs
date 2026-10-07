@@ -23,11 +23,14 @@ use serde::Deserialize;
 use tonic::transport::Uri;
 
 use crate::default as tls_default;
-pub const CONFIG_FILE_LOCATION: &str = ".config/carbide_api_cli.json";
+pub const CONFIG_FILE_LOCATION: &str = ".config/nico_api_cli.json";
+/// Previous name for [`CONFIG_FILE_LOCATION`]. Still read as a fallback (with a
+/// deprecation warning) so existing setups keep working after the rename.
+pub const LEGACY_CONFIG_FILE_LOCATION: &str = ".config/carbide_api_cli.json";
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientConfigError {
-    #[error("Unable to parse url: {0}")]
+    #[error("unable to parse url: {0}")]
     UrlParseError(String),
 }
 
@@ -49,19 +52,30 @@ pub struct FileConfig {
 pub fn get_api_url(api_url: Option<String>, file_config: Option<&FileConfig>) -> String {
     // First from command line, second env var.
     if let Some(api) = api_url {
-        return api;
+        return ensure_url_has_scheme(&api);
     }
 
     // Third config file
     if let Some(file_config) = file_config
         && let Some(api_url) = file_config.api_url.as_ref()
     {
-        return api_url.clone();
+        return ensure_url_has_scheme(api_url);
     }
 
     // TODO configurable default api_url
     // Otherwise we assume the admin-cli is called from inside a kubernetes pod
     "https://carbide-api.forge-system.svc.cluster.local:1079".to_string()
+}
+
+/// Ensures a URL has an HTTP(S) scheme, defaulting to `https://` if missing
+fn ensure_url_has_scheme(url: &str) -> String {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    }
 }
 
 pub fn get_client_cert_info(
@@ -181,12 +195,23 @@ fn get_config_file_location() -> Result<Option<PathBuf>, ClientConfigError> {
     let Ok(home) = env::var("HOME") else {
         return Ok(None);
     };
-    let legacy = Path::new(&home).join(CONFIG_FILE_LOCATION);
-    if legacy.exists() {
-        Ok(Some(legacy))
-    } else {
-        Ok(None)
+    let home = Path::new(&home);
+
+    let config_path = home.join(CONFIG_FILE_LOCATION);
+    if config_path.is_file() {
+        return Ok(Some(config_path));
     }
+
+    let legacy_path = home.join(LEGACY_CONFIG_FILE_LOCATION);
+    if legacy_path.is_file() {
+        eprintln!(
+            "warning: config file `$HOME/{LEGACY_CONFIG_FILE_LOCATION}` is deprecated; \
+             rename it to `$HOME/{CONFIG_FILE_LOCATION}`."
+        );
+        return Ok(Some(legacy_path));
+    }
+
+    Ok(None)
 }
 pub fn get_config_from_file() -> Option<FileConfig> {
     // Third config file
@@ -286,12 +311,16 @@ mod tests {
     }
 
     fn set_env(key: &str, value: &str) {
-        // SAFETY: these tests hold ENV_LOCK while mutating process environment.
+        // SAFETY: Initial lint enablement: callers hold the module-local `ENV_LOCK`,
+        // which serializes these writers but does not prove Unix process-wide exclusion
+        // from environment readers. This needs owner review.
         unsafe { env::set_var(key, value) }
     }
 
     fn remove_env(key: &str) {
-        // SAFETY: these tests hold ENV_LOCK while mutating process environment.
+        // SAFETY: Initial lint enablement: callers hold the module-local `ENV_LOCK`,
+        // which serializes these writers but does not prove Unix process-wide exclusion
+        // from environment readers. This needs owner review.
         unsafe { env::remove_var(key) }
     }
 
@@ -504,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_legacy_config_file_from_home() {
+    fn reads_config_file_from_home() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _snapshot = EnvSnapshot::capture(&["HOME"]);
         let home = TempHome::create();
@@ -542,6 +571,35 @@ mod tests {
         remove_env("HOME");
 
         assert!(get_config_from_file().is_none());
+    }
+
+    #[test]
+    fn ensure_url_has_scheme_adds_https_when_missing() {
+        use super::ensure_url_has_scheme;
+
+        assert_eq!(
+            ensure_url_has_scheme("https://example.com:1079"),
+            "https://example.com:1079"
+        );
+        assert_eq!(
+            ensure_url_has_scheme("http://localhost:8080"),
+            "http://localhost:8080"
+        );
+
+        assert_eq!(
+            ensure_url_has_scheme("localhost:1079"),
+            "https://localhost:1079"
+        );
+
+        assert_eq!(
+            ensure_url_has_scheme("HTTPS://example.com"),
+            "HTTPS://example.com"
+        );
+
+        assert_eq!(
+            ensure_url_has_scheme("  localhost:1079  "),
+            "https://localhost:1079"
+        );
     }
 
     #[test]

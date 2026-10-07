@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_instrument::emit;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -31,13 +32,18 @@ use model::network_segment::{
 };
 use sqlx::{PgConnection, PgTransaction};
 
+use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
 use crate::instance_address::UsedOverlayNetworkIpResolver;
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface::UsedAdminNetworkIpResolver;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -65,7 +71,11 @@ macro_rules! network_segment_snapshot_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes
      FROM network_segments ns
      LEFT JOIN LATERAL (
@@ -83,7 +93,11 @@ macro_rules! network_segment_snapshot_with_history_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes,
         COALESCE(history_agg.json, '[]'::json) AS history
      FROM network_segments ns
@@ -95,11 +109,11 @@ macro_rules! network_segment_snapshot_with_history_query {
         GROUP BY np.segment_id
      ) AS prefixes_agg ON true
      LEFT JOIN LATERAL (
-        SELECT h.segment_id,
-            json_agg(json_build_object('segment_id', h.segment_id, 'state', h.state::text, 'state_version', h.state_version, 'timestamp', h."timestamp")) AS json
+        SELECT h.object_id,
+            json_agg(json_build_object('segment_id', h.object_id, 'state', h.state::text, 'state_version', h.state_version, 'timestamp', h."timestamp")) AS json
         FROM network_segment_state_history h
-        WHERE h.segment_id = ns.id
-        GROUP BY h.segment_id
+        WHERE h.object_id = ns.id::text
+        GROUP BY h.object_id
      ) AS history_agg ON true
 "#
     };
@@ -110,6 +124,19 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
+    // The DNS views publish records under the segment's subdomain_id. VPC
+    // domains only record ownership, so reject them here even when the
+    // segment belongs to the same VPC.
+    if let Some(domain_id) = value.subdomain_id
+        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
+            .await?
+            .is_some_and(|domain| domain.vpc_id.is_some())
+    {
+        return Err(DatabaseError::InvalidArgument(format!(
+            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
+        )));
+    }
+
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -125,8 +152,9 @@ pub async fn persist(
                 vni_id,
                 network_segment_type,
                 can_stretch,
-                allocation_strategy)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                allocation_strategy,
+                infer_slaac_eui64_addresses)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING id";
     let segment_id: NetworkSegmentId = sqlx::query_as(query)
         .bind(value.id)
@@ -142,10 +170,11 @@ pub async fn persist(
         .bind(value.segment_type)
         .bind(value.can_stretch)
         .bind(value.allocation_strategy)
+        .bind(value.infer_slaac_eui64_addresses)
         .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    crate::network_prefix::create_for(txn, &segment_id, &value.prefixes).await?;
+    crate::network_prefix::create_for(txn, &segment_id, &value.prefixes, None).await?;
     crate::state_history::persist(
         txn,
         crate::state_history::StateHistoryTableId::NetworkSegment,
@@ -189,6 +218,10 @@ pub async fn for_vpc(
     Ok(results)
 }
 
+/// Returns the segment matched by a DHCP relay address.
+///
+/// Exact DHCPv6 link-address matches win over prefix containment, matching the
+/// candidate ordering used by `for_relay_all`.
 pub async fn for_relay(
     txn: &mut PgConnection,
     relay: IpAddr,
@@ -197,9 +230,107 @@ pub async fn for_relay(
 
     match results.len() {
         0 | 1 => Ok(results.pop()),
+        _ => {
+            // DHCPv6 link-address equality is unique and more specific than
+            // prefix containment, so it resolves the otherwise ambiguous match.
+            results
+                .into_iter()
+                .find(|segment| {
+                    segment
+                        .prefixes
+                        .iter()
+                        .any(|prefix| prefix.dhcpv6_link_address == Some(relay))
+                })
+                .map(Some)
+                .ok_or_else(|| {
+                    DatabaseError::internal(format!(
+                        "Multiple network segments defined for relay address {relay}"
+                    ))
+                })
+        }
+    }
+}
+
+/// Returns the segment whose managed prefix contains `address`.
+///
+/// This intentionally ignores `dhcpv6_link_address`: that field is DHCP relay
+/// routing context and may be outside the segment prefix.
+pub async fn for_prefix_containing_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> DatabaseResult<Option<NetworkSegment>> {
+    static QUERY: &str = concat!(
+        network_segment_snapshot_query!(),
+        r#"
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM network_prefixes
+                    WHERE network_prefixes.segment_id = ns.id
+                    -- Static address ownership uses managed prefix containment only.
+                    AND $1::inet <<= network_prefixes.prefix
+                )
+                ORDER BY ns.id"#,
+    );
+    let mut results: Vec<NetworkSegment> = sqlx::query_as(QUERY)
+        .bind(IpNetwork::from(address))
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))?;
+
+    match results.len() {
+        0 | 1 => Ok(results.pop()),
         _ => Err(DatabaseError::internal(format!(
-            "Multiple network segments defined for relay address {relay}"
+            "Multiple network segments contain address {address}"
         ))),
+    }
+}
+
+/// Resolve the managed segment whose configured prefix contains a static
+/// address.
+///
+/// Unlike [`for_static_address`], this never falls back to
+/// `static-assignments`. ExpectedInterface declarations using an explicit
+/// allocation policy or a DPU role use this stricter lookup.
+pub async fn for_managed_static_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+    expected_segment_type: Option<NetworkSegmentType>,
+) -> DatabaseResult<NetworkSegment> {
+    let segment = for_prefix_containing_address(&mut *txn, address)
+        .await?
+        .ok_or_else(|| {
+            DatabaseError::InvalidArgument(match expected_segment_type {
+                Some(expected_segment_type) => format!(
+                    "fixed IP {address} is not within a configured {expected_segment_type} network segment",
+                ),
+                None => {
+                    format!("fixed IP {address} is not within a configured network segment")
+                }
+            })
+        })?;
+
+    if let Some(expected_segment_type) = expected_segment_type
+        && segment.config.segment_type != expected_segment_type
+    {
+        return Err(DatabaseError::InvalidArgument(format!(
+            "fixed IP {address} belongs to {} network segment {}, not the expected {expected_segment_type} segment type",
+            segment.config.segment_type, segment.config.name,
+        )));
+    }
+
+    Ok(segment)
+}
+
+/// Resolve the segment that owns a configured static address.
+///
+/// Addresses outside managed prefixes use `static-assignments`.
+pub async fn for_static_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> DatabaseResult<NetworkSegment> {
+    match for_prefix_containing_address(&mut *txn, address).await? {
+        Some(segment) => Ok(segment),
+        None => static_assignments(&mut *txn).await,
     }
 }
 
@@ -215,12 +346,25 @@ pub async fn for_relay_all(
                     SELECT 1
                     FROM network_prefixes
                     WHERE network_prefixes.segment_id = ns.id
-                    AND EXISTS (
-                        SELECT 1 FROM unnest($1::inet[]) AS ip
-                        WHERE ip <<= network_prefixes.prefix
+                    AND (
+                        -- Relay candidates match either normal prefix containment...
+                        EXISTS (
+                            SELECT 1 FROM unnest($1::inet[]) AS ip
+                            WHERE ip <<= network_prefixes.prefix
+                        )
+                        -- ...or exact DHCPv6 link-address metadata.
+                        OR network_prefixes.dhcpv6_link_address = ANY($1::inet[])
                     )
                 )
-                ORDER BY ns.id"#,
+                -- Exact DHCPv6 link-address matches sort first so callers see
+                -- the authoritative segment before prefix fallback candidates.
+                ORDER BY EXISTS (
+                    SELECT 1
+                    FROM network_prefixes
+                    WHERE network_prefixes.segment_id = ns.id
+                    AND network_prefixes.dhcpv6_link_address = ANY($1::inet[])
+                ) DESC,
+                ns.id"#,
     );
     let results = sqlx::query_as(QUERY)
         .bind(
@@ -250,13 +394,27 @@ pub async fn for_segment_type_all(
                     SELECT 1
                     FROM network_prefixes
                     WHERE network_prefixes.segment_id = ns.id
-                    AND EXISTS (
-                        SELECT 1 FROM unnest($1::inet[]) AS ip
-                        WHERE ip <<= network_prefixes.prefix
+                    AND (
+                        -- Relay candidates match either normal prefix containment...
+                        EXISTS (
+                            SELECT 1 FROM unnest($1::inet[]) AS ip
+                            WHERE ip <<= network_prefixes.prefix
+                        )
+                        -- ...or exact DHCPv6 link-address metadata.
+                        OR network_prefixes.dhcpv6_link_address = ANY($1::inet[])
                     )
                 )
+                -- Apply requested segment-type narrowing after relay ownership matching.
                 AND $2 = ns.network_segment_type
-                ORDER BY ns.id"#,
+                -- Exact DHCPv6 link-address matches sort first so callers see
+                -- the authoritative segment before prefix fallback candidates.
+                ORDER BY EXISTS (
+                    SELECT 1
+                    FROM network_prefixes
+                    WHERE network_prefixes.segment_id = ns.id
+                    AND network_prefixes.dhcpv6_link_address = ANY($1::inet[])
+                ) DESC,
+                ns.id"#,
     );
 
     let results = sqlx::query_as(QUERY)
@@ -272,22 +430,6 @@ pub async fn for_segment_type_all(
         .map_err(|e| DatabaseError::new(QUERY, e))?;
 
     Ok(results)
-}
-
-pub async fn for_segment_type(
-    txn: &mut PgConnection,
-    relay: IpAddr,
-    segment_type: NetworkSegmentType,
-) -> DatabaseResult<Option<NetworkSegment>> {
-    let mut results = for_segment_type_all(txn, std::slice::from_ref(&relay), segment_type).await?;
-    if results.len() > 1 {
-        tracing::trace!(
-            "Multiple network segments defined for segment_type {} and relay address {}",
-            segment_type.to_string(),
-            relay.to_string()
-        );
-    }
-    Ok(results.pop())
 }
 
 /// Retrieves the IDs of all network segments.
@@ -383,9 +525,9 @@ pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, 
 
 /// Reconcile declared network definitions against what was previously seeded.
 ///
-///   1. **New** (no snapshot, no segment): no-op. The caller's
-///      segment-creation path is responsible for both creating the segment
-///      and writing the snapshot.
+///   1. **New** (no snapshot, no segment): returned to the caller for creation.
+///      The caller is responsible for creating the segment and writing the
+///      snapshot in the same transaction.
 ///   2. **Backfill** (no snapshot, segment present): record the snapshot,
 ///      linking it to the existing segment's id.
 ///   3. **In sync** (snapshot matches declaration): no-op.
@@ -395,25 +537,33 @@ pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, 
 /// Networks that appear in the snapshot table but are no longer declared
 /// ("dropped" from `InitialObjectsConfig.networks`) are warned about, but
 /// not removed.
+///
+/// # Returns
+///
+/// Config-declared networks that have neither a segment row nor a snapshot,
+/// in unspecified order. The caller must create the segment and write the
+/// snapshot in the same transaction.
 pub async fn reconcile_network_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, NetworkDefinition>,
-) -> Result<(), DatabaseError> {
+) -> Result<Vec<(String, NetworkDefinition)>, DatabaseError> {
     let stored = all_stored_defs(&mut *txn).await?;
+    let mut to_create: Vec<(String, NetworkDefinition)> = Vec::new();
 
     for (name, def) in declared {
         let exists = segment_exists(&mut *txn, name).await?;
         match (stored.get(name), exists) {
-            // Already seeded with the current declaration
+            // Already seeded with the current declaration — nothing to do.
             (Some(stored_def), true) if stored_def == def => {}
-            // Declaration has drifted since seed. Warn don't reapply
+            // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                tracing::warn!(
-                    network_name = name,
-                    stored = ?stored_def,
-                    declared = ?def,
-                    "NetworkDefinition has changed since it was seeded; not re-applying"
-                );
+                emit(ConfigDefinitionDrifted {
+                    resource_kind: ConfigResourceKind::NetworkDefinition,
+                    drift_kind: ConfigDriftKind::Changed,
+                    name: name.clone(),
+                    stored: Some(format!("{stored_def:?}")),
+                    declared: Some(format!("{def:?}")),
+                });
             }
             // Network segment exists, but has no snapshot yet.
             // Pre-migration deployment or a network was re-added after a
@@ -442,16 +592,16 @@ pub async fn reconcile_network_defs(
                 } else {
                     tracing::warn!(
                         network_name = name,
-                        count = candidates.len(),
+                        matching_network_segment_count = candidates.len(),
                         "Backfill skipped: multiple network_segments share this name; \
                          operator must reconcile by hand",
                     );
                 }
             }
-            // New networks are seeded by the caller (`create_initial_networks`),
-            // which both expands the definition into a `NewNetworkSegment` and
-            // writes the snapshot in the same transaction.
-            (None, false) => {}
+            // No segment and no snapshot: return to the caller for creation.
+            (None, false) => {
+                to_create.push((name.clone(), def.clone()));
+            }
             (Some(_), false) => {
                 unreachable!("network_def.segment_id is FK; snapshot cannot outlive its segment")
             }
@@ -460,14 +610,17 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            tracing::warn!(
-                network_name = name,
-                "Network segment exists in database but is no longer declared in any config file"
-            );
+            emit(ConfigDefinitionDrifted {
+                resource_kind: ConfigResourceKind::NetworkDefinition,
+                drift_kind: ConfigDriftKind::Dropped,
+                name: name.clone(),
+                stored: None,
+                declared: None,
+            });
         }
     }
 
-    Ok(())
+    Ok(to_create)
 }
 pub async fn find_ids(
     txn: impl DbReader<'_>,
@@ -529,7 +682,7 @@ where
 /// Find network segments attached to a machine through machine_interfaces, optionally of a certain type
 pub async fn find_ids_by_machine_id(
     txn: &mut PgConnection,
-    machine_id: &::carbide_uuid::machine::MachineId,
+    machine_id: &HostMachineId,
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
     let result = batch_find_ids_by_machine_ids(txn, &[*machine_id], network_segment_type).await?;
@@ -541,9 +694,9 @@ pub async fn find_ids_by_machine_id(
 /// Returns a HashMap mapping each machine ID to its list of segment IDs.
 pub async fn batch_find_ids_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     network_segment_type: Option<NetworkSegmentType>,
-) -> Result<HashMap<MachineId, Vec<NetworkSegmentId>>, DatabaseError> {
+) -> Result<HashMap<HostMachineId, Vec<NetworkSegmentId>>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -576,9 +729,9 @@ pub async fn batch_find_ids_by_machine_ids(
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
-    let mut result: HashMap<MachineId, Vec<NetworkSegmentId>> = HashMap::new();
+    let mut result: HashMap<HostMachineId, Vec<NetworkSegmentId>> = HashMap::new();
     for (machine_id_str, segment_id) in rows {
-        if let Ok(machine_id) = machine_id_str.parse::<MachineId>() {
+        if let Ok(machine_id) = machine_id_str.parse::<HostMachineId>() {
             result.entry(machine_id).or_default().push(segment_id);
         }
     }
@@ -633,7 +786,7 @@ where
                 })
             };
 
-        let mut allocated_addresses = IpAllocator::new(
+        let allocator = IpAllocator::new(
             &mut *conn,
             record,
             dhcp_handler,
@@ -647,31 +800,33 @@ where
             )
         })?;
 
-        let nfree = allocated_addresses.num_free().map_err(|e| {
-            DatabaseError::new(
-                "IpAllocator.num_free error",
-                sqlx::Error::Io(std::io::Error::other(e.to_string())),
-            )
-        })?;
-
-        record.prefixes[0].num_free_ips = nfree;
+        for prefix in &mut record.prefixes {
+            prefix.num_free_ips = Some(allocator.num_free(prefix.id).map_err(|e| {
+                DatabaseError::new(
+                    "IpAllocator.num_free error",
+                    sqlx::Error::Io(std::io::Error::other(e.to_string())),
+                )
+            })?);
+        }
     }
 
     Ok(())
 }
 
-/// Updates the network segment state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` writes the network segment state and `new_version`
+/// when the version matches `expected_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// A missing segment or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)`.
+/// `Applied(())` leaves the write in the caller's transaction; database failures
+/// remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     segment_id: NetworkSegmentId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &NetworkSegmentControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE network_segments SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, NetworkSegmentId>(query)
         .bind(new_version)
@@ -682,7 +837,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -777,6 +935,13 @@ pub async fn mark_as_deleted(
             "Network Segment can't be deleted while addresses on the segment are allocated to instances".to_string(),
         ));
     }
+    let num_referencing_instances =
+        crate::instance::count_network_segment_references(txn, &value.id).await?;
+    if num_referencing_instances > 0 {
+        return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(format!(
+            "network segment can't be deleted while referenced by network configurations; referencing instance count: {num_referencing_instances}"
+        )));
+    }
 
     let query = "UPDATE network_segments SET updated=NOW(), deleted=NOW() WHERE id=$1 RETURNING id";
     let id = sqlx::query_as(query)
@@ -788,16 +953,31 @@ pub async fn mark_as_deleted(
     Ok(id)
 }
 
+/// Physically deletes a segment after rechecking that no allocations reference it.
+///
+/// The caller's transaction retains the recheck's table lock through physical
+/// deletion, serializing with the allocator's exclusive lock on
+/// `instance_addresses`.
 pub async fn final_delete(
     segment_id: NetworkSegmentId,
-    txn: &mut PgConnection,
+    txn: &mut PgTransaction<'_>,
 ) -> Result<NetworkSegmentId, DatabaseError> {
-    crate::network_prefix::delete_for_segment(segment_id, txn).await?;
+    // Recheck inside the delete transaction. The table lock serializes this
+    // read against the allocator's exclusive lock on `instance_addresses`,
+    // closing the gap between the controller's drain decision and physical
+    // deletion.
+    if crate::instance_address::segment_has_allocations(txn.as_mut(), &segment_id).await? {
+        return Err(DatabaseError::NetworkSegmentDelete(
+            "network segment can't be deleted while allocations still reference it".to_string(),
+        ));
+    }
+
+    crate::network_prefix::delete_for_segment(segment_id, txn.as_mut()).await?;
 
     let query = "DELETE FROM network_segments WHERE id=$1::uuid RETURNING id";
     let segment: NetworkSegmentId = sqlx::query_as(query)
         .bind(segment_id)
-        .fetch_one(txn)
+        .fetch_one(txn.as_mut())
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -898,6 +1078,20 @@ pub async fn allocate_svi_ip(
 ) -> Result<IpAddr, DatabaseError> {
     let mut first_svi_ip = None;
 
+    // A tenant prefix with fewer than three reserved addresses falls back to
+    // the instance address allocator. Take its table lock before touching any
+    // prefix row so this path uses the same lock order as segment deletion,
+    // including dual-stack segments whose prefixes reserve different numbers
+    // of addresses.
+    if value.config.segment_type.is_tenant()
+        && value
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.svi_ip.is_none() && prefix.num_reserved < 3)
+    {
+        crate::instance_address::lock_table_for_allocation(txn.as_mut()).await?;
+    }
+
     for prefix in &value.prefixes {
         if prefix.svi_ip.is_some() {
             if first_svi_ip.is_none() {
@@ -944,9 +1138,51 @@ pub async fn allocate_svi_ip(
 
 #[cfg(test)]
 mod tests {
+    use model::network_prefix::NewNetworkPrefix;
     use model::network_segment::NetworkDefinitionSegmentType;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
+        let domain = crate::dns::domain::persist(
+            model::dns::NewDomain {
+                vpc_id: Some(vpc_id),
+                ..model::dns::NewDomain::new("tenant.example")
+            },
+            txn.as_mut(),
+        )
+        .await
+        .expect("create VPC-owned domain");
+        let segment = NewNetworkSegment {
+            subdomain_id: Some(domain.id),
+            vpc_id: Some(vpc_id),
+            segment_type: NetworkSegmentType::Tenant,
+            ..crate::test_support::network_segment::admin_segment(
+                "tenant-dns",
+                "192.0.2.0/24",
+                "192.0.2.1",
+                1,
+            )
+        };
+        let segment_id = segment.id;
+
+        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
+        assert!(
+            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
+            "{result:?}"
+        );
+        let segments = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment_id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await
+        .expect("the rejected creation leaves the transaction usable");
+        assert!(segments.is_empty(), "the rejected segment was not inserted");
+    }
 
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;
@@ -961,21 +1197,202 @@ mod tests {
         .fetch_one(pool)
         .await
     }
-    // A brand-new network is declared but no segment exists yet and no
-    // snapshot has been recorded.
-    // (`create_initial_networks`) is responsible for inserting both the
-    // segment and the snapshot in the same transaction.
+
+    /// Persists one test segment with a single prefix row.
+    async fn persist_test_segment(
+        pool: &sqlx::PgPool,
+        name: &str,
+        prefix: &str,
+        gateway: Option<&str>,
+        dhcpv6_link_address: Option<&str>,
+    ) -> Result<NetworkSegmentId, Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment = NewNetworkSegment {
+            id: uuid::Uuid::new_v4().into(),
+            name: name.to_string(),
+            subdomain_id: None,
+            vpc_id: None,
+            mtu: 1500,
+            prefixes: vec![NewNetworkPrefix {
+                prefix: prefix.parse()?,
+                gateway: gateway.map(str::parse).transpose()?,
+                dhcpv6_link_address: dhcpv6_link_address.map(str::parse).transpose()?,
+                num_reserved: 1,
+            }],
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Admin,
+            can_stretch: None,
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+        };
+        let segment_id = segment.id;
+
+        persist(segment, &mut txn, NetworkSegmentControllerState::Ready).await?;
+        txn.commit().await?;
+        Ok(segment_id)
+    }
+
     #[crate::sqlx_test]
-    async fn test_reconcile_network_defs_brand_new_is_noop(
+    async fn free_ip_counts_are_populated_for_every_dual_stack_prefix(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment = persist(
+            NewNetworkSegment {
+                id: uuid::Uuid::new_v4().into(),
+                name: "dual-stack-free-counts".to_string(),
+                subdomain_id: None,
+                vpc_id: None,
+                mtu: 1500,
+                // Configure IPv6 first so the fixture does not imply an IPv4-first
+                // contract. The assertions below find each family explicitly because
+                // `json_agg` does not guarantee row order.
+                prefixes: vec![
+                    NewNetworkPrefix {
+                        prefix: "2001:db8::/64".parse()?,
+                        gateway: None,
+                        dhcpv6_link_address: None,
+                        num_reserved: 0,
+                    },
+                    NewNetworkPrefix {
+                        prefix: "192.0.2.0/30".parse()?,
+                        gateway: None,
+                        dhcpv6_link_address: None,
+                        num_reserved: 0,
+                    },
+                ],
+                vlan_id: None,
+                vni: None,
+                segment_type: NetworkSegmentType::Admin,
+                can_stretch: None,
+                allocation_strategy: Default::default(),
+                infer_slaac_eui64_addresses: false,
+            },
+            &mut txn,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+
+        let found_without_counts = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment.id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await?;
+        assert_eq!(found_without_counts.len(), 1);
+        assert!(
+            found_without_counts[0]
+                .prefixes
+                .iter()
+                .all(|prefix| prefix.num_free_ips.is_none())
+        );
+
+        let mut found = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment.id),
+            NetworkSegmentSearchConfig {
+                include_num_free_ips: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(found.len(), 1);
+        let found = found.pop().expect("persisted segment should be returned");
+        assert_eq!(found.id, segment.id);
+
+        let ipv4 = found
+            .prefixes
+            .iter()
+            .find(|prefix| prefix.prefix.is_ipv4())
+            .expect("IPv4 prefix should be returned");
+        let ipv6 = found
+            .prefixes
+            .iter()
+            .find(|prefix| prefix.prefix.is_ipv6())
+            .expect("IPv6 prefix should be returned");
+        assert_eq!(ipv4.num_free_ips, Some(2));
+        assert_eq!(ipv6.num_free_ips, Some(u64::MAX as u128 - 1));
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn for_prefix_containing_address_ignores_dhcpv6_link_address(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let link_address = "2001:db8:ffff::1";
+
+        // A DHCPv6 link-address outside the prefix must not make the segment
+        // own that address for static assignment.
+        persist_test_segment(
+            &pool,
+            "link-only",
+            "2001:db8:a::/64",
+            None,
+            Some(link_address),
+        )
+        .await?;
+        let mut txn = pool.begin().await?;
+        let segment = for_prefix_containing_address(&mut txn, link_address.parse()?).await?;
+        assert!(segment.is_none());
+        txn.rollback().await?;
+
+        // If another segment's real prefix contains the same address, static
+        // ownership follows the prefix, not the link-address equality branch.
+        let owner_segment =
+            persist_test_segment(&pool, "prefix-owner", "2001:db8:ffff::/64", None, None).await?;
+        let mut txn = pool.begin().await?;
+        let segment = for_prefix_containing_address(&mut txn, link_address.parse()?)
+            .await?
+            .expect("prefix-containing segment should resolve");
+        assert_eq!(segment.id, owner_segment);
+        txn.rollback().await?;
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn for_relay_prefers_exact_dhcpv6_link_address_over_prefix_containment(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let relay = "2001:db8:ffff::1";
+
+        // One segment matches only because its managed prefix contains the relay.
+        persist_test_segment(&pool, "prefix-owner", "2001:db8:ffff::/64", None, None).await?;
+
+        // The other segment owns the relay by exact DHCPv6 link-address.
+        let exact_segment =
+            persist_test_segment(&pool, "link-owner", "2001:db8:a::/64", None, Some(relay)).await?;
+
+        // The exact link-address match should disambiguate the relay lookup.
+        let mut txn = pool.begin().await?;
+        let segment = for_relay(&mut txn, relay.parse()?)
+            .await?
+            .expect("relay should resolve to exact link-address segment");
+        assert_eq!(segment.id, exact_segment);
+        txn.rollback().await?;
+
+        Ok(())
+    }
+
+    // A brand-new network is declared but no segment exists yet and no
+    // snapshot has been recorded. reconcile_network_defs must return it in
+    // the to-create list and leave all writes to the caller.
+    #[crate::sqlx_test]
+    async fn test_reconcile_network_defs_brand_new_is_returned(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let def = NetworkDefinition {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: "192.168.1.0/24".parse().unwrap(),
-            gateway: "192.168.1.1".parse().unwrap(),
+            prefix_v6: None,
+            gateway: Some("192.168.1.1".parse().unwrap()),
+            dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 5,
             allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
             vpc_name: None,
         };
 
@@ -984,20 +1401,27 @@ mod tests {
             .into_iter()
             .collect();
 
-        reconcile_network_defs(&mut txn, &declared).await?;
+        let to_create = reconcile_network_defs(&mut txn, &declared).await?;
 
-        // Reconcile must not have written a snapshot for the brand-new entry.
+        // reconcile must not have written a snapshot for a brand-new network.
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
         assert!(
             stored.is_none(),
-            "reconcile must leave brand-new networks alone; \
-             snapshot insertion is the caller's responsibility"
+            "reconcile must not write a snapshot for a brand-new network; \
+             that is the caller's responsibility"
         );
 
-        // And must not have created a network_segments row either.
+        // reconcile must not have created a network_segments row.
         assert!(
             !segment_exists(&mut txn, "brand-new").await?,
             "reconcile must not create a network_segments row for a brand-new network"
+        );
+
+        // reconcile must return the brand-new network so the caller can create it.
+        assert_eq!(
+            to_create,
+            vec![("brand-new".to_string(), def)],
+            "brand-new network must appear in the returned to-create list"
         );
 
         txn.rollback().await?;
@@ -1009,10 +1433,13 @@ mod tests {
         NetworkDefinition {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: prefix.parse().unwrap(),
-            gateway: gateway.parse().unwrap(),
+            prefix_v6: None,
+            gateway: Some(gateway.parse().unwrap()),
+            dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 3,
             allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
             vpc_name: None,
         }
     }
@@ -1033,7 +1460,12 @@ mod tests {
         let mut txn = pool.begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        reconcile_network_defs(&mut txn, &declared_one("pre-existing", def.clone())).await?;
+        let to_create =
+            reconcile_network_defs(&mut txn, &declared_one("pre-existing", def.clone())).await?;
+        assert!(
+            to_create.is_empty(),
+            "this arm must not add networks to the to-create list"
+        );
 
         let stored = stored_def(txn.as_mut(), "pre-existing").await?;
         assert_eq!(stored.as_ref(), Some(&def), "snapshot must be backfilled");
@@ -1052,7 +1484,12 @@ mod tests {
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "stable", segment_id, &def).await?;
 
-        reconcile_network_defs(&mut txn, &declared_one("stable", def.clone())).await?;
+        let to_create =
+            reconcile_network_defs(&mut txn, &declared_one("stable", def.clone())).await?;
+        assert!(
+            to_create.is_empty(),
+            "this arm must not add networks to the to-create list"
+        );
 
         let stored = stored_def(txn.as_mut(), "stable").await?;
         assert_eq!(
@@ -1078,7 +1515,12 @@ mod tests {
         let drifted = def("10.0.0.0/24", "10.0.0.1");
         insert_network_def(&mut txn, "drifty", segment_id, &original).await?;
 
-        reconcile_network_defs(&mut txn, &declared_one("drifty", drifted.clone())).await?;
+        let to_create =
+            reconcile_network_defs(&mut txn, &declared_one("drifty", drifted.clone())).await?;
+        assert!(
+            to_create.is_empty(),
+            "this arm must not add networks to the to-create list"
+        );
 
         let stored = stored_def(txn.as_mut(), "drifty").await?;
         assert_eq!(
@@ -1104,7 +1546,11 @@ mod tests {
         insert_network_def(&mut txn, "abandoned", segment_id, &def).await?;
 
         let empty: HashMap<String, NetworkDefinition> = HashMap::new();
-        reconcile_network_defs(&mut txn, &empty).await?;
+        let to_create = reconcile_network_defs(&mut txn, &empty).await?;
+        assert!(
+            to_create.is_empty(),
+            "this arm must not add networks to the to-create list"
+        );
 
         let stored = stored_def(txn.as_mut(), "abandoned").await?;
         assert_eq!(
@@ -1151,6 +1597,165 @@ mod tests {
         Ok(())
     }
 
+    /// `final_delete` must recheck the allocation predicate in its own
+    /// transaction so a network configuration that retains only a prefix
+    /// cannot disappear between the controller drain check and physical
+    /// deletion.
+    #[crate::sqlx_test]
+    async fn final_delete_rejects_instance_network_config_reference(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let segment_id = minimum_segment_data(&pool, "still-referenced").await?;
+        let machine_id = uuid::Uuid::new_v4();
+        let mut txn = pool.begin().await?;
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        sqlx::query(
+            "INSERT INTO instances (machine_id, network_config) \
+             VALUES ($1, jsonb_build_object( \
+                 'interfaces', jsonb_build_array( \
+                     jsonb_build_object('network_segment_id', $2::text))))",
+        )
+        .bind(machine_id)
+        .bind(segment_id)
+        .execute(txn.as_mut())
+        .await?;
+
+        let error = final_delete(segment_id, &mut txn)
+            .await
+            .expect_err("referenced segment must remain present");
+        assert!(matches!(
+            error,
+            DatabaseError::NetworkSegmentDelete(message)
+                if message.contains("allocations still reference it")
+        ));
+        assert!(
+            segment_exists(txn.as_mut(), "still-referenced").await?,
+            "failed final deletion must retain the segment",
+        );
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// SVI allocation must lock the `instance_addresses` table before it
+    /// updates any prefix row. Otherwise, a tenant segment whose prefixes
+    /// reserve different numbers of addresses can deadlock with final deletion:
+    /// allocation holds the first prefix row and waits for the table lock while
+    /// deletion holds the table lock and waits for that prefix row.
+    #[crate::sqlx_test]
+    async fn tenant_svi_allocation_locks_before_mixed_prefix_updates(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup_txn = pool.begin().await?;
+        let mut segment = persist(
+            NewNetworkSegment {
+                id: NetworkSegmentId::new(),
+                name: "mixed-svi-lock-order".to_string(),
+                subdomain_id: None,
+                vpc_id: None,
+                mtu: 1500,
+                prefixes: vec![
+                    NewNetworkPrefix {
+                        prefix: "198.51.100.0/29".parse()?,
+                        gateway: None,
+                        dhcpv6_link_address: None,
+                        num_reserved: 3,
+                    },
+                    NewNetworkPrefix {
+                        prefix: "2001:db8:2403::/64".parse()?,
+                        gateway: None,
+                        dhcpv6_link_address: None,
+                        num_reserved: 0,
+                    },
+                ],
+                vlan_id: None,
+                vni: None,
+                segment_type: NetworkSegmentType::Tenant,
+                can_stretch: Some(true),
+                allocation_strategy: Default::default(),
+                infer_slaac_eui64_addresses: false,
+            },
+            setup_txn.as_mut(),
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        setup_txn.commit().await?;
+
+        // `json_agg` does not promise prefix order. Force the dangerous order:
+        // update the third address directly, then fall back to the allocator.
+        segment
+            .prefixes
+            .sort_by_key(|prefix| std::cmp::Reverse(prefix.num_reserved));
+        assert_eq!(segment.prefixes[0].num_reserved, 3);
+        assert_eq!(segment.prefixes[1].num_reserved, 0);
+
+        let mut deletion_txn = pool.begin().await?;
+        let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(deletion_txn.as_mut())
+            .await?;
+        sqlx::query("LOCK TABLE instance_addresses IN ACCESS SHARE MODE")
+            .execute(deletion_txn.as_mut())
+            .await?;
+
+        let allocation_pool = pool.clone();
+        let segment_id = segment.id;
+        let allocation_task = tokio::spawn(async move {
+            let mut txn = allocation_pool.begin().await.unwrap();
+            let result = allocate_svi_ip(&segment, &mut txn).await;
+            if result.is_ok() {
+                txn.commit().await.unwrap();
+            } else {
+                txn.rollback().await.unwrap();
+            }
+            result
+        });
+
+        // Wait until allocation reaches the table boundary held above. With
+        // the correct order it has not touched either prefix row yet.
+        let mut allocation_is_blocked = false;
+        for _ in 0..300 {
+            allocation_is_blocked = sqlx::query_scalar(
+                r#"SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND activity.wait_event_type = 'Lock'
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
+                      AND activity.query ILIKE
+                          '%LOCK TABLE instance_addresses IN ACCESS EXCLUSIVE MODE%'
+                )"#,
+            )
+            .bind(deletion_pid)
+            .fetch_one(&pool)
+            .await?;
+            if allocation_is_blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            allocation_is_blocked,
+            "SVI allocation never reached the lock on instance_addresses",
+        );
+
+        // Acquiring the table lock before the prefix lock lets this delete
+        // finish. Roll it back so the waiting allocator can resume against the
+        // restored rows.
+        assert_eq!(
+            final_delete(segment_id, &mut deletion_txn).await?,
+            segment_id,
+        );
+        deletion_txn.rollback().await?;
+
+        allocation_task
+            .await
+            .expect("SVI allocation task must complete")
+            .expect("SVI allocation must resume after deletion rollback");
+        Ok(())
+    }
+
     // `network_segments.name` is not UNIQUE at the DB layer, so two rows
     // can share a name Reconcile's backfill
     // path can't tell which one to attach a snapshot to, so it must
@@ -1166,7 +1771,12 @@ mod tests {
         let mut txn = pool.begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        reconcile_network_defs(&mut txn, &declared_one("ambiguous", def.clone())).await?;
+        let to_create =
+            reconcile_network_defs(&mut txn, &declared_one("ambiguous", def.clone())).await?;
+        assert!(
+            to_create.is_empty(),
+            "this arm must not add networks to the to-create list"
+        );
 
         assert!(
             stored_def(txn.as_mut(), "ambiguous").await?.is_none(),

@@ -14,13 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::MachineInterfaceId;
 use prettytable::{Cell, Row, Table};
 use rpc::forge::InterfaceAssociationType;
 use tracing::warn;
@@ -29,7 +29,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn handle_show(
+pub(crate) async fn handle_show(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -81,8 +81,7 @@ async fn show_machine_interfaces_information(
                 "{}",
                 serde_json::to_string_pretty(&machine_interfaces.interfaces.first())?
             );
-        } else {
-            let interface = machine_interfaces.interfaces.first().unwrap().to_owned();
+        } else if let Some(interface) = machine_interfaces.interfaces.first() {
             let domain_list = api_client.get_domains(interface.domain_id).await?;
             println!(
                 "{}",
@@ -123,21 +122,25 @@ fn convert_machines_to_nice_table(
     ));
 
     for machine_interface in machine_interfaces.interfaces {
-        let domain_name = domainlist_map.get(&machine_interface.domain_id.unwrap_or_default());
+        let domain_name = domainlist_map
+            .get(&machine_interface.domain_id.unwrap_or_default())
+            .map(Cow::Borrowed)
+            .unwrap_or_default();
         let mut row = vec![
-            machine_interface.id.unwrap_or_default().to_string(),
-            machine_interface.mac_address,
-            machine_interface.address.join(","),
+            Cow::Owned(machine_interface.id.unwrap_or_default().to_string()),
+            machine_interface.mac_address.as_str().into(),
+            machine_interface.address.join(",").into(),
             machine_interface
                 .machine_id
                 .as_ref()
-                .map(MachineId::to_string)
-                .unwrap_or_default(),
-            machine_interface.hostname,
-            machine_interface.vendor.unwrap_or_default(),
+                .map(ToString::to_string)
+                .unwrap_or_default()
+                .into(),
+            machine_interface.hostname.into(),
+            machine_interface.vendor.unwrap_or_default().into(),
         ];
         if has_more {
-            row.extend_from_slice(&[domain_name.unwrap().to_owned()]);
+            row.extend_from_slice(&[domain_name.as_str().into()]);
         }
         table.add_row(row.into());
     }
@@ -147,7 +150,7 @@ fn convert_machines_to_nice_table(
 
 ///Function to print the machine interface in Table format
 fn convert_machine_to_nice_format(
-    machine_interface: forgerpc::MachineInterface,
+    machine_interface: &forgerpc::MachineInterface,
     domain_list: ::rpc::protos::dns::DomainList,
 ) -> CarbideCliResult<String> {
     let domainlist_map = domain_list
@@ -177,37 +180,62 @@ fn convert_machine_to_nice_format(
     };
 
     let data = vec![
-        ("ID", machine_interface.id.unwrap_or_default().to_string()),
+        (
+            "ID",
+            Cow::Owned(machine_interface.id.unwrap_or_default().to_string()),
+        ),
         (
             "DPU ID",
             machine_interface
                 .attached_dpu_machine_id
                 .as_ref()
-                .map(MachineId::to_string)
-                .unwrap_or_default(),
+                .map(ToString::to_string)
+                .unwrap_or_default()
+                .into(),
         ),
-        ("Associated Node ID", associated_node_id),
+        ("Associated Node ID", associated_node_id.into()),
         (
             "Association Type",
             association_type
                 .map(|v| v.as_str_name())
                 .unwrap_or_default()
-                .to_string(),
+                .into(),
         ),
         (
             "Segment ID",
-            machine_interface.segment_id.unwrap_or_default().to_string(),
+            machine_interface
+                .segment_id
+                .unwrap_or_default()
+                .to_string()
+                .into(),
         ),
         (
             "Domain Id",
-            machine_interface.domain_id.unwrap_or_default().to_string(),
+            machine_interface
+                .domain_id
+                .unwrap_or_default()
+                .to_string()
+                .into(),
         ),
-        ("Domain Name", domain_name.unwrap().to_string()),
-        ("Hostname", machine_interface.hostname),
-        ("Primary", machine_interface.primary_interface.to_string()),
-        ("MAC Address", machine_interface.mac_address),
-        ("Addresses", machine_interface.address.join(",")),
-        ("Vendor", machine_interface.vendor.unwrap_or_default()),
+        (
+            "Domain Name",
+            domain_name.map(|d| d.as_str()).unwrap_or_default().into(),
+        ),
+        ("Hostname", machine_interface.hostname.as_str().into()),
+        (
+            "Primary",
+            machine_interface.primary_interface.to_string().into(),
+        ),
+        ("MAC Address", machine_interface.mac_address.as_str().into()),
+        ("Addresses", machine_interface.address.join(",").into()),
+        (
+            "Vendor",
+            machine_interface
+                .vendor
+                .as_deref()
+                .unwrap_or_default()
+                .into(),
+        ),
     ];
     let mut lines = String::new();
 

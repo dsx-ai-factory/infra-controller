@@ -23,7 +23,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn collection(chassis_id: &str) -> redfish::Collection<'static> {
+pub(super) fn collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!(
         "{}/LeakDetectors",
         redfish::thermal_subsystem::leak_detection_resource(chassis_id).odata_id
@@ -35,7 +35,7 @@ pub fn collection(chassis_id: &str) -> redfish::Collection<'static> {
     }
 }
 
-pub fn resource<'a>(chassis_id: &str, leak_detector_id: &'a str) -> redfish::Resource<'a> {
+pub(super) fn resource<'a>(chassis_id: &str, leak_detector_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("{}/{leak_detector_id}", collection(chassis_id).odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -46,14 +46,14 @@ pub fn resource<'a>(chassis_id: &str, leak_detector_id: &'a str) -> redfish::Res
 }
 
 #[derive(Debug, Clone)]
-pub struct LeakDetector {
-    pub id: Cow<'static, str>,
-    pub user_label: Option<Cow<'static, str>>,
-    pub detector_state: DetectorState,
+pub(crate) struct LeakDetector {
+    pub(crate) id: Cow<'static, str>,
+    pub(crate) user_label: Option<Cow<'static, str>>,
+    pub(crate) detector_state: redfish::resource::Status,
 }
 
 impl LeakDetector {
-    pub fn to_json(&self, chassis_id: &str) -> serde_json::Value {
+    pub(crate) fn to_json(&self, chassis_id: &str) -> serde_json::Value {
         let mut builder = builder(&resource(chassis_id, &self.id))
             .detector_state(self.detector_state)
             .leak_detector_type("Moisture");
@@ -64,34 +64,17 @@ impl LeakDetector {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum DetectorState {
-    Ok,
-    Warning,
-    Critical,
-}
-
-impl DetectorState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "OK",
-            Self::Warning => "Warning",
-            Self::Critical => "Critical",
-        }
-    }
-}
-
-pub fn builder(resource: &redfish::Resource) -> LeakDetectorBuilder {
+fn builder(resource: &redfish::Resource) -> LeakDetectorBuilder {
     LeakDetectorBuilder {
         value: resource.json_patch().patch(json!({
             "Status": redfish::resource::Status::Ok.into_json(),
-            "DetectorState": DetectorState::Ok.as_str(),
+            "DetectorState": "OK",
             "LeakDetectorType": "Moisture",
         })),
     }
 }
 
-pub struct LeakDetectorBuilder {
+struct LeakDetectorBuilder {
     value: serde_json::Value,
 }
 
@@ -104,37 +87,95 @@ impl Builder for LeakDetectorBuilder {
 }
 
 impl LeakDetectorBuilder {
-    pub fn detector_state(self, detector_state: DetectorState) -> Self {
-        let status = match detector_state {
-            DetectorState::Ok => redfish::resource::Status::Ok,
-            DetectorState::Warning => redfish::resource::Status::Warning,
-            DetectorState::Critical => redfish::resource::Status::Critical,
-        };
+    fn detector_state(self, detector_state: redfish::resource::Status) -> Self {
         self.apply_patch(json!({
             "DetectorState": detector_state.as_str(),
-            "Status": status.into_json(),
+            "Status": detector_state.into_json(),
         }))
     }
 
-    pub fn leak_detector_type(self, value: &str) -> Self {
+    fn leak_detector_type(self, value: &str) -> Self {
         self.add_str_field("LeakDetectorType", value)
     }
 
-    pub fn user_label(self, value: &str) -> Self {
+    fn user_label(self, value: &str) -> Self {
         self.add_str_field("UserLabel", value)
     }
 
-    pub fn build(self) -> serde_json::Value {
+    fn build(self) -> serde_json::Value {
         self.value
     }
 }
 
-pub fn generate_chassis_leak_detectors(count: usize) -> Vec<LeakDetector> {
+pub(crate) fn generate_chassis_leak_detectors(count: usize) -> Vec<LeakDetector> {
     (1..=count)
         .map(|index| LeakDetector {
             id: Cow::Owned(format!("LeakDetector_{index}")),
             user_label: Some(Cow::Owned(format!("Leak Detector {index}"))),
-            detector_state: DetectorState::Ok,
+            detector_state: redfish::resource::Status::Ok,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    struct SerializedState {
+        detector_state: String,
+        health: String,
+        state: String,
+    }
+
+    #[test]
+    fn detector_state_sets_detector_and_health_status() {
+        check_values(
+            [
+                Check {
+                    scenario: "OK detector keeps healthy Redfish status",
+                    input: redfish::resource::Status::Ok,
+                    expect: SerializedState {
+                        detector_state: "OK".to_string(),
+                        health: "OK".to_string(),
+                        state: "Enabled".to_string(),
+                    },
+                },
+                Check {
+                    scenario: "warning detector reports warning Redfish status",
+                    input: redfish::resource::Status::Warning,
+                    expect: SerializedState {
+                        detector_state: "Warning".to_string(),
+                        health: "Warning".to_string(),
+                        state: "Enabled".to_string(),
+                    },
+                },
+                Check {
+                    scenario: "critical detector reports critical Redfish status",
+                    input: redfish::resource::Status::Critical,
+                    expect: SerializedState {
+                        detector_state: "Critical".to_string(),
+                        health: "Critical".to_string(),
+                        state: "Enabled".to_string(),
+                    },
+                },
+            ],
+            |detector_state| {
+                let value = LeakDetector {
+                    id: Cow::Borrowed("LeakDetector_1"),
+                    user_label: None,
+                    detector_state,
+                }
+                .to_json("Chassis_1");
+
+                SerializedState {
+                    detector_state: value["DetectorState"].as_str().unwrap().to_string(),
+                    health: value["Status"]["Health"].as_str().unwrap().to_string(),
+                    state: value["Status"]["State"].as_str().unwrap().to_string(),
+                }
+            },
+        );
+    }
 }

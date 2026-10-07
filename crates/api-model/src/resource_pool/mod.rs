@@ -220,9 +220,9 @@ pub struct ResourcePoolStats {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourcePoolError {
-    #[error("Resource pool is empty, cannot allocate")]
+    #[error("resource pool is empty, cannot allocate")]
     Empty,
-    #[error("Cannot convert '{v}' to {pool_name}'s pool type for {owner_type} {owner_id}: {e}")]
+    #[error("cannot convert '{v}' to {pool_name}'s pool type for {owner_type} {owner_id}: {e}")]
     Parse {
         e: String,
         v: String,

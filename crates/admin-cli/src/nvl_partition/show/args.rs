@@ -34,14 +34,14 @@ Filter by name:
     $ nico-admin-cli nvl-partition show --name my-partition
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(""),
         help = "Optional, NvLink Partition ID to search for"
     )]
-    pub id: String,
+    pub(super) id: String,
     #[clap(short, long, help = "Optional, Tenant Organization ID to search for")]
-    pub tenant_org_id: Option<String>,
+    pub(super) tenant_org_id: Option<String>,
     #[clap(short, long, help = "Optional, NvLink Partition Name to search for")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
 }

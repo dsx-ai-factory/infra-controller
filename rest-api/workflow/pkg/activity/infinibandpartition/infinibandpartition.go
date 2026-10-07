@@ -5,7 +5,6 @@ package infinibandpartition
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -16,8 +15,9 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ManageInfiniBandPartition is an activity wrapper for managing InfiniBandPartition lifecycle that allows
@@ -29,7 +29,7 @@ type ManageInfiniBandPartition struct {
 
 // Activity functions
 // UpdateInfiniBandPartitionsInDB is a Temporal activity that takes a collection of InfiniBandPartition data pushed by Site Agent and updates the DB
-func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context.Context, siteID uuid.UUID, ibpInventory *cwssaws.InfiniBandPartitionInventory) error {
+func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context.Context, siteID uuid.UUID, ibpInventory *corev1.InfiniBandPartitionInventory) error {
 	logger := log.With().Str("Activity", "UpdateInfiniBandPartitionsInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -46,7 +46,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 		return err
 	}
 
-	if ibpInventory.InventoryStatus == cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if ibpInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
@@ -219,7 +219,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 	ibpsToDelete := []*cdbm.InfiniBandPartition{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if ibpInventory.InventoryPage == nil || ibpInventory.InventoryPage.TotalPages == 0 || (ibpInventory.InventoryPage.CurrentPage == ibpInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(ibpInventory.GetInventoryPage()) {
 		for _, ibp := range existingIbpIDMap {
 			found := false
 
@@ -248,7 +248,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 			}
 		} else if ibp.ControllerIBPartitionID != nil {
 			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if time.Since(ibp.Created) < cwutil.InventoryReceiptInterval {
+			if site.IsTimeWithinStaleInventoryThreshold(ibp.Created) {
 				continue
 			}
 
@@ -295,7 +295,7 @@ func (mibp ManageInfiniBandPartition) updateIBPStatusInDB(ctx context.Context, t
 		}
 
 		statusDetailDAO := cdbm.NewStatusDetailDAO(mibp.dbSession)
-		_, err = statusDetailDAO.CreateFromParams(ctx, tx, ibpID.String(), string(*status), statusMessage)
+		_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: ibpID.String(), Status: string(*status), Message: statusMessage})
 		if err != nil {
 			return err
 		}

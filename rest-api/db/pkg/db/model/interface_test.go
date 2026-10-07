@@ -10,8 +10,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,13 +102,106 @@ func TestInterfaceInlineRoutingProfile_ToProtoFromProto(t *testing.T) {
 	assert.Nil(t, roundTrip.AllowedAnycastPrefixes)
 
 	var fromProto InterfaceInlineRoutingProfile
-	fromProto.FromProto(&cwssaws.InstanceInterfaceRoutingProfile{
-		AllowedAnycastPrefixes: []*cwssaws.PrefixFilterPolicyEntry{
+	fromProto.FromProto(&corev1.InstanceInterfaceRoutingProfile{
+		AllowedAnycastPrefixes: []*corev1.PrefixFilterPolicyEntry{
 			{Prefix: "198.51.100.0/24"},
 			{Prefix: "2001:db8:1::/64"},
 		},
 	})
 	assert.Equal(t, []string{"198.51.100.0/24", "2001:db8:1::/64"}, fromProto.AllowedAnycastPrefixes)
+}
+
+func TestInterface_EthernetKey(t *testing.T) {
+	vpcID := uuid.New()
+	familyMode := InterfaceVpcIPFamilyModeIPv4Only
+	deviceInstance := 0
+
+	var base Interface
+	base.VpcID = &vpcID
+	base.VpcIPFamilyMode = &familyMode
+	base.Device = cutil.GetPtr("device")
+	base.DeviceInstance = &deviceInstance
+	base.IsPhysical = true
+
+	sameVpcID := vpcID
+	sameFamilyMode := familyMode
+	sameDeviceInstance := deviceInstance
+	same := base
+	same.VpcID = &sameVpcID
+	same.VpcIPFamilyMode = &sameFamilyMode
+	same.Device = cutil.GetPtr("device")
+	same.DeviceInstance = &sameDeviceInstance
+	same.VpcPrefixID = cutil.GetPtr(uuid.New())
+
+	missingDeviceInstance := base
+	missingDeviceInstance.DeviceInstance = nil
+
+	emptyProfile := base
+	emptyProfile.InlineRoutingProfile = &InterfaceInlineRoutingProfile{}
+
+	differentVpc := base
+	differentVpc.VpcID = cutil.GetPtr(uuid.New())
+
+	virtualFunction := base
+	virtualFunction.IsPhysical = false
+	virtualFunction.VirtualFunctionID = cutil.GetPtr(1)
+
+	otherVirtualFunction := virtualFunction
+	otherVirtualFunction.VirtualFunctionID = cutil.GetPtr(2)
+
+	prefixInterface := Interface{VpcPrefixID: cutil.GetPtr(uuid.New()), IsPhysical: true}
+	ipv6 := prefixInterface
+	ipv6.RequestedIpAddress = cutil.GetPtr("2001:db8::1")
+	expandedIPv6 := prefixInterface
+	expandedIPv6.RequestedIpAddress = cutil.GetPtr("2001:0DB8:0:0:0:0:0:1")
+	differentIPv6 := prefixInterface
+	differentIPv6.RequestedIpAddress = cutil.GetPtr("2001:db8::3")
+	invalidAddress := prefixInterface
+	invalidAddress.RequestedIpAddress = cutil.GetPtr("invalid-address")
+	otherInvalidAddress := prefixInterface
+	otherInvalidAddress.RequestedIpAddress = cutil.GetPtr("other-invalid-address")
+	withPrefixes := func(prefixes ...string) Interface {
+		ifc := base
+		ifc.InlineRoutingProfile = &InterfaceInlineRoutingProfile{AllowedAnycastPrefixes: prefixes}
+		return ifc
+	}
+	anycast := withPrefixes("192.0.2.0/24", "2001:db8::/64")
+	expandedAnycast := withPrefixes("192.0.2.0/24", "2001:0DB8:0000:0000::/64")
+
+	tests := []struct {
+		name  string
+		left  Interface
+		right Interface
+		equal bool
+	}{
+		{name: "resolved prefix preserves VPC selector identity", left: base, right: same, equal: true},
+		{name: "missing device instance", left: base, right: missingDeviceInstance},
+		{name: "empty inline profile differs from absent", left: base, right: emptyProfile},
+		{name: "different VPC", left: base, right: differentVpc},
+		{name: "physical and virtual functions differ", left: base, right: virtualFunction},
+		{name: "different virtual functions", left: virtualFunction, right: otherVirtualFunction},
+		{name: "equivalent IPv6 addresses", left: ipv6, right: expandedIPv6, equal: true},
+		{name: "different IPv6 addresses", left: ipv6, right: differentIPv6},
+		{name: "requested address differs from absent", left: ipv6, right: prefixInterface},
+		{name: "invalid address strings remain distinct", left: invalidAddress, right: otherInvalidAddress},
+		{name: "equivalent IPv6 anycast prefixes", left: anycast, right: expandedAnycast, equal: true},
+		{name: "anycast prefix length differs", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/65")},
+		{name: "anycast prefix host bits remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::1/64")},
+		{name: "anycast prefix order remains distinct", left: anycast, right: withPrefixes("2001:db8::/64", "192.0.2.0/24")},
+		{name: "duplicate anycast prefixes remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/64", "2001:db8::/64")},
+		{name: "invalid anycast prefixes remain distinct", left: withPrefixes("invalid-prefix"), right: withPrefixes("other-invalid-prefix")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.equal {
+				assert.Equal(t, tt.left.EthernetInterfaceKey(), tt.right.EthernetInterfaceKey())
+			} else {
+				assert.NotEqual(t, tt.left.EthernetInterfaceKey(), tt.right.EthernetInterfaceKey())
+			}
+		})
+	}
+	assert.Equal(t, "2001:0DB8:0:0:0:0:0:1", *expandedIPv6.RequestedIpAddress)
+	assert.Equal(t, []string{"192.0.2.0/24", "2001:0DB8:0000:0000::/64"}, expandedAnycast.InlineRoutingProfile.AllowedAnycastPrefixes)
 }
 
 func TestInterfaceSQLDAO_Create(t *testing.T) {
@@ -246,6 +338,22 @@ func TestInterfaceSQLDAO_Create(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
+			desc: "create one with vpc selection intent",
+			iss: []Interface{
+				{
+					ID:              uuid.New(),
+					InstanceID:      i1.ID,
+					VpcID:           &vpc.ID,
+					VpcIPFamilyMode: cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+					IsPhysical:      false,
+					Status:          InterfaceStatusPending,
+					CreatedBy:       user.ID,
+				},
+			},
+			expectError:        false,
+			verifyChildSpanner: true,
+		},
+		{
 			desc: "create one with device and device instance",
 			iss: []Interface{
 				{
@@ -314,6 +422,8 @@ func TestInterfaceSQLDAO_Create(t *testing.T) {
 				input := InterfaceCreateInput{
 					InstanceID:           i.InstanceID,
 					SubnetID:             i.SubnetID,
+					VpcID:                i.VpcID,
+					VpcIPFamilyMode:      i.VpcIPFamilyMode,
 					VpcPrefixID:          i.VpcPrefixID,
 					Device:               i.Device,
 					DeviceInstance:       i.DeviceInstance,
@@ -348,14 +458,16 @@ func TestInterfaceSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, i.RequestedIpAddress, persisted.RequestedIpAddress)
 					assert.Equal(t, i.InlineRoutingProfile, got.InlineRoutingProfile)
 					assert.Equal(t, i.InlineRoutingProfile, persisted.InlineRoutingProfile)
+					assert.Equal(t, i.VpcID, got.VpcID)
+					assert.Equal(t, i.VpcID, persisted.VpcID)
+					assert.Equal(t, i.VpcIPFamilyMode, got.VpcIPFamilyMode)
+					assert.Equal(t, i.VpcIPFamilyMode, persisted.VpcIPFamilyMode)
 				}
 			}
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -465,13 +577,15 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 	assert.NotNil(t, ifc)
 
 	input2 := InterfaceCreateInput{
-		InstanceID:     i1.ID,
-		VpcPrefixID:    &vpcPrefix.ID,
-		Device:         cutil.GetPtr("MT43244 BlueField-3 integrated ConnectX-7 network controller"),
-		DeviceInstance: cutil.GetPtr(0),
-		IsPhysical:     true,
-		Status:         InterfaceStatusPending,
-		CreatedBy:      user.ID,
+		InstanceID:      i1.ID,
+		VpcID:           &vpc.ID,
+		VpcIPFamilyMode: cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+		VpcPrefixID:     &vpcPrefix.ID,
+		Device:          cutil.GetPtr("MT43244 BlueField-3 integrated ConnectX-7 network controller"),
+		DeviceInstance:  cutil.GetPtr(0),
+		IsPhysical:      true,
+		Status:          InterfaceStatusPending,
+		CreatedBy:       user.ID,
 	}
 	ifc1, err := ifcd.Create(ctx, nil, input2)
 	assert.Nil(t, err)
@@ -488,6 +602,7 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 		expectedError      bool
 		expectedInstance   bool
 		expectedSubnet     bool
+		expectedVpc        bool
 		expectVpcPrefix    bool
 		expectedDevice     bool
 		expectedIsPhysical bool
@@ -525,9 +640,10 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 		{
 			desc:               "success with vpcprefix relations",
 			id:                 ifc1.ID,
-			paramRelations:     []string{InstanceRelationName, MachineInterfaceRelationName, VpcPrefixRelationName},
+			paramRelations:     []string{InstanceRelationName, MachineInterfaceRelationName, VpcRelationName, VpcPrefixRelationName},
 			expectedError:      false,
 			expectedInstance:   true,
+			expectedVpc:        true,
 			expectVpcPrefix:    true,
 			expectedDevice:     true,
 			expectedIsPhysical: true,
@@ -545,6 +661,10 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 				if tc.expectedSubnet {
 					assert.EqualValues(t, subnet.ID, *got.SubnetID)
 				}
+				if tc.expectedVpc {
+					require.NotNil(t, got.Vpc)
+					assert.EqualValues(t, vpc.ID, got.Vpc.ID)
+				}
 				if tc.expectedIsPhysical {
 					assert.EqualValues(t, ifc.IsPhysical, got.IsPhysical)
 				}
@@ -560,8 +680,6 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -736,6 +854,11 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
+	_, err = ifcd.Update(ctx, nil, InterfaceUpdateInput{
+		InterfaceID:          instance1VpcPrefixes[0].ID,
+		SecondaryVpcPrefixID: &vpcPrefix1.ID,
+	})
+	require.NoError(t, err)
 
 	// Create separate interfaces with IP addresses for IP filtering tests (don't modify existing ones)
 	ifcWithIP1, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: instances[0].ID, SubnetID: &subnet1.ID, IsPhysical: false, Status: InterfaceStatusPending, CreatedBy: user.ID})
@@ -796,9 +919,9 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 			expectedError: false,
 		},
 		{
-			desc:          "GetAll with VpcPrefix ID filter returns objects",
-			VpcPrefixID:   &vpcPrefix.ID,
-			expectedCount: totalCount / 2,
+			desc:          "GetAll with VpcPrefix ID filter returns primary and secondary objects",
+			VpcPrefixID:   &vpcPrefix1.ID,
+			expectedCount: totalCount/2 + 1,
 			expectedError: false,
 		},
 		{
@@ -951,8 +1074,6 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1045,6 +1166,24 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 	})
 	assert.Nil(t, err)
 	assert.NotNil(t, ifc)
+	secondaryVpcPrefix, err := NewVpcPrefixDAO(dbSession).Create(ctx, nil, VpcPrefixCreateInput{
+		Name:         "secondary-vpc-prefix",
+		TenantOrg:    "test",
+		SiteID:       site.ID,
+		VpcID:        vpc.ID,
+		TenantID:     tenant.ID,
+		IpBlockID:    &ipv4Block.ID,
+		Prefix:       "192.0.3.0/24",
+		PrefixLength: 24,
+		Status:       VpcPrefixStatusReady,
+		CreatedBy:    user.ID,
+	})
+	require.NoError(t, err)
+	_, err = ifcd.Update(ctx, nil, InterfaceUpdateInput{
+		InterfaceID:          ifc.ID,
+		SecondaryVpcPrefixID: &secondaryVpcPrefix.ID,
+	})
+	require.NoError(t, err)
 
 	badSession, err := db.NewSession(context.Background(), "localhost", 1234, "postgres", "postgres", "postgres", "")
 	assert.Nil(t, err)
@@ -1057,6 +1196,7 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 		dao                InterfaceDAO
 		input              InterfaceClearInput
 		expectError        bool
+		expectSecondaryID  *uuid.UUID
 		expectRequestedIP  *string
 		expectRouting      *InterfaceInlineRoutingProfile
 		verifyChildSpanner bool
@@ -1066,6 +1206,7 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 			dao:                badDAO,
 			input:              InterfaceClearInput{InterfaceID: ifc.ID, RequestedIpAddress: true},
 			expectError:        true,
+			expectSecondaryID:  &secondaryVpcPrefix.ID,
 			expectRequestedIP:  requestedIpAddress,
 			expectRouting:      routingProfile,
 			verifyChildSpanner: true,
@@ -1075,6 +1216,7 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 			dao:                ifcd,
 			input:              InterfaceClearInput{InterfaceID: ifc.ID, InlineRoutingProfile: true},
 			expectError:        false,
+			expectSecondaryID:  &secondaryVpcPrefix.ID,
 			expectRequestedIP:  requestedIpAddress,
 			expectRouting:      nil,
 			verifyChildSpanner: true,
@@ -1084,6 +1226,17 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 			dao:                ifcd,
 			input:              InterfaceClearInput{InterfaceID: ifc.ID, RequestedIpAddress: true},
 			expectError:        false,
+			expectSecondaryID:  &secondaryVpcPrefix.ID,
+			expectRequestedIP:  nil,
+			expectRouting:      nil,
+			verifyChildSpanner: true,
+		},
+		{
+			desc:               "can clear secondary VPC prefix ID",
+			dao:                ifcd,
+			input:              InterfaceClearInput{InterfaceID: ifc.ID, SecondaryVpcPrefixID: true},
+			expectError:        false,
+			expectSecondaryID:  nil,
 			expectRequestedIP:  nil,
 			expectRouting:      nil,
 			verifyChildSpanner: true,
@@ -1101,12 +1254,11 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 
 			assert.Equal(t, tc.expectRequestedIP, got.RequestedIpAddress)
 			assert.Equal(t, tc.expectRouting, got.InlineRoutingProfile)
+			assert.Equal(t, tc.expectSecondaryID, got.SecondaryVpcPrefixID)
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1276,7 +1428,7 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 
 	vfID := 10
 	macAddress := "21-41-A7-A6-40-76"
-	ipAddresses := []string{"192.0.2.3", "2001:db8:abcd:0018"}
+	ipAddresses := []string{"192.0.2.3", "2001:db8:abcd::18"}
 	routingProfile := &InterfaceInlineRoutingProfile{
 		AllowedAnycastPrefixes: []string{"192.0.2.0/24", "2001:db8::/64"},
 	}
@@ -1301,31 +1453,37 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		desc                    string
-		id                      uuid.UUID
-		paramInstanceID         *uuid.UUID
-		paramSubnetID           *uuid.UUID
-		paramVpcPrefixID        *uuid.UUID
-		paramDevice             *string
-		paramDeviceInstance     *int
-		paramVirtualFunctionID  *int
-		paramRequestedIpAddress *string
-		paramRoutingProfile     *InterfaceInlineRoutingProfile
-		paramMacAddress         *string
-		paramIPAddresses        []string
-		paramStatus             *string
+		desc                      string
+		id                        uuid.UUID
+		paramInstanceID           *uuid.UUID
+		paramSubnetID             *uuid.UUID
+		paramVpcID                *uuid.UUID
+		paramVpcIPFamilyMode      *InterfaceVpcIPFamilyMode
+		paramVpcPrefixID          *uuid.UUID
+		paramSecondaryVpcPrefixID *uuid.UUID
+		paramDevice               *string
+		paramDeviceInstance       *int
+		paramVirtualFunctionID    *int
+		paramRequestedIpAddress   *string
+		paramRoutingProfile       *InterfaceInlineRoutingProfile
+		paramMacAddress           *string
+		paramIPAddresses          []string
+		paramStatus               *string
 
-		expectedInstanceID         *uuid.UUID
-		expectedSubnetID           *uuid.UUID
-		expectedVpcPrefixID        *uuid.UUID
-		expectedDevice             *string
-		expectedDeviceInstance     *int
-		expectedVirtualFunctionID  *int
-		expectedRequestedIpAddress *string
-		expectedRoutingProfile     *InterfaceInlineRoutingProfile
-		expectedMacAddress         *string
-		expectedIPAddresses        []string
-		expectedStatus             *string
+		expectedInstanceID           *uuid.UUID
+		expectedSubnetID             *uuid.UUID
+		expectedVpcID                *uuid.UUID
+		expectedVpcIPFamilyMode      *InterfaceVpcIPFamilyMode
+		expectedVpcPrefixID          *uuid.UUID
+		expectedSecondaryVpcPrefixID *uuid.UUID
+		expectedDevice               *string
+		expectedDeviceInstance       *int
+		expectedVirtualFunctionID    *int
+		expectedRequestedIpAddress   *string
+		expectedRoutingProfile       *InterfaceInlineRoutingProfile
+		expectedMacAddress           *string
+		expectedIPAddresses          []string
+		expectedStatus               *string
 
 		expectError        bool
 		verifyChildSpanner bool
@@ -1353,25 +1511,31 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			desc:                    "success wth vpcprefix fields updated",
-			id:                      ifcRouting.ID,
-			paramInstanceID:         &i2.ID,
-			paramVpcPrefixID:        &vpcPrefix2.ID,
-			paramVirtualFunctionID:  &vfID,
-			paramRequestedIpAddress: cutil.GetPtr("192.0.2.31"),
-			paramRoutingProfile:     routingProfile,
-			paramMacAddress:         &macAddress,
-			paramIPAddresses:        ipAddresses,
-			paramStatus:             cutil.GetPtr(InterfaceStatusReady),
+			desc:                      "success wth vpcprefix fields updated",
+			id:                        ifcRouting.ID,
+			paramInstanceID:           &i2.ID,
+			paramVpcID:                &vpc.ID,
+			paramVpcIPFamilyMode:      cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+			paramVpcPrefixID:          &vpcPrefix2.ID,
+			paramSecondaryVpcPrefixID: &vpcPrefix1.ID,
+			paramVirtualFunctionID:    &vfID,
+			paramRequestedIpAddress:   cutil.GetPtr("192.0.2.31"),
+			paramRoutingProfile:       routingProfile,
+			paramMacAddress:           &macAddress,
+			paramIPAddresses:          ipAddresses,
+			paramStatus:               cutil.GetPtr(InterfaceStatusReady),
 
-			expectedInstanceID:         &i2.ID,
-			expectedVpcPrefixID:        &vpcPrefix2.ID,
-			expectedVirtualFunctionID:  &vfID,
-			expectedRequestedIpAddress: cutil.GetPtr("192.0.2.31"),
-			expectedRoutingProfile:     routingProfile,
-			expectedMacAddress:         &macAddress,
-			expectedIPAddresses:        ipAddresses,
-			expectedStatus:             cutil.GetPtr(InterfaceStatusReady),
+			expectedInstanceID:           &i2.ID,
+			expectedVpcID:                &vpc.ID,
+			expectedVpcIPFamilyMode:      cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+			expectedVpcPrefixID:          &vpcPrefix2.ID,
+			expectedSecondaryVpcPrefixID: &vpcPrefix1.ID,
+			expectedVirtualFunctionID:    &vfID,
+			expectedRequestedIpAddress:   cutil.GetPtr("192.0.2.31"),
+			expectedRoutingProfile:       routingProfile,
+			expectedMacAddress:           &macAddress,
+			expectedIPAddresses:          ipAddresses,
+			expectedStatus:               cutil.GetPtr(InterfaceStatusReady),
 
 			expectError:        false,
 			verifyChildSpanner: true,
@@ -1406,6 +1570,18 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 			paramStatus: cutil.GetPtr(InterfaceStatusProvisioning),
 			expectError: true,
 		},
+		{
+			desc:             "failed with malformed IP address",
+			id:               ifc1.ID,
+			paramIPAddresses: []string{"not-an-ip"},
+			expectError:      true,
+		},
+		{
+			desc:             "failed with CIDR-form IP address",
+			id:               ifc1.ID,
+			paramIPAddresses: []string{"192.0.2.1/31"},
+			expectError:      true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -1413,7 +1589,10 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 				InterfaceID:          tc.id,
 				InstanceID:           tc.paramInstanceID,
 				SubnetID:             tc.paramSubnetID,
+				VpcID:                tc.paramVpcID,
+				VpcIPFamilyMode:      tc.paramVpcIPFamilyMode,
 				VpcPrefixID:          tc.paramVpcPrefixID,
+				SecondaryVpcPrefixID: tc.paramSecondaryVpcPrefixID,
 				Device:               tc.paramDevice,
 				DeviceInstance:       tc.paramDeviceInstance,
 				VirtualFunctionID:    tc.paramVirtualFunctionID,
@@ -1433,9 +1612,16 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 				if tc.expectedSubnetID != nil {
 					assert.Equal(t, *tc.expectedSubnetID, *got.SubnetID)
 				}
+				if tc.expectedVpcID != nil {
+					assert.Equal(t, *tc.expectedVpcID, *got.VpcID)
+				}
+				if tc.expectedVpcIPFamilyMode != nil {
+					assert.Equal(t, *tc.expectedVpcIPFamilyMode, *got.VpcIPFamilyMode)
+				}
 				if tc.expectedVpcPrefixID != nil {
 					assert.Equal(t, *tc.expectedVpcPrefixID, *got.VpcPrefixID)
 				}
+				assert.Equal(t, tc.expectedSecondaryVpcPrefixID, got.SecondaryVpcPrefixID)
 				assert.Equal(t, *tc.expectedVirtualFunctionID, *got.VirtualFunctionID)
 				assert.Equal(t, tc.expectedRequestedIpAddress, got.RequestedIpAddress)
 				assert.Equal(t, tc.expectedRoutingProfile, got.InlineRoutingProfile)
@@ -1446,6 +1632,8 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 				persisted, err := ifcd.GetByID(ctx, nil, tc.id, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tc.expectedRoutingProfile, persisted.InlineRoutingProfile)
+				assert.Equal(t, tc.expectedVpcID, persisted.VpcID)
+				assert.Equal(t, tc.expectedVpcIPFamilyMode, persisted.VpcIPFamilyMode)
 
 				if tc.expectedDevice != nil {
 					assert.Equal(t, *tc.expectedDevice, *got.Device)
@@ -1462,12 +1650,43 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
-
+	prefixTests := []struct {
+		name     string
+		prefixes []string
+		want     []string
+		wantErr  string
+	}{
+		{name: "replace", prefixes: []string{"192.0.2.0/24", "2001:db8::/64"}, want: []string{"192.0.2.0/24", "2001:db8::/64"}},
+		{name: "omit", want: []string{"2001:db8:1::/64"}},
+		{name: "clear", prefixes: []string{}, want: []string{}},
+		{name: "reject malformed prefix", prefixes: []string{"2001:db8:2::/64", "not-a-prefix"}, want: []string{"2001:db8:1::/64"}, wantErr: "invalid Interface IP prefix"},
+	}
+	for _, tt := range prefixTests {
+		t.Run("IP prefixes/"+tt.name, func(t *testing.T) {
+			_, err := ifcd.Update(ctx, nil, InterfaceUpdateInput{
+				InterfaceID: ifc.ID,
+				IPPrefixes:  []string{"2001:db8:1::/64"},
+			})
+			require.NoError(t, err)
+			// Updating `Status` forces a write even when prefixes are omitted.
+			_, err = ifcd.Update(ctx, nil, InterfaceUpdateInput{
+				InterfaceID: ifc.ID,
+				IPPrefixes:  tt.prefixes,
+				Status:      cutil.GetPtr(InterfaceStatusReady),
+			})
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			persisted, err := ifcd.GetByID(ctx, nil, ifc.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, persisted.IPPrefixes)
+		})
+	}
 }
 
 func TestInterfaceSQLDAO_Delete(t *testing.T) {
@@ -1589,8 +1808,6 @@ func TestInterfaceSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1739,8 +1956,6 @@ func TestInterfaceSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1888,6 +2103,4 @@ func TestInterfaceSQLDAO_DeleteAllByInstanceIDs(t *testing.T) {
 	// Verify the active span is propagated through the call.
 	span := otrace.SpanFromContext(ctx)
 	assert.True(t, span.SpanContext().IsValid())
-	_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-	assert.True(t, ok)
 }

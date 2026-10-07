@@ -11,29 +11,30 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateSubnetV2 is a workflow to create new Subnets using the CreateSubnetOnSite activity
 // V1 (CreateSubnet) is found cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func CreateSubnetV2(ctx workflow.Context, request *cwssaws.NetworkSegmentCreationRequest) error {
+func CreateSubnetV2(ctx workflow.Context, request *corev1.NetworkSegmentCreationRequest) error {
 	logger := log.With().Str("Workflow", "Subnet").Str("Action", "Create").Str("VPC ID", request.VpcId.String()).Str("Name", request.Name).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -56,21 +57,20 @@ func CreateSubnetV2(ctx workflow.Context, request *cwssaws.NetworkSegmentCreatio
 // DeleteSubnetV2 is a workflow to delete Subnets using the DeleteSubnetOnSite activity
 // V1 (DeleteSubnet) is found cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func DeleteSubnetV2(ctx workflow.Context, request *cwssaws.NetworkSegmentDeletionRequest) error {
+func DeleteSubnetV2(ctx workflow.Context, request *corev1.NetworkSegmentDeletionRequest) error {
 	logger := log.With().Str("Workflow", "Subnet").Str("Action", "Delete").Str("Subnet ID", request.GetId().GetValue()).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

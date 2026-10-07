@@ -15,7 +15,37 @@
 	<tr><th>VNI</th><td>{{ vni }}</td></tr>
 </table>
 
+<h2>Routing Profile Overrides</h2>
+{% if has_routing_profile_overrides %}
+<div style="overflow: auto;"><pre><code>{{ routing_profile_overrides }}</code></pre></div>
+{% else %}
+<p>None</p>
+{% endif %}
+
+<h2>Current Effective Routing Profile</h2>
+{% if has_effective_routing_profile %}
+<div style="overflow: auto;"><pre><code>{{ effective_routing_profile }}</code></pre></div>
+{% else %}
+<p>Not applicable or unavailable from the current API configuration.</p>
+{% endif %}
+
 <h2>Metadata</h2>
 {{ metadata_detail|safe }}
+
+<h2>VPC Peerings</h2>
+{% if peerings.is_empty() %}
+<p>No VPC peerings found.</p>
+{% else %}
+<table class="sortable overview">
+	<thead>
+		<tr><th>Peering ID</th><th>Peer VPC</th></tr>
+	</thead>
+	<tbody>
+		{% for peering in peerings %}
+		<tr><td>{{ peering.id }}</td><td><a href="/admin/vpc/{{ peering.peer_vpc_id }}">{{ peering.peer_vpc_id }}</a></td></tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
 
 {% endblock %}

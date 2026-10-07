@@ -24,7 +24,7 @@ func UnitTestDB(ctx context.Context, t *testing.T, dbConf cdb.Config) (*cdb.Sess
 		return nil, err
 	}
 
-	err = migrations.MigrateWithDB(ctx, session.DB)
+	err = migrations.MigrateWithDB(ctx, session.DB, migrations.MigrateOptions{})
 
 	return session, err
 }

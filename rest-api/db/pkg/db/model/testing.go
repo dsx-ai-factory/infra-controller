@@ -97,6 +97,12 @@ func TestSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create InfiniBandInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*InfiniBandInterface)(nil))
 	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*SpectrumXAttachment)(nil))
+	assert.Nil(t, err)
 	// create ssh key table
 	err = dbSession.DB.ResetModel(context.Background(), (*SSHKey)(nil))
 	assert.Nil(t, err)
@@ -163,7 +169,13 @@ func TestBuildUser(t *testing.T, dbSession *db.Session, starfleetID string, org 
 func TestBuildInfrastructureProvider(t *testing.T, dbSession *db.Session, name string, org string, user *User) *InfrastructureProvider {
 	ipDAO := NewInfrastructureProviderDAO(dbSession)
 
-	ip, err := ipDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Provider"), org, cutil.GetPtr(org), user)
+	ip, err := ipDAO.Create(context.Background(), nil, InfrastructureProviderCreateInput{
+		Name:           name,
+		DisplayName:    cutil.GetPtr("Test Provider"),
+		Org:            org,
+		OrgDisplayName: cutil.GetPtr(org),
+		CreatedBy:      user.ID,
+	})
 	assert.Nil(t, err)
 
 	return ip
@@ -173,14 +185,11 @@ func TestBuildInfrastructureProvider(t *testing.T, dbSession *db.Session, name s
 func TestBuildTenant(t *testing.T, dbSession *db.Session, name string, org string, user *User) *Tenant {
 	tnDAO := NewTenantDAO(dbSession)
 
-	tncfg := TenantConfig{}
-
 	tn, err := tnDAO.Create(context.Background(), nil, TenantCreateInput{
 		Name:           name,
 		DisplayName:    cutil.GetPtr("Test Tenant"),
 		Org:            org,
 		OrgDisplayName: cutil.GetPtr(org),
-		Config:         &tncfg,
 		CreatedBy:      user.ID,
 	})
 	assert.Nil(t, err)
@@ -216,7 +225,7 @@ func TestBuildSite(t *testing.T, dbSession *db.Session, ip *InfrastructureProvid
 }
 
 // TestBuildTenantSite creates a test Tenant/Site relationship
-func TestBuildTenantSite(t *testing.T, dbSession *db.Session, tn *Tenant, st *Site, config map[string]interface{}, user *User) *TenantSite {
+func TestBuildTenantSite(t *testing.T, dbSession *db.Session, tn *Tenant, st *Site, config *TenantSiteConfig, user *User) *TenantSite {
 	tsDAO := NewTenantSiteDAO(dbSession)
 
 	ts, err := tsDAO.Create(context.Background(), nil, TenantSiteCreateInput{

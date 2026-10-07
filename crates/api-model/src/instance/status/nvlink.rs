@@ -72,8 +72,8 @@ impl InstanceNvLinkStatus {
                 }
                 None => {
                     tracing::error!(
-                        "could not find matching status gpu {:?}",
-                        cfg.device_instance
+                        device_instance = cfg.device_instance,
+                        "could not find matching status gpu",
                     );
                     configs_synced = SyncState::Pending;
                     InstanceNvLinkGpuStatus {

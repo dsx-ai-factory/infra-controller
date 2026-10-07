@@ -3,6 +3,7 @@ api-server = "https://127.0.0.1:8001"
 root-ca = "/opt/forge/forge_root.pem"
 client-cert = "/opt/forge/machine_cert.pem"
 client-key = "/opt/forge/machine_cert.key"
+local-api-socket = "/opt/forge/run/agent.sock"
 
 [machine]
 interface-id = "91609f10-c91d-470d-a260-6293ea0c1234"
@@ -12,6 +13,7 @@ address = "0.0.0.0:7777"
 
 [telemetry]
 metrics-address = "0.0.0.0:8888"
+prometheus-enabled = true
 
 [hbn]
 root-dir = "/var/lib/hbn"

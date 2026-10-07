@@ -26,9 +26,9 @@ Delete an expected rack by rack ID:
     $ nico-admin-cli expected-rack delete 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Rack ID of expected rack to delete.")]
-    pub rack_id: RackId,
+    rack_id: RackId,
 }
 
 impl From<Args> for rpc::forge::ExpectedRackRequest {

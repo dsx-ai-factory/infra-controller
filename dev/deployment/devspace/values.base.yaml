@@ -1,4 +1,11 @@
 nico-api:
+  # Disable legacy forge-system namespace alias for local dev
+  legacyAlias:
+    enabled: false
+  # Vault's local admin-CLI certificates are issued by CN=local-vault-ca.
+  auth:
+    additionalIssuerCns:
+      - "local-vault-ca"
   resources:
     limits:
       cpu: "16"
@@ -6,14 +13,26 @@ nico-api:
     requests:
       cpu: "1"
       memory: "1Gi"
+  webAuth:
+    mode: "none"
+  # DevSpace does not deploy rack-manager. Do not render RMS-backed services
+  # into nico-api's configuration when their backend is absent.
+  componentManager:
+    enabled: false
+  rms:
+    enabled: false
   siteConfig:
     enabled: true
     nicoApiSiteConfig: |
-      bypass_rbac = true
       attestation_enabled = false
       dpu_ipmi_tool_impl = "test"
       initial_domain_name = "local.nico"
       initial_dpu_agent_upgrade_policy = "off"
+      # devspace's deployment uses machine-a-tron in single-IP mode, which
+      # requires insecure discovery (where the server trusts a caller-provided
+      # machine interface ID rather than inspecting the connection's source
+      # IP.)
+      allow_insecure_discovery = true
 
       # DB transactions in nico should be quick, pool size should ≈ the
       # number of cores. Default postgres configuration is a 100 connection
@@ -68,7 +87,7 @@ nico-api:
       spiffe_trust_domain = "nico.local"
       spiffe_service_base_paths = ["/nico-system/sa/", "/default/sa/"]
       spiffe_machine_base_path = "/nico-system/machine/"
-      additional_issuer_cns = []
+      additional_issuer_cns = ["local-vault-ca"]
 
       [host_health]
       hardware_health_reports = "MonitorOnly"
@@ -91,7 +110,7 @@ nico-api:
       enabled = true
       create_machines = true
       allow_changing_bmc_proxy = true
-      bmc_proxy = "machine-a-tron-bmc-mock.nico-system.svc.cluster.local:1266"
+      bmc_proxy = "nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:1266"
       run_interval = "10s"
       machines_created_per_run = 1000
       explorations_per_run = 1000
@@ -104,7 +123,6 @@ nico-api:
       concurrency_limit = 100
 
 nico-bmc-proxy:
-  enabled: true
   replicas: 1 # save on local resources
   configFiles:
     enabled: true
@@ -113,7 +131,7 @@ nico-bmc-proxy:
       metrics_endpoint = "[::]:1080"
       database_url = "postgres://replaced-by-env-var"
       allowed_principals = ["trusted-certificate"]
-      bmc_proxy = "machine-a-tron-bmc-mock.nico-system.svc.cluster.local:1266"
+      bmc_proxy = "nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:1266"
 
       [tls]
       identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -128,7 +146,7 @@ nico-bmc-proxy:
         "/default/sa/",
       ]
       spiffe_machine_base_path = "/nico-system/machine/"
-      additional_issuer_cns = []
+      additional_issuer_cns = ["local-vault-ca"]
 
       [auth.acls]
       "trusted-certificate" = ["/**"]
@@ -139,17 +157,33 @@ nico-bmc-proxy:
       client_cert = "/var/run/secrets/spiffe.io/tls.crt"
       client_key = "/var/run/secrets/spiffe.io/tls.key"
 
-nico-dhcp:
-  enabled: false
-nico-dns:
-  enabled: false
+nico-machine-a-tron:
+  enabled: true
+  # Deploy to nico-system (same namespace as nico-api) for simpler dev setup
+  # No need to copy secrets or configure cross-namespace access
+  machineATron:
+    nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
+  machineDefaults:
+    accelerationFactor: 0.01
+  # Preserve simulated machine identity and installed OS across pod restarts.
+  # Without this, Core can remain in an Assigned state while a restarted
+  # machine-a-tron has reset the corresponding host and DPUs to MachineDown.
+  persistence:
+    enabled: true
+  # SPIFFE URI must match nico-api's allowed service_base_paths
+  certificate:
+    uris:
+      - "spiffe://nico.local/nico-system/sa/machine-a-tron"
+  pods:
+    mat-0:
+      machines:
+        rack-machines:
+          hwType: wiwynn_gb200_nvl
+          hostCount: 2
+          dpuPerHostCount: 2
+          bmcDhcpRelayAddress: "192.168.192.1"
+          underlayDhcpRelayAddress: "192.168.176.1"
 nico-dsx-exchange-consumer:
-  enabled: false
-nico-hardware-health:
-  enabled: false
-nico-pxe:
-  enabled: false
-nico-ssh-console-rs:
   enabled: false
 unbound:
   enabled: false

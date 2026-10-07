@@ -23,14 +23,14 @@ mod update;
 
 // Cross-module re-exports for jump module
 use clap::Parser;
-pub use show::args::Args as ShowComputeAllocation;
-pub use show::cmd::show;
+pub(crate) use show::args::Args as ShowComputeAllocation;
+pub(crate) use show::cmd::show;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Create a compute allocation", visible_alias = "c")]
     Create(create::Args),
 

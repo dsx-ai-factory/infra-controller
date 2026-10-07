@@ -14,20 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashSet;
-use std::path::Path;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use lazy_static::lazy_static;
 use rpc::forge::{ForgeAgentControlResponse, MachineArchitecture};
 use tempfile::TempDir;
-use uuid::Uuid;
 
 use crate::api_client::ClientApiError;
 use crate::config::MachineATronContext;
-use crate::host_machine::HostMachineHandle;
-use crate::machine_state_machine::AddressConfigError;
 
 lazy_static! {
     static ref BMC_MOCK_SOCKET_TEMP_DIR: TempDir = tempfile::Builder::new()
@@ -36,24 +31,32 @@ lazy_static! {
         .unwrap();
 }
 
-#[derive(Debug, Clone)]
-pub enum PxeResponse {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum PxeBootTarget {
     Exit,
     Scout,    // PXE script is booting scout.efi
     DpuAgent, // PXE script is booting carbide.efi
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum PxeError {
-    #[error("API Client error running PXE request: {0}")]
-    ClientApi(#[from] ClientApiError),
-    #[error("PXE Request failed with status: {0}")]
-    PxeRequest(#[from] tonic::Status),
-    #[error("Error sending PXE request: {0}")]
-    Reqwest(#[from] reqwest::Error),
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) struct PxeResponse {
+    pub(super) boot_target: PxeBootTarget,
+    pub(super) machine_interface_id: Option<MachineInterfaceId>,
 }
 
-pub async fn forge_agent_control(
+#[derive(thiserror::Error, Debug)]
+pub(super) enum PxeError {
+    #[error("API client error running PXE request: {0}")]
+    ClientApi(#[from] ClientApiError),
+    #[error("PXE request failed with status: {0}")]
+    PxeRequest(#[from] tonic::Status),
+    #[error("error sending PXE request: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("PXE script contains an invalid machine interface ID '{0}'")]
+    InvalidMachineInterfaceId(String),
+}
+
+pub(super) async fn forge_agent_control(
     app_context: &MachineATronContext,
     machine_id: MachineId,
 ) -> Option<ForgeAgentControlResponse> {
@@ -67,13 +70,18 @@ pub async fn forge_agent_control(
             if e.code() == tonic::Code::NotFound {
                 return None;
             }
-            tracing::warn!("Error getting control action: {e}");
+            tracing::warn!(
+                error = %e,
+                "Error getting control action",
+            );
             Some(ForgeAgentControlResponse::noop())
         }
     }
 }
 
-pub fn get_validation_id(response: &ForgeAgentControlResponse) -> Option<MachineValidationId> {
+pub(super) fn get_validation_id(
+    response: &ForgeAgentControlResponse,
+) -> Option<MachineValidationId> {
     if let Some(rpc::forge::forge_agent_control_response::Action::MachineValidation(
         machine_validation,
     )) = &response.action
@@ -84,7 +92,7 @@ pub fn get_validation_id(response: &ForgeAgentControlResponse) -> Option<Machine
     }
 }
 
-pub async fn send_pxe_boot_request(
+pub(super) async fn send_pxe_boot_request(
     app_context: &MachineATronContext,
     arch: MachineArchitecture,
     client_ip: std::net::IpAddr,
@@ -102,144 +110,129 @@ pub async fn send_pxe_boot_request(
         .pxe_script;
     tracing::info!("PXE Request successful");
 
-    let response = if pxe_script.contains("exit") {
-        tracing::info!("PXE Request is EXIT");
-        PxeResponse::Exit
-    } else if let Some(kernel_url) = pxe_script
-        .lines()
-        .find(|l| l.starts_with("kernel"))
-        .and_then(|l| l.split(" ").nth(1))
-    {
-        if kernel_url.ends_with("/carbide.efi") {
-            PxeResponse::DpuAgent
-        } else if kernel_url.ends_with("/scout.efi") {
-            PxeResponse::Scout
-        } else {
-            tracing::error!(
-                "Could not determine what to do with kernel URL returned by PXE script, will treat as 'exit': {}",
-                pxe_script
-            );
-            PxeResponse::Exit
+    let response = parse_pxe_response(&pxe_script)?;
+    match response.boot_target {
+        PxeBootTarget::Exit => {
+            tracing::info!("PXE Request is EXIT");
         }
-    } else {
-        tracing::error!(
-            "Could not determine what to do with PXE script (no kernel line, no exit line), will treat as 'exit': {}",
-            pxe_script
-        );
-        PxeResponse::Exit
-    };
+        PxeBootTarget::Scout => {
+            tracing::info!("PXE Request boots Scout");
+        }
+        PxeBootTarget::DpuAgent => {
+            tracing::info!("PXE Request boots DPU agent");
+        }
+    }
 
     Ok(response)
 }
 
-pub async fn get_next_free_machine(
-    machine_handles: &Vec<HostMachineHandle>,
-    assigned_mat_ids: &HashSet<Uuid>,
-) -> Option<HostMachineHandle> {
-    for machine in machine_handles {
-        if assigned_mat_ids.contains(&machine.mat_id()) {
-            continue;
-        }
-        let state = machine.api_state().await.ok()?;
-        if state == "Ready" {
-            return Some(machine.clone());
-        }
-    }
-    None
-}
-
-pub async fn add_address_to_interface(
-    address: &str,
-    interface: &str,
-) -> Result<(), AddressConfigError> {
-    if interface_has_address(interface, address).await? {
-        tracing::info!(
-            "Skipping adding address {} to interface {}, as it is already configured.",
-            address,
-            interface
-        );
-        return Ok(());
-    }
-
-    tracing::info!("Adding address {} to interface {}", address, interface);
-    let wrapper_cmd = find_sudo_command();
-    let mut cmd = tokio::process::Command::new(wrapper_cmd);
-    #[cfg(not(target_os = "macos"))]
-    let output = cmd
-        .args(["ip", "a", "add", address, "dev", interface])
-        .output()
-        .await?;
-    #[cfg(target_os = "macos")]
-    let output = cmd
-        .args([
-            // Prevent sudo from trying to read password.
-            "--non-interactive",
-            "ifconfig",
-            interface,
-            "add",
-            address,
-            "up",
-        ])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Err(AddressConfigError::CommandFailure(Box::new(cmd), output));
-    }
-
-    Ok(())
-}
-#[cfg(target_os = "macos")]
-async fn interface_has_address(
-    _interface: &str,
-    _address: &str,
-) -> Result<bool, AddressConfigError> {
-    Ok(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-async fn interface_has_address(interface: &str, address: &str) -> Result<bool, AddressConfigError> {
-    let mut cmd = tokio::process::Command::new("/usr/bin/env");
-
-    let output = cmd
-        .args([
-            "ip",
-            "a",
-            "s",
-            "to",
-            &[address, "32"].join("/"),
-            "dev",
-            interface,
-        ])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Err(AddressConfigError::CommandFailure(Box::new(cmd), output));
-    }
-    if output.stdout.is_empty() {
-        Ok(false)
-    } else {
-        Ok(true)
-    }
-}
-
-fn find_sudo_command() -> &'static str {
-    std::env::var("PATH")
-        .ok()
-        .and_then(|path| {
-            path.split(":").find_map(|dir| {
-                if std::fs::exists(Path::new(dir).join("sudo")).unwrap_or(false) {
-                    Some("sudo")
-                } else if std::fs::exists(Path::new(dir).join("doas")).unwrap_or(false) {
-                    Some("doas")
-                } else {
-                    None
-                }
+fn parse_pxe_response(pxe_script: &str) -> Result<PxeResponse, PxeError> {
+    let machine_interface_id = pxe_script
+        .split_ascii_whitespace()
+        .find_map(|token| token.strip_prefix("machine_id="))
+        .or_else(|| {
+            pxe_script.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("echo Interface ID:")
+                    .map(str::trim)
             })
         })
-        .unwrap_or_else(|| {
-            tracing::warn!("could not find sudo or doas in PATH, falling back on /usr/bin/env");
-            "/usr/bin/env"
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| PxeError::InvalidMachineInterfaceId(value.to_string()))
         })
+        .transpose()?;
+
+    let boot_target = if pxe_script.contains("exit") {
+        PxeBootTarget::Exit
+    } else if let Some(kernel_url) = pxe_script
+        .lines()
+        .find(|l| l.starts_with("kernel"))
+        .and_then(|l| l.split_ascii_whitespace().nth(1))
+    {
+        if kernel_url.ends_with("/carbide.efi") {
+            PxeBootTarget::DpuAgent
+        } else if kernel_url.ends_with("/scout.efi") {
+            PxeBootTarget::Scout
+        } else {
+            tracing::error!(
+                pxe_script = %pxe_script,
+                "Could not determine what to do with kernel URL returned by PXE script, will treat as 'exit'",
+            );
+            PxeBootTarget::Exit
+        }
+    } else {
+        tracing::error!(
+            pxe_script = %pxe_script,
+            "Could not determine what to do with PXE script (no kernel line, no exit line), will treat as 'exit'",
+        );
+        PxeBootTarget::Exit
+    };
+
+    Ok(PxeResponse {
+        boot_target,
+        machine_interface_id,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases};
+
+    use super::*;
+
+    #[test]
+    fn parses_pxe_boot_target_and_machine_interface_id() {
+        let machine_interface_id: MachineInterfaceId =
+            "0fd6e9a3-06fc-4a22-ad29-aca299677b00".parse().unwrap();
+
+        check_cases(
+            [
+                Case {
+                    scenario: "Scout kernel command line",
+                    input: format!(
+                        "kernel http://carbide-pxe/scout.efi console=tty0 machine_id={machine_interface_id}"
+                    ),
+                    expect: Yields(PxeResponse {
+                        boot_target: PxeBootTarget::Scout,
+                        machine_interface_id: Some(machine_interface_id),
+                    }),
+                },
+                Case {
+                    scenario: "DPU agent kernel command line",
+                    input: format!(
+                        "kernel http://carbide-pxe/carbide.efi machine_id={machine_interface_id}"
+                    ),
+                    expect: Yields(PxeResponse {
+                        boot_target: PxeBootTarget::DpuAgent,
+                        machine_interface_id: Some(machine_interface_id),
+                    }),
+                },
+                Case {
+                    scenario: "known interface exiting to installed OS",
+                    input: format!("echo Interface ID: {machine_interface_id}\nexit ||"),
+                    expect: Yields(PxeResponse {
+                        boot_target: PxeBootTarget::Exit,
+                        machine_interface_id: Some(machine_interface_id),
+                    }),
+                },
+                Case {
+                    scenario: "unknown interface exits without identity",
+                    input: "echo this is an unknown host interface\nexit ||".to_string(),
+                    expect: Yields(PxeResponse {
+                        boot_target: PxeBootTarget::Exit,
+                        machine_interface_id: None,
+                    }),
+                },
+                Case {
+                    scenario: "malformed machine interface ID",
+                    input: "kernel http://carbide-pxe/scout.efi machine_id=not-a-uuid".to_string(),
+                    expect: Fails,
+                },
+            ],
+            |pxe_script| parse_pxe_response(&pxe_script).map_err(drop),
+        );
+    }
 }

@@ -21,7 +21,7 @@ use mac_address::MacAddress;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn explore(
+pub(super) async fn explore(
     api_client: &ApiClient,
     address: &str,
     mac: Option<MacAddress>,

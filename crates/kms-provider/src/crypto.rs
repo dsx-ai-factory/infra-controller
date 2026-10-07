@@ -15,32 +15,50 @@
  * limitations under the License.
  */
 
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use sha2::{Digest, Sha256};
 
 use crate::KmsError;
 
-/// NONCE_LEN is the byte length of an AES-256-GCM
-/// nonce.
+/// The byte length of an AES-256-GCM nonce.
 const NONCE_LEN: usize = 12;
 
-/// encrypt encrypts plaintext using AES-256-GCM
-/// with a random 12-byte nonce. Returns
-/// (ciphertext, nonce) on success.
-pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), KmsError> {
+/// Encrypt plaintext with AES-256-GCM under a random 12-byte nonce, binding
+/// `aad` into the authentication tag. Returns `(ciphertext, nonce)`.
+///
+/// The associated data is authenticated but not encrypted: decryption fails
+/// unless the same bytes are presented again. Callers use this to tie a
+/// ciphertext to its storage location (the secrets table passes the row's
+/// `path`), so a ciphertext copied onto another row will not decrypt. Pass
+/// `b""` when there is no context to bind, which is what DEK wrapping does.
+pub fn encrypt(
+    key: &[u8; 32],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), KmsError> {
     let cipher = Aes256Gcm::new(key.into());
     let nonce_bytes: [u8; NONCE_LEN] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| KmsError::EncryptionFailed("AES-256-GCM encryption failed".to_string()))?;
     Ok((ciphertext, nonce_bytes.to_vec()))
 }
 
-/// decrypt decrypts AES-256-GCM ciphertext using
-/// the provided key and nonce.
-pub fn decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, KmsError> {
+/// Decrypt AES-256-GCM ciphertext. The key, nonce, and `aad` must all match
+/// what [`encrypt`] was given, or decryption fails.
+pub fn decrypt(
+    key: &[u8; 32],
+    nonce: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, KmsError> {
     if nonce.len() != NONCE_LEN {
         return Err(KmsError::DecryptionFailed(format!(
             "invalid nonce length: expected {NONCE_LEN} bytes, got {}",
@@ -50,16 +68,14 @@ pub fn decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8
     let cipher = Aes256Gcm::new(key.into());
     let nonce = Nonce::from_slice(nonce);
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| KmsError::DecryptionFailed("AES-256-GCM decryption failed".to_string()))
-}
-
-/// derive_key_id produces a deterministic identifier
-/// from key material. Returns the first 16 hex
-/// characters of the SHA-256 hash of the key.
-pub fn derive_key_id(key: &[u8; 32]) -> String {
-    let hash = Sha256::digest(key);
-    hex::encode(&hash[..8])
 }
 
 #[cfg(test)]
@@ -82,15 +98,14 @@ mod tests {
         key
     }
 
-    // Verifies that encrypt then decrypt produces
-    // the original plaintext.
+    // Verifies that encrypt then decrypt produces the original plaintext.
     #[test]
     fn encrypt_decrypt_round_trip() {
         let key = test_key();
         let plaintext = b"hello, secrets!";
 
-        let (ciphertext, nonce) = encrypt(&key, plaintext).expect("encrypt");
-        let decrypted = decrypt(&key, &nonce, &ciphertext).expect("decrypt");
+        let (ciphertext, nonce) = encrypt(&key, plaintext, b"").expect("encrypt");
+        let decrypted = decrypt(&key, &nonce, &ciphertext, b"").expect("decrypt");
 
         assert_eq!(decrypted, plaintext);
     }
@@ -102,55 +117,51 @@ mod tests {
         let wrong_key = other_key();
         let plaintext = b"sensitive data";
 
-        let (ciphertext, nonce) = encrypt(&key, plaintext).expect("encrypt");
-        let result = decrypt(&wrong_key, &nonce, &ciphertext);
+        let (ciphertext, nonce) = encrypt(&key, plaintext, b"").expect("encrypt");
+        let result = decrypt(&wrong_key, &nonce, &ciphertext, b"");
 
         assert!(result.is_err());
     }
 
-    // Verifies that encrypting the same plaintext
-    // twice produces different ciphertext.
+    // Verifies that encrypting the same plaintext twice produces different
+    // ciphertext (a new random nonce every call).
     #[test]
     fn different_nonces_produce_different_ciphertext() {
         let key = test_key();
         let plaintext = b"same plaintext";
 
-        let (ct1, nonce1) = encrypt(&key, plaintext).expect("encrypt 1");
-        let (ct2, nonce2) = encrypt(&key, plaintext).expect("encrypt 2");
+        let (ct1, nonce1) = encrypt(&key, plaintext, b"").expect("encrypt 1");
+        let (ct2, nonce2) = encrypt(&key, plaintext, b"").expect("encrypt 2");
 
         assert_ne!(nonce1, nonce2);
         assert_ne!(ct1, ct2);
     }
 
-    // Verifies that an invalid nonce length returns
-    // an error.
+    // Verifies that an invalid nonce length returns an error.
     #[test]
     fn invalid_nonce_length_errors() {
         let key = test_key();
-        let result = decrypt(&key, &[0u8; 11], &[]);
+        let result = decrypt(&key, &[0u8; 11], &[], b"");
         assert!(result.is_err());
     }
 
-    // Verifies that derive_key_id is deterministic.
+    // Verifies that the associated data is bound into the ciphertext: the
+    // same bytes decrypt it, different bytes do not.
     #[test]
-    fn derive_key_id_is_deterministic() {
+    fn aad_mismatch_fails_decryption() {
         let key = test_key();
-        assert_eq!(derive_key_id(&key), derive_key_id(&key));
-    }
+        let plaintext = b"bound to a path";
 
-    // Verifies that different keys produce different
-    // key_ids.
-    #[test]
-    fn derive_key_id_differs_for_different_keys() {
-        assert_ne!(derive_key_id(&test_key()), derive_key_id(&other_key()));
-    }
+        let (ciphertext, nonce) =
+            encrypt(&key, plaintext, b"machines/bmc/a/root").expect("encrypt");
 
-    // Verifies that derive_key_id produces 16 hex
-    // characters.
-    #[test]
-    fn derive_key_id_is_16_hex_chars() {
-        let id = derive_key_id(&test_key());
-        assert_eq!(id.len(), 16);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        let ok = decrypt(&key, &nonce, &ciphertext, b"machines/bmc/a/root").expect("same aad");
+        assert_eq!(ok, plaintext);
+
+        let swapped = decrypt(&key, &nonce, &ciphertext, b"machines/bmc/b/root");
+        assert!(
+            swapped.is_err(),
+            "ciphertext moved to another path must not decrypt"
+        );
     }
 }

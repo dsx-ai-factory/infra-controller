@@ -22,8 +22,9 @@
 use std::str::FromStr;
 
 use ::rpc::errors::RpcDataConversionError;
-use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::TrustedMachineId;
+use db::DatabaseError;
+use db::measured_boot::interface::profile::get_measurement_profile_record_by_id;
 use db::measured_boot::interface::site::{
     get_approved_machines, get_approved_profiles, insert_into_approved_machines,
     insert_into_approved_profiles, list_attestation_summary,
@@ -52,9 +53,23 @@ use tonic::Status;
 use crate::CarbideError;
 use crate::api::Api;
 
+fn measurement_trust_removal_error(
+    error: DatabaseError,
+    kind: &'static str,
+    id: String,
+) -> CarbideError {
+    if error.is_not_found() {
+        CarbideError::NotFoundError { kind, id }
+    } else {
+        CarbideError::Internal {
+            message: format!("removal failed: {error}"),
+        }
+    }
+}
+
 /// handle_import_site_measurements handles the ImportSiteMeasurements
 /// API endpoint.
-pub async fn handle_import_site_measurements(
+pub(crate) async fn handle_import_site_measurements(
     api: &Api,
     req: ImportSiteMeasurementsRequest,
 ) -> Result<ImportSiteMeasurementsResponse, Status> {
@@ -89,7 +104,7 @@ pub async fn handle_import_site_measurements(
 
 /// handle_export_site_measurements handles the ExportSiteMeasurements
 /// API endpoint.
-pub async fn handle_export_site_measurements(
+pub(crate) async fn handle_export_site_measurements(
     api: &Api,
     _req: ExportSiteMeasurementsRequest,
 ) -> Result<ExportSiteMeasurementsResponse, Status> {
@@ -106,7 +121,7 @@ pub async fn handle_export_site_measurements(
 
 /// handle_add_measurement_trusted_machine handles the
 /// AddMeasurementTrustedMachine API endpoint.
-pub async fn handle_add_measurement_trusted_machine(
+pub(crate) async fn handle_add_measurement_trusted_machine(
     api: &Api,
     req: AddMeasurementTrustedMachineRequest,
 ) -> Result<AddMeasurementTrustedMachineResponse, Status> {
@@ -134,7 +149,7 @@ pub async fn handle_add_measurement_trusted_machine(
 
 /// handle_remove_measurement_trusted_machine handles the
 /// RemoveMeasurementTrustedMachine API endpoint.
-pub async fn handle_remove_measurement_trusted_machine(
+pub(crate) async fn handle_remove_measurement_trusted_machine(
     api: &Api,
     req: RemoveMeasurementTrustedMachineRequest,
 ) -> Result<RemoveMeasurementTrustedMachineResponse, Status> {
@@ -143,23 +158,32 @@ pub async fn handle_remove_measurement_trusted_machine(
     let approval_record: MeasurementApprovedMachineRecord = match req.selector {
         // Remove by approval ID.
         Some(remove_measurement_trusted_machine_request::Selector::ApprovalId(approval_uuid)) => {
+            let id = approval_uuid.to_string();
             remove_from_approved_machines_by_approval_id(&mut txn, approval_uuid)
                 .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("removal failed: {e}"),
+                .map_err(|error| {
+                    measurement_trust_removal_error(
+                        error,
+                        "measurement trusted machine approval",
+                        id,
+                    )
                 })?
         }
         // Remove by machine ID.
         Some(remove_measurement_trusted_machine_request::Selector::MachineId(machine_id)) => {
             remove_from_approved_machines_by_machine_id(
                 &mut txn,
-                MachineId::from_str(&machine_id).map_err(|_| {
-                    CarbideError::from(RpcDataConversionError::InvalidMachineId(machine_id))
+                TrustedMachineId::from_str(&machine_id).map_err(|_| {
+                    CarbideError::from(RpcDataConversionError::InvalidMachineId(machine_id.clone()))
                 })?,
             )
             .await
-            .map_err(|e| CarbideError::Internal {
-                message: format!("removal failed: {e}"),
+            .map_err(|error| {
+                measurement_trust_removal_error(
+                    error,
+                    "measurement trusted machine approval",
+                    machine_id,
+                )
             })?
         }
         // Oops, forgot to set a selector.
@@ -179,7 +203,7 @@ pub async fn handle_remove_measurement_trusted_machine(
 
 /// handle_list_measurement_trusted_machines handles the
 /// ListMeasurementTrustedMachines API endpoint.
-pub async fn handle_list_measurement_trusted_machines(
+pub(crate) async fn handle_list_measurement_trusted_machines(
     api: &Api,
     _req: ListMeasurementTrustedMachinesRequest,
 ) -> Result<ListMeasurementTrustedMachinesResponse, Status> {
@@ -198,16 +222,27 @@ pub async fn handle_list_measurement_trusted_machines(
 
 /// handle_add_measurement_trusted_profile handles the
 /// AddMeasurementTrustedProfile API endpoint.
-pub async fn handle_add_measurement_trusted_profile(
+pub(crate) async fn handle_add_measurement_trusted_profile(
     api: &Api,
     req: AddMeasurementTrustedProfileRequest,
 ) -> Result<AddMeasurementTrustedProfileResponse, Status> {
     let mut txn = api.txn_begin().await?;
     let approval_type = req.approval_type();
+    let profile_id = req
+        .profile_id
+        .ok_or(CarbideError::MissingArgument("profile_id"))?;
+    get_measurement_profile_record_by_id(&mut txn, profile_id)
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: format!("failed to fetch measurement system profile: {e}"),
+        })?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "MeasurementSystemProfile",
+            id: profile_id.to_string(),
+        })?;
     let approval_record = insert_into_approved_profiles(
         &mut txn,
-        req.profile_id
-            .ok_or(CarbideError::MissingArgument("profile_id"))?,
+        profile_id,
         MeasurementApprovedType::from(approval_type),
         req.pcr_registers,
         req.comments,
@@ -225,7 +260,7 @@ pub async fn handle_add_measurement_trusted_profile(
 
 /// handle_remove_measurement_trusted_profile handles the
 /// RemoveMeasurementTrustedProfile API endpoint.
-pub async fn handle_remove_measurement_trusted_profile(
+pub(crate) async fn handle_remove_measurement_trusted_profile(
     api: &Api,
     req: RemoveMeasurementTrustedProfileRequest,
 ) -> Result<RemoveMeasurementTrustedProfileResponse, Status> {
@@ -233,18 +268,28 @@ pub async fn handle_remove_measurement_trusted_profile(
     let approval_record: MeasurementApprovedProfileRecord = match req.selector {
         // Remove by approval ID.
         Some(remove_measurement_trusted_profile_request::Selector::ApprovalId(approval_uuid)) => {
+            let id = approval_uuid.to_string();
             remove_from_approved_profiles_by_approval_id(&mut txn, approval_uuid)
                 .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("removal failed: {e}"),
+                .map_err(|error| {
+                    measurement_trust_removal_error(
+                        error,
+                        "measurement trusted profile approval",
+                        id,
+                    )
                 })?
         }
         // Remove by profile ID.
         Some(remove_measurement_trusted_profile_request::Selector::ProfileId(profile_id)) => {
+            let id = profile_id.to_string();
             remove_from_approved_profiles_by_profile_id(&mut txn, profile_id)
                 .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("removal failed: {e}"),
+                .map_err(|error| {
+                    measurement_trust_removal_error(
+                        error,
+                        "measurement trusted profile approval",
+                        id,
+                    )
                 })?
         }
         // Oops, forgot to set a selector.
@@ -264,7 +309,7 @@ pub async fn handle_remove_measurement_trusted_profile(
 
 /// handle_list_measurement_trusted_profiles handles the
 /// ListMeasurementTrustedProfiles API endpoint.
-pub async fn handle_list_measurement_trusted_profiles(
+pub(crate) async fn handle_list_measurement_trusted_profiles(
     api: &Api,
     _req: ListMeasurementTrustedProfilesRequest,
 ) -> Result<ListMeasurementTrustedProfilesResponse, Status> {
@@ -281,7 +326,7 @@ pub async fn handle_list_measurement_trusted_profiles(
     Ok(ListMeasurementTrustedProfilesResponse { approval_records })
 }
 
-pub async fn handle_list_attestation_summary(
+pub(crate) async fn handle_list_attestation_summary(
     api: &Api,
     _req: ListAttestationSummaryRequest,
 ) -> Result<ListAttestationSummaryResponse, Status> {

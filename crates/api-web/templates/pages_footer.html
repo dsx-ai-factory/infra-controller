@@ -30,13 +30,14 @@
 
     <div class="pagination-info">
         {% if page.pages() > 1 %}
-        <span class="page-status">Page {{ page.current_page() + 1 }} of {{ page.pages() }}</span>
+        <span class="page-status">Page {{ page.current_page().saturating_add(1) }} of {{ page.pages() }}</span>
         {% endif %}
         {% if page.total_items() >= 25 %}
         <span class="page-size-label">Show</span>
         {% if page.limit() == 25 %}<span class="page-link active">25</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=25{{page.extra_query_params}}">25</a>{% endif %}
         {% if page.limit() == 50 %}<span class="page-link active">50</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=50{{page.extra_query_params}}">50</a>{% endif %}
         {% if page.limit() == 100 %}<span class="page-link active">100</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=100{{page.extra_query_params}}">100</a>{% endif %}
+        {% if page.limit() == 0 %}<span class="page-link active" title="Show all items on one page">All</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=0{{page.extra_query_params}}" title="Show all items on one page">All</a>{% endif %}
         {% endif %}
     </div>
 </div>

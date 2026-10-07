@@ -10,15 +10,14 @@ import (
 )
 
 func TestReadExpectedSyncEnabled(t *testing.T) {
-	// The mirror writes to rack / component tables, so the default has to
-	// be off — an operator should have to opt in explicitly. These cases
-	// pin both the truthy / falsy ParseBool grammar and the
-	// "unparseable / unset is conservatively off" guarantee.
+	// Default is on when the env var is unset/empty. Operators opt out
+	// with an explicit falsey value. Unparseable values stay disabled
+	// so a typo cannot silently enable or leave the gate ambiguous.
 	for _, tc := range []struct {
 		raw  string
 		want bool
 	}{
-		{"", false},    // unset env var
+		{"", true},     // unset / empty env var
 		{"true", true}, // canonical truthy
 		{"True", true}, // ParseBool accepts mixed case
 		{"TRUE", true}, // and upper case

@@ -38,7 +38,7 @@
 	{% for record in state_history %}
 		<tr>
 			<td>{{ record.version|config_version|safe }}</td>
-			<td><div style="overflow: auto;"><pre><code class="prettyjson">{{ record.state }}</code></pre></div></td>
+			<td><div style="overflow: auto;"><pre><code>{{ record.state|pretty_json }}</code></pre></div></td>
 		</tr>
 	{% endfor %}
 	</tbody>

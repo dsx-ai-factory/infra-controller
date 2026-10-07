@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Local development Dockerfile for nico-mcp
+
+# Build stage
+FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+
+# Docker automatically provides these args during multi-platform builds
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+
+# Set environment variables for cross-compilation
+ENV CGO_ENABLED=0
+ENV GOOS=$TARGETOS
+ENV GOARCH=$TARGETARCH
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Copy go module files first for better caching
+COPY go.mod go.sum ./
+# Copy SDK go module files, required for maintaining separate go.mod for SDK
+COPY sdk/standard/go.mod ./sdk/standard/
+# Download dependencies
+RUN go mod download
+
+# nico-mcp only needs the mcp service, the CLI package it reuses for the REST
+# client + OpenAPI parser, and the embedded spec.
+COPY mcp/ ./mcp/
+COPY cli/ ./cli/
+COPY openapi/ ./openapi/
+
+# Build the application
+WORKDIR /workspace/mcp
+RUN go build \
+        -ldflags "-extldflags '-static' -w -s" \
+        -o /app/nico-mcp \
+        ./cmd/nico-mcp
+
+# Final stage
+FROM nvcr.io/nvidia/distroless/go:v4.0.8 AS final
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder --chown=nvs:nvs /app/nico-mcp /app/nico-mcp
+
+# Switch to non-root user
+USER nvs
+
+# Expose the default MCP listen port
+EXPOSE 8080
+
+# Run the application
+ENTRYPOINT ["/app/nico-mcp"]

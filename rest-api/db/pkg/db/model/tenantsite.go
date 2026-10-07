@@ -8,11 +8,13 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 const (
@@ -30,22 +32,28 @@ var (
 	}
 )
 
+// TenantSiteConfig holds per-tenant-site configuration. Fields must stay flat so
+// jsonb partial merge works.
+type TenantSiteConfig struct {
+	TargetedInstanceCreation *bool `json:"targetedInstanceCreation,omitempty"`
+}
+
 // TenantSite captures the relationship between a Tenant and a Site
 type TenantSite struct {
 	bun.BaseModel `bun:"table:tenant_site,alias:ts"`
 
-	ID                  uuid.UUID              `bun:"type:uuid,pk"`
-	TenantID            uuid.UUID              `bun:"tenant_id,type:uuid,notnull"`
-	Tenant              *Tenant                `bun:"rel:belongs-to,join:tenant_id=id"`
-	TenantOrg           string                 `bun:"tenant_org,notnull"`
-	SiteID              uuid.UUID              `bun:"site_id,type:uuid,notnull"`
-	Site                *Site                  `bun:"rel:belongs-to,join:site_id=id"`
-	EnableSerialConsole bool                   `bun:"enable_serial_console,notnull"`
-	Config              map[string]interface{} `bun:"config,type:jsonb,json_use_number"`
-	Created             time.Time              `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated             time.Time              `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted             *time.Time             `bun:"deleted,soft_delete"`
-	CreatedBy           uuid.UUID              `bun:"type:uuid,notnull"`
+	ID                  uuid.UUID        `bun:"type:uuid,pk"`
+	TenantID            uuid.UUID        `bun:"tenant_id,type:uuid,notnull"`
+	Tenant              *Tenant          `bun:"rel:belongs-to,join:tenant_id=id"`
+	TenantOrg           string           `bun:"tenant_org,notnull"`
+	SiteID              uuid.UUID        `bun:"site_id,type:uuid,notnull"`
+	Site                *Site            `bun:"rel:belongs-to,join:site_id=id"`
+	EnableSerialConsole bool             `bun:"enable_serial_console,notnull"`
+	Config              TenantSiteConfig `bun:"config,type:jsonb,notnull,default:'{}'::jsonb"`
+	Created             time.Time        `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated             time.Time        `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted             *time.Time       `bun:"deleted,soft_delete"`
+	CreatedBy           uuid.UUID        `bun:"type:uuid,notnull"`
 }
 
 // TenantSiteCreateInput input parameters for Create method
@@ -53,7 +61,7 @@ type TenantSiteCreateInput struct {
 	TenantID  uuid.UUID
 	TenantOrg string
 	SiteID    uuid.UUID
-	Config    map[string]interface{}
+	Config    *TenantSiteConfig
 	CreatedBy uuid.UUID
 }
 
@@ -61,7 +69,7 @@ type TenantSiteCreateInput struct {
 type TenantSiteUpdateInput struct {
 	TenantSiteID        uuid.UUID
 	EnableSerialConsole *bool
-	Config              map[string]interface{}
+	Config              *TenantSiteConfig
 }
 
 type TenantSiteFilterInput struct {
@@ -113,19 +121,15 @@ type TenantSiteDAO interface {
 
 // TenantSiteSQLDAO is an implementation of the TenantSiteDAO interface
 type TenantSiteSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a TenantSite by ID
-func (tssd TenantSiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.GetByID")
-	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
-
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "id", id.String())
-	}
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.GetByID")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
+	cotel.SetAttribute(tnsDAOSpan, attribute.String("id", id.String()))
 
 	ts := &TenantSite{}
 
@@ -149,15 +153,12 @@ func (tssd TenantSiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUI
 // GetByTenantIDAndSiteID returns a TenantSite by Tenant ID and Site ID
 // If there are more than one entry for the same Tenant ID and Site ID (which is not a normal case), it will return the first one
 // TODO: Add a unique constraint on Tenant ID, Site ID and deleted
-func (tssd TenantSiteSQLDAO) GetByTenantIDAndSiteID(ctx context.Context, tx *db.Tx, tenantID uuid.UUID, siteID uuid.UUID, includeRelations []string) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) GetByTenantIDAndSiteID(ctx context.Context, tx *db.Tx, tenantID uuid.UUID, siteID uuid.UUID, includeRelations []string) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.GetBySiteAndTenantID")
-	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
-
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "tenant_id", tenantID.String())
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "site_id", siteID.String())
-	}
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.GetBySiteAndTenantID")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
+	cotel.SetAttribute(tnsDAOSpan, attribute.String("tenant_id", tenantID.String()))
+	cotel.SetAttribute(tnsDAOSpan, attribute.String("site_id", siteID.String()))
 
 	ts := &TenantSite{}
 
@@ -180,12 +181,10 @@ func (tssd TenantSiteSQLDAO) GetByTenantIDAndSiteID(ctx context.Context, tx *db.
 
 // GetAll returns a list of TenantSites filtered by tenantID, tenantOrg, siteID, offset, limit and orderBy
 // if orderBy is nil, then records are ordered by column specified in TenantSiteOrderByDefault in ascending order
-func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantSiteFilterInput, page paginator.PageInput, includeRelations []string) ([]TenantSite, int, error) {
+func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantSiteFilterInput, page paginator.PageInput, includeRelations []string) (_ []TenantSite, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.GetAll")
-	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
-	}
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.GetAll")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
 
 	tss := []TenantSite{}
 
@@ -193,17 +192,14 @@ func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Tenan
 
 	if filter.TenantIDs != nil {
 		query = query.Where("ts.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 
 	if filter.TenantOrgs != nil {
 		query = query.Where("ts.tenant_org IN (?)", bun.In(filter.TenantOrgs))
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "tenant_org", filter.TenantOrgs)
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("ts.site_id IN (?)", bun.In(filter.SiteIDs))
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "site_id", filter.SiteIDs)
 	}
 
 	if filter.ConfigKey != nil && filter.ConfigVal != nil {
@@ -233,18 +229,14 @@ func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Tenan
 }
 
 // Create creates a new TenantSite from the given parameters
-func (tssd TenantSiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantSiteCreateInput) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantSiteCreateInput) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.Create")
-	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
-	}
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.Create")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
 
-	var normConfig map[string]interface{}
+	var normConfig TenantSiteConfig
 	if input.Config != nil {
-		normConfig = input.Config
-	} else {
-		normConfig = map[string]interface{}{}
+		normConfig = *input.Config
 	}
 
 	ts := &TenantSite{
@@ -271,14 +263,11 @@ func (tssd TenantSiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input Tenant
 }
 
 // Update updates an existing TenantSite from the given parameters
-func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantSiteUpdateInput) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantSiteUpdateInput) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.Update")
-	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
-
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "id", input.TenantSiteID.String())
-	}
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.Update")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
+	cotel.SetAttribute(tnsDAOSpan, attribute.String("id", input.TenantSiteID.String()))
 
 	ts := &TenantSite{
 		ID: input.TenantSiteID,
@@ -289,12 +278,6 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 	if input.EnableSerialConsole != nil {
 		ts.EnableSerialConsole = *input.EnableSerialConsole
 		updatedFields = append(updatedFields, "enable_serial_console")
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "enable_serial_console", *input.EnableSerialConsole)
-	}
-
-	if input.Config != nil {
-		ts.Config = input.Config
-		updatedFields = append(updatedFields, "config")
 	}
 
 	if len(updatedFields) > 0 {
@@ -303,6 +286,28 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 		_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().Model(ts).Column(updatedFields...).Where("id = ?", input.TenantSiteID).Exec(ctx)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	if input.Config != nil {
+		if input.Config.TargetedInstanceCreation != nil {
+			_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
+				Model(ts).
+				Set("config = config || ?::jsonb, updated = current_timestamp", input.Config).
+				Where("id = ?", input.TenantSiteID).
+				Exec(ctx)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
+				Model(ts).
+				Set("config = config - 'targetedInstanceCreation', updated = current_timestamp").
+				Where("id = ?", input.TenantSiteID).
+				Exec(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -315,14 +320,11 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 }
 
 // Delete deletes a TenantSite by ID
-func (tssd TenantSiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (tssd TenantSiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.Delete")
-	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
-
-		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "id", id.String())
-	}
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.Delete")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
+	cotel.SetAttribute(tnsDAOSpan, attribute.String("id", id.String()))
 
 	ts := &TenantSite{
 		ID: id,
@@ -339,7 +341,6 @@ func (tssd TenantSiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID
 // NewTenantSiteDAO creates a new TenantSiteDAO
 func NewTenantSiteDAO(dbSession *db.Session) TenantSiteDAO {
 	return &TenantSiteSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

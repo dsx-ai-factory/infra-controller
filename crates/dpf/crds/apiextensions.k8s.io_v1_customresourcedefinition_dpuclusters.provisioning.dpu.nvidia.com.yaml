@@ -113,7 +113,7 @@ spec:
               maxNodes:
                 default: 1000
                 description: MaxNodes is the max amount of node in the cluster
-                maximum: 1000
+                maximum: 3000
                 minimum: 1
                 type: integer
               type:
@@ -188,6 +188,57 @@ spec:
                   - type
                   type: object
                 type: array
+              etcdEncryptionAtRest:
+                description: EtcdEncryptionAtRest exposes the observed encryption-at-rest
+                  state for the cluster.
+                properties:
+                  provider:
+                    description: Provider is the committed encryption-at-rest provider
+                      for the cluster.
+                    enum:
+                    - staticKey
+                    - vaultKMS
+                    type: string
+                  staticKey:
+                    description: StaticKey exposes staticKey-specific observed state.
+                    properties:
+                      activeKeyRef:
+                        description: |-
+                          ActiveKeyRef is the source Secret observed for the currently active key.
+                          This field is informational and must not be used by controllers to select desired key material.
+                        properties:
+                          key:
+                            description: Key is the key within the Secret data.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name is the name of the Secret.
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace of the Secret.
+                            minLength: 1
+                            type: string
+                          resourceVersion:
+                            description: ResourceVersion is the resourceVersion of
+                              the Secret.
+                            minLength: 1
+                            type: string
+                          uid:
+                            description: UID is the UID of the Secret.
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        - namespace
+                        - resourceVersion
+                        - uid
+                        type: object
+                    type: object
+                required:
+                - provider
+                type: object
               nodesCount:
                 description: NodesCount is the number of DPUs assigned to the cluster
                 minimum: 0
@@ -224,6 +275,11 @@ spec:
         x-kubernetes-validations:
         - message: name length can't be bigger than 63 chars
           rule: self.metadata.name.size() <= 63
+        - message: 'name must be a DNS-1035 label: start with a lowercase letter,
+            contain only lowercase alphanumerics or ''-'', and end with an alphanumeric'
+          optionalOldSelf: true
+          rule: self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') || (oldSelf.hasValue()
+            && oldSelf.value().metadata.name == self.metadata.name)
     served: true
     storage: true
     subresources:

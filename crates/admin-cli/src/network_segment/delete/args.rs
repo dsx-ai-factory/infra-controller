@@ -26,9 +26,9 @@ Delete a network segment by ID:
     $ nico-admin-cli network-segment delete --id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "Id of the network segment")]
-    pub id: NetworkSegmentId,
+    id: NetworkSegmentId,
 }
 
 impl From<Args> for ::rpc::forge::NetworkSegmentDeletionRequest {

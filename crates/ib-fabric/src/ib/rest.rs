@@ -32,18 +32,20 @@ use super::ufmclient::{
 use super::{IBFabric, IBFabricConfig, IBFabricVersions};
 use crate::errors::IbError;
 
-pub struct RestIBFabric {
+pub(super) struct RestIBFabric {
     ufm: Ufm,
 }
 
 const DEFAULT_INDEX0: bool = true;
 const DEFAULT_MEMBERSHIP: PortMembership = PortMembership::Full;
 
-pub fn new_client(addr: &str, auth: &str) -> Result<Arc<dyn IBFabric>, IbError> {
-    // Detect authentification method
-    // 'user token' or 'client authentification'
-    // 'client authentification' method is choosen in case empty 'auth' string or valid path in 'auth'
-    let (token, cert) = if auth.trim().is_empty() {
+/// Detects the authentication method `auth` selects: a bearer token, or
+/// client-certificate files on disk. Certificate authentication is chosen for
+/// an empty `auth` string (the SPIFFE default paths) or one naming an existing
+/// path. The returned [`UFMCert`] paths are exactly what a client built from
+/// `auth` loads, so callers can also watch them for rotation.
+pub(super) fn auth_method(auth: &str) -> (Option<String>, Option<UFMCert>) {
+    if auth.trim().is_empty() {
         (
             None,
             Some(UFMCert {
@@ -63,7 +65,11 @@ pub fn new_client(addr: &str, auth: &str) -> Result<Arc<dyn IBFabric>, IbError> 
         )
     } else {
         (Some(auth.to_string()), None)
-    };
+    }
+}
+
+pub(super) fn new_client(addr: &str, auth: &str) -> Result<Arc<dyn IBFabric>, IbError> {
+    let (token, cert) = auth_method(auth);
 
     let conf = UFMConfig {
         address: addr.to_string(),
@@ -421,8 +427,65 @@ impl From<PortMembership> for IBPortMembership {
 #[cfg(test)]
 mod tests {
     use model::errors::ModelError;
+    use opentelemetry::global;
+    use ufm_mock::{
+        InfinibandPortState, InventoryMachine, InventoryPort, InventorySnapshot, UfmAuthToken,
+        UfmMock, UfmMockConfig,
+    };
 
     use super::*;
+
+    #[tokio::test]
+    async fn rest_client_is_compatible_with_the_ufm_mock() {
+        let auth_token = UfmAuthToken::new("test-token".to_string()).unwrap();
+        let ufm_mock = UfmMock::new(
+            &UfmMockConfig::default(),
+            &auth_token,
+            &global::meter("ib-fabric-ufm-mock-compatibility-test"),
+        )
+        .unwrap();
+        ufm_mock
+            .apply_inventory(InventorySnapshot {
+                inventory_id: "inventory-a".into(),
+                epoch_id: "epoch-a".into(),
+                generation: 1.into(),
+                machines: vec![InventoryMachine {
+                    mat_id: "mat-a".into(),
+                    machine_id: None,
+                    infiniband_ports: Some(vec![InventoryPort {
+                        guid: "0000000000000001".parse().unwrap(),
+                        state: InfinibandPortState::Active,
+                    }]),
+                }],
+            })
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, ufm_mock.router()).await.unwrap();
+        });
+        let client = new_client(&format!("http://{address}"), "test-token").unwrap();
+
+        assert_eq!(client.versions().await.unwrap().ufm_version, "6.18.0");
+        assert_eq!(client.find_ib_port(None).await.unwrap().len(), 1);
+        let partitions = client
+            .get_ib_networks(GetPartitionOptions {
+                include_guids_data: true,
+                include_qos_conf: false,
+            })
+            .await
+            .unwrap();
+        assert!(
+            partitions[&0x7fff]
+                .associated_guids
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn ib_rest_type_conversion() {

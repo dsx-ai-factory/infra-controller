@@ -20,22 +20,29 @@
  * Askama makes all these functions accessible as template filters.
  */
 
+#![allow(
+    unreachable_pub,
+    reason = "askama::filter_fn emits public helper items inside this template-filter module"
+)]
+
 use std::collections::BTreeSet;
 use std::fmt::{Display, Write};
 use std::str::FromStr;
 
 use askama_escape::Escaper;
 use carbide_uuid::machine::MachineId;
-use itertools::Itertools;
 
 /// Generates HTML links for Machine IDs
 #[askama::filter_fn]
-pub fn machine_id_link(id: impl Display, _env: &dyn askama::Values) -> ::askama::Result<String> {
+pub(super) fn machine_id_link(
+    id: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
     machine_link(id, "machine")
 }
 
 /// Generates a formatted link for Machine IDs to a predefined path
-pub fn machine_link(id: impl Display, path: impl Display) -> ::askama::Result<String> {
+pub(super) fn machine_link(id: impl Display, path: impl Display) -> ::askama::Result<String> {
     let id = id.to_string();
     let link_path: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
 
@@ -72,12 +79,25 @@ fn escaped_shortened_id_link(id: impl Display, path: impl Display) -> ::askama::
     let mut escaped_id = String::new();
     askama_escape::Html.write_escaped(&mut escaped_id, &id)?;
 
-    let short_id = &escaped_id[escaped_id.len().saturating_sub(6)..];
+    if id.chars().count() <= 6 {
+        return Ok(format!(
+            r#"<a href="/admin/{path}/{link_path}">{escaped_id}</a>"#
+        ));
+    }
+
+    let short_id = id
+        .char_indices()
+        .rev()
+        .nth(5)
+        .map(|(index, _)| &id[index..])
+        .unwrap_or(&id);
+    let mut escaped_short_id = String::new();
+    askama_escape::Html.write_escaped(&mut escaped_short_id, short_id)?;
     let formatted = format!(
         r#"
     <a href="/admin/{path}/{link_path}">
         <div class="machine_id">
-            <div>{escaped_id}</div><div>{short_id}</div>
+            <div>{escaped_id}</div><div>{escaped_short_id}</div>
         </div>
     </a>"#
     );
@@ -86,12 +106,15 @@ fn escaped_shortened_id_link(id: impl Display, path: impl Display) -> ::askama::
 }
 
 #[askama::filter_fn]
-pub fn rack_id_link(id: impl Display, _env: &dyn askama::Values) -> ::askama::Result<String> {
+pub(super) fn rack_id_link(
+    id: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
     escaped_shortened_id_link(id, "rack")
 }
 
 #[askama::filter_fn]
-pub fn power_shelf_id_link(
+pub(super) fn power_shelf_id_link(
     id: impl Display,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -99,13 +122,16 @@ pub fn power_shelf_id_link(
 }
 
 #[askama::filter_fn]
-pub fn switch_id_link(id: impl Display, _env: &dyn askama::Values) -> ::askama::Result<String> {
+pub(super) fn switch_id_link(
+    id: impl Display,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
     escaped_shortened_id_link(id, "switch")
 }
 
 /// Formats labels into HTML
 #[askama::filter_fn]
-pub fn label_list_fmt(
+pub(super) fn label_list_fmt(
     labels: &[rpc::forge::Label],
     _env: &dyn askama::Values,
     truncate: bool,
@@ -125,7 +151,7 @@ pub fn label_list_fmt(
         let truncated_key = if truncate && label.key.len() > MAX_LABEL_LENGTH {
             &format!(
                 "{}...",
-                &label.key.chars().take(MAX_LABEL_LENGTH).collect::<String>()
+                label.key.chars().take(MAX_LABEL_LENGTH).collect::<String>()
             )
         } else {
             &label.key
@@ -138,7 +164,7 @@ pub fn label_list_fmt(
             let truncated_value = if truncate && value.len() > MAX_LABEL_LENGTH {
                 &format!(
                     "{}...",
-                    &value.chars().take(MAX_LABEL_LENGTH).collect::<String>()
+                    value.chars().take(MAX_LABEL_LENGTH).collect::<String>()
                 )
             } else {
                 value
@@ -153,7 +179,7 @@ pub fn label_list_fmt(
 /// If there is no alert, generates a green "None" bubble
 /// Generates HTML using the unified bubble system
 #[askama::filter_fn]
-pub fn health_alerts_fmt(
+pub(super) fn health_alerts_fmt(
     alerts: &[health_report::HealthProbeAlert],
     _env: &dyn askama::Values,
     include_message: bool,
@@ -189,7 +215,7 @@ pub fn health_alerts_fmt(
 /// Formats a list of Health Alert Classifications
 /// If there is no alert, the generated String will be empty
 #[askama::filter_fn]
-pub fn health_alert_classifications_fmt(
+pub(super) fn health_alert_classifications_fmt(
     alerts: &Vec<health_report::HealthProbeAlert>,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -198,7 +224,7 @@ pub fn health_alert_classifications_fmt(
 
 /// Formats a single Health Alert Classification
 #[askama::filter_fn]
-pub fn health_alert_classification_fmt(
+pub(super) fn health_alert_classification_fmt(
     alert: &health_report::HealthProbeAlert,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -235,7 +261,7 @@ where
 /// Renders version strings including timestamps
 /// Also shows the localized timestamp on Mouseover
 #[askama::filter_fn]
-pub fn config_version(
+pub(super) fn config_version(
     version: impl Display,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -254,7 +280,7 @@ pub fn config_version(
 
 /// Prints the value of the `Option` in case it's `Some(x)`, and otherwise an empty string
 #[askama::filter_fn]
-pub fn option_fmt(
+pub(super) fn option_fmt(
     value: &Option<impl Display>,
     _env: &dyn askama::Values,
 ) -> askama::Result<String> {
@@ -265,7 +291,7 @@ pub fn option_fmt(
 }
 
 #[askama::filter_fn]
-pub fn option_fmt_or(
+pub(super) fn option_fmt_or(
     value: &Option<impl Display>,
     _env: &dyn askama::Values,
     default: &str,
@@ -276,16 +302,38 @@ pub fn option_fmt_or(
     })
 }
 
+/// Formats JSON for display without routing integer values through JavaScript numbers.
+///
+/// Invalid JSON is returned unchanged so this can also be used for endpoints whose
+/// response bodies are not guaranteed to be JSON.
 #[askama::filter_fn]
-pub fn comma_separated(
-    value: impl IntoIterator<Item = impl Display>,
+pub(super) fn pretty_json(
+    value: impl Display,
     _env: &dyn askama::Values,
-) -> askama::Result<String> {
-    let result = value.into_iter().map(|item| item.to_string()).join(", ");
-    Ok(result)
+) -> ::askama::Result<String> {
+    Ok(format_json(value))
 }
 
-pub(crate) fn state_and_substate_labels(state_json: impl Display) -> (String, String) {
+// separate function because askama filter functions can't be tested directly
+fn format_json(value: impl Display) -> String {
+    let input = value.to_string();
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&input) else {
+        return input;
+    };
+
+    // Some Redfish responses contain JSON encoded inside this top-level field.
+    if let Some(response_body) = json
+        .get("ResponseBody")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|body| serde_json::from_str(body).ok())
+    {
+        json["ResponseBody"] = response_body;
+    }
+
+    serde_json::to_string_pretty(&json).unwrap_or(input)
+}
+
+fn state_and_substate_labels(state_json: impl Display) -> (String, String) {
     let state_json = state_json.to_string();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&state_json) else {
         return (state_json, String::new());
@@ -313,7 +361,7 @@ pub(crate) fn state_and_substate_labels(state_json: impl Display) -> (String, St
 }
 
 #[askama::filter_fn]
-pub fn state_with_substate_label(
+pub(super) fn state_with_substate_label(
     state: impl Display,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -343,7 +391,7 @@ fn capitalize_state(state: &str) -> String {
 
 /// Formats the boot order list
 #[askama::filter_fn]
-pub fn boot_order_fmt(
+pub(super) fn boot_order_fmt(
     boot_order: &Option<rpc::site_explorer::BootOrder>,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -359,7 +407,10 @@ pub fn boot_order_fmt(
 }
 
 #[askama::filter_fn]
-pub fn colorize_output(ansi_text: &str, _env: &dyn askama::Values) -> ::askama::Result<String> {
+pub(super) fn colorize_output(
+    ansi_text: &str,
+    _env: &dyn askama::Values,
+) -> ::askama::Result<String> {
     let html = ansi_to_html::Converter::new()
         .convert(ansi_text)
         .unwrap_or_default();
@@ -368,7 +419,7 @@ pub fn colorize_output(ansi_text: &str, _env: &dyn askama::Values) -> ::askama::
 
 /// Formats a state handler outcome
 #[askama::filter_fn]
-pub fn controller_state_reason_fmt(
+pub(super) fn controller_state_reason_fmt(
     reason: &Option<::rpc::forge::ControllerStateReason>,
     _env: &dyn askama::Values,
 ) -> ::askama::Result<String> {
@@ -395,7 +446,7 @@ pub fn controller_state_reason_fmt(
     }
 
     if let Some(source_ref) = reason.source_ref.as_ref() {
-        const GITHUB_REPO: &str = "https://github.com/NVIDIA/ncx-infra-controller-core";
+        const GITHUB_REPO: &str = "https://github.com/NVIDIA/infra-controller";
 
         // TODO: carbide_version::v!(git_sha) should work here - however it returns an
         // outdated commit ID.
@@ -419,4 +470,122 @@ pub fn controller_state_reason_fmt(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::{escaped_shortened_id_link, format_json};
+
+    #[test]
+    fn shortened_id_links_render_exact_output() {
+        check_values(
+            [
+                Check {
+                    scenario: "short ID",
+                    input: "a12",
+                    expect: r#"<a href="/admin/rack/a12">a12</a>"#.to_string(),
+                },
+                Check {
+                    scenario: "long ASCII ID",
+                    input: "rack-a12",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/rack-a12\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>rack-a12</div><div>ck-a12</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "six accented characters",
+                    input: "áéíóúñ",
+                    expect: concat!(
+                        "<a href=\"/admin/rack/",
+                        "%C3%A1%C3%A9%C3%AD%C3%B3%C3%BA%C3%B1",
+                        "\">áéíóúñ</a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "seven accented characters",
+                    input: "áéíóúñü",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/",
+                        "%C3%A1%C3%A9%C3%AD%C3%B3%C3%BA%C3%B1%C3%BC",
+                        "\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>áéíóúñü</div><div>éíóúñü</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "Unicode suffix",
+                    input: "rack-abcdeå",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/rack-abcde%C3%A5\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>rack-abcdeå</div><div>abcdeå</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "HTML metacharacters",
+                    input: "rack-<&abcd",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/rack-%3C%26abcd\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>rack-&#60;&#38;abcd</div>",
+                        "<div>&#60;&#38;abcd</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+            ],
+            |id| escaped_shortened_id_link(id, "rack").unwrap(),
+        );
+    }
+
+    #[test]
+    fn pretty_json_preserves_values_and_fallbacks() {
+        check_values(
+            [
+                Check {
+                    scenario: "smallest unsafe JavaScript integer",
+                    input: r#"{"id":9007199254740993}"#,
+                    expect: "{\n  \"id\": 9007199254740993\n}".to_string(),
+                },
+                Check {
+                    scenario: "maximum 64-bit integer",
+                    input: r#"{"gpu_uid":18446744073709551615}"#,
+                    expect: "{\n  \"gpu_uid\": 18446744073709551615\n}".to_string(),
+                },
+                Check {
+                    scenario: "nested ResponseBody JSON",
+                    input: r#"{"ResponseBody":"{\"id\":18446744073709551615}"}"#,
+                    expect: concat!(
+                        "{\n",
+                        "  \"ResponseBody\": {\n",
+                        "    \"id\": 18446744073709551615\n",
+                        "  }\n",
+                        "}"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "non-JSON response",
+                    input: "GPU not found: 18446744073709551615",
+                    expect: "GPU not found: 18446744073709551615".to_string(),
+                },
+            ],
+            format_json,
+        );
+    }
 }

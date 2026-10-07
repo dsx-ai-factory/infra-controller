@@ -15,6 +15,6 @@
  * limitations under the License.
  */
 
-pub mod cmds;
+mod cmds;
 
-pub use cmds::handle_debug_bundle;
+pub(crate) use cmds::handle_debug_bundle;

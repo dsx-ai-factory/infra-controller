@@ -16,8 +16,8 @@
  */
 
 // src/config.rs
-// This module defines the firmware configuration types: FirmwareSpec,
-// FlashSpec, FlashOptions, and FirmwareFlasherProfile. I originally had
+// This module re-exports FirmwareSpec and defines the firmware configuration
+// types FlashSpec, FlashOptions, and FirmwareFlasherProfile. I originally had
 // this single SupernicFirmwareConfig type in here, but it started to get
 // kind of messy when I tried to implement it. By breaking it up into a
 // a structured separation of concerns, I ended up with a pretty nice RAII
@@ -26,44 +26,17 @@
 
 use std::path::{Path, PathBuf};
 
+pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
-    FirmwareFlasherProfile as FirmwareFlasherProfilePb, FirmwareSpec as FirmwareSpecPb,
-    FlashOptions as FlashOptionsPb, FlashSpec as FlashSpecPb,
+    FirmwareFlasherProfile as FirmwareFlasherProfilePb, FlashOptions as FlashOptionsPb,
+    FlashSpec as FlashSpecPb,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
 use crate::firmware::reset::DEFAULT_RESET_LEVEL;
 use crate::firmware::source::FirmwareSource;
-
-// FirmwareSpec identifies a firmware target by device identity and
-// version. The part_number and psid identify the hardware the
-// firmware is built for, and the version is the target firmware
-// version. Used to construct a FirmwareFlasher with the aforementioned
-// RAII-esque validation (if the underlying MlxDeviceInfo for the given
-// device_id doesn't match this FirmwareSpec, then we will fail to
-// construct a new FirmwareFlasher).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FirmwareSpec {
-    // part_number is the manufacturer part number that the firmware
-    // is built for (e.g., "900-9D3B4-00CV-TA0").
-    pub part_number: String,
-    // psid (Parameter-Set IDentification) identifies the firmware
-    // configuration (e.g., "MT_0000000884").
-    pub psid: String,
-    // version is the target firmware version (e.g., "32.43.1014").
-    pub version: String,
-}
-
-impl FirmwareSpec {
-    // map_key returns a key suitable for indexing firmware specs
-    // by hardware identity, in the format "part_number:psid", like
-    // in the case of the carbide-api runtime config mappings.
-    pub fn map_key(&self) -> String {
-        format!("{}:{}", self.part_number, self.psid)
-    }
-}
 
 // FlashSpec specifies source locations and caching options for
 // flash and verify_image operations. Contains everything needed
@@ -177,7 +150,7 @@ impl Default for FlashOptions {
 //   version = "32.43.1014"
 //   firmware_url = "https://..."
 //   reset = true
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FirmwareFlasherProfile {
     #[serde(flatten)]
     pub firmware_spec: FirmwareSpec,
@@ -185,6 +158,61 @@ pub struct FirmwareFlasherProfile {
     pub flash_spec: FlashSpec,
     #[serde(flatten, default)]
     pub flash_options: FlashOptions,
+}
+
+impl<'de> Deserialize<'de> for FirmwareFlasherProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // `deny_unknown_fields` cannot be combined with `flatten`, so use one
+        // strict flat representation and rebuild the three public sections.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FlatFirmwareFlasherProfile {
+            part_number: String,
+            psid: String,
+            version: String,
+            firmware_url: String,
+            firmware_credentials: Option<Credentials>,
+            device_conf_url: Option<String>,
+            device_conf_credentials: Option<Credentials>,
+            #[serde(default)]
+            verify_from_cache: bool,
+            cache_dir: Option<PathBuf>,
+            #[serde(default)]
+            verify_image: bool,
+            #[serde(default)]
+            verify_version: bool,
+            #[serde(default)]
+            reset: bool,
+            #[serde(default = "default_reset_level")]
+            reset_level: u8,
+        }
+
+        let profile = FlatFirmwareFlasherProfile::deserialize(deserializer)?;
+        Ok(Self {
+            firmware_spec: FirmwareSpec {
+                part_number: profile.part_number,
+                psid: profile.psid,
+                version: profile.version,
+            },
+            flash_spec: FlashSpec {
+                firmware_url: profile.firmware_url,
+                firmware_credentials: profile.firmware_credentials,
+                device_conf_url: profile.device_conf_url,
+                device_conf_credentials: profile.device_conf_credentials,
+                verify_from_cache: profile.verify_from_cache,
+                cache_dir: profile.cache_dir,
+            },
+            flash_options: FlashOptions {
+                verify_image: profile.verify_image,
+                verify_version: profile.verify_version,
+                reset: profile.reset,
+                reset_level: profile.reset_level,
+            },
+        })
+    }
 }
 
 impl FirmwareFlasherProfile {
@@ -199,28 +227,6 @@ impl FirmwareFlasherProfile {
         toml::from_str(toml_str).map_err(|e| {
             FirmwareError::ConfigError(format!("Failed to parse firmware profile: {e}"))
         })
-    }
-}
-
-// From implementations for converting FirmwareSpec
-// to/from a FirmwareSpecPb protobuf message and back.
-impl From<FirmwareSpec> for FirmwareSpecPb {
-    fn from(spec: FirmwareSpec) -> Self {
-        FirmwareSpecPb {
-            part_number: spec.part_number,
-            psid: spec.psid,
-            version: spec.version,
-        }
-    }
-}
-
-impl From<FirmwareSpecPb> for FirmwareSpec {
-    fn from(proto: FirmwareSpecPb) -> Self {
-        FirmwareSpec {
-            part_number: proto.part_number,
-            psid: proto.psid,
-            version: proto.version,
-        }
     }
 }
 
@@ -315,30 +321,6 @@ impl TryFrom<FirmwareFlasherProfilePb> for FirmwareFlasherProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_firmware_spec_map_key() {
-        let spec = FirmwareSpec {
-            part_number: "900-9D3B4-00CV-TA0".to_string(),
-            psid: "MT_0000000884".to_string(),
-            version: "32.43.1014".to_string(),
-        };
-        assert_eq!(spec.map_key(), "900-9D3B4-00CV-TA0:MT_0000000884");
-    }
-
-    #[test]
-    fn test_firmware_spec_roundtrip() {
-        let original = FirmwareSpec {
-            part_number: "900-9D3B4-00CV-TA0".to_string(),
-            psid: "MT_0000000884".to_string(),
-            version: "32.43.1014".to_string(),
-        };
-        let proto: FirmwareSpecPb = original.clone().into();
-        let converted: FirmwareSpec = proto.into();
-        assert_eq!(original.part_number, converted.part_number);
-        assert_eq!(original.psid, converted.psid);
-        assert_eq!(original.version, converted.version);
-    }
 
     #[test]
     fn test_flash_options_default() {
@@ -479,5 +461,84 @@ verify_version = true
         assert!(profile.flash_options.verify_image);
         assert!(profile.flash_options.verify_version);
         assert_eq!(profile.flash_options.reset_level, 3); // default
+    }
+
+    #[test]
+    fn profile_toml_rejects_unknown_fields() {
+        let toml_str = r#"
+part_number = "900-9D3B4-00CV-TA0"
+psid = "MT_0000000884"
+version = "32.43.1014"
+firmware_url = "https://artifacts.nvidia.com/fw.bin"
+firmware_urll = "https://typo.example.com/fw.bin"
+"#;
+
+        let error = FirmwareFlasherProfile::from_toml(toml_str).unwrap_err();
+        assert!(error.to_string().contains("firmware_urll"));
+    }
+
+    #[test]
+    fn profile_serde_round_trip_preserves_every_field() {
+        let original = FirmwareFlasherProfile {
+            firmware_spec: FirmwareSpec {
+                part_number: "900-9D3B4-00CV-TA0".to_string(),
+                psid: "MT_0000000884".to_string(),
+                version: "32.43.1014".to_string(),
+            },
+            flash_spec: FlashSpec {
+                firmware_url: "https://artifacts.nvidia.com/fw.bin".to_string(),
+                firmware_credentials: Some(Credentials::bearer_token("token123")),
+                device_conf_url: Some("https://artifacts.nvidia.com/debug.conf".to_string()),
+                device_conf_credentials: Some(Credentials::basic_auth("user", "pass")),
+                verify_from_cache: true,
+                cache_dir: Some(PathBuf::from("/var/cache/fw")),
+            },
+            flash_options: FlashOptions {
+                verify_image: true,
+                verify_version: true,
+                reset: true,
+                reset_level: 5,
+            },
+        };
+
+        let encoded = toml::to_string(&original).expect("profile serializes");
+        let decoded = FirmwareFlasherProfile::from_toml(&encoded)
+            .expect("serialized profile must deserialize under the strict schema");
+
+        assert_eq!(
+            decoded.firmware_spec.part_number,
+            original.firmware_spec.part_number
+        );
+        assert_eq!(decoded.firmware_spec.psid, original.firmware_spec.psid);
+        assert_eq!(
+            decoded.firmware_spec.version,
+            original.firmware_spec.version
+        );
+        assert_eq!(
+            decoded.flash_spec.firmware_url,
+            original.flash_spec.firmware_url
+        );
+        assert_eq!(
+            decoded.flash_spec.device_conf_url,
+            original.flash_spec.device_conf_url
+        );
+        assert!(decoded.flash_spec.verify_from_cache);
+        assert_eq!(decoded.flash_spec.cache_dir, original.flash_spec.cache_dir);
+        assert!(matches!(
+            decoded.flash_spec.firmware_credentials,
+            Some(Credentials::BearerToken { token }) if token == "token123"
+        ));
+        assert!(matches!(
+            decoded.flash_spec.device_conf_credentials,
+            Some(Credentials::BasicAuth { username, password })
+                if username == "user" && password == "pass"
+        ));
+        assert!(decoded.flash_options.verify_image);
+        assert!(decoded.flash_options.verify_version);
+        assert!(decoded.flash_options.reset);
+        assert_eq!(
+            decoded.flash_options.reset_level,
+            original.flash_options.reset_level
+        );
     }
 }

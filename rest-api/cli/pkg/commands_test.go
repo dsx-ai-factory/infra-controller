@@ -4,7 +4,13 @@
 package cli
 
 import (
+	"bytes"
 	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,6 +67,23 @@ func TestToKebab(t *testing.T) {
 	}
 }
 
+func TestCollectOperations(t *testing.T) {
+	spec := &Spec{Paths: map[string]PathItem{
+		"/preferred": {
+			Put: &Operation{OperationID: "replace-all-resource"},
+		},
+		"/legacy": {
+			Put: &Operation{OperationID: "replace-all-resource-legacy", Deprecated: true},
+		},
+	}}
+
+	operations := collectOperations(spec)
+
+	require.Len(t, operations, 1)
+	assert.Equal(t, "replace-all-resource", operations[0].op.OperationID)
+	assert.Equal(t, "/preferred", operations[0].path)
+}
+
 func TestClientFromContextExplicitTokenCommandOverridesCachedConfigToken(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &ConfigFile{
@@ -88,6 +111,25 @@ func TestClientFromContextExplicitTokenCommandOverridesCachedConfigToken(t *test
 	client, err := clientFromContext(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "explicit-token", client.Token)
+}
+
+func TestClientFromContextReturnsMalformedConfigError(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("auth:\n  token:missing-space\n  token_command: echo token\n"), 0600))
+	SetConfigPath(configPath)
+	defer SetConfigPath("")
+
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags.String("token", "", "")
+	flags.String("token-command", "", "")
+	flags.String("base-url", "", "")
+	flags.String("org", "", "")
+	flags.Bool("debug", false, "")
+
+	ctx := cli.NewContext(cli.NewApp(), flags, nil)
+	_, err := clientFromContext(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "loading config: parsing config "+configPath)
 }
 
 func TestOperationAction(t *testing.T) {
@@ -131,6 +173,7 @@ func TestOperationAction(t *testing.T) {
 		{"get-jwks", "get"},
 		{"get-spiffe-jwks", "get"},
 		{"get-openid-configuration", "get"},
+		{"start-machine-validation", "start"},
 	}
 
 	for _, tt := range tests {
@@ -168,6 +211,7 @@ func TestExtractResourceSuffix(t *testing.T) {
 		{"get-jwks", "jwks"},
 		{"get-spiffe-jwks", "spiffe-jwks"},
 		{"get-openid-configuration", "openid-configuration"},
+		{"start-machine-validation", "machine-validation"},
 	}
 
 	for _, tt := range tests {
@@ -384,18 +428,290 @@ func TestBuildCommands_NoDuplicateFlags(t *testing.T) {
 	visit("nicocli", cmds)
 }
 
-// TestBuildActionCommand_ReservedBodyPropertyPrefixed verifies that when a
-// request body schema has a property whose kebab-cased name collides with a
-// reserved CLI-wrapper flag (data, data-file, output, all), the generated
-// command registers the body property under a "body-" prefix instead of
-// creating a duplicate flag.
-func TestBuildActionCommand_ReservedBodyPropertyPrefixed(t *testing.T) {
+func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	operations := make(map[string]string)
+	for _, info := range GeneratedCommandInfos(spec) {
+		operations[info.Name] = info.OperationID
+	}
+
+	assert.Equal(t, "machine-power-control-machine", operations["machine power"])
+	assert.Equal(t, "get-all-dpu-machines", operations["dpu-machine list"])
+	assert.Equal(t, "get-dpu-machine", operations["dpu-machine get"])
+	assert.Equal(t,
+		"machine-power-control-machine",
+		operations["machine power-control-machine machine-power-control-machine"],
+	)
+
+	for operationID, path := range commandPathAliases {
+		assert.Equalf(t,
+			operationID,
+			operations[strings.Join(path, " ")],
+			"concise command path for %q does not identify the same operation",
+			operationID,
+		)
+	}
+	for operationID, path := range commandPathReplacements {
+		assert.Equalf(t,
+			operationID,
+			operations[strings.Join(path, " ")],
+			"replacement command path for %q does not identify the same operation",
+			operationID,
+		)
+	}
+	for operationID, paths := range additionalCommandPathAliases {
+		for _, path := range paths {
+			assert.Equalf(t,
+				operationID,
+				operations[strings.Join(path, " ")],
+				"additional command path for %q does not identify the same operation",
+				operationID,
+			)
+		}
+	}
+}
+
+func TestGeneratedCommandInfos_ExpectedInventoryBulkPaths(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	operations := make(map[string]GeneratedCommandInfo)
+	for _, info := range GeneratedCommandInfos(spec) {
+		operations[info.OperationID] = info
+	}
+
+	tests := []struct {
+		operationID string
+		method      string
+		path        string
+	}{
+		{
+			operationID: "replace-all-expected-rack",
+			method:      http.MethodPut,
+			path:        "/v2/org/{org}/nico/expected-rack/all",
+		},
+		{
+			operationID: "replace-all-expected-rack-group",
+			method:      http.MethodPut,
+			path:        "/v2/org/{org}/nico/expected-rack-group/all",
+		},
+		{operationID: "replace-all-expected-machine", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-machine/all"},
+		{operationID: "delete-all-expected-machine", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-machine/all"},
+		{operationID: "replace-all-expected-switch", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-switch/all"},
+		{operationID: "delete-all-expected-switch", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-switch/all"},
+		{operationID: "replace-all-expected-power-shelf", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+		{operationID: "delete-all-expected-power-shelf", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+	}
+	for _, tt := range tests {
+		operation, ok := operations[tt.operationID]
+		require.True(t, ok, "missing %s", tt.operationID)
+		assert.Equal(t, tt.method, operation.Method)
+		assert.Equal(t, tt.path, operation.Path)
+	}
+
+	_, hasRackLegacy := operations["replace-all-expected-rack-legacy"]
+	assert.False(t, hasRackLegacy)
+	_, hasRackGroupLegacy := operations["replace-all-expected-rack-group-legacy"]
+	assert.False(t, hasRackGroupLegacy)
+}
+
+func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
+	tests := []struct {
+		action string
+		flags  []string
+	}{
+		{action: "get"},
+		{action: "update", flags: []string{"--routing-profile", "--vni"}},
+		{action: "release-inactive-vni", flags: []string{"--if-version-match", "--expected-inactive-vni"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			vpc := app.Command("vpc")
+			require.NotNil(t, vpc)
+			routingProfile := vpc.Command("routing-profile")
+			require.NotNil(t, routingProfile)
+			command := routingProfile.Command(tt.action)
+			require.NotNil(t, command)
+			require.NotNil(t, command.Action)
+
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run([]string{"nicocli", "vpc", "routing-profile", tt.action, "--help"})
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), "nicocli vpc routing-profile "+tt.action)
+			for _, name := range tt.flags {
+				assert.Contains(t, output.String(), name)
+			}
+			if tt.action == "update" {
+				assert.NotContains(t, output.String(), "--if-version-match")
+			}
+		})
+	}
+}
+
+func TestNewApp_VpcPrefixCreateSelectors(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+	vpcPrefix := app.Command("vpc-prefix")
+	require.NotNil(t, vpcPrefix)
+	create := vpcPrefix.Command("create")
+	require.NotNil(t, create)
+	require.NotNil(t, create.Action)
+
+	flags := make(map[string]cli.Flag)
+	for _, flag := range create.Flags {
+		flags[flag.Names()[0]] = flag
+	}
+	require.Contains(t, flags, "prefix")
+	require.Contains(t, flags, "prefix-length")
+	assert.Contains(t, flags["prefix"].(*cli.StringFlag).Usage, "exactly one of --prefix or --prefix-length is required")
+	assert.Contains(t, flags["prefix-length"].(*cli.StringFlag).Usage, "exactly one of --prefix or --prefix-length is required")
+
+	var output bytes.Buffer
+	app.Writer = &output
+	app.ErrWriter = &output
+	require.NoError(t, app.Run([]string{"nicocli", "vpc-prefix", "create", "--help"}))
+	assert.Contains(t, output.String(), "--prefix value")
+	assert.Contains(t, output.String(), "--prefix-length value")
+	assert.Contains(t, output.String(), "exactly one of --prefix or --prefix-length is required")
+}
+
+func TestNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
+	requestCount := 0
+	requestBody := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, err = w.Write([]byte(`{}`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	const (
+		vpcID     = "5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3"
+		ipBlockID = "8c1d1a06-90a2-4863-8ee1-6029265b9f0a"
+	)
+	tests := []struct {
+		name      string
+		args      []string
+		wantBody  string
+		wantError string
+	}{
+		{
+			name: "automatic allocation flags",
+			args: []string{"--name", "automatic", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix-length", "24"},
+			wantBody: fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name: "explicit allocation flags",
+			args: []string{"--name", "explicit", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix", "10.20.30.0/24"},
+			wantBody: fmt.Sprintf(
+				`{"name":"explicit","vpcId":%q,"ipBlockId":%q,"prefix":"10.20.30.0/24"}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name:      "neither selector flags",
+			args:      []string{"--name", "missing", "--vpc-id", vpcID, "--ip-block-id", ipBlockID},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+		{
+			name:      "both selector flags",
+			args:      []string{"--name", "both", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix", "10.20.30.0/24", "--prefix-length", "24"},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+		{
+			name: "null selector in inline JSON is omitted",
+			args: []string{"--data", fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefix":null,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			)},
+			wantBody: fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefix":null,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name: "both selectors in inline JSON",
+			args: []string{"--data", fmt.Sprintf(
+				`{"name":"both","vpcId":%q,"ipBlockId":%q,"prefix":"10.20.30.0/24","prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			)},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeRequests := requestCount
+			requestBody = ""
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+
+			args := []string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"vpc-prefix", "create",
+			}
+			err = app.Run(append(args, test.args...))
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Equal(t, beforeRequests, requestCount)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, beforeRequests+1, requestCount)
+			assert.JSONEq(t, test.wantBody, requestBody)
+		})
+	}
+}
+
+// TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
+// for reserved names and scalar-compatible, single-item arrays.
+func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {
+	one := 1
+	two := 2
 	spec := &Spec{
 		Paths: map[string]PathItem{
 			"/v2/org/{org}/nico/widget": {
 				Post: &Operation{
 					OperationID: "create-widget",
 					Tags:        []string{"Widget"},
+					Parameters: []Parameter{
+						{
+							Name:        "legacyFilter",
+							In:          "query",
+							Deprecated:  true,
+							Description: "Legacy filter",
+							Schema: &Schema{
+								Type: "string",
+							},
+						},
+					},
 					RequestBody: &RequestBody{
 						Content: map[string]MediaType{
 							"application/json": {
@@ -407,6 +723,24 @@ func TestBuildActionCommand_ReservedBodyPropertyPrefixed(t *testing.T) {
 										"dataFile": {Type: "string"},
 										"output":   {Type: "string"},
 										"all":      {Type: "boolean"},
+										"legacyBodyParam": {
+											Type:       "boolean",
+											Deprecated: true,
+										},
+										"rackIds": {
+											Type: "array",
+											Items: &Schema{
+												Type: "string",
+											},
+											MaxItems: &one,
+										},
+										"tagIds": {
+											Type: "array",
+											Items: &Schema{
+												Type: "string",
+											},
+											MaxItems: &two,
+										},
 									},
 									Required: []string{"name"},
 								},
@@ -450,6 +784,132 @@ func TestBuildActionCommand_ReservedBodyPropertyPrefixed(t *testing.T) {
 
 	// Non-colliding body property stays unprefixed.
 	assert.Equal(t, 1, counts["name"], "--name (non-reserved body property)")
+
+	// A primitive array constrained to one item is presented as a scalar flag.
+	// Arrays that permit multiple items still require JSON input.
+	assert.Equal(t, 1, counts["rack-ids"], "--rack-ids (single-item array property)")
+	assert.Equal(t, 0, counts["tag-ids"], "multi-item arrays do not get scalar flags")
+
+	app := &cli.App{
+		Name: "nicocli",
+		Commands: []*cli.Command{
+			{
+				Name: "widget",
+				Subcommands: []*cli.Command{
+					cmd,
+				},
+			},
+		},
+	}
+	var output bytes.Buffer
+	app.Writer = &output
+	err := app.Run([]string{
+		"nicocli",
+		"widget",
+		"create",
+		"-h",
+	})
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"--legacy-body-param value legacyBodyParam (deprecated)",
+		normalizedOptionHelpLine(output.String(), "--legacy-body-param value"),
+	)
+	assert.Equal(
+		t,
+		"--legacy-filter value legacyFilter (deprecated): Legacy filter",
+		normalizedOptionHelpLine(output.String(), "--legacy-filter value"),
+	)
+	assert.Equal(
+		t,
+		"--rack-ids value rackIds",
+		normalizedOptionHelpLine(output.String(), "--rack-ids value"),
+	)
+	assert.NotContains(t, output.String(), "[ --rack-ids value ]")
+}
+
+func TestBuildRequestBody(t *testing.T) {
+	var body []byte
+	app := &cli.App{
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name: "data",
+			},
+			&cli.StringFlag{
+				Name: "data-file",
+			},
+			&cli.StringFlag{
+				Name: "resource-ids",
+			},
+		},
+		Action: func(c *cli.Context) error {
+			var err error
+			body, err = buildRequestBody(c, []bodyField{
+				{
+					jsonName: "resourceIds",
+					flagName: "resource-ids",
+					schema: &Schema{
+						Type: "array",
+					},
+					wrapInList: true,
+					itemType:   "string",
+				},
+			})
+			return err
+		},
+	}
+
+	err := app.Run([]string{
+		"test",
+		"--resource-ids",
+		"resource-1",
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"resourceIds":["resource-1"]}`, string(body))
+}
+
+func TestBuildRequestBody_VpcPrefixSelectors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "automatic allocation",
+			args: []string{"test", "--prefix-length", "24"},
+			want: `{"prefixLength":24}`,
+		},
+		{
+			name: "explicit CIDR allocation",
+			args: []string{"test", "--prefix", "10.20.30.0/24"},
+			want: `{"prefix":"10.20.30.0/24"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body []byte
+			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "data"},
+					&cli.StringFlag{Name: "data-file"},
+					&cli.StringFlag{Name: "prefix"},
+					&cli.StringFlag{Name: "prefix-length"},
+				},
+				Action: func(c *cli.Context) error {
+					var err error
+					body, err = buildRequestBody(c, []bodyField{
+						{jsonName: "prefix", flagName: "prefix", schema: &Schema{Type: "string"}},
+						{jsonName: "prefixLength", flagName: "prefix-length", schema: &Schema{Type: "integer"}},
+					})
+					return err
+				},
+			}
+
+			require.NoError(t, app.Run(test.args))
+			assert.JSONEq(t, test.want, string(body))
+		})
+	}
 }
 
 // TestNewApp_DpuExtensionServiceCreate_DoesNotPanic loads the real embedded
@@ -493,9 +953,21 @@ func TestBuildActionCommand_UsageTextUsesBinaryName(t *testing.T) {
 	}
 
 	cmd := buildActionCommand(spec, ro, "")
-	assert.Equal(t, "nicocli site get <siteId>", cmd.UsageText)
+	assert.Equal(t, "nicocli site get [command options] <siteId>", cmd.UsageText)
 	assert.False(t, strings.HasPrefix(cmd.UsageText, "cli "),
 		"UsageText must not start with the literal word 'cli '; got %q", cmd.UsageText)
+}
+
+func TestNewApp_RackGetUsageShowsOptionsBeforeID(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	var output bytes.Buffer
+	app.Writer = &output
+	require.NoError(t, app.Run([]string{"nicocli", "rack", "get", "--help"}))
+
+	assert.Contains(t, output.String(), "USAGE:\n   nicocli rack get [command options] <id>")
+	assert.NotContains(t, output.String(), "nicocli rack get <id>")
 }
 
 // TestBuildCommands_AllUsageTextStartsWithBinaryName walks every dynamically
@@ -527,7 +999,7 @@ func TestBuildCommands_AllUsageTextStartsWithBinaryName(t *testing.T) {
 }
 
 func TestDetectMisorderedFlags(t *testing.T) {
-	usage := "nicocli machine update <machineId>"
+	usage := "nicocli machine update [command options] <machineId>"
 	tests := []struct {
 		name         string
 		args         []string
@@ -552,7 +1024,7 @@ func TestDetectMisorderedFlags(t *testing.T) {
 			args:         []string{"fm100htq", "--data", "{}"},
 			argParams:    []string{"machineId"},
 			wantErr:      true,
-			wantContains: []string{"--data", "placed after a positional", "Move all flags before positionals", "[flags...] <machineId>"},
+			wantContains: []string{"--data", "placed after a positional", "Move all flags before positionals", "[command options] <machineId>"},
 		},
 		{
 			name:         "flag=value form after positional",
@@ -822,32 +1294,132 @@ func TestNewApp_CurrentSingletonCommandSurface(t *testing.T) {
 	}
 }
 
-// TestBuildCommands_CurrentSingletonsAreRunnable asserts that every
-// get-current-<resource> singleton in the embedded spec is reachable from the
-// non-interactive CLI under the `current` action that the interactive TUI
-// prints (NVBug 6100988). Driven off the spec so it stays honest as singletons
-// are added or removed.
-func TestBuildCommands_CurrentSingletonsAreRunnable(t *testing.T) {
+func TestNewApp_UEFICredentialCreateCommand(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err, "NewApp failed")
+
+	var credential *cli.Command
+	for _, command := range app.Commands {
+		if command.Name == "uefi-credential" {
+			credential = command
+			break
+		}
+	}
+	require.NotNil(t, credential, "UEFI credential must be exposed by the embedded OpenAPI spec")
+
+	var create *cli.Command
+	for _, command := range credential.Subcommands {
+		if command.Name == "create" {
+			create = command
+			break
+		}
+	}
+	require.NotNil(t, create, "UEFI credential must expose a create command")
+}
+
+// TestBuildCommands_RunnablePaths asserts that reviewed generated command paths
+// reach executable leaves in the non-interactive CLI.
+func TestBuildCommands_RunnablePaths(t *testing.T) {
 	spec, err := ParseSpec(openapi.Spec)
 	require.NoError(t, err)
 	cmds := BuildCommands(spec)
 
-	cmdByName := func(list []*cli.Command, name string) *cli.Command {
-		for _, c := range list {
-			if c.HasName(name) {
-				return c
-			}
-		}
-		return nil
+	tests := []struct {
+		name string
+		path []string
+	}{
+		{name: "tenant current", path: []string{"tenant", "current"}},
+		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
+		{name: "service account current", path: []string{"service-account", "current"}},
+		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
+		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
+		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},
+		{name: "machine BMC reset", path: []string{"machine", "bmc", "reset"}},
+		{name: "machine DPU reprovision", path: []string{"machine", "dpu", "reprovision"}},
+		{name: "machine validation results", path: []string{"machine", "validation", "results", "list"}},
+		{name: "machine validation runs", path: []string{"machine", "validation", "runs", "list"}},
+		{name: "machine validation start", path: []string{"machine", "validation", "start"}},
+		{name: "rack health report delete", path: []string{"rack", "health-report", "delete"}},
+		{name: "rack health report list", path: []string{"rack", "health-report", "list"}},
+		{name: "rack health report update", path: []string{"rack", "health-report", "update"}},
+		{name: "tray health report delete", path: []string{"tray", "health-report", "delete"}},
+		{name: "tray health report list", path: []string{"tray", "health-report", "list"}},
+		{name: "tray health report update", path: []string{"tray", "health-report", "update"}},
 	}
 
-	for _, tag := range []string{"tenant", "infrastructure-provider", "service-account"} {
-		t.Run(tag, func(t *testing.T) {
-			parent := cmdByName(cmds, tag)
-			require.NotNilf(t, parent, "tag %q must be a top-level command", tag)
-			assert.NotNilf(t, cmdByName(parent.Subcommands, "current"),
-				"tag %q must expose a `current` command runnable from the CLI", tag)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			children := cmds
+			var command *cli.Command
+			for _, component := range test.path {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(component) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "command path %q is missing component %q", strings.Join(test.path, " "), component)
+				children = command.Subcommands
+			}
+			require.NotNilf(t, command.Action, "command path %q must be executable", strings.Join(test.path, " "))
 		})
+	}
+}
+
+func TestCollectOperations_MachineScopedOperationsUseMachineTag(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	for _, operation := range collectOperations(spec) {
+		if !strings.Contains(operation.path, "/machine/{machineId}/") {
+			continue
+		}
+		assert.Equalf(t,
+			"Machine",
+			operation.tag,
+			"machine-scoped operation %q must remain under the Machine API",
+			operation.op.OperationID,
+		)
+	}
+}
+
+func TestBuildCommands_SiteExplorerActionIsRunnable(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	var siteExplorer *cli.Command
+	for _, command := range BuildCommands(spec) {
+		if command.HasName("site-explorer") {
+			siteExplorer = command
+			break
+		}
+	}
+	require.NotNil(t, siteExplorer)
+
+	var sawCreate, sawEndpointAction, sawList bool
+	for _, command := range siteExplorer.Subcommands {
+		if command.HasName("create") {
+			sawCreate = true
+		}
+		if command.HasName("endpoint") && len(command.Subcommands) > 0 {
+			for _, subcommand := range command.Subcommands {
+				if subcommand.HasName("action") && subcommand.Action != nil {
+					sawEndpointAction = true
+				}
+			}
+		}
+		if command.HasName("list") {
+			sawList = true
+		}
+	}
+	if !sawCreate {
+		t.Fatal("site-explorer create must be generated from the OpenAPI operation")
+	}
+	require.True(t, sawEndpointAction,
+		"site-explorer endpoint action must be generated from the OpenAPI operation")
+	if !sawList {
+		t.Fatal("site-explorer list must be generated from the OpenAPI operation")
 	}
 }
 
@@ -887,6 +1459,197 @@ func TestBuildCommands_AllocationConstraintIsUpdateOnly(t *testing.T) {
 	assert.Equal(t, []string{"update"}, actions,
 		"allocation constraint must expose only `update`; create/get/list/delete were "+
 			"removed from the OpenAPI spec because the server never registered those routes (NVBug 6232163)")
+}
+
+func TestNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, "100", request.URL.Query().Get("pageSize"))
+		assert.Equal(t, "1", request.URL.Query().Get("pageNumber"))
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`[]`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+	})
+
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--api-name", "nico",
+		"--token", "test-token",
+		"machine", "list", "--all",
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.JSONEq(t, `[]`, string(output))
+}
+
+func TestNewApp_MachineValidationCommandSurface(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	var machine, machineValidation *cli.Command
+	for _, command := range app.Commands {
+		assert.NotEqual(t, "machine-validation", command.Name, "Machine validation must not be a top-level resource")
+		if command.Name == "machine" {
+			machine = command
+		}
+	}
+	require.NotNil(t, machine, "Machine must be exposed by the embedded OpenAPI spec")
+	for _, command := range machine.Subcommands {
+		assert.NotContains(t,
+			[]string{"reprovision-machine-dpu", "reset-machine-bmc", "validation-results", "validation-runs"},
+			command.Name,
+			"Machine must not expose a synthetic command path alongside its reviewed resource path",
+		)
+		if command.Name == "validation" {
+			machineValidation = command
+			break
+		}
+	}
+	require.NotNil(t, machineValidation, "Machine must expose validation operations")
+
+	var start *cli.Command
+	for _, command := range machineValidation.Subcommands {
+		if command.Name == "start" {
+			start = command
+			break
+		}
+	}
+	require.NotNil(t, start, "Machine validation must expose a start command")
+	assert.Equal(t, "nicocli machine validation start [command options] <machineId>", start.UsageText)
+
+	for _, resourceName := range []string{"results", "runs"} {
+		var resource *cli.Command
+		for _, command := range machineValidation.Subcommands {
+			if command.Name == resourceName {
+				resource = command
+				break
+			}
+		}
+		require.NotNil(t, resource, "Machine validation must expose a %s sub-resource", resourceName)
+
+		var list *cli.Command
+		for _, command := range resource.Subcommands {
+			if command.Name == "list" {
+				list = command
+				break
+			}
+		}
+		require.NotNil(t, list, "Machine validation %s must expose a list command", resourceName)
+	}
+}
+
+func TestNewApp_MachineValidationStartExecutesRESTRequest(t *testing.T) {
+	var method, path, authorization, body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		method = request.Method
+		path = request.URL.Path
+		authorization = request.Header.Get("Authorization")
+		requestBody, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		body = string(requestBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, err = w.Write([]byte(`{"validationID":"validation-1","machineID":"machine-1","startTime":"2026-08-05T16:00:00Z","endTime":null,"name":"Test_machine-1","context":"OnDemand","status":{"state":"Started","total":0,"completed":0},"durationToCompleteSecs":0}`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--api-name", "nico",
+		"--token", "test-token",
+		"machine", "validation", "start",
+		"--data", `{"allowedTests":["gpu_bandwidth"],"runUnverifiedTests":true}`,
+		"machine-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, method)
+	assert.Equal(t, "/v2/org/test-org/nico/machine/machine-1/validation/run", path)
+	assert.Equal(t, "Bearer test-token", authorization)
+	assert.JSONEq(t, `{"allowedTests":["gpu_bandwidth"],"runUnverifiedTests":true}`, body)
+}
+
+func normalizedOptionHelpLine(output, option string) string {
+	for _, line := range strings.Split(output, "\n") {
+		normalized := strings.Join(strings.Fields(line), " ")
+		if strings.HasPrefix(normalized, option) {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
+	tests := []struct {
+		name         string
+		resource     string
+		expectedPath string
+	}{
+		{
+			name:         "runs",
+			resource:     "runs",
+			expectedPath: "/v2/org/test-org/nico/machine/machine-1/validation/run",
+		},
+		{
+			name:         "results",
+			resource:     "results",
+			expectedPath: "/v2/org/test-org/nico/machine/machine-1/validation/result",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var method, path, authorization string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				method = request.Method
+				path = request.URL.Path
+				authorization = request.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(`[]`))
+				require.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+
+			err = app.Run([]string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"machine", "validation", tt.resource, "list",
+				"machine-1",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, http.MethodGet, method)
+			assert.Equal(t, tt.expectedPath, path)
+			assert.Equal(t, "Bearer test-token", authorization)
+		})
+	}
 }
 
 // sortStrings is a tiny stable sort used by the order-independence test so it

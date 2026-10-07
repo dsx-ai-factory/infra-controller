@@ -4,10 +4,13 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,20 +19,131 @@ import (
 	cli "github.com/urfave/cli/v2"
 )
 
+var (
+	errOpenAPIOperationUnavailable = errors.New("OpenAPI operation is unavailable")
+	errOpenAPIResourceIDMissing    = errors.New("OpenAPI operation has no resource ID path parameter")
+)
+
 type resolvedOp struct {
-	tag        string
-	action     string
-	method     string
-	path       string
-	op         *Operation
-	pathParams []Parameter
+	tag         string
+	action      string
+	commandPath []string
+	method      string
+	path        string
+	op          *Operation
+	pathParams  []Parameter
+}
+
+type operationIndex map[string]resolvedOp
+
+func newOperationIndex(spec *Spec) operationIndex {
+	index := make(operationIndex)
+	for _, operation := range collectOperations(spec) {
+		index[operation.op.OperationID] = operation
+	}
+	return index
+}
+
+func (index operationIndex) require(operationID string) (resolvedOp, error) {
+	operation, ok := index[operationID]
+	if !ok {
+		return resolvedOp{}, fmt.Errorf("%w: %q", errOpenAPIOperationUnavailable, operationID)
+	}
+	return operation, nil
+}
+
+func (operation resolvedOp) parameters() []Parameter {
+	parameters := append([]Parameter{}, operation.pathParams...)
+	return append(parameters, operation.op.Parameters...)
+}
+
+func (operation resolvedOp) resourceIDParameter() (string, error) {
+	for _, parameter := range operation.parameters() {
+		if parameter.In == "path" && parameter.Name != "org" {
+			return parameter.Name, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %q", errOpenAPIResourceIDMissing, operation.op.OperationID)
+}
+
+func (operation resolvedOp) execute(client *Client, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
+	return client.Do(operation.method, operation.path, pathParams, queryParams, body)
 }
 
 // bodyField tracks a request body property for type-aware flag reading.
 type bodyField struct {
-	jsonName string
-	flagName string
-	schema   *Schema
+	jsonName   string
+	flagName   string
+	schema     *Schema
+	wrapInList bool
+	itemType   SchemaType
+}
+
+var exactlyOneBodyFieldsByOperation = map[string][]string{
+	"create-vpc-prefix": {"prefix", "prefixLength"},
+}
+
+// GeneratedCommandFlag describes a flag accepted by an OpenAPI-generated
+// command. It is used by other nicocli interfaces that need to prepare the
+// same command line without duplicating the OpenAPI-to-CLI naming rules.
+type GeneratedCommandFlag struct {
+	Name       string
+	TakesValue bool
+}
+
+// GeneratedCommandBodyField describes a request-body property exposed as a
+// generated CLI flag.
+type GeneratedCommandBodyField struct {
+	JSONName string
+	FlagName string
+}
+
+// GeneratedCommandBodyFormField describes one request-body schema property for
+// interactive form construction. Properties recursively describe object fields
+// and array items while preserving enough type information for JSON fallbacks.
+type GeneratedCommandBodyFormField struct {
+	JSONName   string
+	Required   bool
+	Type       SchemaType
+	Enum       []string
+	ItemType   SchemaType
+	ItemEnum   []string
+	Properties []GeneratedCommandBodyFormField
+}
+
+// GeneratedCommandQueryParameter describes one generated query flag.
+type GeneratedCommandQueryParameter struct {
+	Name        string
+	FlagName    string
+	Description string
+	Required    bool
+	Type        SchemaType
+	Enum        []string
+}
+
+// GeneratedCommandInfo describes one executable REST command leaf produced
+// from the OpenAPI contract.
+type GeneratedCommandInfo struct {
+	Name                string
+	Description         string
+	OperationID         string
+	Method              string
+	Path                string
+	PathParameters      []string
+	Flags               []GeneratedCommandFlag
+	QueryParameters     []GeneratedCommandQueryParameter
+	BodyFields          []GeneratedCommandBodyField
+	BodyFormFields      []GeneratedCommandBodyFormField
+	BodyRootType        SchemaType
+	RootBodyProperties  []string
+	BodyPropertyNames   []string
+	HasRequestBody      bool
+	RequestBodyRequired bool
+}
+
+type commandBuildOptions struct {
+	clientFactory func(*cli.Context) (*Client, error)
+	record        func(GeneratedCommandInfo)
 }
 
 // reservedBodyFlagNames are flag names owned by the CLI wrapper. Body
@@ -41,6 +155,71 @@ var reservedBodyFlagNames = map[string]bool{
 	"all":       true,
 	"data":      true,
 	"data-file": true,
+}
+
+// commandPathAliases adds concise aliases for generated commands. The original
+// generated paths remain available for compatibility.
+var commandPathAliases = map[string][]string{
+	"bringup-rack":                                      {"rack", "bringup"},
+	"bringup-racks":                                     {"rack", "bringup-all"},
+	"cancel-task":                                       {"task", "cancel"},
+	"create-or-update-host-firmware-config":             {"host-firmware-config", "update"},
+	"create-or-update-machine-health-report":            {"machine", "health-report", "update"},
+	"create-or-update-rack-health-report":               {"rack", "health-report", "update"},
+	"create-or-update-tray-health-report":               {"tray", "health-report", "update"},
+	"create-or-update-tenant-identity-config":           {"tenant-identity", "update"},
+	"create-or-update-tenant-identity-token-delegation": {"tenant-identity", "token-delegation", "update"},
+	"create-site-explorer-endpoint-action":              {"site-explorer", "create"},
+	"delete-all-expected-rack":                          {"expected-rack", "delete-all"},
+	"delete-tenant-identity-token-delegation":           {"tenant-identity", "token-delegation", "delete"},
+	"firmware-update-rack":                              {"rack", "firmware"},
+	"firmware-update-racks":                             {"rack", "firmware-all"},
+	"firmware-update-tray":                              {"tray", "firmware"},
+	"firmware-update-trays":                             {"tray", "firmware-all"},
+	"get-dpu-machines":                                  {"machine", "dpu", "get"},
+	"get-machine-gpu-stats":                             {"machine", "gpu-stats"},
+	"get-machine-instance-type-stats":                   {"machine", "instance-type-stats"},
+	"get-machine-instance-type-stats-summary":           {"machine", "instance-type-stats-summary"},
+	"get-rack-tasks":                                    {"rack", "task", "get"},
+	"get-tenant-identity-token-delegation":              {"tenant-identity", "token-delegation", "get"},
+	"get-tenant-instance-type-stats":                    {"tenant", "instance-type-stats"},
+	"get-tray-tasks":                                    {"tray", "task", "get"},
+	"get-all-measured-boot-trusted-machine":             {"measured-boot", "machine", "list"},
+	"get-all-measured-boot-trusted-profile":             {"measured-boot", "profile", "list"},
+	"list-rules":                                        {"rule", "list"},
+	"machine-power-control-machine":                     {"machine", "power"},
+	"power-control-rack":                                {"rack", "power"},
+	"power-control-racks":                               {"rack", "power-all"},
+	"power-control-tray":                                {"tray", "power"},
+	"power-control-trays":                               {"tray", "power-all"},
+	"release-vpc-inactive-vni":                          {"vpc", "routing-profile", "release-inactive-vni"},
+	"replace-all-expected-rack":                         {"expected-rack", "replace-all"},
+	"create-measured-boot-trusted-machine":              {"measured-boot", "machine", "approve"},
+	"create-measured-boot-trusted-profile":              {"measured-boot", "profile", "approve"},
+	"delete-measured-boot-trusted-machine":              {"measured-boot", "machine", "remove"},
+	"delete-measured-boot-trusted-profile":              {"measured-boot", "profile", "remove"},
+	"validate-rack":                                     {"rack", "validate"},
+	"validate-racks":                                    {"rack", "validate-all"},
+	"validate-tray":                                     {"tray", "validate"},
+	"validate-trays":                                    {"tray", "validate-all"},
+}
+
+// commandPathReplacements moves operations to reviewed resource paths without
+// retaining the generated path. Use this when an operation changes tag so its
+// old top-level resource and the synthetic path under the new tag both need to
+// disappear.
+var commandPathReplacements = map[string][]string{
+	"get-all-machine-validation-results": {"machine", "validation", "results", "list"},
+	"get-all-machine-validation-runs":    {"machine", "validation", "runs", "list"},
+	"reprovision-machine-dpu":            {"machine", "dpu", "reprovision"},
+	"reset-machine-bmc":                  {"machine", "bmc", "reset"},
+	"start-machine-validation":           {"machine", "validation", "start"},
+}
+
+// additionalCommandPathAliases preserves established command paths when an
+// operation also has a newer preferred alias.
+var additionalCommandPathAliases = map[string][][]string{
+	"create-site-explorer-endpoint-action": {{"site-explorer", "endpoint", "action"}},
 }
 
 // subResourceHelpTemplate renders actions and sub-resources as separate sections.
@@ -63,7 +242,59 @@ OPTIONS:
 
 // BuildCommands converts parsed OpenAPI operations into a cli.Command tree grouped by tag.
 func BuildCommands(spec *Spec) []*cli.Command {
+	return buildCommands(spec, commandBuildOptions{})
+}
+
+// GeneratedCommandInfos returns the REST command leaves produced from spec.
+// The names come from the same build pass as BuildCommands, including
+// sub-resource grouping and collision expansion.
+func GeneratedCommandInfos(spec *Spec) []GeneratedCommandInfo {
+	var infos []GeneratedCommandInfo
+	seen := make(map[string]struct{})
+	buildCommands(spec, commandBuildOptions{
+		record: func(info GeneratedCommandInfo) {
+			if _, exists := seen[info.Name]; exists {
+				return
+			}
+			seen[info.Name] = struct{}{}
+			infos = append(infos, info)
+		},
+	})
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].Name < infos[j].Name
+	})
+	return infos
+}
+
+// RunGeneratedCommand executes one OpenAPI-generated command through client.
+// This keeps alternate interfaces on the generated CLI's flag, request-body,
+// pagination, output, and error behavior while reusing their active client.
+func RunGeneratedCommand(spec *Spec, client *Client, name string, args []string) error {
+	if client == nil {
+		return fmt.Errorf("generated command client is required")
+	}
+
+	commands := buildCommands(spec, commandBuildOptions{
+		clientFactory: func(*cli.Context) (*Client, error) {
+			return client, nil
+		},
+	})
+	app := &cli.App{
+		Name:     binaryName,
+		Commands: commands,
+	}
+	appArgs := []string{binaryName}
+	appArgs = append(appArgs, strings.Fields(name)...)
+	appArgs = append(appArgs, args...)
+	return app.Run(appArgs)
+}
+
+func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
 	ops := collectOperations(spec)
+	ops = slices.DeleteFunc(ops, func(op resolvedOp) bool {
+		_, replaced := commandPathReplacements[op.op.OperationID]
+		return replaced
+	})
 	grouped := groupByTag(ops)
 
 	tagDescriptions := make(map[string]string)
@@ -74,7 +305,7 @@ func BuildCommands(spec *Spec) []*cli.Command {
 	var commands []*cli.Command
 	for _, cmdName := range sortedKeys(grouped) {
 		actions := grouped[cmdName]
-		subCmds := buildTagSubcommands(spec, actions)
+		subCmds := buildTagSubcommandsWithOptions(spec, actions, options)
 		sort.Slice(subCmds, func(i, j int) bool { return subCmds[i].Name < subCmds[j].Name })
 		desc := tagDescriptions[cmdName]
 		if desc == "" {
@@ -93,6 +324,34 @@ func BuildCommands(spec *Spec) []*cli.Command {
 		}
 		commands = append(commands, cmd)
 	}
+	operationIndex := newOperationIndex(spec)
+	addAlias := func(operationID string, path []string) {
+		if len(path) < 2 {
+			panic(fmt.Sprintf("command path alias for %q must have at least two components", operationID))
+		}
+		operation, ok := operationIndex[operationID]
+		if !ok {
+			return
+		}
+		operation.commandPath = path
+		commands = addCommandAtPath(
+			commands,
+			path,
+			buildActionCommandWithOptions(spec, operation, "", options),
+		)
+	}
+	for operationID, path := range commandPathAliases {
+		addAlias(operationID, path)
+	}
+	for operationID, path := range commandPathReplacements {
+		addAlias(operationID, path)
+	}
+	for operationID, paths := range additionalCommandPathAliases {
+		for _, path := range paths {
+			addAlias(operationID, path)
+		}
+	}
+	sortCommandTree(commands)
 	return commands
 }
 
@@ -110,7 +369,7 @@ func collectOperations(spec *Spec) []resolvedOp {
 			{"DELETE", item.Delete},
 		}
 		for _, me := range methods {
-			if me.op == nil {
+			if me.op == nil || me.op.Deprecated {
 				continue
 			}
 			tag := "other"
@@ -142,6 +401,10 @@ func groupByTag(ops []resolvedOp) map[string][]resolvedOp {
 // buildTagSubcommands splits a tag's operations into primary resource actions
 // and nested sub-resource groups.
 func buildTagSubcommands(spec *Spec, ops []resolvedOp) []*cli.Command {
+	return buildTagSubcommandsWithOptions(spec, ops, commandBuildOptions{})
+}
+
+func buildTagSubcommandsWithOptions(spec *Spec, ops []resolvedOp, options commandBuildOptions) []*cli.Command {
 	primary := detectPrimaryResource(ops)
 
 	var primaryOps []resolvedOp
@@ -183,7 +446,7 @@ func buildTagSubcommands(spec *Spec, ops []resolvedOp) []*cli.Command {
 
 	var cmds []*cli.Command
 	for _, op := range primaryOps {
-		cmds = append(cmds, buildActionCommand(spec, op, ""))
+		cmds = append(cmds, buildActionCommandWithOptions(spec, op, "", options))
 	}
 
 	subResNames := make([]string, 0, len(subResourceOps))
@@ -196,7 +459,7 @@ func buildTagSubcommands(spec *Spec, ops []resolvedOp) []*cli.Command {
 		subOps := subResourceOps[name]
 		subCmds := make([]*cli.Command, 0, len(subOps))
 		for _, op := range subOps {
-			subCmds = append(subCmds, buildActionCommand(spec, op, name))
+			subCmds = append(subCmds, buildActionCommandWithOptions(spec, op, name, options))
 		}
 		sort.Slice(subCmds, func(i, j int) bool { return subCmds[i].Name < subCmds[j].Name })
 
@@ -213,6 +476,63 @@ func buildTagSubcommands(spec *Spec, ops []resolvedOp) []*cli.Command {
 	}
 
 	return cmds
+}
+
+func addCommandAtPath(commands []*cli.Command, path []string, command *cli.Command) []*cli.Command {
+	if len(path) == 1 {
+		for _, existing := range commands {
+			if existing.Name == path[0] {
+				if existing.Action == nil && len(existing.Subcommands) > 0 {
+					existing.Category = ""
+					existing.Usage = command.Usage
+					existing.UsageText = command.UsageText
+					existing.Flags = command.Flags
+					existing.Action = command.Action
+					return commands
+				}
+				if existing.Usage == command.Usage && existing.UsageText == command.UsageText {
+					return commands
+				}
+				panic(fmt.Sprintf(
+					"command path alias collides at %q: existing usage %q, alias usage %q",
+					strings.Join(path, " "), existing.UsageText, command.UsageText,
+				))
+			}
+		}
+		command.Name = path[0]
+		return append(commands, command)
+	}
+
+	for _, existing := range commands {
+		if existing.Name != path[0] {
+			continue
+		}
+		if existing.Action != nil {
+			panic(fmt.Sprintf("command path alias cannot place a subcommand under action %q", existing.Name))
+		}
+		existing.Subcommands = addCommandAtPath(existing.Subcommands, path[1:], command)
+		return commands
+	}
+
+	group := &cli.Command{
+		Name:     path[0],
+		Category: "Sub-resources",
+		Usage:    path[0] + " operations",
+	}
+	group.Subcommands = addCommandAtPath(group.Subcommands, path[1:], command)
+	return append(commands, group)
+}
+
+func sortCommandTree(commands []*cli.Command) {
+	sort.Slice(commands, func(i, j int) bool { return commands[i].Name < commands[j].Name })
+	for _, command := range commands {
+		sortCommandTree(command.Subcommands)
+		if slices.ContainsFunc(command.Subcommands, func(child *cli.Command) bool {
+			return child.Category != ""
+		}) {
+			command.CustomHelpTemplate = subResourceHelpTemplate
+		}
+	}
 }
 
 func detectPrimaryResource(ops []resolvedOp) string {
@@ -236,7 +556,7 @@ func extractResourceSuffix(opID string) string {
 	prefixes := []string{
 		"batch-create-", "batch-update-",
 		"get-all-", "get-current-",
-		"create-", "update-", "delete-", "get-",
+		"create-", "update-", "delete-", "get-", "start-",
 	}
 	for _, p := range prefixes {
 		if strings.HasPrefix(opID, p) {
@@ -279,6 +599,10 @@ func isListAction(action string) bool {
 }
 
 func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Command {
+	return buildActionCommandWithOptions(spec, ro, subResource, commandBuildOptions{})
+}
+
+func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string, options commandBuildOptions) *cli.Command {
 	flags := []cli.Flag{
 		&cli.StringFlag{
 			Name:   "output",
@@ -297,9 +621,9 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 	}
 
 	var argParams []string
+	var queryParameters []GeneratedCommandQueryParameter
 
-	allParams := append([]Parameter{}, ro.pathParams...)
-	allParams = append(allParams, ro.op.Parameters...)
+	allParams := ro.parameters()
 
 	for _, p := range allParams {
 		if p.Name == "org" {
@@ -310,11 +634,30 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 			continue
 		}
 		if p.In == "query" {
-			flags = append(flags, paramToFlag(p))
+			flag := paramToFlag(p)
+			flags = append(flags, flag)
+			queryParameter := GeneratedCommandQueryParameter{
+				Name:        p.Name,
+				FlagName:    flag.Names()[0],
+				Description: p.Description,
+				Required:    p.Required,
+			}
+			if schema := spec.ResolveSchema(p.Schema); schema != nil {
+				queryParameter.Type = schema.Type
+				queryParameter.Enum = append([]string(nil), schema.Enum...)
+			} else if p.Schema != nil {
+				queryParameter.Type = p.Schema.Type
+				queryParameter.Enum = append([]string(nil), p.Schema.Enum...)
+			}
+			queryParameters = append(queryParameters, queryParameter)
 		}
 	}
 
 	var bodyFields []bodyField
+	var bodyFormFields []GeneratedCommandBodyFormField
+	var bodyRootType SchemaType
+	var rootBodyProperties []string
+	var bodyPropertyNames []string
 
 	hasBody := ro.op.RequestBody != nil
 	if hasBody {
@@ -329,14 +672,28 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 			},
 		)
 		if schema := spec.RequestBodySchema(ro.op); schema != nil {
+			bodyRootType, bodyFormFields = generatedBodyFormFields(spec, schema)
+			rootBodyProperties, bodyPropertyNames = generatedBodyProperties(spec, schema)
 			reqSet := make(map[string]bool)
 			for _, r := range schema.Required {
 				reqSet[r] = true
 			}
 			for name, prop := range schema.Properties {
 				resolved := spec.ResolveSchema(prop)
-				if resolved == nil || resolved.Type == "object" || resolved.Type == "array" {
+				if resolved == nil || resolved.Type == "object" {
 					continue
+				}
+				wrapInList := false
+				var itemType SchemaType
+				if resolved.Type == "array" {
+					if resolved.MaxItems == nil || *resolved.MaxItems != 1 {
+						continue
+					}
+					itemType = generatedSchemaType(spec.ResolveSchema(resolved.Items))
+					if itemType == "" || itemType == "object" || itemType == "array" {
+						continue
+					}
+					wrapInList = true
 				}
 				flagName := toKebab(name)
 				// Prefix body properties whose kebab-cased name collides with
@@ -350,13 +707,21 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 					flagName = "body-" + flagName
 				}
 				usage := name
+				if prop.Deprecated || resolved.Deprecated {
+					usage += " (deprecated)"
+				}
 				if reqSet[name] {
 					usage += " (required)"
 				}
+				if fields := exactlyOneBodyFieldsByOperation[ro.op.OperationID]; slices.Contains(fields, name) {
+					usage += fmt.Sprintf(" (exactly one of %s is required)", exactlyOneBodyFlags(fields))
+				}
 				bodyFields = append(bodyFields, bodyField{
-					jsonName: name,
-					flagName: flagName,
-					schema:   resolved,
+					jsonName:   name,
+					flagName:   flagName,
+					schema:     resolved,
+					wrapInList: wrapInList,
+					itemType:   itemType,
 				})
 				flags = append(flags, schemaToFlag(flagName, usage, resolved))
 			}
@@ -367,11 +732,17 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 		return flags[i].Names()[0] < flags[j].Names()[0]
 	})
 
-	usageText := binaryName + " " + tagToCommand(ro.tag)
-	if subResource != "" {
-		usageText += " " + subResource
+	usageText := binaryName
+	if len(ro.commandPath) > 0 {
+		usageText += " " + strings.Join(ro.commandPath, " ")
+	} else {
+		usageText += " " + tagToCommand(ro.tag)
+		if subResource != "" {
+			usageText += " " + subResource
+		}
+		usageText += " " + ro.action
 	}
-	usageText += " " + ro.action
+	usageText += " [command options]"
 	for _, ap := range argParams {
 		usageText += " <" + ap + ">"
 	}
@@ -381,7 +752,7 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 		summary = ro.op.OperationID
 	}
 
-	return &cli.Command{
+	command := &cli.Command{
 		Name:      ro.action,
 		Usage:     summary,
 		UsageText: usageText,
@@ -391,7 +762,11 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 				return err
 			}
 
-			client, err := clientFromContext(c)
+			clientFactory := options.clientFactory
+			if clientFactory == nil {
+				clientFactory = clientFromContext
+			}
+			client, err := clientFactory(c)
 			if err != nil {
 				return err
 			}
@@ -420,13 +795,17 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 				if err != nil {
 					return err
 				}
+				err = validateExactlyOneBodyFields(ro.op.OperationID, body)
+				if err != nil {
+					return err
+				}
 			}
 
 			if isList && c.Bool("all") {
 				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"))
 			}
 
-			respBody, respHeaders, err := client.Do(ro.method, ro.path, pathParams, queryParams, body)
+			respBody, respHeaders, err := ro.execute(client, pathParams, queryParams, body)
 			if err != nil {
 				return err
 			}
@@ -440,6 +819,170 @@ func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Comm
 			return FormatOutput(respBody, c.String("output"))
 		},
 	}
+
+	if options.record != nil {
+		nameParts := ro.commandPath
+		if len(nameParts) == 0 {
+			nameParts = []string{tagToCommand(ro.tag)}
+			if subResource != "" {
+				nameParts = append(nameParts, subResource)
+			}
+			nameParts = append(nameParts, ro.action)
+		}
+
+		flagInfos := make([]GeneratedCommandFlag, 0, len(flags))
+		for _, flag := range flags {
+			takesValue := true
+			if _, ok := flag.(*cli.BoolFlag); ok {
+				takesValue = false
+			}
+			for _, name := range flag.Names() {
+				flagInfos = append(flagInfos, GeneratedCommandFlag{
+					Name:       name,
+					TakesValue: takesValue,
+				})
+			}
+		}
+		bodyFieldInfos := make([]GeneratedCommandBodyField, 0, len(bodyFields))
+		for _, field := range bodyFields {
+			bodyFieldInfos = append(bodyFieldInfos, GeneratedCommandBodyField{
+				JSONName: field.jsonName,
+				FlagName: field.flagName,
+			})
+		}
+		options.record(GeneratedCommandInfo{
+			Name:                strings.Join(nameParts, " "),
+			Description:         summary,
+			OperationID:         ro.op.OperationID,
+			Method:              ro.method,
+			Path:                ro.path,
+			PathParameters:      append([]string(nil), argParams...),
+			Flags:               flagInfos,
+			QueryParameters:     append([]GeneratedCommandQueryParameter(nil), queryParameters...),
+			BodyFields:          bodyFieldInfos,
+			BodyFormFields:      append([]GeneratedCommandBodyFormField(nil), bodyFormFields...),
+			BodyRootType:        bodyRootType,
+			RootBodyProperties:  append([]string(nil), rootBodyProperties...),
+			BodyPropertyNames:   append([]string(nil), bodyPropertyNames...),
+			HasRequestBody:      hasBody,
+			RequestBodyRequired: ro.op.RequestBody != nil && ro.op.RequestBody.Required,
+		})
+	}
+
+	return command
+}
+
+func generatedBodyFormFields(spec *Spec, schema *Schema) (SchemaType, []GeneratedCommandBodyFormField) {
+	root := spec.ResolveSchema(schema)
+	rootType := generatedSchemaType(root)
+	fieldContainer := root
+	if rootType == "array" && root != nil {
+		fieldContainer = spec.ResolveSchema(root.Items)
+	}
+	if fieldContainer == nil {
+		return rootType, nil
+	}
+	return rootType, generatedBodyFormProperties(spec, fieldContainer, make(map[*Schema]bool))
+}
+
+func generatedBodyFormProperties(
+	spec *Spec,
+	container *Schema,
+	visiting map[*Schema]bool,
+) []GeneratedCommandBodyFormField {
+	container = spec.ResolveSchema(container)
+	if container == nil || visiting[container] {
+		return nil
+	}
+	visiting[container] = true
+	defer delete(visiting, container)
+
+	required := make(map[string]bool, len(container.Required))
+	for _, name := range container.Required {
+		required[name] = true
+	}
+
+	names := generatedSortedKeys(container.Properties)
+	fields := make([]GeneratedCommandBodyFormField, 0, len(names))
+	for _, name := range names {
+		property := spec.ResolveSchema(container.Properties[name])
+		if property == nil {
+			continue
+		}
+		field := GeneratedCommandBodyFormField{
+			JSONName: name,
+			Required: required[name],
+			Type:     generatedSchemaType(property),
+			Enum:     append([]string(nil), property.Enum...),
+		}
+		switch field.Type {
+		case "object":
+			field.Properties = generatedBodyFormProperties(spec, property, visiting)
+		case "array":
+			item := spec.ResolveSchema(property.Items)
+			field.ItemType = generatedSchemaType(item)
+			if item != nil {
+				field.ItemEnum = append([]string(nil), item.Enum...)
+				if field.ItemType == "object" {
+					field.Properties = generatedBodyFormProperties(spec, item, visiting)
+				}
+			}
+		}
+		fields = append(fields, field)
+	}
+	return fields
+}
+
+func generatedSchemaType(schema *Schema) SchemaType {
+	if schema == nil {
+		return ""
+	}
+	if schema.Type != "" {
+		return schema.Type
+	}
+	if len(schema.Properties) > 0 {
+		return "object"
+	}
+	return ""
+}
+
+func generatedBodyProperties(spec *Spec, schema *Schema) ([]string, []string) {
+	root := spec.ResolveSchema(schema)
+	if root != nil && root.Type == "array" {
+		root = spec.ResolveSchema(root.Items)
+	}
+
+	var rootNames []string
+	if root != nil {
+		rootNames = generatedSortedKeys(root.Properties)
+	}
+
+	seen := make(map[*Schema]bool)
+	allNames := make(map[string]struct{})
+	var collect func(*Schema)
+	collect = func(current *Schema) {
+		current = spec.ResolveSchema(current)
+		if current == nil || seen[current] {
+			return
+		}
+		seen[current] = true
+		for name, property := range current.Properties {
+			allNames[name] = struct{}{}
+			collect(property)
+		}
+		collect(current.Items)
+	}
+	collect(schema)
+	return rootNames, generatedSortedKeys(allNames)
+}
+
+func generatedSortedKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // detectMisorderedFlags returns a helpful error when urfave/cli's stdlib flag
@@ -494,23 +1037,11 @@ func detectMisorderedFlagsInArgs(args, argParams []string, usageText string) err
 		return nil
 	}
 
-	// Rewrite the usage line so the hint shows exactly where flags belong.
-	hint := usageText
-	if len(argParams) > 0 {
-		tail := ""
-		for _, ap := range argParams {
-			tail += " <" + ap + ">"
-		}
-		if idx := strings.Index(usageText, tail); idx >= 0 {
-			hint = usageText[:idx] + " [flags...]" + tail
-		}
-	}
-
 	var msg strings.Builder
 	if len(misplacedFlags) > 0 {
 		fmt.Fprintf(&msg, "flag(s) %s placed after a positional argument; urfave/cli (stdlib flag) stops parsing flags at the first positional, so these flags are being ignored.\n",
 			strings.Join(misplacedFlags, ", "))
-		fmt.Fprintf(&msg, "Move all flags before positionals, e.g.\n  %s\n", hint)
+		fmt.Fprintf(&msg, "Move all flags before positionals, e.g.\n  %s\n", usageText)
 	}
 	if len(extraPositionals) > 0 {
 		if msg.Len() > 0 {
@@ -549,6 +1080,41 @@ func schemaToFlag(flagName, usage string, schema *Schema) cli.Flag {
 	return &cli.StringFlag{Name: flagName, Usage: usage}
 }
 
+func exactlyOneBodyFlags(fields []string) string {
+	flags := make([]string, 0, len(fields))
+	for _, field := range fields {
+		flags = append(flags, "--"+toKebab(field))
+	}
+	return strings.Join(flags, " or ")
+}
+
+func validateExactlyOneBodyFields(operationID string, body []byte) error {
+	fields := exactlyOneBodyFieldsByOperation[operationID]
+	if len(fields) == 0 {
+		return nil
+	}
+
+	values := make(map[string]json.RawMessage)
+	if len(body) > 0 {
+		err := json.Unmarshal(body, &values)
+		if err != nil {
+			return fmt.Errorf("invalid request body for %s: %w", operationID, err)
+		}
+	}
+
+	selected := 0
+	for _, field := range fields {
+		value, ok := values[field]
+		if ok && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			selected++
+		}
+	}
+	if selected != 1 {
+		return fmt.Errorf("exactly one of %s must be specified", exactlyOneBodyFlags(fields))
+	}
+	return nil
+}
+
 func buildRequestBody(c *cli.Context, bodyFields []bodyField) ([]byte, error) {
 	data := c.String("data")
 	dataFile := c.String("data-file")
@@ -566,9 +1132,17 @@ func buildRequestBody(c *cli.Context, bodyFields []bodyField) ([]byte, error) {
 		if v == "" {
 			continue
 		}
-		val, err := coerceValue(v, bf.schema.Type)
+		valueType := bf.schema.Type
+		if bf.wrapInList {
+			valueType = bf.itemType
+		}
+		val, err := coerceValue(v, valueType)
 		if err != nil {
 			return nil, fmt.Errorf("flag --%s: %w", bf.flagName, err)
+		}
+		if bf.wrapInList {
+			obj[bf.jsonName] = []interface{}{val}
+			continue
 		}
 		obj[bf.jsonName] = val
 	}
@@ -624,7 +1198,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 	}
 	queryParams["pageSize"] = strconv.Itoa(maxPageSize)
 
-	var allItems []json.RawMessage
+	allItems := make([]json.RawMessage, 0)
 	totalFromHeader := 0
 
 	for {
@@ -701,7 +1275,10 @@ func coerceValue(v string, schemaType SchemaType) (interface{}, error) {
 }
 
 func clientFromContext(c *cli.Context) (*Client, error) {
-	cfg, _ := LoadConfig()
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
 	ApplyEnvOverrides(cfg)
 
 	tokenCommand := c.String("token-command")
@@ -781,6 +1358,13 @@ func clientFromContext(c *cli.Context) (*Client, error) {
 func paramToFlag(p Parameter) cli.Flag {
 	flagName := toKebab(p.Name)
 	usage := p.Description
+	if p.Deprecated {
+		deprecatedUsage := p.Name + " (deprecated)"
+		if usage != "" {
+			deprecatedUsage += ": " + usage
+		}
+		usage = deprecatedUsage
+	}
 	if p.Schema != nil && len(p.Schema.Enum) > 0 {
 		usage += " [" + strings.Join(p.Schema.Enum, ", ") + "]"
 	}
@@ -827,6 +1411,7 @@ func operationAction(opID string) string {
 		{prefix: "update-", action: "update"},
 		{prefix: "delete-", action: "delete"},
 		{prefix: "get-", bare: "get"},
+		{prefix: "start-", action: "start"},
 	}
 
 	for _, p := range patterns {

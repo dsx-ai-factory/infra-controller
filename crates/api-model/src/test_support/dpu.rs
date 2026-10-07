@@ -19,15 +19,17 @@ use mac_address::MacAddress;
 
 use crate::hardware_info::HardwareInfo;
 use crate::site_explorer::{
-    Chassis, ComputerSystem, ComputerSystemAttributes, EndpointExplorationError,
-    EndpointExplorationReport, EndpointType, EthernetInterface, Inventory, Manager, NicMode,
-    PCIeDevice, PowerState, Service, UefiDevicePath,
+    BlueFieldOperatingMode, Chassis, ComputerSystem, ComputerSystemAttributes,
+    EndpointExplorationError, EndpointExplorationReport, EndpointType, EthernetInterface,
+    Inventory, Manager, PCIeDevice, PowerState, Service, UefiDevicePath,
 };
 use crate::test_support::HardwareInfoTemplate;
 
 pub const DPU_INFO_JSON: &[u8] = include_bytes!("../hardware_info/test_data/dpu_info.json");
 
 pub const DPU_BF3_INFO_JSON: &[u8] = include_bytes!("../hardware_info/test_data/dpu_bf3_info.json");
+
+pub const DPU_BF4_INFO_JSON: &[u8] = include_bytes!("../hardware_info/test_data/dpu_bf4_info.json");
 
 #[derive(Clone, Debug)]
 pub struct DpuConfig {
@@ -40,10 +42,10 @@ pub struct DpuConfig {
     pub override_hosts_uefi_device_path: Option<UefiDevicePath>,
     pub hardware_info_template: HardwareInfoTemplate,
     /// The `nic_mode` value included in the DPU's `EndpointExplorationReport`.
-    /// Defaults to `Some(NicMode::Dpu)`; tests exercising the auto-correct
-    /// path override this to `Some(NicMode::Nic)` to simulate a DPU whose
+    /// Defaults to `Some(BlueFieldOperatingMode::Dpu)`; tests exercising the auto-correct
+    /// path override this to `Some(BlueFieldOperatingMode::Nic)` to simulate a DPU whose
     /// hardware mode doesn't match the operator-declared mode.
-    pub nic_mode: Option<NicMode>,
+    pub nic_mode: Option<BlueFieldOperatingMode>,
 }
 
 impl From<&DpuConfig> for HardwareInfo {
@@ -67,10 +69,14 @@ impl From<DpuConfig> for EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: value.last_exploration_error,
             last_exploration_latency: None,
+            component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             machine_id: None,
             managers: vec![Manager {
                 id: "bmc".to_string(),
+                ipmi_port: None,
                 ethernet_interfaces: vec![EthernetInterface {
                     id: Some("eth0".to_string()),
                     description: Some("Management Network Interface".to_string()),
@@ -112,6 +118,8 @@ impl From<DpuConfig> for EndpointExplorationReport {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
+                serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
                 id: "Card1".to_string(),

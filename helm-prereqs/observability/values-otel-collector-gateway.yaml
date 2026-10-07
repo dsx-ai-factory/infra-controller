@@ -1,0 +1,166 @@
+# OTEL Collector — GATEWAY (Deployment). The central OTLP/mTLS receiver the DPU dials at
+# otel-receiver.forge:443. Receives DPU (bluefield/charts/nico-otelcol) DOCA/HBN/kernel/auth logs +
+# host metrics -> local Loki (logs) + prometheus/site (metrics, scraped by Prometheus).
+#
+# mTLS TRUST CHAIN: the DPU trusts the site root CA (its
+# /etc/otelcol-contrib/certs/ca.pem) and presents a client cert ALSO signed by that root. So:
+#   - server cert (otel-receiver-tls) is issued by the site CA issuer (leaf signed by the site root)
+#   - client_ca_file = that cert secret's own ca.crt (= the site root) -> verifies the DPU's client cert
+# NOT a dev CA (e.g. "NICo Local Dev CA") — the DPU does not trust it (causes the x509 handshake fail).
+#
+# IMAGE PIN: see values-otel-collector-agent.yaml (the loki exporter needs a 0.106.x image).
+mode: deployment
+# Name all resources exactly `otel-collector-gateway` (default would be
+# `otel-collector-gateway-opentelemetry-collector`). Keeps the Service name matching the Prometheus
+# scrape target (values-kube-prometheus-stack.yaml) and the `deploy/otel-collector-gateway` refs in docs.
+fullnameOverride: otel-collector-gateway
+replicaCount: 1
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+image:
+  repository: "otel/opentelemetry-collector-contrib"
+  tag: "0.106.1"
+# Site label value. Overridden per site by install-observability.sh
+# (OTEL_SITE_NAME env) — must stay at index 0 of extraEnvs.
+extraEnvs:
+  - name: OTEL_SITE_NAME
+    value: "nico-site"
+# DPU dials :443; the OTLP gRPC receiver listens on 4317 -> Service maps servicePort 443 to containerPort 4317.
+# The chart's OTHER default ports are explicitly disabled: helm deep-merges values, so without
+# this the LoadBalancer VIP would also expose the chart's default unauthenticated listeners
+# (OTLP/HTTP 4318, jaeger 6831/14250/14268, zipkin 9411), bypassing the mTLS client-cert gate.
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 443
+    protocol: TCP
+  prometheus:
+    enabled: true
+    containerPort: 9999
+    servicePort: 9999
+    protocol: TCP
+  otlp-http:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+service:
+  type: LoadBalancer
+  # ETP=Local: the DPU otelcol dials the VIP ON-SUBNET from its mgmt IP — the same L2 segment
+  # as the MetalLB VIP (as it does for the nico-api VIP).
+  # Give the gateway a DEDICATED VIP: sharing a VIP across Services with different
+  # externalTrafficPolicy values wedges MetalLB's announcement. mTLS authenticates via the DPU
+  # client cert, so client-IP preservation is a bonus, not a requirement.
+  # install-observability.sh sets the MetalLB address annotation from OTEL_RECEIVER_VIP; the VIP
+  # must exist in the site's MetalLB pool and in DNS (unbound localData: otel-receiver.forge).
+  externalTrafficPolicy: Local
+extraVolumes:
+  - name: otlp-server-cert
+    secret:
+      secretName: otel-receiver-tls        # site-issuer: tls.crt/tls.key (server) + ca.crt (= site-root, the DPU's trust anchor AND its client-cert CA)
+extraVolumeMounts:
+  - {name: otlp-server-cert, mountPath: /etc/otel/tls, readOnly: true}
+# Bracket the pod IP in listener and scrape addresses. Unbracketed IPv6
+# endpoints prevent collector startup; brackets also work for IPv4.
+config:
+  extensions:
+    health_check:
+      endpoint: "[${env:MY_POD_IP}]:13133"
+  receivers:
+    # Null out the chart's default receivers (helm merge keeps them otherwise; a null key
+    # removes it) — only the mTLS OTLP/gRPC listener below may exist on this pod.
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        http: null
+        grpc:
+          endpoint: "[${env:MY_POD_IP}]:4317"
+          tls:
+            cert_file: /etc/otel/tls/tls.crt
+            key_file: /etc/otel/tls/tls.key
+            client_ca_file: /etc/otel/tls/ca.crt         # verify the DPU client cert against site-root (the cert secret's own ca.crt)
+    prometheus/local-telemetry:
+      config:
+        scrape_configs:
+          - job_name: opentelemetry-collector
+            scrape_interval: 10s
+            static_configs:
+              - targets: ["[${env:MY_POD_IP}]:8888"]
+            metric_relabel_configs:
+              - {action: labeldrop, regex: "service_instance_id|service_name"}
+  processors:
+    memory_limiter:
+      limit_percentage: 80
+      spike_limit_percentage: 25
+      check_interval: 1s
+    # Single source of the forge_site value (${env:OTEL_SITE_NAME}).
+    resource/site-label-loki:
+      attributes:
+        - {action: insert, key: forge_site, value: "${env:OTEL_SITE_NAME}"}
+    resource/dpu-logs-loki:
+      attributes:
+        - action: insert
+          key: loki.resource.labels
+          value: forge_site, exporter, machine.id, host.machine.id, host.name, component
+        - {action: insert, key: loki.format, value: raw}
+    transform/dpu-logs-loki:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(attributes["loki.attribute.labels"], "systemd.unit") where resource.attributes["component"] == "journald"
+            - set(attributes["loki.attribute.labels"], "log.file.path") where resource.attributes["component"] == "hbn" or resource.attributes["component"] == "dpu-auth-filelog"
+    transform/metrics:
+      metric_statements:
+        - context: datapoint
+          statements:
+            - set(attributes["host.name"], resource.attributes["host.name"])
+            - set(attributes["process.name"], resource.attributes["process.executable.name"])
+            - set(attributes["component"], resource.attributes["component"])
+    batch: {}
+  exporters:
+    loki:
+      endpoint: http://loki.loki.svc.cluster.local:3100/loki/api/v1/push
+      headers:
+        X-Scope-OrgID: forge
+      default_labels_enabled:
+        exporter: false
+    prometheus/site:
+      # Listen on both available address families and follow the chart's port override.
+      endpoint: ":{{ .Values.ports.prometheus.containerPort }}"
+      resource_to_telemetry_conversion:
+        enabled: false
+  service:
+    pipelines:
+      # Remove the chart's default pipelines; only the explicit ones below run.
+      logs: null
+      traces: null
+      logs/dpu:
+        receivers: [otlp]
+        processors: [memory_limiter, resource/site-label-loki, resource/dpu-logs-loki, transform/dpu-logs-loki, batch]
+        exporters: [loki]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, transform/metrics, batch]
+        exporters: [prometheus/site]
+      metrics/local-telemetry:
+        receivers: [prometheus/local-telemetry]
+        processors: [memory_limiter, batch]
+        exporters: [prometheus/site]
+    telemetry:
+      metrics:
+        address: "[${env:MY_POD_IP}]:8888"
+# Prometheus scrapes :9999 via the additionalScrapeConfig in values-kube-prometheus-stack.yaml.

@@ -21,11 +21,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use carbide_instrument::{Outcome, emit};
 use carbide_uuid::machine::MachineId;
 
 use super::dedup_queue::DedupQueue;
 use super::{
-    CollectorEvent, DataSink, EventContext, HealthReport, HealthReportTarget, ReportSource,
+    CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
+    HealthReportTarget, ReportSource,
 };
 use crate::HealthError;
 use crate::api_client::ApiClientWrapper;
@@ -111,11 +113,15 @@ impl HealthReportSink {
 
                     match report.as_ref().try_into() {
                         Ok(converted) => {
-                            if let Err(error) =
-                                worker_client.submit_health_report(&key.id, converted).await
-                            {
-                                tracing::warn!(?error, worker_id, "Failed to submit health report");
-                            }
+                            let result =
+                                worker_client.submit_health_report(&key.id, converted).await;
+                            emit(HealthReportSubmitted {
+                                target: HealthReportTarget::Machine,
+                                outcome: Outcome::from(&result),
+                                id: key.id.to_string(),
+                                worker_id,
+                                error: result.err().map(|e| e.to_string()).unwrap_or_default(),
+                            });
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -164,12 +170,16 @@ impl DataSink for HealthReportSink {
         "health_report_sink"
     }
 
-    fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), HealthError> {
         let CollectorEvent::HealthReport(report) = event else {
-            return;
+            return Ok(());
         };
         if report.target != Some(HealthReportTarget::Machine) {
-            return;
+            return Ok(());
         }
 
         if self.skip_empty_reports && report.is_empty() {
@@ -177,7 +187,7 @@ impl DataSink for HealthReportSink {
                 source = ?report.source,
                 "Skipping empty machine health report"
             );
-            return;
+            return Ok(());
         }
 
         if let Some(machine_id) = context.machine_id() {
@@ -201,7 +211,7 @@ impl DataSink for HealthReportSink {
                             machine_id = %key.id,
                             "Suppressing unchanged success-only health report"
                         );
-                        return;
+                        return Ok(());
                     }
                     cache.entries.insert(
                         key.clone(),
@@ -218,11 +228,15 @@ impl DataSink for HealthReportSink {
             }
 
             self.queue.save_latest(key, Arc::clone(report));
+            Ok(())
         } else {
             tracing::warn!(
                 report = ?report,
                 "Received machine-target HealthReport event without machine_id context"
             );
+            Err(HealthError::GenericError(
+                "machine-target health report event without machine_id context".to_string(),
+            ))
         }
     }
 }
@@ -236,7 +250,7 @@ mod tests {
     use mac_address::MacAddress;
 
     use super::*;
-    use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData};
+    use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
     use crate::sink::events::{Classification, HealthReportAlert, HealthReportSuccess, Probe};
 
     fn machine_id(value: &str) -> MachineId {
@@ -263,15 +277,18 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse::<IpAddr>().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("00:00:00:00:00:01").unwrap(),
+                mac: Some(MacAddress::from_str("00:00:00:00:00:01").unwrap()),
             },
             collector_type: "test",
+            labels: Default::default(),
             metadata: Some(EndpointMetadata::Machine(MachineData {
-                machine_id: id,
+                machine_id: Some(id),
                 machine_serial: None,
+                system_uuid: SharedSystemUuid::default(),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: None,
+                driver_version: None,
             })),
             rack_id: None,
         }
@@ -283,6 +300,7 @@ mod tests {
             target: Some(HealthReportTarget::Machine),
             observed_at: None,
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
             }],
@@ -297,6 +315,7 @@ mod tests {
             observed_at: None,
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
                 message: "Fan speed critical".to_string(),
@@ -438,6 +457,7 @@ mod tests {
             target: Some(HealthReportTarget::Machine),
             observed_at: None,
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan1".to_string()),
             }],

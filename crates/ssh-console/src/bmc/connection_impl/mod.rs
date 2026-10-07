@@ -15,8 +15,8 @@
  * limitations under the License.
  */
 
-pub mod ipmi;
-pub mod ssh;
+pub(super) mod ipmi;
+pub(super) mod ssh;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::sync::oneshot;

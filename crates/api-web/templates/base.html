@@ -8,7 +8,7 @@
 	</head>
 	<body class="preload">
 		<nav>
-			<h3><a href="/admin" id="site-name">carbide-web</a></h3>
+			<h3><a href="/admin" id="site-name">NICo &bull; {{ Self::site_name() }}</a></h3>
 			<form action="/admin/search" class="search-container">
 				<input type="search" placeholder="fm100.., 10.2.., etc" name="q" tabindex="1" title="Enter a machine id, UUID, IP address, MAC address, serial number, or shortcode">
 				<input type="submit" value="">
@@ -64,6 +64,7 @@
 				<li><a href="/admin/attestation-summary">Attestations</a></li>
 				<li><a href="/admin/instance-type">Instance Types</a></li>
 				<li><a href="/admin/dpa">DPAs</a></li>
+				<li><a href="/admin/firmware">Firmware</a></li>
 			</ul>
 			<hr/>
 			<h3>BMCs and Site Explorer</h3>
@@ -158,6 +159,7 @@
 		</script>
 		<script src="/admin/static/sortable.js"></script>
 		<script src="/admin/static/tabs.js"></script>
+		<script src="/admin/static/table_filter.js"></script>
 		<script>
 			const toastContainer = document.getElementById('toast-container');
 			const errorWrapper = document.getElementById('error-modal-wrapper');
@@ -243,25 +245,6 @@
 				});
 			}
 
-
-			// Extract site name from URL (e.g., "dev3" from "api-dev3.frg.nvidia.com")
-			// If URL doesn't match the pattern, returns defaultSiteName (defaults to "dev3")
-			function getSiteName(defaultSiteName = "dev3") {
-				const url = window.location.href;
-				const match = url.match(/https?:\/\/api-([^.]+)\.frg\.nvidia\.com/);
-				return match ? match[1] : defaultSiteName;
-			}
-
-			// Update the sidebar header label with the deployment site
-			// (e.g. "carbide • dev3" on api-dev3.frg.nvidia.com).
-			function setSiteHeader() {
-				const displayName = getSiteName("localDev");
-				const siteNameElement = document.getElementById("site-name");
-				if (siteNameElement) {
-					siteNameElement.innerHTML = `carbide • ${displayName}`;
-				}
-			}
-
 			function create_el(type, attributes, htmlAttributes) {
 				const el = document.createElement(type);
 				Object.assign(el, attributes);
@@ -273,31 +256,12 @@
 				return el;
 			}
 
-			// Build Grafana logs URL for a given search term (machine ID or BMC IP)
-			function buildGrafanaLogsUrl(searchTerm) {
-				const siteName = getSiteName();
-				const grafanaBaseUrl = 'https://grafana-' + siteName + '.frg.nvidia.com';
-				const query = '{k8s_container_name="carbide-api"} |= `' + searchTerm + '` != `SPAN`';
-				const panesJson = {
-					"KLl": {
-						"datasource": "P8E80F9AEF21F6940",
-						"queries": [{
-							"refId": "A",
-							"expr": query,
-							"queryType": "range",
-							"datasource": {
-								"type": "loki",
-								"uid": "P8E80F9AEF21F6940"
-							},
-							"editorMode": "builder"
-						}],
-						"range": {
-							"from": "now-6h",
-							"to": "now"
-						}
-					}
-				};
-				return grafanaBaseUrl + '/explore?panes=' + encodeURIComponent(JSON.stringify(panesJson)) + '&schemaVersion=1&orgId=1';
+			// Build logs URL for a given search term (machine ID or BMC IP).
+			// Returns the URL with {search} replaced, or null if not configured.
+			function buildLogsUrl(searchTerm) {
+				const template = {{ Self::logs_link_template()|json|safe }};
+				if (!template) return null;
+				return template.replace('{search}', encodeURIComponent(searchTerm));
 			}
 
 			// "Show" pages have a JSON link, fill in its target
@@ -315,39 +279,8 @@
 				jsonLink.href = url.toString();
 			}
 
-			function prettifyJSONs() {
-				let elems = document.getElementsByClassName("prettyjson");
-				for (elem of elems) {
-					// No need to set whiteSpace style as it's handled by CSS now
-					try {
-						let jsObj = JSON.parse(elem.innerText);
-
-						// In some well-known member fields on the highest level,
-						// the data stored in the field is also JSON.
-						// We expand that inner data
-						const deserializeField = (obj, field) => {
-							if (obj[field] != null) {
-								try {
-									obj[field] = JSON.parse(obj[field]);
-								} catch (e) {
-								}
-							}
-						};
-
-						const unpackFields = ["ResponseBody"];
-						for (unpackField of unpackFields) {
-							deserializeField(jsObj, unpackField);
-						}
-						elem.innerText = JSON.stringify(jsObj, null,4);
-					} catch (e) {
-					}
-				}
-			}
-
 			document.addEventListener("DOMContentLoaded", function(event){
 				attachJsonLink();
-				setSiteHeader();
-				prettifyJSONs();
 			});
 
 			// Updates the title of spans to render the localized version

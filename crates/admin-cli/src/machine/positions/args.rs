@@ -29,7 +29,7 @@ Show positions for specific machines:
     $ nico-admin-cli machine positions --machine 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'm',
         long,
@@ -37,5 +37,5 @@ pub struct Args {
         value_delimiter = ' ',
         help = "The machine(s) to query, leave empty for all (default)"
     )]
-    pub machine: Vec<MachineId>,
+    pub(super) machine: Vec<MachineId>,
 }

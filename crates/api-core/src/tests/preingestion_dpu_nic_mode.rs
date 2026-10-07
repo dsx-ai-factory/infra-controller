@@ -29,8 +29,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use carbide_preingestion_manager::PreingestionManager;
 use model::site_explorer::{
-    Chassis, ComputerSystem, ComputerSystemAttributes, EndpointExplorationReport, EndpointType,
-    Inventory, NicMode, PowerState, PreingestionState, Service,
+    BlueFieldOperatingMode, Chassis, ComputerSystem, ComputerSystemAttributes,
+    EndpointExplorationReport, EndpointType, Inventory, PowerState, PreingestionState, Service,
 };
 use model::test_support::DpuConfig;
 use rpc::forge::forge_server::Forge;
@@ -39,7 +39,7 @@ use tonic::Code;
 use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::tests::common;
 
-fn dpu_report(nic_mode: NicMode) -> EndpointExplorationReport {
+fn dpu_report(nic_mode: BlueFieldOperatingMode) -> EndpointExplorationReport {
     DpuConfig {
         nic_mode: Some(nic_mode),
         ..DpuConfig::default()
@@ -52,6 +52,9 @@ fn dpu_report(nic_mode: NicMode) -> EndpointExplorationReport {
 /// we just need a row that `set_pause_remediation` can update.
 fn host_bmc_report() -> EndpointExplorationReport {
     EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,
@@ -72,6 +75,8 @@ fn host_bmc_report() -> EndpointExplorationReport {
             power_state: PowerState::On,
             sku: None,
             boot_order: None,
+            bios_version: None,
+            serial_console_ssh_port: None,
         }],
         chassis: vec![Chassis {
             id: String::new(),
@@ -123,18 +128,25 @@ fn build_preingestion_manager(env: &common::api_fixtures::TestEnv) -> Preingesti
         None,
         None,
         env.api.work_lock_manager_handle.clone(),
+        env.config.ntp_servers.clone(),
     )
 }
 
-/// Seed a NicMode DPU + a host BMC with `pause_remediation = true`. The host
+/// Seed a DPU reporting NIC operating mode plus a host BMC with
+/// `pause_remediation = true`. The host
 /// row's flag is the primary marker that the skip's cleanup ran,
 /// since `set_pause_remediation(host_bmc_ip, false)` is the only thing the
 /// skip does to that row.
 async fn seed_nic_mode_pair(env: &common::api_fixtures::TestEnv) {
     let mut txn = env.pool.begin().await.unwrap();
-    db::explored_endpoints::insert(DPU_IP, &dpu_report(NicMode::Nic), false, &mut txn)
-        .await
-        .unwrap();
+    db::explored_endpoints::insert(
+        DPU_IP,
+        &dpu_report(BlueFieldOperatingMode::Nic),
+        false,
+        &mut txn,
+    )
+    .await
+    .unwrap();
     db::explored_endpoints::insert(HOST_BMC_IP, &host_bmc_report(), false, &mut txn)
         .await
         .unwrap();
@@ -266,7 +278,7 @@ async fn test_preingestion_nic_mode_does_not_skip_bfb_copy_in_progress(
 /// inserted `BfbRecoveryNeeded` for a NIC-mode DPU into `Complete` on its
 /// next tick, so accepting the request would be a silent no-op for the
 /// operator. The handler must reject up front with an actionable message
-/// pointing at `ExpectedMachine.dpu_mode`.
+/// pointing at the admin-CLI policy flag.
 #[crate::sqlx_test]
 async fn test_copy_bfb_to_dpu_rshim_rejects_nic_mode_dpu(
     pool: sqlx::PgPool,
@@ -274,7 +286,13 @@ async fn test_copy_bfb_to_dpu_rshim_rejects_nic_mode_dpu(
     let env = common::api_fixtures::create_test_env(pool.clone()).await;
 
     let mut txn = pool.begin().await?;
-    db::explored_endpoints::insert(DPU_IP, &dpu_report(NicMode::Nic), false, &mut txn).await?;
+    db::explored_endpoints::insert(
+        DPU_IP,
+        &dpu_report(BlueFieldOperatingMode::Nic),
+        false,
+        &mut txn,
+    )
+    .await?;
     txn.commit().await?;
 
     let status = env
@@ -299,8 +317,8 @@ async fn test_copy_bfb_to_dpu_rshim_rejects_nic_mode_dpu(
         "error should name NIC mode; got: {msg}",
     );
     assert!(
-        msg.contains("ExpectedMachine.dpu_mode"),
-        "error should point at the operator-facing knob (`ExpectedMachine.dpu_mode`); got: {msg}",
+        msg.contains("--dpu-policy manage"),
+        "error should point at the operator-facing `--dpu-policy` flag; got: {msg}",
     );
 
     Ok(())

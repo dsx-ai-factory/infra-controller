@@ -25,12 +25,19 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
+use carbide_uuid::site_prefix::SitePrefixId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use clap::{CommandFactory, Parser};
+use ipnet::IpNet;
+use rpc::forge::DeletedFilter;
 
+use super::common::VpcPrefixSelector;
 use super::*;
+use crate::test_support::{parse_leaf, raw_value};
 
 const TEST_VPC_ID: &str = "00000000-0000-0000-0000-000000000001";
 const TEST_VPC_PREFIX_ID: &str = "00000000-0000-0000-0000-000000000002";
+const TEST_SITE_PREFIX_ID: &str = "00000000-0000-0000-0000-000000000003";
 
 // verify_cmd_structure runs a baseline clap debug_assert()
 // to do basic command configuration checking and validation,
@@ -51,79 +58,107 @@ fn verify_cmd_structure() {
 
 // parse_show routes every valid `show` invocation to the Show variant and
 // reports which selectors/filters landed: a tuple of (prefix_selector?,
-// vpc_id?, contains?, contained_by?, deleted-discriminant) so each original
+// vpc_id?, contains?, contained_by?, deleted-is-only) so each original
 // presence/enum assertion survives as a row.
 #[test]
 fn parse_show_routes_to_show_variant() {
-    fn deleted_str(d: &rpc::forge::DeletedFilter) -> &'static str {
-        match d {
-            rpc::forge::DeletedFilter::Exclude => "exclude",
-            rpc::forge::DeletedFilter::Only => "only",
-            _ => "other",
-        }
-    }
-
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Show(args) => (
-                        args.prefix_selector.is_some(),
-                        args.vpc_id.is_some(),
-                        args.contains.is_some(),
-                        args.contained_by.is_some(),
-                        deleted_str(&args.deleted),
-                    ),
-                    _ => panic!("expected Show variant"),
+            parse_leaf::<Cmd>(argv, &["show"])
+                .map(|matches| {
+                    (
+                        matches
+                            .get_one::<VpcPrefixSelector>("VpcPrefixSelector")
+                            .is_some(),
+                        matches.get_one::<VpcId>("vpc-id").is_some(),
+                        matches.get_one::<IpNet>("contains").is_some(),
+                        matches.get_one::<IpNet>("contained-by").is_some(),
+                        matches!(
+                            matches.get_one::<DeletedFilter>("deleted"),
+                            Some(DeletedFilter::Only)
+                        ),
+                    )
                 })
                 .map_err(drop)
         };
         "show with no arguments" {
-            &["vpc-prefix", "show"][..] => Yields((false, false, false, false, "exclude")),
+            &["vpc-prefix", "show"][..] => Yields((false, false, false, false, false)),
         }
 
         "show with --deleted only" {
-            &["vpc-prefix", "show", "--deleted", "only"][..] => Yields((false, false, false, false, "only")),
+            &["vpc-prefix", "show", "--deleted", "only"][..] => Yields((false, false, false, false, true)),
         }
 
         "show with a prefix-selector id" {
-            &["vpc-prefix", "show", TEST_VPC_PREFIX_ID][..] => Yields((true, false, false, false, "exclude")),
+            &["vpc-prefix", "show", TEST_VPC_PREFIX_ID][..] => Yields((true, false, false, false, false)),
         }
 
         "show with a prefix-selector cidr" {
-            &["vpc-prefix", "show", "10.0.0.0/8"][..] => Yields((true, false, false, false, "exclude")),
+            &["vpc-prefix", "show", "10.0.0.0/8"][..] => Yields((true, false, false, false, false)),
         }
 
         "show with --vpc-id" {
-            &["vpc-prefix", "show", "--vpc-id", TEST_VPC_ID][..] => Yields((false, true, false, false, "exclude")),
+            &["vpc-prefix", "show", "--vpc-id", TEST_VPC_ID][..] => Yields((false, true, false, false, false)),
         }
 
         "show with --contains" {
-            &["vpc-prefix", "show", "--contains", "10.0.0.0/24"][..] => Yields((false, false, true, false, "exclude")),
+            &["vpc-prefix", "show", "--contains", "10.0.0.0/24"][..] => Yields((false, false, true, false, false)),
         }
 
         "show with --contained-by" {
-            &["vpc-prefix", "show", "--contained-by", "10.0.0.0/8"][..] => Yields((false, false, false, true, "exclude")),
+            &["vpc-prefix", "show", "--contained-by", "10.0.0.0/8"][..] => Yields((false, false, false, true, false)),
+        }
+    );
+}
+
+#[test]
+fn contains_search_accepts_addresses_and_prefixes() {
+    scenarios!(
+        run = |value| {
+            parse_leaf::<Cmd>(&["vpc-prefix", "show", "--contains", value], &["show"])
+                .map(|matches| matches.get_one::<IpNet>("contains").map(ToString::to_string))
+                .map_err(|error| error.kind())
+        };
+        "IPv4 address" {
+            "192.0.2.5" => Yields(Some("192.0.2.5/32".to_string())),
+        }
+        "IPv6 address" {
+            "2001:db8::1234" => Yields(Some("2001:db8::1234/128".to_string())),
+        }
+        "CIDR prefix passes through unchanged" {
+            "2001:db8::/64" => Yields(Some("2001:db8::/64".to_string())),
+        }
+        "invalid prefix length" {
+            "2001:db8::/129" => FailsWith(clap::error::ErrorKind::ValueValidation),
         }
     );
 }
 
 // parse_create routes every valid `create` invocation to the Create variant,
-// reporting (vpc_id, prefix, name, vpc_prefix_id?) so the required-field and
-// optional-id assertions each become a row.
+// reporting (vpc_id, prefix, name, vpc_prefix_id?, site_prefix_id?) so the
+// required-field and optional-id assertions each become a row.
 #[test]
 fn parse_create_routes_to_create_variant() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Create(args) => (
-                        args.vpc_id.to_string(),
-                        args.prefix.to_string(),
-                        args.name,
-                        args.vpc_prefix_id.is_some(),
-                    ),
-                    _ => panic!("expected Create variant"),
+            parse_leaf::<Cmd>(argv, &["create"])
+                .map(|matches| {
+                    (
+                        matches
+                            .get_one::<VpcId>("vpc-id")
+                            .copied()
+                            .expect("VPC ID is required"),
+                        *matches
+                            .get_one::<IpNet>("prefix")
+                            .expect("prefix is required"),
+                        raw_value(&matches, "name").expect("name is required"),
+                        matches
+                            .get_one::<VpcPrefixId>("vpc-prefix-id")
+                            .is_some(),
+                        matches
+                            .get_one::<SitePrefixId>("site-prefix-id")
+                            .copied(),
+                    )
                 })
                 .map_err(drop)
         };
@@ -138,10 +173,11 @@ fn parse_create_routes_to_create_variant() {
                 "--name",
                 "test-prefix",
             ][..] => Yields((
-                TEST_VPC_ID.to_string(),
-                "10.0.0.0/8".to_string(),
+                TEST_VPC_ID.parse::<VpcId>().unwrap(),
+                "10.0.0.0/8".parse::<IpNet>().unwrap(),
                 "test-prefix".to_string(),
                 false,
+                None,
             )),
         }
 
@@ -158,12 +194,60 @@ fn parse_create_routes_to_create_variant() {
                 "--vpc-prefix-id",
                 TEST_VPC_PREFIX_ID,
             ][..] => Yields((
-                TEST_VPC_ID.to_string(),
-                "10.0.0.0/8".to_string(),
+                TEST_VPC_ID.parse::<VpcId>().unwrap(),
+                "10.0.0.0/8".parse::<IpNet>().unwrap(),
                 "test-prefix".to_string(),
                 true,
+                None,
             )),
         }
+
+        "create with optional --site-prefix-id" {
+            &[
+                "vpc-prefix",
+                "create",
+                "--vpc-id",
+                TEST_VPC_ID,
+                "--site-prefix-id",
+                TEST_SITE_PREFIX_ID,
+                "--prefix",
+                "10.0.0.0/8",
+                "--name",
+                "test-prefix",
+            ][..] => Yields((
+                TEST_VPC_ID.parse::<VpcId>().unwrap(),
+                "10.0.0.0/8".parse::<IpNet>().unwrap(),
+                "test-prefix".to_string(),
+                false,
+                Some(TEST_SITE_PREFIX_ID.parse::<SitePrefixId>().unwrap()),
+            )),
+        }
+    );
+}
+
+#[test]
+fn create_request_preserves_site_prefix_id() {
+    let Cmd::Create(args) = Cmd::try_parse_from([
+        "vpc-prefix",
+        "create",
+        "--vpc-id",
+        TEST_VPC_ID,
+        "--site-prefix-id",
+        TEST_SITE_PREFIX_ID,
+        "--prefix",
+        "10.0.0.0/8",
+        "--name",
+        "test-prefix",
+    ])
+    .expect("create arguments should parse") else {
+        panic!("create arguments should route to the create command");
+    };
+
+    let request: rpc::forge::VpcPrefixCreationRequest = args.into();
+
+    assert_eq!(
+        request.site_prefix_id,
+        Some(TEST_SITE_PREFIX_ID.parse().unwrap())
     );
 }
 
@@ -172,16 +256,16 @@ fn parse_create_routes_to_create_variant() {
 #[test]
 fn parse_delete_routes_to_delete_variant() {
     scenarios!(
-        run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Delete(args) => args.vpc_prefix_id.to_string(),
-                    _ => panic!("expected Delete variant"),
-                })
-                .map_err(drop)
-        };
+        run = |argv| parse_leaf::<Cmd>(argv, &["delete"])
+            .map(|matches| {
+                matches
+                    .get_one::<VpcPrefixId>("vpc_prefix_id")
+                    .copied()
+                    .expect("VPC prefix ID is required")
+            })
+            .map_err(drop);
         "delete with a vpc-prefix-id" {
-            &["vpc-prefix", "delete", TEST_VPC_PREFIX_ID][..] => Yields(TEST_VPC_PREFIX_ID.to_string()),
+            &["vpc-prefix", "delete", TEST_VPC_PREFIX_ID][..] => Yields(TEST_VPC_PREFIX_ID.parse::<VpcPrefixId>().unwrap()),
         }
     );
 }

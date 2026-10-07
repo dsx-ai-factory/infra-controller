@@ -4,6 +4,7 @@
 package flowgrpc
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,15 +28,30 @@ func (flowgrpc *API) Init() {
 
 	ManagerAccess.Data.EB.Log.Info().Msg("Flow: Initializing Flow gRPC client manager")
 
-	prometheus.MustRegister(
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Namespace: "elektra_site_agent",
-			Name:      MetricFlowStatus,
-			Help:      "Flow gRPC health status",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.FlowGrpc.State.HealthStatus.Load())
-			}))
+	gauge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+		Name:      MetricFlowStatus,
+		Help:      "Flow gRPC health status",
+	},
+		func() float64 {
+			return float64(ManagerAccess.Data.EB.Managers.FlowGrpc.State.HealthStatus.Load())
+		})
+	if err := prometheus.Register(gauge); err != nil {
+		are := prometheus.AlreadyRegisteredError{}
+		if errors.As(err, &are) {
+			// AlreadyRegisteredError fires when Init() is called more than once
+			// (the common retry case). ExistingCollector will be the GaugeFunc we
+			// registered on the first call, so the assertion below passes and we
+			// continue safely — no crashloop. The panic only fires if a foreign
+			// collector of a different type owns the name, which would leave flow
+			// gRPC health status silently unreported.
+			if _, ok := are.ExistingCollector.(prometheus.GaugeFunc); !ok {
+				panic(fmt.Errorf("flowgrpc: metric %q already registered as unexpected type %T", MetricFlowStatus, are.ExistingCollector))
+			}
+		} else {
+			panic(fmt.Errorf("flowgrpc: failed to register metric %q: %w", MetricFlowStatus, err))
+		}
+	}
 
 	ManagerAccess.Data.EB.Managers.FlowGrpc.State.HealthStatus.Store(uint64(computils.CompNotKnown))
 
@@ -78,10 +94,10 @@ func (flowgrpc *API) Start() {
 func (flowgrpc *API) GetState() []string {
 	state := ManagerAccess.Data.EB.Managers.FlowGrpc.State
 	var strs []string
-	strs = append(strs, fmt.Sprintln(" GRPC Succeeded:", state.GrpcSucc.Load()))
-	strs = append(strs, fmt.Sprintln(" GRPC Failed:", state.GrpcFail.Load()))
-	strs = append(strs, fmt.Sprintln(" GRPC Status:", computils.CompStatus(state.HealthStatus.Load())))
-	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err))
+	strs = append(strs, fmt.Sprintln(" Flow GRPC Succeeded:", state.GrpcSucc.Load()))
+	strs = append(strs, fmt.Sprintln(" Flow GRPC Failed:", state.GrpcFail.Load()))
+	strs = append(strs, fmt.Sprintln(" Flow GRPC Status:", computils.CompStatus(state.HealthStatus.Load())))
+	strs = append(strs, fmt.Sprintln(" Flow GRPC Last Error:", state.Err.Load()))
 
 	return strs
 }

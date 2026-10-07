@@ -23,7 +23,7 @@ pub enum SpiffeError {
     #[error("SPIFFE validation error: {0}")]
     Validation(#[from] crate::SpiffeValidationError),
 
-    #[error("Unrecognized SPIFFE ID: {0}")]
+    #[error("unrecognized SPIFFE ID: {0}")]
     Recognition(#[from] crate::SpiffeContextError),
 }
 

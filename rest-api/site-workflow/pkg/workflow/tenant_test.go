@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
@@ -33,7 +33,7 @@ func (ctts *CreateTenantTestSuite) AfterTest(suiteName, testName string) {
 func (ctts *CreateTenantTestSuite) Test_CreateTenant_Success() {
 	var tenantManager iActivity.ManageTenant
 
-	request := &cwssaws.CreateTenantRequest{
+	request := &corev1.CreateTenantRequest{
 		OrganizationId: "m4jjok8wsg",
 	}
 
@@ -50,7 +50,7 @@ func (ctts *CreateTenantTestSuite) Test_CreateTenant_Success() {
 func (ctts *CreateTenantTestSuite) Test_CreateTenant_Failure() {
 	var tenantManager iActivity.ManageTenant
 
-	request := &cwssaws.CreateTenantRequest{
+	request := &corev1.CreateTenantRequest{
 		OrganizationId: "m4jjok8wsg",
 	}
 
@@ -88,9 +88,9 @@ func (s *UpdateTenantTestSuite) AfterTest(suiteName, testName string) {
 func (s *UpdateTenantTestSuite) Test_UpdateTenant_Success() {
 	var tenantManager iActivity.ManageTenant
 
-	request := &cwssaws.UpdateTenantRequest{
+	request := &corev1.UpdateTenantRequest{
 		OrganizationId: "m4jjok8wsg",
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name: "updated-tenant-name",
 		},
 	}
@@ -108,9 +108,9 @@ func (s *UpdateTenantTestSuite) Test_UpdateTenant_Success() {
 func (s *UpdateTenantTestSuite) Test_UpdateTenant_Failure() {
 	var tenantManager iActivity.ManageTenant
 
-	request := &cwssaws.UpdateTenantRequest{
+	request := &corev1.UpdateTenantRequest{
 		OrganizationId: "m4jjok8wsg",
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name: "updated-tenant-name",
 		},
 	}

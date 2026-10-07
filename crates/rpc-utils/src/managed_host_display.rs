@@ -21,16 +21,17 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use byte_unit::UnitType;
-use carbide_uuid::machine::MachineId;
+use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
-use rpc::common::MachineIdList;
+use rpc::common::DpuMachineIdList;
 // use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     BmcInfo, ConnectedDevice, GetSiteExplorationRequest, MachineType, ManagedHostQuarantineState,
     NetworkDevice, NetworkDeviceIdList,
 };
-use rpc::machine_discovery::MemoryDevice;
+use rpc::machine_discovery::MemoryDeviceGroup;
 use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint};
 use rpc::{DiscoveryInfo, DmiData, DynForge, Machine, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -67,15 +68,16 @@ impl ManagedHostMetadata {
             .await
             .map(|response| response.into_inner())
             .map_err(|e| {
-                warn!("Failed to get site exploration report: {:?}", e);
+                warn!(error = ?e, "failed to get site exploration report");
             })
             .unwrap_or_default();
 
         // Find connected devices for this machines
-        let dpu_id_request = tonic::Request::new(MachineIdList {
+        let dpu_id_request = tonic::Request::new(DpuMachineIdList {
             machine_ids: machines
                 .iter()
-                .flat_map(|m| m.associated_dpu_machine_ids.clone())
+                .filter_map(|machine| machine.status.as_ref())
+                .flat_map(|status| status.associated_dpu_machine_ids.iter().copied())
                 .collect(),
         });
         let connected_devices = api
@@ -148,13 +150,21 @@ pub struct ManagedHostOutput {
     pub slot_number: Option<i32>,
     pub tray_index: Option<i32>,
     pub rack_id: Option<String>,
+    pub dpf: Option<rpc::forge::DpfMachineState>,
 }
 
 impl From<Machine> for ManagedHostOutput {
     fn from(machine: Machine) -> ManagedHostOutput {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
+        let status = machine.status.unwrap_or_default();
+        let config = machine.config.unwrap_or_default();
+        let primary_interface = status.interfaces.iter().find(|x| x.primary_interface);
         let (host_admin_ip, host_admin_mac) = primary_interface
-            .map(|x| (x.address.first().cloned(), Some(x.mac_address.clone())))
+            .map(|x| {
+                (
+                    x.address.join(",").none_if_empty(),
+                    Some(x.mac_address.clone()),
+                )
+            })
             .unwrap_or((None, None));
 
         let BmcInfoDisplay {
@@ -164,7 +174,7 @@ impl From<Machine> for ManagedHostOutput {
             firmware_version: host_bmc_firmware_version,
         } = machine.bmc_info.into();
 
-        let discovery_info = machine.discovery_info;
+        let discovery_info = status.discovery_info;
         let host_gpu_count = discovery_info
             .as_ref()
             .map(|di| di.gpus.len())
@@ -173,9 +183,29 @@ impl From<Machine> for ManagedHostOutput {
             .as_ref()
             .map(|di| di.infiniband_interfaces.len())
             .unwrap_or_default();
-        let host_memory = discovery_info
-            .as_ref()
-            .and_then(|di| get_memory_details(&di.memory_devices));
+        let host_memory = discovery_info.as_ref().and_then(|di| {
+            if di.memory_groups_are_authoritative() {
+                let valid: Vec<_> = di
+                    .memory_device_groups
+                    .iter()
+                    .cloned()
+                    .filter_map(|g| g.nonzero())
+                    .collect();
+                get_memory_details(&valid)
+            } else {
+                #[allow(deprecated)]
+                let groups: Vec<MemoryDeviceGroup> = di
+                    .memory_devices
+                    .iter()
+                    .map(|md| MemoryDeviceGroup {
+                        size_mb: md.size_mb,
+                        mem_type: md.mem_type.clone(),
+                        count: 1,
+                    })
+                    .collect();
+                get_memory_details(&groups)
+            }
+        });
 
         let DmiDataDisplay {
             product_serial: _,
@@ -186,14 +216,14 @@ impl From<Machine> for ManagedHostOutput {
             .and_then(|di| di.dmi_data.as_ref())
             .into();
 
-        let health = machine
+        let health = status
             .health
             .map(|h| {
                 health_report::HealthReport::try_from(h)
                     .unwrap_or_else(health_report::HealthReport::malformed_report)
             })
             .unwrap_or_else(health_report::HealthReport::missing_report);
-        let health_sources = machine
+        let health_sources = status
             .health_sources
             .into_iter()
             .map(|o| o.source)
@@ -216,7 +246,7 @@ impl From<Machine> for ManagedHostOutput {
             hostname: primary_interface
                 .as_ref()
                 .map(|i| i.hostname.clone())
-                .and_then(|h| if h.trim().is_empty() { None } else { Some(h) }),
+                .filter(|h| !h.trim().is_empty()),
             machine_id: machine.id.as_ref().map(|i| i.to_string()),
             state: machine.state.clone(),
             time_in_state: config_version::since_state_change_humanized(&machine.state_version),
@@ -251,28 +281,29 @@ impl From<Machine> for ManagedHostOutput {
             host_gpu_count,
             host_ib_ifs_count,
             host_memory,
-            failure_details: machine.failure_details.clone(),
-            maintenance_reference: machine.maintenance_reference.clone(),
-            maintenance_start_time: to_time(machine.maintenance_start_time, machine.id),
+            failure_details: status.failure_details.clone(),
+            maintenance_reference: config.maintenance_reference.clone(),
+            maintenance_start_time: to_time(config.maintenance_start_time, machine.id),
             host_last_reboot_time: machine
                 .id
                 .as_ref()
-                .and_then(|id| to_time(machine.last_reboot_time, Some(id))),
+                .and_then(|id| to_time(status.last_reboot_time, Some(id))),
             host_last_reboot_requested_time_and_mode: machine.id.as_ref().map(|id| {
                 format!(
                     "{}/{}",
-                    to_time(machine.last_reboot_requested_time, Some(id))
+                    to_time(status.last_reboot_requested_time, Some(id))
                         .unwrap_or("Unknown".to_string()),
-                    machine.last_reboot_requested_mode.unwrap_or_default()
+                    status.last_reboot_requested_mode.unwrap_or_default()
                 )
             }),
-            quarantine_state: machine.quarantine_state.clone(),
-            instance_type_id: machine.instance_type_id.clone(),
+            quarantine_state: status.quarantine.clone(),
+            instance_type_id: config.instance_type_id.clone(),
             slot_number: machine.placement_in_rack.and_then(|p| p.slot_number),
             tray_index: machine.placement_in_rack.and_then(|p| p.tray_index),
             rack_id,
             health,
             health_sources,
+            dpf: config.dpf,
             // dpus and exploration_report are filled in later
             dpus: Default::default(),
             exploration_report: Default::default(),
@@ -331,18 +362,15 @@ impl ManagedHostAttachedDpu {
         exploration_report: Option<EndpointExplorationReport>,
         is_primary: bool,
     ) -> Self {
+        let status = dpu_machine.status.unwrap_or_default();
         let last_reboot_requested_time_and_mode = Some(format!(
             "{}/{}",
-            to_time(dpu_machine.last_reboot_requested_time, dpu_machine.id)
+            to_time(status.last_reboot_requested_time, dpu_machine.id)
                 .unwrap_or("Unknown".to_string()),
-            dpu_machine.last_reboot_requested_mode()
+            status.last_reboot_requested_mode.unwrap_or_default()
         ));
 
-        let (oob_ip, oob_mac) = match dpu_machine
-            .interfaces
-            .into_iter()
-            .find(|x| x.primary_interface)
-        {
+        let (oob_ip, oob_mac) = match status.interfaces.into_iter().find(|x| x.primary_interface) {
             Some(primary_interface) => (
                 Some(primary_interface.address.join(",")),
                 Some(primary_interface.mac_address.to_owned()),
@@ -361,14 +389,14 @@ impl ManagedHostAttachedDpu {
             product_serial: serial_number,
             chassis_serial: _,
             bios_version,
-        } = dpu_machine
+        } = status
             .discovery_info
             .as_ref()
             .and_then(|d| d.dmi_data.as_ref())
             .into();
 
         ManagedHostAttachedDpu {
-            discovery_info: dpu_machine.discovery_info.unwrap_or_default(),
+            discovery_info: status.discovery_info.unwrap_or_default(),
             machine_id: dpu_machine.id.map(|i| i.to_string()),
             state: Some(dpu_machine.state),
             serial_number,
@@ -377,22 +405,22 @@ impl ManagedHostAttachedDpu {
             bmc_mac,
             bmc_version,
             bmc_firmware_version,
-            last_reboot_time: to_time(dpu_machine.last_reboot_time, dpu_machine.id),
+            last_reboot_time: to_time(status.last_reboot_time, dpu_machine.id),
             exploration_report,
             last_reboot_requested_time_and_mode,
-            last_observation_time: to_time(dpu_machine.last_observation_time, dpu_machine.id),
+            last_observation_time: to_time(status.last_observation_time, dpu_machine.id),
             oob_ip,
             oob_mac,
             switch_connections,
             is_primary,
-            health: dpu_machine
+            health: status
                 .health
                 .map(|h| {
                     health_report::HealthReport::try_from(h)
                         .unwrap_or_else(health_report::HealthReport::malformed_report)
                 })
                 .unwrap_or_else(health_report::HealthReport::missing_report),
-            failure_details: dpu_machine.failure_details,
+            failure_details: status.failure_details,
         }
     }
 }
@@ -403,14 +431,20 @@ pub fn get_managed_host_output(source: ManagedHostMetadata) -> Vec<ManagedHostOu
         .managed_hosts
         .into_iter()
         .map(|machine| {
-            let primary_dpu_id = machine.interfaces.iter().find_map(|iface| {
-                if iface.primary_interface {
-                    iface.attached_dpu_machine_id
-                } else {
-                    None
-                }
+            let primary_dpu_id = machine.status.as_ref().and_then(|status| {
+                status.interfaces.iter().find_map(|interface| {
+                    if interface.primary_interface {
+                        interface.attached_dpu_machine_id
+                    } else {
+                        None
+                    }
+                })
             });
-            let dpu_machine_ids = machine.associated_dpu_machine_ids.clone();
+            let dpu_machine_ids = machine
+                .status
+                .as_ref()
+                .map(|status| status.associated_dpu_machine_ids.clone())
+                .unwrap_or_default();
 
             let mut managed_host_output = ManagedHostOutput::from(machine);
             managed_host_output.exploration_report = managed_host_output
@@ -426,7 +460,10 @@ pub fn get_managed_host_output(source: ManagedHostMetadata) -> Vec<ManagedHostOu
                         .remove(&id)
                         .map(|dpu| (id, dpu))
                         .or_else(|| {
-                            tracing::warn!("Could not find DPU for associated_dpu_machine_id {id}");
+                            tracing::warn!(
+                                dpu_machine_id = %id,
+                                "could not find associated DPU"
+                            );
                             None
                         })
                 })
@@ -460,9 +497,9 @@ struct IndexedManagedHostMetadata {
     /// The managed hosts (non-dpu)
     managed_hosts: Vec<Machine>,
     /// DPU's indexed by their ID
-    dpus_by_id: HashMap<MachineId, Machine>,
+    dpus_by_id: HashMap<DpuMachineId, Machine>,
     /// Switch connections for each DPU, indexed by the DPU MachineId
-    switch_connections_by_dpu_id: HashMap<MachineId, Vec<DpuSwitchConnection>>,
+    switch_connections_by_dpu_id: HashMap<DpuMachineId, Vec<DpuSwitchConnection>>,
     /// Exploration reports, indexed by the BMC address
     exploration_reports_by_address: HashMap<String, EndpointExplorationReport>,
 }
@@ -474,11 +511,11 @@ impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
             .into_iter()
             .map(|n| (n.id.clone(), n))
             .collect();
-        let switch_connections_by_dpu_id: HashMap<MachineId, Vec<DpuSwitchConnection>> = value
+        let switch_connections_by_dpu_id: HashMap<DpuMachineId, Vec<DpuSwitchConnection>> = value
             .connected_devices
             .into_iter()
             .filter_map(|cd| {
-                let dpu_id = cd.id?;
+                let dpu_id = cd.id.and_then(|id| DpuMachineId::try_from(id).ok())?;
                 let network_device = cd
                     .network_device_id
                     .as_ref()
@@ -497,9 +534,12 @@ impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
             .filter(|m| m.machine_type() == MachineType::Host)
             .collect();
 
-        let dpus_by_id: HashMap<MachineId, Machine> = dpus
+        let dpus_by_id: HashMap<DpuMachineId, Machine> = dpus
             .into_iter()
-            .filter_map(|m| m.id.map(|i| (i, m)))
+            .filter_map(|m| {
+                m.id.and_then(|id| DpuMachineId::try_from(id).ok())
+                    .map(|i| (i, m))
+            })
             .collect();
 
         let exploration_reports_by_address: HashMap<String, EndpointExplorationReport> = value
@@ -517,22 +557,28 @@ impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
     }
 }
 
-pub fn get_memory_details(memory_devices: &Vec<MemoryDevice>) -> Option<String> {
+pub fn get_memory_details(memory_device_groups: &[MemoryDeviceGroup]) -> Option<String> {
     let mut breakdown = BTreeMap::default();
-    let mut total_size = 0;
-    for md in memory_devices {
+    let mut total_size = 0u64;
+    let mut total_count = 0u32;
+    for group in memory_device_groups {
+        if group.count == 0 {
+            continue;
+        }
         let size = byte_unit::Byte::from_f64_with_unit(
-            md.size_mb.unwrap_or(0) as f64,
+            group.size_mb.unwrap_or(0) as f64,
             byte_unit::Unit::MiB,
         )
         .unwrap_or_default();
-        total_size += size.as_u64();
-        *breakdown.entry(size).or_insert(0u32) += 1;
+        let group_size = size.as_u64().checked_mul(group.count as u64)?;
+        total_size = total_size.checked_add(group_size)?;
+        total_count = total_count.checked_add(group.count)?;
+        *breakdown.entry(size).or_insert(0u32) += group.count;
     }
 
     let total_size = byte_unit::Byte::from(total_size);
 
-    if memory_devices.len() == 1 {
+    if total_count == 1 {
         Some(
             total_size
                 .get_appropriate_unit(UnitType::Binary)
@@ -572,11 +618,11 @@ pub fn to_time<M: Display>(t: Option<Timestamp>, machine_id: Option<M>) -> Optio
             }
             Err(err) => {
                 warn!(
-                    "get_managed_host_output {}, invalid timestamp: {}",
-                    machine_id
+                    machine_id = %machine_id
                         .map(|x| x.to_string())
                         .unwrap_or_else(|| "(no machine ID)".to_string()),
-                    err
+                    error = %err,
+                    "managed host has an invalid timestamp"
                 );
                 None
             }
@@ -597,10 +643,10 @@ impl From<Option<BmcInfo>> for BmcInfoDisplay {
     fn from(value: Option<BmcInfo>) -> Self {
         if let Some(bmc_info) = value {
             Self {
-                ip: bmc_info.ip.if_non_empty(),
-                mac: bmc_info.mac.if_non_empty(),
-                version: bmc_info.version.if_non_empty(),
-                firmware_version: bmc_info.firmware_version.if_non_empty(),
+                ip: bmc_info.ip.none_if_empty(),
+                mac: bmc_info.mac.none_if_empty(),
+                version: bmc_info.version.none_if_empty(),
+                firmware_version: bmc_info.firmware_version.none_if_empty(),
             }
         } else {
             Self::default()
@@ -620,9 +666,9 @@ impl From<Option<&DmiData>> for DmiDataDisplay {
     fn from(value: Option<&DmiData>) -> Self {
         if let Some(dmi_data) = value {
             Self {
-                product_serial: dmi_data.product_serial.clone().if_non_empty(),
-                chassis_serial: dmi_data.chassis_serial.clone().if_non_empty(),
-                bios_version: dmi_data.bios_version.clone().if_non_empty(),
+                product_serial: dmi_data.product_serial.clone().none_if_empty(),
+                chassis_serial: dmi_data.chassis_serial.clone().none_if_empty(),
+                bios_version: dmi_data.bios_version.clone().none_if_empty(),
             }
         } else {
             Self {
@@ -634,32 +680,6 @@ impl From<Option<&DmiData>> for DmiDataDisplay {
     }
 }
 
-/// Simple if_non_empty() function to map an empty String (or a Option<String>::None) into None
-trait IfNonEmpty {
-    type SomeVal;
-    fn if_non_empty(self) -> Option<Self::SomeVal>;
-}
-
-impl IfNonEmpty for Option<String> {
-    type SomeVal = String;
-    fn if_non_empty(self) -> Option<Self::SomeVal> {
-        if let Some(s) = self
-            && !s.is_empty()
-        {
-            Some(s)
-        } else {
-            None
-        }
-    }
-}
-
-impl IfNonEmpty for String {
-    type SomeVal = String;
-    fn if_non_empty(self) -> Option<Self::SomeVal> {
-        if !self.is_empty() { Some(self) } else { None }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
@@ -668,19 +688,20 @@ mod tests {
 
     use super::*;
 
-    fn memory(size_mb: Option<u32>) -> MemoryDevice {
-        MemoryDevice {
+    fn memory(size_mb: Option<u32>) -> MemoryDeviceGroup {
+        MemoryDeviceGroup {
             size_mb,
             mem_type: None,
+            count: 1,
         }
     }
 
     #[test]
     fn formats_memory_details() {
         value_scenarios!(
-            run = |devices| get_memory_details(&devices);
+            run = |devices: Vec<MemoryDeviceGroup>| get_memory_details(&devices);
             "missing memory" {
-                Vec::<MemoryDevice>::new() => None,
+                vec![] => None,
                 vec![memory(Some(0)), memory(None)] => None,
             }
 
@@ -690,10 +711,22 @@ mod tests {
 
             "device breakdown" {
                 vec![
-                    memory(Some(32768)),
-                    memory(Some(32768)),
+                    MemoryDeviceGroup { size_mb: Some(32768), mem_type: None, count: 2 },
                     memory(Some(65536)),
                 ] => Some("128 GiB (32 GiBx2, 64 GiBx1)".to_string()),
+            }
+
+            "overflowing total size" {
+                vec![
+                    MemoryDeviceGroup { size_mb: Some(u32::MAX), mem_type: None, count: u32::MAX },
+                ] => None,
+            }
+
+            "mixed zero and nonzero count groups" {
+                vec![
+                    MemoryDeviceGroup { size_mb: Some(65536), mem_type: None, count: 0 },
+                    MemoryDeviceGroup { size_mb: Some(32768), mem_type: None, count: 2 },
+                ] => Some("64 GiB (32 GiBx2)".to_string()),
             }
         );
     }
@@ -710,22 +743,60 @@ mod tests {
         );
     }
 
+    // When every group in `memory_device_groups` has count == 0, the field is
+    // logically empty. Per the wire contract, display must fall back to the
+    // legacy `memory_devices` field.
     #[test]
-    fn filters_empty_display_fields() {
-        value_scenarios!(
-            run = |value| value.if_non_empty();
-            "option string" {
-                None::<String> => None,
-                Some(String::new()) => None,
-                Some("value".to_string()) => Some("value".to_string()),
-            }
-        );
+    #[allow(deprecated)]
+    fn managed_host_output_falls_back_to_legacy_memory_when_all_groups_are_zero_count() {
+        let host_memory = ManagedHostOutput::from(Machine {
+            status: Some(rpc::forge::MachineStatus {
+                discovery_info: Some(DiscoveryInfo {
+                    memory_device_groups: vec![MemoryDeviceGroup {
+                        size_mb: Some(8192),
+                        mem_type: Some("DDR4".to_string()),
+                        count: 0,
+                    }],
+                    memory_devices: vec![
+                        rpc::machine_discovery::MemoryDevice {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".to_string()),
+                        },
+                        rpc::machine_discovery::MemoryDevice {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".to_string()),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .host_memory;
+        assert_eq!(host_memory, Some("32 GiB (16 GiBx2)".to_string()));
+    }
 
+    #[test]
+    fn managed_host_output_preserves_all_primary_interface_addresses() {
         value_scenarios!(
-            run = |value: String| value.if_non_empty();
-            "string" {
-                String::new() => None,
-                "value".to_string() => Some("value".to_string()),
+            run = |addresses| ManagedHostOutput::from(Machine {
+                status: Some(rpc::forge::MachineStatus {
+                    interfaces: vec![rpc::MachineInterface {
+                        primary_interface: true,
+                        address: addresses,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .host_admin_ip;
+            "primary interface address lists" {
+                Vec::<String>::new() => None,
+                vec!["192.0.2.10".to_string()] => Some("192.0.2.10".to_string()),
+                vec!["192.0.2.10".to_string(), "2001:db8::10".to_string()]
+                    => Some("192.0.2.10,2001:db8::10".to_string()),
             }
         );
     }

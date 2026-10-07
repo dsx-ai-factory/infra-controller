@@ -23,7 +23,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
+pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/HostInterfaces");
     redfish::Collection {
         odata_id: Cow::Owned(odata_id),
@@ -32,7 +32,10 @@ pub fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
     }
 }
 
-pub fn manager_resource<'a>(manager_id: &'a str, iface_id: &'a str) -> redfish::Resource<'a> {
+pub(crate) fn manager_resource<'a>(
+    manager_id: &'a str,
+    iface_id: &'a str,
+) -> redfish::Resource<'a> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/HostInterfaces/{iface_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -42,7 +45,7 @@ pub fn manager_resource<'a>(manager_id: &'a str, iface_id: &'a str) -> redfish::
     }
 }
 
-pub fn builder(resource: &redfish::Resource) -> HostInterfaceBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> HostInterfaceBuilder {
     HostInterfaceBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
@@ -50,18 +53,18 @@ pub fn builder(resource: &redfish::Resource) -> HostInterfaceBuilder {
 }
 
 #[derive(Clone)]
-pub struct HostInterface {
-    pub id: Cow<'static, str>,
+pub(crate) struct HostInterface {
+    pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
 }
 
 impl HostInterface {
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
     }
 }
 
-pub struct HostInterfaceBuilder {
+pub(crate) struct HostInterfaceBuilder {
     id: Cow<'static, str>,
     value: serde_json::Value,
 }
@@ -76,11 +79,11 @@ impl Builder for HostInterfaceBuilder {
 }
 
 impl HostInterfaceBuilder {
-    pub fn interface_enabled(self, v: bool) -> Self {
+    pub(crate) fn interface_enabled(self, v: bool) -> Self {
         self.apply_patch(json!({ "InterfaceEnabled": v }))
     }
 
-    pub fn build(self) -> HostInterface {
+    pub(crate) fn build(self) -> HostInterface {
         HostInterface {
             id: self.id,
             value: self.value,

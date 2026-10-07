@@ -22,15 +22,12 @@ use crate::errors::CarbideCliError;
 use crate::managed_host::StartUpdates;
 use crate::rpc::ApiClient;
 
-pub async fn start_updates(
+pub(crate) async fn start_updates(
     api_client: &ApiClient,
     options: StartUpdates,
 ) -> color_eyre::Result<()> {
     let (start_timestamp, end_timestamp) = if options.cancel {
-        (
-            chrono::Utc.timestamp_opt(0, 0).unwrap(),
-            chrono::Utc.timestamp_opt(0, 0).unwrap(),
-        )
+        (None, None)
     } else {
         let start = if let Some(start) = options.start {
             if let Some(start) = time_parse(start.as_str()) {
@@ -56,14 +53,14 @@ pub async fn start_updates(
         } else {
             start
                 .checked_add_signed(chrono::TimeDelta::days(1))
-                .unwrap()
+                .ok_or_else(|| eyre::eyre!("invalid date: {start}"))?
         };
-        (start, end)
+        (Some(start), Some(end))
     };
     let request = forgerpc::SetFirmwareUpdateTimeWindowRequest {
         machine_ids: options.machines,
-        start_timestamp: Some(start_timestamp.into()),
-        end_timestamp: Some(end_timestamp.into()),
+        start_timestamp: start_timestamp.map(Into::into),
+        end_timestamp: end_timestamp.map(Into::into),
     };
     api_client
         .0

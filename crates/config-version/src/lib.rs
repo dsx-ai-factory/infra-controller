@@ -243,9 +243,9 @@ fn tzero() -> DateTime<Utc> {
 /// Error that is returned when parsing a version fails
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigVersionParseError {
-    #[error("Invalid version format: {0}")]
+    #[error("invalid version format: {0}")]
     VersionFormat(String),
-    #[error("Invalid date time: {0}, {1}")]
+    #[error("invalid date time: {0}, {1}")]
     DateTime(i64, u32),
 }
 

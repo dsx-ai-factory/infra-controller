@@ -28,12 +28,12 @@ Ping twice a second:
     $ nico-admin-cli ping --interval 0.5
 
 ")]
-pub struct Opts {
+pub(crate) struct Opts {
     #[clap(
         short,
         long,
         default_value("1.0"),
         help = "Wait interval seconds between sending each request. Real number allowed with dot as a decimal separator."
     )]
-    pub interval: f32,
+    pub(super) interval: f32,
 }

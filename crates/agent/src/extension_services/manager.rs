@@ -60,7 +60,12 @@ impl ExtensionServiceManager {
         self.service_handlers
             .get_mut(t)
             .map(|handler| handler.as_mut() as &mut dyn ExtensionServiceHandler)
-            .ok_or_else(|| eyre::eyre!("No handler for {:?}", t))
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "extension service type {:?} is not supported on this DPU",
+                    t
+                )
+            })
     }
 
     pub async fn update_desired_services(
@@ -73,7 +78,7 @@ impl ExtensionServiceManager {
         for config in configs {
             let service = ServiceConfig::try_from(config).map_err(|e| {
                 eyre::eyre!(
-                    "Failed to convert ManagedHostDpuExtensionServiceConfig to ServiceConfig: {}",
+                    "failed to convert ManagedHostDpuExtensionServiceConfig to ServiceConfig: {}",
                     e
                 )
             })?;
@@ -101,18 +106,87 @@ impl ExtensionServiceManager {
             .into_iter()
             .map(|c| {
                 ServiceConfig::try_from(c).map_err(|e| eyre::eyre!(
-                "Failed to convert ManagedHostDpuExtensionServiceConfig to ServiceConfig: {e}"
+                "failed to convert ManagedHostDpuExtensionServiceConfig to ServiceConfig: {e}"
             ))
             })
             .collect::<Result<_, _>>()?;
 
         let mut service_statuses = Vec::with_capacity(service_configs.len());
         for service in service_configs {
-            let handler = self.get_handler_mut(&service.service_type).unwrap();
-            let status = handler.get_service_status(&service).await?;
+            let status = match self.get_handler_mut(&service.service_type) {
+                Ok(handler) => handler.get_service_status(&service).await?,
+                Err(err) => {
+                    let state = if service.removed.is_some() {
+                        tracing::info!(
+                            service_id = %service.id,
+                            error = %err,
+                            "Treating removed unsupported extension service as terminated"
+                        );
+                        rpc::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated
+                    } else {
+                        tracing::error!(
+                            service_id = %service.id,
+                            error = %err,
+                            "Error getting extension service status"
+                        );
+                        rpc::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceError
+                    };
+                    rpc::DpuExtensionServiceStatusObservation {
+                        service_id: service.id.to_string(),
+                        service_type: service.service_type.into(),
+                        service_name: service.name,
+                        version: service.version.to_string(),
+                        removed: service.removed,
+                        state: state.into(),
+                        components: vec![],
+                        message: err.to_string(),
+                    }
+                }
+            };
             service_statuses.push(status);
         }
 
         Ok(service_statuses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service_config(removed: Option<String>) -> rpc::ManagedHostDpuExtensionServiceConfig {
+        rpc::ManagedHostDpuExtensionServiceConfig {
+            service_id: uuid::Uuid::nil().to_string(),
+            name: "test-service".to_string(),
+            version: config_version::ConfigVersion::initial().version_string(),
+            service_type: DpuExtensionServiceType::KubernetesPod.into(),
+            removed,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn containerized_platform_reports_status_for_unsupported_services() {
+        let mut manager =
+            ExtensionServiceManager::platform_defaults(&AgentPlatformType::Containerized);
+
+        let statuses = manager
+            .get_service_statuses(vec![
+                service_config(None),
+                service_config(Some(chrono::Utc::now().to_rfc3339())),
+            ])
+            .await
+            .expect("unsupported services should produce status observations");
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(
+            statuses[0].state,
+            rpc::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceError as i32
+        );
+        assert_eq!(
+            statuses[1].state,
+            rpc::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated as i32
+        );
+        assert!(statuses[1].removed.is_some());
     }
 }

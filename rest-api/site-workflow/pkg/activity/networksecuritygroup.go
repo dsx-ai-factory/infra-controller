@@ -15,7 +15,7 @@ import (
 
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
@@ -27,7 +27,7 @@ type ManageNetworkSecurityGroup struct {
 }
 
 // Function to Create NICo NetworkSecurityGroup with the Site Controller
-func (mm *ManageNetworkSecurityGroup) CreateNetworkSecurityGroupOnSite(ctx context.Context, request *cwssaws.CreateNetworkSecurityGroupRequest) error {
+func (mm *ManageNetworkSecurityGroup) CreateNetworkSecurityGroupOnSite(ctx context.Context, request *corev1.CreateNetworkSecurityGroupRequest) error {
 	logger := log.With().Str("Activity", "CreateNetworkSecurityGroupOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -56,19 +56,20 @@ func (mm *ManageNetworkSecurityGroup) CreateNetworkSecurityGroupOnSite(ctx conte
 	}
 	rpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = rpcServiceClient.CreateNetworkSecurityGroup(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create NetworkSecurityGroup using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create NetworkSecurityGroup using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function Update NICo NetworkSecurityGroup with the Site Controller
-func (mm *ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupOnSite(ctx context.Context, request *cwssaws.UpdateNetworkSecurityGroupRequest) error {
+func (mm *ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupOnSite(ctx context.Context, request *corev1.UpdateNetworkSecurityGroupRequest) error {
 	logger := log.With().Str("Activity", "UpdateNetworkSecurityGroupOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -96,19 +97,20 @@ func (mm *ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupOnSite(ctx conte
 	}
 	rpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = rpcServiceClient.UpdateNetworkSecurityGroup(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update config for NetworkSecurityGroup using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update config for NetworkSecurityGroup using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to Delete NICo NetworkSecurityGroup with the Site Controller
-func (mm *ManageNetworkSecurityGroup) DeleteNetworkSecurityGroupOnSite(ctx context.Context, request *cwssaws.DeleteNetworkSecurityGroupRequest) error {
+func (mm *ManageNetworkSecurityGroup) DeleteNetworkSecurityGroupOnSite(ctx context.Context, request *corev1.DeleteNetworkSecurityGroupRequest) error {
 	logger := log.With().Str("Activity", "DeleteNetworkSecurityGroupOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -136,13 +138,14 @@ func (mm *ManageNetworkSecurityGroup) DeleteNetworkSecurityGroupOnSite(ctx conte
 	}
 	rpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = rpcServiceClient.DeleteNetworkSecurityGroup(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete NetworkSecurityGroup using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete NetworkSecurityGroup using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
@@ -163,7 +166,7 @@ type ManageNetworkSecurityGroupInventory struct {
 func (mmi *ManageNetworkSecurityGroupInventory) DiscoverNetworkSecurityGroupInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverNetworkSecurityGroupInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[*cwssaws.UUID, *cwssaws.NetworkSecurityGroup, *cwssaws.NetworkSecurityGroupInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.UUID, *corev1.NetworkSecurityGroup, *corev1.NetworkSecurityGroupInventory]{
 		itemType:               "NetworkSecurityGroup",
 		config:                 mmi.config,
 		internalFindIDs:        networkSecurityGroupFindIDs,
@@ -180,17 +183,17 @@ func NewManageNetworkSecurityGroupInventory(config ManageInventoryConfig) Manage
 	}
 }
 
-func networkSecurityGroupFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.UUID, error) {
+func networkSecurityGroupFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.UUID, error) {
 	// Call Core gRPC API endpoint
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	networkSecurityGroupIdList, err := grpcServiceClient.FindNetworkSecurityGroupIds(ctx, &cwssaws.FindNetworkSecurityGroupIdsRequest{})
+	networkSecurityGroupIdList, err := grpcServiceClient.FindNetworkSecurityGroupIds(ctx, &corev1.FindNetworkSecurityGroupIdsRequest{})
 	if err != nil {
 		return nil, err
 	}
 	return util.StringsToProtobufUUIDList(networkSecurityGroupIdList.GetNetworkSecurityGroupIds()), nil
 }
 
-func networkSecurityGroupFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.UUID) ([]*cwssaws.NetworkSecurityGroup, error) {
+func networkSecurityGroupFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.UUID) ([]*corev1.NetworkSecurityGroup, error) {
 	nsgIDs := make([]string, len(ids))
 
 	for i, id := range ids {
@@ -199,7 +202,7 @@ func networkSecurityGroupFindByIDs(ctx context.Context, grpcClient *cClient.Core
 
 	// Call Core gRPC API endpoint
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	networkSecurityGroupList, err := grpcServiceClient.FindNetworkSecurityGroupsByIds(ctx, &cwssaws.FindNetworkSecurityGroupsByIdsRequest{
+	networkSecurityGroupList, err := grpcServiceClient.FindNetworkSecurityGroupsByIds(ctx, &corev1.FindNetworkSecurityGroupsByIdsRequest{
 		NetworkSecurityGroupIds: nsgIDs,
 	})
 	if err != nil {
@@ -208,14 +211,14 @@ func networkSecurityGroupFindByIDs(ctx context.Context, grpcClient *cClient.Core
 	return networkSecurityGroupList.GetNetworkSecurityGroups(), nil
 }
 
-func networkSecurityGroupPagedInventory(allItemIDs []*cwssaws.UUID, pagedItems []*cwssaws.NetworkSecurityGroup, input *pagedInventoryInput) *cwssaws.NetworkSecurityGroupInventory {
+func networkSecurityGroupPagedInventory(allItemIDs []*corev1.UUID, pagedItems []*corev1.NetworkSecurityGroup, input *pagedInventoryInput) *corev1.NetworkSecurityGroupInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of Machines
-	networkSecurityGroupInventory := &cwssaws.NetworkSecurityGroupInventory{
+	networkSecurityGroupInventory := &corev1.NetworkSecurityGroupInventory{
 		NetworkSecurityGroups: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),

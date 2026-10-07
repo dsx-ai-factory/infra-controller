@@ -26,6 +26,6 @@ Verify a machine against its assigned SKU:
     $ nico-admin-cli sku verify 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
-    pub machine_id: MachineId,
+pub(crate) struct Args {
+    pub(super) machine_id: MachineId,
 }

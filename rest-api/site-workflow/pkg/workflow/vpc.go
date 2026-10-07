@@ -6,11 +6,13 @@ package workflow
 import (
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 func DiscoverVPCInventory(ctx workflow.Context) error {
@@ -52,21 +54,20 @@ func DiscoverVPCInventory(ctx workflow.Context) error {
 // CreateVPCV2 is a workflow to create new VPCs using the CreateVpcOnSite activity
 // V1 (CreateVPC) is found in cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func CreateVPCV2(ctx workflow.Context, request *cwssaws.VpcCreationRequest) (*cwssaws.Vpc, error) {
+func CreateVPCV2(ctx workflow.Context, request *corev1.VpcCreationRequest) (*corev1.Vpc, error) {
 	logger := log.With().Str("Workflow", "VPC").Str("Action", "Create").Str("VPC ID", request.GetId().GetValue()).Str("Name", request.Name).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -74,7 +75,7 @@ func CreateVPCV2(ctx workflow.Context, request *cwssaws.VpcCreationRequest) (*cw
 	ctx = workflow.WithActivityOptions(ctx, options)
 
 	var vpcManager activity.ManageVPC
-	var controllerVpc cwssaws.Vpc
+	var controllerVpc corev1.Vpc
 
 	err := workflow.ExecuteActivity(ctx, vpcManager.CreateVpcOnSite, request).Get(ctx, &controllerVpc)
 	if err != nil {
@@ -88,21 +89,20 @@ func CreateVPCV2(ctx workflow.Context, request *cwssaws.VpcCreationRequest) (*cw
 }
 
 // UpdateVPC is a workflow to update VPCs using the UpdateVpcOnSite activity
-func UpdateVPC(ctx workflow.Context, request *cwssaws.VpcUpdateRequest) error {
+func UpdateVPC(ctx workflow.Context, request *corev1.VpcUpdateRequest) error {
 	logger := log.With().Str("Workflow", "VPC").Str("Action", "Update").Str("VPC ID", request.GetId().GetValue()).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -125,21 +125,20 @@ func UpdateVPC(ctx workflow.Context, request *cwssaws.VpcUpdateRequest) error {
 // DeleteVPCV2 is a workflow to Delete VPCs using the DeleteVpcOnSite activity
 // V1 (DeleteVPC) is found in cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func DeleteVPCV2(ctx workflow.Context, request *cwssaws.VpcDeletionRequest) error {
+func DeleteVPCV2(ctx workflow.Context, request *corev1.VpcDeletionRequest) error {
 	logger := log.With().Str("Workflow", "VPC").Str("Action", "Delete").Str("VPC ID", request.GetId().GetValue()).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -160,21 +159,20 @@ func DeleteVPCV2(ctx workflow.Context, request *cwssaws.VpcDeletionRequest) erro
 }
 
 // UpdateVPCVirtualization is a workflow to update VPC virtualization type
-func UpdateVPCVirtualization(ctx workflow.Context, request *cwssaws.VpcUpdateVirtualizationRequest) error {
+func UpdateVPCVirtualization(ctx workflow.Context, request *corev1.VpcUpdateVirtualizationRequest) error {
 	logger := log.With().Str("Workflow", "VPC").Str("Action", "Update Virtualization").Str("VPC ID", request.GetId().GetValue()).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

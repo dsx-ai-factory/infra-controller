@@ -18,13 +18,15 @@
 use ::rpc::forge as forgerpc;
 
 use super::args::Args;
+use crate::credential::common::map_ufm_credential_api_error;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn delete_ufm(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn delete_ufm(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client
         .0
         .delete_credential(forgerpc::CredentialDeletionRequest::try_from(data)?)
-        .await?;
+        .await
+        .map_err(map_ufm_credential_api_error)?;
     Ok(())
 }

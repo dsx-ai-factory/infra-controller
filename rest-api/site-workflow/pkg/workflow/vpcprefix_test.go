@@ -7,9 +7,9 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -85,11 +85,11 @@ func (cvvts *CreateVpcPrefixTestSuite) AfterTest(suiteName, testName string) {
 func (cvvts *CreateVpcPrefixTestSuite) Test_CreateVpcPrefix_Success() {
 	var VpcPrefixManager iActivity.ManageVpcPrefix
 
-	request := &cwssaws.VpcPrefixCreationRequest{
-		Id:     &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+	request := &corev1.VpcPrefixCreationRequest{
+		Id:     &corev1.VpcPrefixId{Value: uuid.NewString()},
 		Name:   "the_name",
 		Prefix: "192.110.0.0/24",
-		VpcId:  &cwssaws.VpcId{Value: uuid.NewString()},
+		VpcId:  &corev1.VpcId{Value: uuid.NewString()},
 	}
 
 	// Mock CreateVpcPrefixOnSite activity
@@ -105,11 +105,11 @@ func (cvvts *CreateVpcPrefixTestSuite) Test_CreateVpcPrefix_Success() {
 func (cvvts *CreateVpcPrefixTestSuite) Test_CreateVpcPrefix_Failure() {
 	var VpcPrefixManager iActivity.ManageVpcPrefix
 
-	request := &cwssaws.VpcPrefixCreationRequest{
-		Id:     &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+	request := &corev1.VpcPrefixCreationRequest{
+		Id:     &corev1.VpcPrefixId{Value: uuid.NewString()},
 		Name:   "the_name",
 		Prefix: "192.110.0.0/24",
-		VpcId:  &cwssaws.VpcId{Value: uuid.NewString()},
+		VpcId:  &corev1.VpcId{Value: uuid.NewString()},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -146,8 +146,8 @@ func (uvvts *UpdateVpcPrefixTestSuite) AfterTest(suiteName, testName string) {
 func (uvvts *UpdateVpcPrefixTestSuite) Test_UpdateVpcPrefix_Success() {
 	var VpcPrefixManager iActivity.ManageVpcPrefix
 
-	request := &cwssaws.VpcPrefixUpdateRequest{
-		Id:   &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+	request := &corev1.VpcPrefixUpdateRequest{
+		Id:   &corev1.VpcPrefixId{Value: uuid.NewString()},
 		Name: util.GetStrPtr("updated-vpcprefix-name"),
 	}
 
@@ -164,8 +164,8 @@ func (uvvts *UpdateVpcPrefixTestSuite) Test_UpdateVpcPrefix_Success() {
 func (uvvts *UpdateVpcPrefixTestSuite) Test_UpdateVpcPrefix_Failure() {
 	var VpcPrefixManager iActivity.ManageVpcPrefix
 
-	request := &cwssaws.VpcPrefixUpdateRequest{
-		Id:   &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+	request := &corev1.VpcPrefixUpdateRequest{
+		Id:   &corev1.VpcPrefixId{Value: uuid.NewString()},
 		Name: util.GetStrPtr("updated-vpcprefix-name"),
 	}
 
@@ -203,8 +203,8 @@ func (cvvts *DeleteVpcPrefixTestSuite) AfterTest(suiteName, testName string) {
 func (cvvts *DeleteVpcPrefixTestSuite) Test_DeleteVpcPrefix_Success() {
 	var VpcPrefixManager iActivity.ManageVpcPrefix
 
-	request := &cwssaws.VpcPrefixDeletionRequest{
-		Id: &cwssaws.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcPrefixDeletionRequest{
+		Id: &corev1.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	// Mock DeleteVpcPrefixOnSite activity
@@ -220,8 +220,8 @@ func (cvvts *DeleteVpcPrefixTestSuite) Test_DeleteVpcPrefix_Success() {
 func (cvvts *DeleteVpcPrefixTestSuite) Test_DeleteVpcPrefix_Failure() {
 	var VpcPrefixManager iActivity.ManageVpcPrefix
 
-	request := &cwssaws.VpcPrefixDeletionRequest{
-		Id: &cwssaws.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcPrefixDeletionRequest{
+		Id: &corev1.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	errMsg := "Site Controller communication error"

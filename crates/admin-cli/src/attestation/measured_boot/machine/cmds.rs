@@ -26,55 +26,53 @@ use measured_boot::records::CandidateMachineSummary;
 use measured_boot::report::MeasurementReport;
 use serde::Serialize;
 
-use crate::attestation::measured_boot::global;
-use crate::attestation::measured_boot::machine::args::{Attest, CmdMachine, Show};
-use crate::cli_output;
+use crate::attestation::measured_boot::machine::args::{Attest, List, Show};
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-/// dispatch matches + dispatches the correct command
-/// for the `mock-machine` subcommand.
-pub async fn dispatch(
-    cmd: CmdMachine,
-    cli: &mut global::cmds::CliData<'_, '_>,
-) -> CarbideCliResult<()> {
-    match cmd {
-        CmdMachine::Attest(local_args) => {
-            cli_output(
-                attest(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
+impl Run for Attest {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            attest(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Show {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if self.machine_id.is_some() {
+            crate::cli_output(
+                show_by_id(&ctx.api_client, self).await?,
+                &ctx.config.format,
                 crate::Destination::Stdout(),
-            )?;
-        }
-        CmdMachine::Show(local_args) => {
-            if local_args.machine_id.is_some() {
-                cli_output(
-                    show_by_id(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            } else {
-                cli_output(
-                    show_all(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-        }
-        CmdMachine::List(_) => {
-            cli_output(
-                list(cli.grpc_conn).await?,
-                &cli.args.format,
+            )
+        } else {
+            crate::cli_output(
+                show_all(&ctx.api_client, self).await?,
+                &ctx.config.format,
                 crate::Destination::Stdout(),
-            )?;
+            )
         }
     }
-    Ok(())
+}
+
+impl Run for List {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list(&ctx.api_client).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
 }
 
 /// attest sends attestation data for the given machine ID, as in, PCR
 /// register + value pairings, which results in a journal entry being made.
-pub async fn attest(grpc_conn: &ApiClient, attest: Attest) -> CarbideCliResult<MeasurementReport> {
+async fn attest(grpc_conn: &ApiClient, attest: Attest) -> CarbideCliResult<MeasurementReport> {
     let response = grpc_conn.0.attest_candidate_machine(attest).await?;
 
     MeasurementReport::from_grpc_opt(response.report)
@@ -82,7 +80,7 @@ pub async fn attest(grpc_conn: &ApiClient, attest: Attest) -> CarbideCliResult<M
 }
 
 /// show_by_id shows all info about a given machine ID.
-pub async fn show_by_id(grpc_conn: &ApiClient, show: Show) -> CarbideCliResult<CandidateMachine> {
+async fn show_by_id(grpc_conn: &ApiClient, show: Show) -> CarbideCliResult<CandidateMachine> {
     let response = grpc_conn
         .0
         .show_candidate_machine(ShowCandidateMachineRequest::try_from(show)?)
@@ -93,10 +91,7 @@ pub async fn show_by_id(grpc_conn: &ApiClient, show: Show) -> CarbideCliResult<C
 }
 
 /// show_all shows all info about all machines.
-pub async fn show_all(
-    grpc_conn: &ApiClient,
-    _show: Show,
-) -> CarbideCliResult<CandidateMachineList> {
+async fn show_all(grpc_conn: &ApiClient, _show: Show) -> CarbideCliResult<CandidateMachineList> {
     Ok(CandidateMachineList(
         grpc_conn
             .0
@@ -113,7 +108,7 @@ pub async fn show_all(
 }
 
 /// list lists all machine IDs.
-pub async fn list(grpc_conn: &ApiClient) -> CarbideCliResult<CandidateMachineSummaryList> {
+async fn list(grpc_conn: &ApiClient) -> CarbideCliResult<CandidateMachineSummaryList> {
     Ok(CandidateMachineSummaryList(
         grpc_conn
             .0
@@ -133,7 +128,7 @@ pub async fn list(grpc_conn: &ApiClient) -> CarbideCliResult<CandidateMachineSum
 /// for a Vec<CandidateMachineSummary> so the ToTable trait can
 /// be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct CandidateMachineSummaryList(Vec<CandidateMachineSummary>);
+struct CandidateMachineSummaryList(Vec<CandidateMachineSummary>);
 
 impl ToTable for CandidateMachineSummaryList {
     fn into_table(self) -> eyre::Result<String> {
@@ -150,7 +145,7 @@ impl ToTable for CandidateMachineSummaryList {
 /// pattern for a Vec<CandidateMachine> so the ToTable
 /// trait can be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct CandidateMachineList(Vec<CandidateMachine>);
+struct CandidateMachineList(Vec<CandidateMachine>);
 
 impl ToTable for CandidateMachineList {
     fn into_table(self) -> eyre::Result<String> {

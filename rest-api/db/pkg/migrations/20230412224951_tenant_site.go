@@ -13,6 +13,18 @@ import (
 	"github.com/uptrace/bun"
 )
 
+type legacyTenantSiteInsert struct {
+	bun.BaseModel `bun:"table:tenant_site,alias:ts"`
+
+	ID                  uuid.UUID              `bun:"type:uuid,pk"`
+	TenantID            uuid.UUID              `bun:"tenant_id,type:uuid,notnull"`
+	TenantOrg           string                 `bun:"tenant_org,notnull"`
+	SiteID              uuid.UUID              `bun:"site_id,type:uuid,notnull"`
+	EnableSerialConsole bool                   `bun:"enable_serial_console,notnull"`
+	Config              map[string]interface{} `bun:"config,type:jsonb,notnull,default:'{}'::jsonb"`
+	CreatedBy           uuid.UUID              `bun:"type:uuid,notnull"`
+}
+
 func createAndPopulateTenantSiteUpMigrationfunc(ctx context.Context, db *bun.DB) error {
 	// Start transactions
 	tx, terr := db.BeginTx(ctx, &sql.TxOptions{})
@@ -40,7 +52,7 @@ func createAndPopulateTenantSiteUpMigrationfunc(ctx context.Context, db *bun.DB)
 		count++
 		if !found {
 			tenantSiteMap[mapKey] = true
-			tenantSite := model.TenantSite{
+			tenantSite := legacyTenantSiteInsert{
 				ID:                  uuid.New(),
 				TenantID:            allocation.TenantID,
 				TenantOrg:           allocation.Tenant.Org,

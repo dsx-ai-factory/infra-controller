@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
@@ -132,6 +133,8 @@ func TestAPIVpcPeeringCreateRequest_ToProto(t *testing.T) {
 
 func TestNewAPIVpcPeering(t *testing.T) {
 	now := time.Now()
+	vpc1TenantID := uuid.New()
+	vpc2TenantID := uuid.New()
 	dbVpcPeering := cdbm.VpcPeering{
 		ID:            uuid.New(),
 		Vpc1ID:        uuid.New(),
@@ -141,9 +144,39 @@ func TestNewAPIVpcPeering(t *testing.T) {
 		Status:        cdbm.VpcPeeringStatusReady,
 		Created:       now,
 		Updated:       now,
+		Vpc1: &cdbm.Vpc{
+			ID:       uuid.New(),
+			TenantID: vpc1TenantID,
+			Name:     "vpc-1",
+			Status:   cdbm.VpcStatusReady,
+		},
+		Vpc2: &cdbm.Vpc{
+			ID:       uuid.New(),
+			TenantID: vpc2TenantID,
+			Name:     "vpc-2",
+			Status:   cdbm.VpcStatusReady,
+		},
+		TenantID: &vpc1TenantID,
+		Tenant: &cdbm.Tenant{
+			ID:             vpc1TenantID,
+			Org:            "test-org",
+			OrgDisplayName: util.GetPtr("Org Display name"),
+		},
 	}
 
-	api := NewAPIVpcPeering(dbVpcPeering)
+	dbMappedPeeringTenantsMap := map[uuid.UUID]*cdbm.Tenant{
+		vpc1TenantID: {
+			ID:             vpc1TenantID,
+			Org:            "test-org",
+			OrgDisplayName: util.GetPtr("Org Display name"),
+		},
+		vpc2TenantID: {
+			ID:             vpc2TenantID,
+			Org:            "test-org",
+			OrgDisplayName: util.GetPtr("Org Display name"),
+		},
+	}
+	api := NewAPIVpcPeering(dbVpcPeering, dbMappedPeeringTenantsMap)
 
 	assert.Equal(t, dbVpcPeering.ID.String(), api.ID)
 	assert.Equal(t, dbVpcPeering.Vpc1ID.String(), api.Vpc1ID)
@@ -153,34 +186,51 @@ func TestNewAPIVpcPeering(t *testing.T) {
 	assert.Equal(t, dbVpcPeering.Status, api.Status)
 	assert.Equal(t, dbVpcPeering.Created, api.Created)
 	assert.Equal(t, dbVpcPeering.Updated, api.Updated)
-
+	require.NotNil(t, api.Vpc1)
+	require.NotNil(t, api.Vpc1.Tenant)
+	assert.Equal(t, vpc1TenantID.String(), api.Vpc1.Tenant.ID)
+	require.NotNil(t, api.Vpc2)
+	require.NotNil(t, api.Vpc2.Tenant)
+	assert.Equal(t, vpc2TenantID.String(), api.Vpc2.Tenant.ID)
+	require.NotNil(t, api.Tenant)
+	require.NotNil(t, api.TenantID)
+	assert.Equal(t, dbVpcPeering.TenantID.String(), *api.TenantID)
+	assert.Equal(t, dbVpcPeering.Tenant.Org, api.Tenant.Org)
 }
 
-func TestNewAPIVpcPeeringSummary(t *testing.T) {
-	now := time.Now()
-	dbVpcPeering := &cdbm.VpcPeering{
-		ID:            uuid.New(),
-		Vpc1ID:        uuid.New(),
-		Vpc2ID:        uuid.New(),
-		SiteID:        uuid.New(),
-		IsMultiTenant: false,
-		Status:        cdbm.VpcPeeringStatusPending,
-		Created:       now,
-		Updated:       now,
+func TestNewAPIVpcPeeringVpcSummary(t *testing.T) {
+	vpc1TenantID := uuid.New()
+	dbVpc := &cdbm.Vpc{
+		ID:       uuid.New(),
+		TenantID: vpc1TenantID,
+		Name:     "vpc-1",
+		Status:   cdbm.VpcStatusReady,
+	}
+	dbTenant := &cdbm.Tenant{
+		ID:             vpc1TenantID,
+		Org:            "test-org",
+		OrgDisplayName: util.GetPtr("Org Display name"),
 	}
 
 	t.Run("ok when db model is provided", func(t *testing.T) {
-		summary := NewAPIVpcPeeringSummary(dbVpcPeering)
+		summary := NewAPIVpcPeeringVpcSummary(dbVpc, dbTenant)
 		assert.NotNil(t, summary)
-		assert.Equal(t, dbVpcPeering.ID.String(), summary.ID)
-		assert.Equal(t, dbVpcPeering.Vpc1ID.String(), summary.Vpc1ID)
-		assert.Equal(t, dbVpcPeering.Vpc2ID.String(), summary.Vpc2ID)
-		assert.Equal(t, dbVpcPeering.Status, summary.Status)
-		assert.Equal(t, dbVpcPeering.IsMultiTenant, summary.IsMultiTenant)
+		assert.Equal(t, dbVpc.ID.String(), summary.ID)
+		assert.Equal(t, dbVpc.Name, summary.Name)
+		assert.Equal(t, dbVpc.TenantID.String(), summary.TenantID)
+		assert.Equal(t, dbVpc.Status, summary.Status)
+		require.NotNil(t, summary.Tenant)
+		assert.Equal(t, vpc1TenantID.String(), summary.Tenant.ID)
+	})
+
+	t.Run("ok when tenant is nil", func(t *testing.T) {
+		summary := NewAPIVpcPeeringVpcSummary(dbVpc, nil)
+		assert.NotNil(t, summary)
+		assert.Nil(t, summary.Tenant)
 	})
 
 	t.Run("returns nil when db model is nil", func(t *testing.T) {
-		summary := NewAPIVpcPeeringSummary(nil)
+		summary := NewAPIVpcPeeringVpcSummary(nil, nil)
 		assert.Nil(t, summary)
 	})
 }

@@ -177,6 +177,6 @@ func (ipm InfinibandPartitionManager) Delete(ctx context.Context, id string) *Ap
 	ctx = WithLogger(ctx, ipm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, ipm.client.Config.Token)
 
-	resp, err := ipm.client.apiClient.InfiniBandPartitionAPI.DeleteInfinibandPartition(ctx, ipm.client.apiMetadata.Organization, id).Execute()
+	_, resp, err := ipm.client.apiClient.InfiniBandPartitionAPI.DeleteInfinibandPartition(ctx, ipm.client.apiMetadata.Organization, id).Execute()
 	return HandleResponseError(resp, err)
 }

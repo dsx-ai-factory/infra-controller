@@ -74,11 +74,12 @@ fn driver_runs_and_emits_expected_lint() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let diff = similar::TextDiff::from_lines(&expected_stderr, &relevant_stderr)
-        .unified_diff()
-        .context_radius(3)
-        .header("expected", "output")
-        .to_string();
+    let diff =
+        similar::TextDiff::from_lines(expected_stderr.trim_end(), relevant_stderr.trim_end())
+            .unified_diff()
+            .context_radius(3)
+            .header("expected", "output")
+            .to_string();
 
     // Now assert on stderr
     assert!(

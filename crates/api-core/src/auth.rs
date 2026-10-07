@@ -18,16 +18,49 @@ use std::path::Path;
 use std::sync::Arc;
 
 use carbide_authn::middleware::{ExternalUserInfo, Principal};
+use carbide_uuid::machine::MachineId;
 
-use crate::CarbideError;
+use crate::{CarbideError, CarbideResult};
 
 mod casbin_engine;
-pub mod internal_rbac_rules;
-pub mod middleware;
-pub mod mqtt_auth;
+mod internal_rbac_rules;
+pub(crate) mod middleware;
+pub(crate) mod mqtt_auth;
+#[cfg(test)]
 mod test_certs;
 
 pub type AuthContext = carbide_authn::middleware::AuthContext<Authorization>;
+
+/// `PrincipalClass` keeps the identity labels on authorization decisions
+/// bounded. Both a normal denial and a permissive-mode override use the
+/// strongest principal, so the two counters group callers the same way.
+/// Variants stay weakest-first because the derived ordering selects that
+/// strongest principal with `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, carbide_instrument::LabelValue)]
+enum PrincipalClass {
+    Anonymous,
+    TrustedCertificate,
+    SpiffeMachine,
+    SpiffeService,
+    ExternalUser,
+}
+
+impl PrincipalClass {
+    fn classify(principals: &[Principal]) -> Self {
+        principals
+            .iter()
+            .map(|principal| match principal {
+                Principal::ExternalUser(_) => PrincipalClass::ExternalUser,
+                Principal::SpiffeServiceIdentifier(_) => PrincipalClass::SpiffeService,
+                Principal::SpiffeMachineIdentifier(_) => PrincipalClass::SpiffeMachine,
+                Principal::TrustedCertificate => PrincipalClass::TrustedCertificate,
+                Principal::Anonymous => PrincipalClass::Anonymous,
+            })
+            .max()
+            // A request that presented no principals at all is anonymous.
+            .unwrap_or(PrincipalClass::Anonymous)
+    }
+}
 
 // An Authorization is sort of like a ticket that says we're allowed to do the
 // thing we're trying to do, and specifically which Principal was permitted to
@@ -41,19 +74,40 @@ pub struct Authorization {
 impl carbide_authn::middleware::Authorization for Authorization {}
 
 #[derive(thiserror::Error, Debug, Clone)]
-pub enum AuthorizationError {
-    #[error("Unauthorized: CasbinEngine: all auth principals denied by enforcer")]
+enum AuthorizationError {
+    #[error("unauthorized: CasbinEngine: all auth principals denied by enforcer")]
     Unauthorized,
 }
 
 impl From<AuthorizationError> for tonic::Status {
     fn from(e: AuthorizationError) -> Self {
         tracing::info!(error = %e, "Request denied");
-        tonic::Status::permission_denied("Not authorized")
+        tonic::Status::permission_denied("not authorized")
     }
 }
 
-pub fn external_user_info<T>(
+/// `authenticated_machine_id` reads the machine identity from the request's
+/// `AuthContext`, not its payload. Returns `None` when no machine identity is
+/// available and `PermissionDeniedError` when the identity is malformed.
+/// Callers that require a machine identity must reject `None`.
+pub(crate) fn authenticated_machine_id<T>(
+    request: &tonic::Request<T>,
+) -> CarbideResult<Option<MachineId>> {
+    request
+        .extensions()
+        .get::<AuthContext>()
+        .and_then(AuthContext::get_spiffe_machine_id)
+        .map(|machine_id| {
+            machine_id.parse().map_err(|error| {
+                CarbideError::PermissionDeniedError(format!(
+                    "invalid authenticated machine identity: {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn external_user_info<T>(
     request: &tonic::Request<T>,
 ) -> Result<ExternalUserInfo, CarbideError> {
     if let Some(external_user_info) = request
@@ -72,14 +126,14 @@ pub fn external_user_info<T>(
 // This is a "predicate" in the grammar sense of the word, so it's some sort of
 // action that may or may not specify an object it's acting on.
 #[derive(Clone, Debug)]
-pub enum Predicate {
+enum Predicate {
     // A call to a Forge-owned gRPC method. The string is the gRPC method name,
     // relative to the Forge service that contains it (i.e. without any slash
     // delimiters).
     ForgeCall(String),
 }
 
-pub trait PrincipalExtractor {
+trait PrincipalExtractor {
     // Extract all useful principals from a request.
     fn principals(&self) -> Vec<Principal>;
 }
@@ -99,7 +153,7 @@ impl PrincipalExtractor for &[Principal] {
 }
 
 // A PolicyEngine is anything that can enforce whether a request is allowed.
-pub trait PolicyEngine {
+trait PolicyEngine {
     fn authorize(
         &self,
         principals: &[Principal],
@@ -107,19 +161,19 @@ pub trait PolicyEngine {
     ) -> Result<Authorization, AuthorizationError>;
 }
 
-pub type PolicyEngineObject = dyn PolicyEngine + Send + Sync;
+type PolicyEngineObject = dyn PolicyEngine + Send + Sync;
 
 #[derive(Clone)]
-pub struct CasbinAuthorizer {
+pub(crate) struct CasbinAuthorizer {
     policy_engine: Arc<PolicyEngineObject>,
 }
 
 impl CasbinAuthorizer {
-    pub fn new(policy_engine: Arc<PolicyEngineObject>) -> Self {
+    fn new(policy_engine: Arc<PolicyEngineObject>) -> Self {
         Self { policy_engine }
     }
 
-    pub fn authorize<R: PrincipalExtractor>(
+    fn authorize<R: PrincipalExtractor>(
         &self,
         req: &R,
         predicate: Predicate,
@@ -143,7 +197,7 @@ impl CasbinAuthorizer {
         self.policy_engine = permissive_engine;
     }
 
-    pub async fn build_casbin(
+    pub(crate) async fn build_casbin(
         policy_path: &Path,
         permissive_mode: bool,
     ) -> Result<Self, CasbinAuthorizerError> {
@@ -162,9 +216,34 @@ impl CasbinAuthorizer {
 }
 
 #[derive(thiserror::Error, Clone, Debug)]
-pub enum CasbinAuthorizerError {
-    #[error("Initialization error: {0}")]
+pub(crate) enum CasbinAuthorizerError {
+    #[error("initialization error: {0}")]
     InitializationError(String),
+}
+
+/// `AuthorizationPermissiveOverride` records a policy denial that permissive
+/// mode turns into a successful authorization. Concrete identities and the
+/// requested method stay on the warning; only the bounded principal class
+/// becomes a metric label.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "authorization_permissive_override",
+    metric_name = "carbide_auth_permissive_overrides_total",
+    component = "nico-api",
+    log = warn,
+    metric = counter,
+    message = "The policy engine denied this request, but --auth-permissive-mode overrides it.",
+    describe = "Number of policy denials overridden by authorization permissive mode, by principal class"
+)]
+struct AuthorizationPermissiveOverride {
+    #[label]
+    principal_class: PrincipalClass,
+    #[context]
+    principals: String,
+    #[context]
+    predicate: String,
+    #[context]
+    error: String,
 }
 
 struct PermissiveWrapper {
@@ -185,13 +264,16 @@ impl PolicyEngine for PermissiveWrapper {
     ) -> Result<Authorization, AuthorizationError> {
         let result = self.inner.authorize(principals, predicate.clone());
         result.or_else(|e| {
-            tracing::warn!(
-                ?principals,
-                ?predicate,
-                error = %e,
-                "The policy engine denied this request, but \
-                --auth-permissive-mode overrides it."
-            );
+            carbide_instrument::emit(AuthorizationPermissiveOverride {
+                principal_class: PrincipalClass::classify(principals),
+                principals: principals
+                    .iter()
+                    .map(Principal::audit_identity)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                predicate: format!("{predicate:?}"),
+                error: e.to_string(),
+            });
 
             // FIXME: Strictly speaking, it's not true that Anonymous is
             // authorized to do this. Maybe define a different principal
@@ -215,13 +297,82 @@ mod tests {
     use carbide_authn::config::{AllowedCertCriteria, CertComponent};
     use carbide_authn::middleware::CertDescriptionMiddleware;
     use carbide_authn::spiffe_id::TrustDomain;
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use eyre::Context;
 
     use super::*;
 
+    /// A rejecting policy lets the permissive wrapper exercise the exact
+    /// branch that production uses after Casbin denies a request.
+    struct DenyAll;
+
+    impl PolicyEngine for DenyAll {
+        fn authorize(
+            &self,
+            _principals: &[Principal],
+            _predicate: Predicate,
+        ) -> Result<Authorization, AuthorizationError> {
+            Err(AuthorizationError::Unauthorized)
+        }
+    }
+
     struct ClientCertTable {
         cert: Cow<'static, str>,
         desired: Principal,
+    }
+
+    /// A permissive override still authorizes the request, but one emit writes
+    /// the existing warning and increments the caller's bounded metric series.
+    #[test]
+    fn permissive_override_logs_counts_and_authorizes() {
+        let metrics = MetricsCapture::start();
+        let wrapper = PermissiveWrapper::new(Arc::new(DenyAll));
+        let principals = vec![
+            Principal::SpiffeServiceIdentifier("scout".to_string()),
+            Principal::TrustedCertificate,
+        ];
+        let mut authorized = false;
+
+        let logs = capture_logs(|| {
+            authorized = wrapper
+                .authorize(
+                    &principals,
+                    Predicate::ForgeCall("PowerControl".to_string()),
+                )
+                .is_ok();
+        });
+
+        assert!(authorized, "permissive mode must still allow the request");
+        let event = logs
+            .iter()
+            .find(|log| {
+                log.metadata_name == "authorization_permissive_override"
+                    && log.message
+                        == "The policy engine denied this request, but \
+                            --auth-permissive-mode overrides it."
+            })
+            .expect("the permissive override warning");
+        assert_eq!(event.level, tracing::Level::WARN);
+        assert_eq!(event.field("principal_class"), Some("spiffe_service"));
+        assert_eq!(
+            event.field("principals"),
+            Some("spiffe-service-id/scout,trusted-certificate")
+        );
+        assert_eq!(
+            event.field("predicate"),
+            Some("ForgeCall(\"PowerControl\")")
+        );
+        assert_eq!(
+            event.field("error"),
+            Some("unauthorized: CasbinEngine: all auth principals denied by enforcer")
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_auth_permissive_overrides_total",
+                &[("principal_class", "spiffe_service")]
+            ),
+            1.0
+        );
     }
 
     #[test]

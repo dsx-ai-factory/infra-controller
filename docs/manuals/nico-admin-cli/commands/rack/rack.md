@@ -1,6 +1,6 @@
 # `nico-admin-cli rack`
 
-_[Hardware commands](../../hardware.md) › **rack**_
+*[Hardware commands](../../hardware.md) › **rack***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-rack - Rack Management
 
 ## SYNOPSIS
 
-**nico-admin-cli rack** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli rack [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,24 +19,26 @@ Rack Management
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary id
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Subcommands
@@ -48,7 +52,9 @@ Print help (see a summary with -h)
 | [`metadata`](./rack-metadata.md) | Edit Metadata associated with a Rack |
 | [`profile`](./rack-profile.md) | Rack profile |
 | [`maintenance`](./rack-maintenance.md) | On-demand rack maintenance |
+| [`state-history`](./rack-state-history.md) | Show rack state history |
+| [`health-history`](./rack-health-history.md) | Show rack health history |
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

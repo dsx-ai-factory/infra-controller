@@ -30,7 +30,7 @@ use dashmap::DashMap;
 /// object should be emitted or should be suppressed.
 ///
 /// The suppression period is configurable
-pub struct LogLimiter<K> {
+pub(crate) struct LogLimiter<K> {
     objects: DashMap<K, LimitData>,
     suppress_period: Duration,
     clean_unused_keys_period: Duration,
@@ -48,7 +48,7 @@ impl<K: Hash + PartialEq + Eq + Clone> Default for LogLimiter<K> {
 }
 
 impl<K: Hash + PartialEq + Eq + Clone> LogLimiter<K> {
-    pub fn new(suppress_period: Duration, clean_unused_keys_period: Duration) -> Self {
+    pub(crate) fn new(suppress_period: Duration, clean_unused_keys_period: Duration) -> Self {
         assert!(
             clean_unused_keys_period >= Duration::from_secs(1),
             "Minimum clean_unused_keys_period is 1s"
@@ -65,7 +65,7 @@ impl<K: Hash + PartialEq + Eq + Clone> LogLimiter<K> {
 
     /// Returns whether a log message which can be summarized as `log_summary`
     /// should be emitted (`true`) or suppressed (`false`).
-    pub fn should_log(&self, key: &K, log_summary: &str) -> bool {
+    pub(crate) fn should_log(&self, key: &K, log_summary: &str) -> bool {
         let now = Instant::now();
 
         // The main path will only insert and look up the passed `key` inside the map.

@@ -12,44 +12,56 @@ Some of the configuration items that should be considered which could potentiall
 
 ## Host BMC Password Requirements
 
-**Note**: New servers should be using the default username for the server type e.g. USERID for Lenovo, admin for NVIDIA/Vikings, root for Dell
+<Note>
+New servers should be using the default username for the server type. For example, `USERID` for Lenovo, `admin` for NVIDIA/Vikings, and `root` for Dell.
+</Note>
 
-You should check both the expected machines DB and the site vault pod data store for any existing data. If entries exist in both expected machines and vault, you should consider the password stored in vault as the password that should be used.
+You should check both the expected machines DB and the credential store (the site vault pod data store by default, or the Postgres `secrets` journal when configured) for any existing data. If entries exist in both expected machines and the credential store, you should consider the password in the credential store as the password that should be used. With the Postgres store, list the BMC entries in the `nico_system_nico` database with `SELECT path, seq, kek_id, created_at FROM secrets WHERE path LIKE 'machines/bmc/%' ORDER BY seq DESC;`; the values are encrypted, so the query shows which BMC paths have an entry, not the passwords.
 
 ### Check Host BMC exists in Expected Machines DB
 
 If there is an existing data in expected machines for the machine, you can either update the password
 in expected machines or change the password on the Host BMC to match.
 
-1. Use `nico-admin-cli` to check if there is an existing entry for the host BMC:
+Replace the example MAC address, serial number, and credentials with values for your machine.
+
+1. List expected machines and find the host BMC MAC address:
 
     ```bash
-    nico-admin-cli expected-machine show |grep <Host BMC IP Address|Host BMC MAC Address>
+    nico-admin-cli expected-machine show
     ```
 
 2. If an entry exists for the machine, display the details using `nico-admin-cli`:
 
     ```bash
-    nico-admin-cli expected-machine show <Host BMC MAC address>
+    nico-admin-cli expected-machine show 00:11:22:33:44:55
     ```
 
-3. To update an existing expected machines data:
+3. Correct the BMC password for an existing expected machine:
 
     ```bash
-    nico-admin-cli expected-machine add --bmc-mac-address <BMC MAC Address> --bmc-username <BMC Username> --bmc-password <BMC Password --chassis-serial-number <Chassis Serial Number>
+    nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+      --bmc-password 'mynewpassword'
     ```
 
-    > **Note**: If you only need to update the BMC password, you just need to supply the BMC MAC Address and BMC Password
+   The patch preserves the stored username and other omitted fields. To correct only the
+   username, supply `--bmc-username admin` instead. You can supply both flags to change both values.
+   For additional options, refer to the
+   [expected-machine patch reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-patch.md).
 
-4. To add a new machine to the expected machines DB:
+4. If no entry exists, add a new expected machine:
 
     ```bash
-    nico-admin-cli expected-machine update --bmc-mac-address <BMC_MAC_ADDRESS> <--bmc-username <BMC_USERNAME> --bmc-password <BMC_PASSWORD> --chassis-serial-number <CHASSIS_SERIAL_NUMBER>
+    nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+      --bmc-username admin --bmc-password 'mypassword' --chassis-serial-number SERIAL-001
     ```
+
+   For additional options, refer to the
+   [expected-machine add reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-add.md).
 
 ### Checking site vault data
 
-To check if the Host BMC has currently any passwords in vault on a site:
+To check if the Host BMC has currently any passwords in vault on a site (default Vault backend):
 
 1. Connect to the Kubernetes environment for the site you are working on
 2. Retrieve the decoded vault secret for the site:
@@ -84,7 +96,7 @@ To check if the Host BMC has currently any passwords in vault on a site:
     vault kv get --tls-skip-verify secrets/machines/bmc/<BMC MAC Address>/root
     ```
 
-    Ensure these credentials match the credentials currently set on the host BMC. It is easier to just update the Host BMC to match vault rather than attempting to update the secret in vault.
+   Ensure these credentials match the credentials currently set on the host BMC. It is easier to just update the Host BMC to match vault rather than attempting to update the secret in vault.
 
 ## DPU BMC Password Requirements
 
@@ -204,7 +216,7 @@ To check the current Bluefield firmware versions installed on a DPU:
 
 3. Check the current DPU BMC Firmware Versions:
 
-    Bluefield 2 DPUs:
+   Bluefield 2 DPUs:
 
     ```bash
     curl -k -H "X-Auth-Token: $BMCTOKEN" -X GET https://$DPUBMCIP/redfish/v1/UpdateService/FirmwareInventory
@@ -213,7 +225,7 @@ To check the current Bluefield firmware versions installed on a DPU:
     curl -k -H "X-Auth-Token: $BMCTOKEN" -X GET https://$DPUBMCIP/redfish/v1/UpdateService/FirmwareInventory/<firmware_id>_BMC_Firmware | jq -r ' .Version'
     ```
 
-    Bluefield 3 DPUs:
+   Bluefield 3 DPUs:
 
     ```bash
     curl -ks -H "X-Auth-Token: $BMCTOKEN" -X GET https://$DPUBMCIP/redfish/v1/UpdateService/FirmwareInventory/BMC_Firmware | jq -r ' .Version'
@@ -232,13 +244,13 @@ For the examples below, we are installing FW version 24.01-5, but confirm this w
 
 1. Download the relevant packages for your DPU type:
 
-    Bluefield 2:
+   Bluefield 2:
 
     ```bash
     wget https://urm.nvidia.com/artifactory/sw-bmc-generic-local/BF2/BF2BMC-24.01-5/OPN/bf2-bmc-ota-24.01-5-opn.tar
     ```
 
-    Bluefield 3:
+   Bluefield 3:
 
     ```bash
     wget https://urm.nvidia.com/artifactory/sw-bmc-generic-local/BF3/BF3BMC-24.01-5/OPN/bf3-bmc-24.01-5_opn.fwpkg
@@ -255,13 +267,13 @@ For the examples below, we are installing FW version 24.01-5, but confirm this w
 
 4. Initiate the DPU BMC FW Upgrade:
 
-    Bluefield 2:
+   Bluefield 2:
 
     ```bash
     curl -k -H "X-Auth-Token: $BMCTOKEN" -H "Content-Type: application/octet-stream" -X POST -T bf2-bmc-ota-24.01-5-opn.tar https://$DPUBMCIP/redfish/v1/UpdateService/update
     ```
 
-    Bluefield 3:
+   Bluefield 3:
 
     ```bash
     curl -k -H "X-Auth-Token: $BMCTOKEN" -H "Content-Type: application/octet-stream" -X POST -T bf3-bmc-24.01-5_opn.fwpkg https://$DPUBMCIP/redfish/v1/UpdateService/update
@@ -297,7 +309,7 @@ For the examples below, we are installing FW version 24.01-5, but confirm this w
 
 7. Once the DPU BMC has rebooted, retrieve a new BMC Token and check the installed firmware version:
 
-    Bluefield 2:
+   Bluefield 2:
 
     ```bash
     export BMCTOKEN=`curl -k -H "Content-Type: application/json" -X POST https://$DPUBMCIP/login -d "{\"username\": \"root\", \"password\": \"$BMCPASS\"}" | grep token | awk '{print $2;}' | tr -d '"'`
@@ -308,7 +320,7 @@ For the examples below, we are installing FW version 24.01-5, but confirm this w
 
     ```
 
-    Bluefield 3:
+   Bluefield 3:
 
     ```bash
     export BMCTOKEN=`curl -k -H "Content-Type: application/json" -X POST https://$DPUBMCIP/login -d "{\"username\": \"root\", \"password\": \"$BMCPASS\"}" | grep token | awk '{print $2;}' | tr -d '"'`
@@ -336,9 +348,9 @@ To successfully boot from the NICo BFB image, the DPU ARM OS needs to have Secur
     curl -k -u root:"$BMCPASS" -X  GET https://$DPUBMCIP/redfish/v1/Systems/Bluefield/SecureBoot
     ```
 
-    ***Note:***  If you do not see the `SecureBootCurrentBoot` option listed, you should install DOCA version 2.5.0
+   ***Note:*** If you do not see the `SecureBootCurrentBoot` option listed, you should install DOCA version 2.5.0
 
-    If you see the following output, secure boot is enabled and it needs to be disabled:
+   If you see the following output, secure boot is enabled and it needs to be disabled:
 
     ```json
     {
@@ -356,7 +368,7 @@ To successfully boot from the NICo BFB image, the DPU ARM OS needs to have Secur
     }
     ```
 
-    If you see `"SecureBootCurrentBoot": "Disabled",` no action is required. You should attempt to boot the DPU ARM OS over the network:
+   If you see `"SecureBootCurrentBoot": "Disabled",` no action is required. You should attempt to boot the DPU ARM OS over the network:
 
     ```json
     {
@@ -396,7 +408,7 @@ To disable Secure Boot if it is enabled:
     curl -k -u root:"$BMCPASS" -X  GET https://$DPUBMCIP/redfish/v1/Systems/Bluefield/SecureBoot
     ```
 
-    ***Note:*** You may need to run this step several times to disable secure boot. It may take up to 3 cycles of this for the setting to stick
+   ***Note:*** You may need to run this step several times to disable secure boot. It may take up to 3 cycles of this for the setting to stick
 
 If the "SecureBootCurrentBoot" setting is not shown, attempt to install DOCA 2.5.0:
 

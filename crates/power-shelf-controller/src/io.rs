@@ -19,7 +19,10 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use config_version::{ConfigVersion, Versioned};
-use db::{DatabaseError, ObjectColumnFilter, power_shelf as db_power_shelf};
+use db::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter,
+    power_shelf as db_power_shelf,
+};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfSearchFilter, state_sla,
@@ -82,7 +85,7 @@ impl StateControllerIO for PowerShelfStateControllerIO {
                 "PowerShelf::find()",
                 sqlx::Error::Decode(
                     eyre::eyre!(
-                        "Searching for PowerShelf {} returned multiple results",
+                        "searching for PowerShelf {} returned multiple results",
                         power_shelf_id
                     )
                     .into(),
@@ -109,7 +112,7 @@ impl StateControllerIO for PowerShelfStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db_power_shelf::try_update_controller_state(
             txn,
             *object_id,
@@ -153,16 +156,59 @@ impl StateControllerIO for PowerShelfStateControllerIO {
             PowerShelfControllerState::FetchingData => ("fetching_data", ""),
             PowerShelfControllerState::Configuring => ("configuring", ""),
             PowerShelfControllerState::Ready => ("ready", ""),
-            PowerShelfControllerState::Maintenance { operation } => {
+            PowerShelfControllerState::RotatingBmc { .. } => ("rotatingbmc", ""),
+            PowerShelfControllerState::Maintenance { operation, .. } => {
                 let op = match operation {
                     model::power_shelf::PowerShelfMaintenanceOperation::PowerOn => "power_on",
-                    model::power_shelf::PowerShelfMaintenanceOperation::PowerOff => "power_off",
+                    model::power_shelf::PowerShelfMaintenanceOperation::PowerOff { .. } => {
+                        "power_off"
+                    }
                 };
                 ("maintenance", op)
+            }
+            PowerShelfControllerState::ReProvisioning {
+                reprovisioning_state,
+            } => {
+                let sub = match reprovisioning_state {
+                    model::power_shelf::ReProvisioningState::WaitingForRackFirmwareUpgrade => {
+                        "waiting_for_rack_firmware_upgrade"
+                    }
+                };
+                ("reprovisioning", sub)
+            }
+            PowerShelfControllerState::Decommissioning {
+                decommissioning_state,
+            } => {
+                let sub = match decommissioning_state {
+                    model::power_shelf::PowerShelfDecommissioningState::SuppressingSiteExplorer => {
+                        "suppressingsiteexplorer"
+                    }
+                    model::power_shelf::PowerShelfDecommissioningState::SuppressingBmcDhcp => {
+                        "suppressingbmcdhcp"
+                    }
+                    model::power_shelf::PowerShelfDecommissioningState::FactoryResetBmc => {
+                        "factoryresetbmc"
+                    }
+                    model::power_shelf::PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
+                        "waitingforbmcdhcpacknowledgement"
+                    }
+                    model::power_shelf::PowerShelfDecommissioningState::DeletingManagedCredentials => {
+                        "deletingmanagedcredentials"
+                    }
+                    model::power_shelf::PowerShelfDecommissioningState::Decommissioned => {
+                        "decommissioned"
+                    }
+                };
+                ("decommissioning", sub)
             }
             PowerShelfControllerState::Error { .. } => ("error", ""),
             PowerShelfControllerState::Deleting => ("deleting", ""),
         }
+    }
+
+    fn manual_intervention_reason(state: &Self::ControllerState) -> Option<&'static str> {
+        // The stored cause is free text, so the reason is a fixed token.
+        matches!(state, PowerShelfControllerState::Error { .. }).then_some("error")
     }
 
     fn state_sla(

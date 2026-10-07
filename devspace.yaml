@@ -1,5 +1,5 @@
 version: v2beta1
-name: ncx-infra-controller-core
+name: infra-controller
 
 vars:
   LOCAL_DEV_NAMESPACE:
@@ -14,13 +14,78 @@ vars:
   LOCAL_DEV_CERT_ISSUER_GROUP:
     source: env
     default: cert-manager.io
+  LOCAL_DEV_REST_POSTGRES_DB:
+    source: env
+    default: nico_rest
+  LOCAL_DEV_REST_POSTGRES_USER:
+    source: env
+    default: nico_rest
+  LOCAL_DEV_REST_POSTGRES_PASSWORD:
+    source: env
+    default: nico_rest
+  LOCAL_DEV_REST_API_FORWARD_PORT:
+    source: env
+    default: "18388"
+  LOCAL_DEV_KEYCLOAK_FORWARD_PORT:
+    source: env
+    default: "18082"
+  LOCAL_DEV_DSX_GATEWAY_FORWARD_PORT:
+    source: env
+    default: "18080"
+  LOCAL_DEV_DSX_GATEWAY_PROFILE: "0"
+
+pipelines:
+  build: |-
+    run_dependencies --all --pipeline build
+    build_local_images
+  dev: |-
+    run_dependencies --all
+    ensure_pull_secrets --all
+    build_local_images
+    create_deployments --all
+    start_dev --all
+  deploy: |-
+    run_dependencies --all
+    ensure_pull_secrets --all
+    build_local_images
+    create_deployments --all
+  purge: |-
+    CONTEXT=$(kubectl config current-context 2>/dev/null || echo "")
+    case "$CONTEXT" in
+      kind-*)
+        LOCAL_DEV_NAMESPACE=${DEVSPACE_NAMESPACE} dev/deployment/devspace/reset-kind-cluster.sh
+        ;;
+      *)
+        run_default_pipeline purge
+        ;;
+    esac
+
+functions:
+  build_local_images: |-
+    build_images core-artifacts nico-rest-api nico-rest-workflow \
+      nico-rest-site-manager nico-rest-site-agent nico-rest-db \
+      nico-rest-cert-manager
+    if [ "${LOCAL_DEV_DSX_GATEWAY_PROFILE}" = "1" ]; then
+      build_images nico-mcp
+    fi
+    # Custom-build onChange state can outlive the corresponding local Docker
+    # image. Always invoke these inexpensive second-stage builds so the tags
+    # consumed by the Kind image-loading hook are guaranteed to exist.
+    build_images nico-api nico-bmc-proxy machine-a-tron --force-rebuild
 
 images:
+  core-artifacts:
+    image: nico-devspace-core-artifacts
+    tags:
+      - latest
+    dockerfile: dev/deployment/devspace/Dockerfile.core-artifacts
+    context: .
+    buildKit: {}
+    skipPush: true
   nico-api:
     image: nico-api
     custom:
       command: |-
-        docker image inspect build-container-localdev >/dev/null 2>&1 || docker build --pull=false -t build-container-localdev -f dev/docker/Dockerfile.build-container-x86_64 .
         docker build -t ${runtime.images.nico-api.image}:${runtime.images.nico-api.tag} -f dev/deployment/devspace/Dockerfile.api .
       onChange:
         - .dockerignore
@@ -31,14 +96,18 @@ images:
         - crates
         - include
         - dev/docker/Dockerfile.build-container-x86_64
+        - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
+        - dev/deployment/devspace/Dockerfile.core-artifacts
+        - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.api
+        - dev/deployment/devspace/Dockerfile.api.dockerignore
         - pxe/templates
         - pxe/static/blobs/internal/aarch64/secure-boot-pk.pem
   nico-bmc-proxy:
     image: nico-bmc-proxy
     custom:
       command: |-
-        docker image inspect build-container-localdev >/dev/null 2>&1 || docker build --pull=false -t build-container-localdev -f dev/docker/Dockerfile.build-container-x86_64 .
         docker build -t ${runtime.images.nico-bmc-proxy.image}:${runtime.images.nico-bmc-proxy.tag} -f dev/deployment/devspace/Dockerfile.bmc-proxy .
       onChange:
         - .dockerignore
@@ -48,12 +117,16 @@ images:
         - .cargo
         - crates
         - dev/docker/Dockerfile.build-container-x86_64
+        - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
+        - dev/deployment/devspace/Dockerfile.core-artifacts
+        - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.bmc-proxy
+        - dev/deployment/devspace/Dockerfile.bmc-proxy.dockerignore
   machine-a-tron:
     image: machine-a-tron
     custom:
       command: |-
-        docker image inspect build-container-localdev >/dev/null 2>&1 || docker build --pull=false -t build-container-localdev -f dev/docker/Dockerfile.build-container-x86_64 .
         docker build -t ${runtime.images.machine-a-tron.image}:${runtime.images.machine-a-tron.tag} -f dev/deployment/devspace/Dockerfile.machine-a-tron .
       onChange:
         - .dockerignore
@@ -64,7 +137,60 @@ images:
         - crates
         - include
         - dev/docker/Dockerfile.build-container-x86_64
+        - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
+        - dev/deployment/devspace/Dockerfile.core-artifacts
+        - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.machine-a-tron
+        - dev/deployment/devspace/Dockerfile.machine-a-tron.dockerignore
+  nico-rest-api:
+    image: localhost:5000/nico-rest-api
+    tags:
+      - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+    dockerfile: rest-api/docker/local/Dockerfile.nico-rest-api
+    context: rest-api
+    buildKit: {}
+    skipPush: true
+  nico-rest-workflow:
+    image: localhost:5000/nico-rest-workflow
+    tags:
+      - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+    dockerfile: rest-api/docker/local/Dockerfile.nico-rest-workflow
+    context: rest-api
+    buildKit: {}
+    skipPush: true
+  nico-rest-site-manager:
+    image: localhost:5000/nico-rest-site-manager
+    tags:
+      - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+    dockerfile: rest-api/docker/local/Dockerfile.nico-rest-site-manager
+    context: rest-api
+    buildKit: {}
+    skipPush: true
+  nico-rest-site-agent:
+    image: localhost:5000/nico-rest-site-agent
+    tags:
+      - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+    dockerfile: rest-api/docker/local/Dockerfile.nico-rest-site-agent
+    context: rest-api
+    buildKit: {}
+    skipPush: true
+  nico-rest-db:
+    image: localhost:5000/nico-rest-db
+    tags:
+      - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+    dockerfile: rest-api/docker/local/Dockerfile.nico-rest-db
+    context: rest-api
+    buildKit: {}
+    skipPush: true
+  nico-rest-cert-manager:
+    image: localhost:5000/nico-rest-cert-manager
+    tags:
+      - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+    dockerfile: rest-api/docker/local/Dockerfile.nico-rest-cert-manager
+    context: rest-api
+    buildKit: {}
+    skipPush: true
 
 deployments:
   carbide-local:
@@ -79,44 +205,127 @@ deployments:
             repository: ${runtime.images.nico-api.image}
             tag: ${runtime.images.nico-api.tag}
             pullPolicy: IfNotPresent
+          certificate:
+            issuerRef:
+              kind: ${LOCAL_DEV_CERT_ISSUER_KIND}
+              name: ${LOCAL_DEV_CERT_ISSUER_NAME}
+              group: ${LOCAL_DEV_CERT_ISSUER_GROUP}
         nico-bmc-proxy:
           image:
             repository: ${runtime.images.nico-bmc-proxy.image}
             tag: ${runtime.images.nico-bmc-proxy.tag}
             pullPolicy: IfNotPresent
+        nico-machine-a-tron:
+          image:
+            repository: ${runtime.images.machine-a-tron.image}
+            tag: ${runtime.images.machine-a-tron.tag}
+            pullPolicy: IfNotPresent
       valuesFiles:
         - dev/deployment/devspace/values.base.yaml
         - dev/deployment/devspace/values.generated.yaml
-  machine-a-tron-local:
-    namespace: ${LOCAL_DEV_NAMESPACE}
-    updateImageTags: true
-    kubectl:
-      manifests:
-        - dev/deployment/devspace/machine-a-tron.yaml
-      patches:
-        - target:
-            apiVersion: cert-manager.io/v1
-            kind: Certificate
-            name: machine-a-tron-certificate
-          op: replace
-          path: spec.issuerRef.kind
-          value: ${LOCAL_DEV_CERT_ISSUER_KIND}
-        - target:
-            apiVersion: cert-manager.io/v1
-            kind: Certificate
-            name: machine-a-tron-certificate
-          op: replace
-          path: spec.issuerRef.name
-          value: ${LOCAL_DEV_CERT_ISSUER_NAME}
-        - target:
-            apiVersion: cert-manager.io/v1
-            kind: Certificate
-            name: machine-a-tron-certificate
-          op: replace
-          path: spec.issuerRef.group
-          value: ${LOCAL_DEV_CERT_ISSUER_GROUP}
-
+  nico-rest:
+    namespace: nico-rest
+    updateImageTags: false
+    helm:
+      chart:
+        path: ./helm/rest/nico-rest
+      values:
+        global:
+          image:
+            repository: localhost:5000
+            tag: ${runtime.images.nico-rest-api.tag}
+            pullPolicy: Never
+          imagePullSecrets: []
+          certificate:
+            issuerRef:
+              kind: ClusterIssuer
+              name: nico-rest-ca-issuer
+              group: cert-manager.io
+        nico-rest-common:
+          secrets:
+            dbCreds:
+              username: ${LOCAL_DEV_REST_POSTGRES_USER}
+              password: ${LOCAL_DEV_REST_POSTGRES_PASSWORD}
+        nico-rest-api:
+          nodePort:
+            enabled: true
+            port: 30388
+          config:
+            db:
+              host: postgres.postgres.svc.cluster.local.
+              name: ${LOCAL_DEV_REST_POSTGRES_DB}
+              user: ${LOCAL_DEV_REST_POSTGRES_USER}
+            keycloak:
+              enabled: true
+              baseURL: http://keycloak:8082
+              externalBaseURL: http://localhost:${LOCAL_DEV_KEYCLOAK_FORWARD_PORT}
+              realm: nico-dev
+              clientID: nico-api
+              serviceAccount: true
+        nico-rest-workflow:
+          secrets:
+            dbCreds: db-creds
+          config:
+            db:
+              host: postgres.postgres.svc.cluster.local.
+              name: ${LOCAL_DEV_REST_POSTGRES_DB}
+              user: ${LOCAL_DEV_REST_POSTGRES_USER}
+        nico-rest-db:
+          waitForPostgres:
+            repository: postgres
+            tag: 14.5-alpine
+          db:
+            host: postgres.postgres.svc.cluster.local.
+            name: ${LOCAL_DEV_REST_POSTGRES_DB}
+            user: ${LOCAL_DEV_REST_POSTGRES_USER}
+  nico-rest-site-agent:
+    namespace: nico-rest
+    updateImageTags: false
+    helm:
+      chart:
+        path: ./helm/rest/nico-rest-site-agent
+      values:
+        global:
+          image:
+            repository: localhost:5000
+            tag: ${runtime.images.nico-rest-api.tag}
+            pullPolicy: Never
+          imagePullSecrets: []
+          certificate:
+            issuerRef:
+              kind: ClusterIssuer
+              name: nico-rest-ca-issuer
+              group: cert-manager.io
+        certificate:
+          uris:
+            - spiffe://nico.local/nico-system/sa/elektra-site-agent
+        envConfig:
+          NICO_ADDRESS: nico-api.${LOCAL_DEV_NAMESPACE}.svc.cluster.local:1079
+          NICO_SEC_OPT: "2"
+          CORE_GRPC_ADDRESS: nico-api.${LOCAL_DEV_NAMESPACE}.svc.cluster.local:1079
+          CORE_GRPC_SEC_OPT: "2"
+          FLOW_GRPC_ENABLED: "false"
+          CLUSTER_ID: 00000000-0000-4000-8000-000000000001
+          # The Site Agent reports this interval and Cloud derives its staleness guard from it,
+          # so a fast local cadence no longer needs padding to avoid skipped hosts.
+          TEMPORAL_INVENTORY_SCHEDULE: "@every 1m"
+          TEMPORAL_SERVER: site.server.temporal.local
+          TEMPORAL_SUBSCRIBE_NAMESPACE: 00000000-0000-4000-8000-000000000001
+          TEMPORAL_SUBSCRIBE_QUEUE: site
 hooks:
+  - name: build-base-image
+    events: ["before:build"]
+    command: |-
+      case "$(uname -m)" in
+        x86_64) BUILD_ARCH=x86_64 ;;
+        aarch64|arm64) BUILD_ARCH=aarch64 ;;
+        *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+      esac
+      KEA_VERSION=$(cat dev/docker/kea.version)
+      docker build --pull=false \
+        --build-arg KEA_VERSION="$KEA_VERSION" \
+        -t build-container-localdev \
+        -f "dev/docker/Dockerfile.build-container-$BUILD_ARCH" .
   - name: load-images-into-local-cluster
     events: ["before:deploy"]
     command: |-
@@ -124,10 +333,201 @@ hooks:
       case "$CONTEXT" in
         kind-*)
           echo "Loading images into kind cluster..."
-          kind load docker-image \
+          kind load docker-image --name "${CONTEXT#kind-}" \
             "${runtime.images.nico-api.image}:${runtime.images.nico-api.tag}" \
             "${runtime.images.nico-bmc-proxy.image}:${runtime.images.nico-bmc-proxy.tag}" \
             "${runtime.images.machine-a-tron.image}:${runtime.images.machine-a-tron.tag}"
           ;;
         # Add new local K8s tools here
       esac
+  - name: load-rest-images-into-local-cluster
+    events: ["before:deploy"]
+    command: |-
+      CONTEXT=$(kubectl config current-context 2>/dev/null || echo "")
+      case "$CONTEXT" in
+        kind-*)
+          echo "Loading REST images into kind cluster..."
+          kind load docker-image --name "${CONTEXT#kind-}" \
+            "${runtime.images.nico-rest-api.image}:${runtime.images.nico-rest-api.tag}" \
+            "${runtime.images.nico-rest-workflow.image}:${runtime.images.nico-rest-workflow.tag}" \
+            "${runtime.images.nico-rest-site-manager.image}:${runtime.images.nico-rest-site-manager.tag}" \
+            "${runtime.images.nico-rest-site-agent.image}:${runtime.images.nico-rest-site-agent.tag}" \
+            "${runtime.images.nico-rest-db.image}:${runtime.images.nico-rest-db.tag}" \
+            "${runtime.images.nico-rest-cert-manager.image}:${runtime.images.nico-rest-cert-manager.tag}"
+          ;;
+      esac
+  - name: setup-rest-integration
+    events: ["after:deploy"]
+    command: |-
+      LOCAL_DEV_REST_API_FORWARD_PORT=${LOCAL_DEV_REST_API_FORWARD_PORT} \
+      LOCAL_DEV_KEYCLOAK_FORWARD_PORT=${LOCAL_DEV_KEYCLOAK_FORWARD_PORT} \
+        dev/deployment/devspace/setup-rest-integration.sh
+
+profiles:
+  - name: dsx-exchange
+    patches:
+      - op: replace
+        path: vars.LOCAL_DEV_DSX_GATEWAY_PROFILE
+        value: "1"
+      - op: add
+        path: images.nico-mcp
+        value:
+          image: localhost:5000/nico-mcp
+          tags:
+            - ${DEVSPACE_GIT_COMMIT}-${DEVSPACE_TIMESTAMP}
+          dockerfile: rest-api/docker/local/Dockerfile.nico-mcp
+          context: rest-api
+          buildKit: {}
+          skipPush: true
+      - op: add
+        path: deployments.nico-mcp
+        value:
+          namespace: nico-rest
+          updateImageTags: false
+          helm:
+            chart:
+              path: ./helm/rest/nico-mcp
+            values:
+              global:
+                image:
+                  repository: localhost:5000
+                  tag: ${runtime.images.nico-rest-api.tag}
+                  pullPolicy: Never
+                imagePullSecrets: []
+              config:
+                baseURL: http://nico-rest-api:8388
+                apiName: nico
+      - op: add
+        path: deployments.dsx-gateway-csc
+        value:
+          namespace: dsx-gateway-csc
+          updateImageTags: false
+          helm:
+            chart:
+              path: ./.devspace/dsx-exchange-v2.9.1/deploy/dsx-agent-gateway
+            valuesFiles:
+              - dev/deployment/devspace/dsx-agent-gateway-common.yaml
+              - dev/deployment/devspace/dsx-agent-gateway-csc.yaml
+            values:
+              auth:
+                jwt:
+                  providers:
+                    nico-dev:
+                      issuer: http://localhost:${LOCAL_DEV_KEYCLOAK_FORWARD_PORT}/realms/nico-dev
+      - op: add
+        path: hooks
+        value:
+          name: prepare-dsx-exchange-source
+          events: ["before:build"]
+          command: dev/deployment/devspace/prepare-dsx-exchange.sh >/dev/null
+      - op: add
+        path: hooks
+        value:
+          name: install-dsx-gateway-prereqs
+          events: ["before:deploy"]
+          command: dev/deployment/devspace/install-dsx-gateway-prereqs.sh
+      - op: add
+        path: hooks
+        value:
+          name: load-dsx-profile-images-into-local-cluster
+          events: ["before:deploy"]
+          command: |-
+            CONTEXT=$(kubectl config current-context 2>/dev/null || echo "")
+            case "$CONTEXT" in
+              kind-*)
+                echo "Loading the NICo MCP image into the kind cluster..."
+                kind load docker-image --name "${CONTEXT#kind-}" \
+                  "${runtime.images.nico-mcp.image}:${runtime.images.nico-mcp.tag}"
+                ;;
+            esac
+      - op: replace
+        path: hooks.name=setup-rest-integration.command
+        value: |-
+          LOCAL_DEV_REST_API_FORWARD_PORT=${LOCAL_DEV_REST_API_FORWARD_PORT} \
+          LOCAL_DEV_KEYCLOAK_FORWARD_PORT=${LOCAL_DEV_KEYCLOAK_FORWARD_PORT} \
+          LOCAL_DEV_DSX_GATEWAY_FORWARD_PORT=${LOCAL_DEV_DSX_GATEWAY_FORWARD_PORT} \
+          LOCAL_DEV_DSX_GATEWAY_ENABLED=${LOCAL_DEV_DSX_GATEWAY_PROFILE} \
+            dev/deployment/devspace/setup-rest-integration.sh
+      - op: add
+        path: deployments.dsx-exchange
+        value:
+          namespace: ${LOCAL_DEV_NAMESPACE}
+          helm:
+            chart:
+              name: nats
+              version: "2.12.6"
+              repo: https://nats-io.github.io/k8s/helm/charts/
+            values:
+              fullnameOverride: dsx-exchange
+              config:
+                cluster:
+                  enabled: false
+                jetstream:
+                  enabled: true
+                  fileStore:
+                    enabled: true
+                    maxSize: 256Mi
+                    pvc:
+                      enabled: false
+                  memoryStore:
+                    enabled: true
+                    maxSize: 64Mi
+                mqtt:
+                  enabled: true
+                  port: 1883
+                  merge:
+                    stream_replicas: 1
+                    consumer_memory_storage: true
+              container:
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+              natsBox:
+                enabled: false
+              podDisruptionBudget:
+                enabled: false
+      - op: add
+        path: deployments.carbide-local.helm.values.nico-api
+        value:
+          dsxExchangeEventBusConfig: '{enabled=true,mqtt_endpoint="dsx-exchange",mqtt_broker_port=1883,auth={auth_mode="none"},periodic_state_republish={interval="10s"}}'
+  - name: core-only
+    patches:
+      - op: add
+        path: hooks
+        value:
+          name: reject-dsx-gateway-with-core-only
+          events: ["before:build", "before:deploy"]
+          command: |-
+            if [ "${LOCAL_DEV_DSX_GATEWAY_PROFILE}" = "1" ]; then
+              echo "the dsx-exchange and core-only profiles cannot be combined" >&2
+              exit 1
+            fi
+      - op: replace
+        path: functions.build_local_images
+        value: |-
+          build_images core-artifacts
+          build_images nico-api nico-bmc-proxy machine-a-tron
+      - op: remove
+        path: images.nico-rest-api
+      - op: remove
+        path: images.nico-rest-workflow
+      - op: remove
+        path: images.nico-rest-site-manager
+      - op: remove
+        path: images.nico-rest-site-agent
+      - op: remove
+        path: images.nico-rest-db
+      - op: remove
+        path: images.nico-rest-cert-manager
+      - op: remove
+        path: deployments.nico-rest
+      - op: remove
+        path: deployments.nico-rest-site-agent
+      - op: remove
+        path: hooks.name=load-rest-images-into-local-cluster
+      - op: remove
+        path: hooks.name=setup-rest-integration

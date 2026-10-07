@@ -22,14 +22,14 @@ use serde_json::json;
 use crate::json::{JsonExt, JsonPatch};
 
 /// Defines minimal set of Redfish resource attributes.
-pub struct Collection<'a> {
-    pub odata_id: Cow<'a, str>,
-    pub odata_type: Cow<'a, str>,
-    pub name: Cow<'a, str>,
+pub(crate) struct Collection<'a> {
+    pub(crate) odata_id: Cow<'a, str>,
+    pub(crate) odata_type: Cow<'a, str>,
+    pub(crate) name: Cow<'a, str>,
 }
 
 impl Collection<'_> {
-    pub fn nav_property(&self, name: &str) -> serde_json::Value {
+    pub(crate) fn nav_property(&self, name: &str) -> serde_json::Value {
         json!({
             name: {
                 "@odata.id": self.odata_id
@@ -37,7 +37,7 @@ impl Collection<'_> {
         })
     }
 
-    pub fn with_members(&self, members: &[impl serde::Serialize]) -> serde_json::Value {
+    pub(crate) fn with_members(&self, members: &[impl serde::Serialize]) -> serde_json::Value {
         let count = members.len();
         self.json_patch().patch(json!({
             "Members": members,

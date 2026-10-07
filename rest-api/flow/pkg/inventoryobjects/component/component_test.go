@@ -76,6 +76,22 @@ func TestAddBMC(t *testing.T) {
 	assert.Equal(t, 0, comp.bmcMacToID[bmcs[1].MAC.String()].index)
 }
 
+func TestComponent_ManagementMAC(t *testing.T) {
+	hostMAC, err := net.ParseMAC("aa:bb:cc:dd:ee:02")
+	assert.NoError(t, err)
+	secondHostMAC, err := net.ParseMAC("aa:bb:cc:dd:ee:01")
+	assert.NoError(t, err)
+	dpuMAC, err := net.ParseMAC("00:11:22:33:44:55")
+	assert.NoError(t, err)
+
+	comp := New(devicetypes.ComponentTypeCompute, nil, "", nil)
+	comp.AddBMC(devicetypes.BMCTypeDPU, bmc.BMC{MAC: bmc.MACAddress{HardwareAddr: dpuMAC}})
+	comp.AddBMC(devicetypes.BMCTypeHost, bmc.BMC{MAC: bmc.MACAddress{HardwareAddr: hostMAC}})
+	comp.AddBMC(devicetypes.BMCTypeHost, bmc.BMC{MAC: bmc.MACAddress{HardwareAddr: secondHostMAC}})
+
+	assert.Equal(t, "aa:bb:cc:dd:ee:01", comp.ManagementMAC())
+}
+
 func TestIsCompute(t *testing.T) {
 	comp := New(devicetypes.ComponentTypeCompute, nil, "", nil)
 	assert.True(t, comp.IsCompute())

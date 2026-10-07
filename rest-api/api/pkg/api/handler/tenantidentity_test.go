@@ -22,15 +22,17 @@ import (
 	tp "go.temporal.io/sdk/temporal"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // countMockCalls returns the number of recorded invocations of method on the testify mock.
@@ -44,8 +46,8 @@ func countMockCalls(m *mock.Mock, method string) int {
 	return n
 }
 
-// TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow verifies every tenant-identity handler returns 500 and terminates its workflow when the underlying Temporal workflow times out.
-func TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testing.T) {
+// TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow verifies the tenant-identity handlers that still use bespoke workflows return 500 and terminate their workflow when the underlying Temporal workflow times out.
+func TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
@@ -157,7 +159,7 @@ func TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testin
 			name: "GET .well-known/jwks.json (oidc)", method: http.MethodGet,
 			entity: "TenantIdentity", workflow: "GetJWKS", user: nil,
 			newHandler: func() echo.HandlerFunc {
-				return NewGetJWKSHandler(dbSession, siteClientPool, cwssaws.JwksKind_Oidc).Handle
+				return NewGetJWKSHandler(dbSession, siteClientPool, corev1.JwksKind_Oidc).Handle
 			},
 		},
 		{
@@ -193,6 +195,158 @@ func TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testin
 			assert.Contains(t, recorder.Body.String(), expected)
 			assert.Equal(t, beforeTerminate+1, countMockCalls(&temporalClient.Mock, "TerminateWorkflow"),
 				"expected exactly one TerminateWorkflow call for %s", tt.workflow)
+		})
+	}
+}
+
+// TestReencryptTenantIdentitySecretsHandler_Handle verifies that only the re-encryption endpoint dispatches through the generic Core gRPC proxy and returns the curated REST response.
+func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
+	dbSession := testSiteInitDB(t)
+	defer dbSession.Close()
+
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.InfrastructureProvider)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.Tenant)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.Site)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil)))
+
+	const (
+		providerOrg        = "test-reencrypt-provider-org"
+		tenantOrg          = "test-reencrypt-tenant-org"
+		otherSiteTenantOrg = "test-reencrypt-other-site-tenant-org"
+		unknownTenantOrg   = "test-reencrypt-unknown-tenant-org"
+	)
+	providerUser := testVPCBuildUser(t, dbSession, "test-reencrypt-provider-user", providerOrg, []string{auth.ProviderAdminRole})
+	infraProvider := testVPCSiteBuildInfrastructureProvider(t, dbSession, "test-reencrypt-ip", providerOrg, providerUser)
+	site := testVPCBuildSite(t, dbSession, infraProvider, "test-reencrypt-site", false, false, cdbm.SiteStatusRegistered, providerUser)
+	otherSite := testVPCBuildSite(t, dbSession, infraProvider, "test-reencrypt-other-site", false, false, cdbm.SiteStatusRegistered, providerUser)
+
+	tenantUser := testVPCBuildUser(t, dbSession, "test-reencrypt-tenant-user", tenantOrg, []string{auth.TenantAdminRole})
+	tenant := testVPCBuildTenant(t, dbSession, "test-reencrypt-tenant", tenantOrg, tenantUser)
+	common.TestBuildTenantSite(t, dbSession, tenant, site, providerUser)
+
+	otherSiteTenantUser := testVPCBuildUser(t, dbSession, "test-reencrypt-other-site-tenant-user", otherSiteTenantOrg, []string{auth.TenantAdminRole})
+	otherSiteTenant := testVPCBuildTenant(t, dbSession, "test-reencrypt-other-site-tenant", otherSiteTenantOrg, otherSiteTenantUser)
+	common.TestBuildTenantSite(t, dbSession, otherSiteTenant, otherSite, providerUser)
+
+	responseJSON, err := protojson.Marshal(&corev1.ReencryptTenantIdentitySecretsResponse{
+		RowsExamined:           3,
+		RowsUpdated:            2,
+		RowsSkippedAllOnTarget: 1,
+		FieldsReencrypted:      4,
+		FieldsSkippedOnTarget:  2,
+		CurrentEncryptionKeyId: "key-2",
+	})
+	require.NoError(t, err)
+
+	testConfig := common.GetTestConfig()
+	temporalConfig, _ := testConfig.GetTemporalConfig()
+	siteClientPool := sc.NewClientPool(temporalConfig)
+	echoServer := echo.New()
+	handler := NewReencryptTenantIdentitySecretsHandler(dbSession, siteClientPool)
+
+	tests := []struct {
+		name       string
+		body       string
+		wantOrg    *string
+		wantDryRun bool
+		wantError  string
+	}{
+		{
+			name:      "empty request body is rejected before proxy dispatch",
+			wantError: "Request body is required",
+		},
+		{
+			name:       "omitted organization targets all organizations",
+			body:       `{"dryRun":true}`,
+			wantDryRun: true,
+		},
+		{
+			name: "null organization targets all organizations",
+			body: `{"organizationId":null}`,
+		},
+		{
+			name:      "blank organization is rejected before scope lookup or proxy dispatch",
+			body:      `{"organizationId":" \t"}`,
+			wantError: "Error validating Reencrypt Tenant Identity Secrets request data",
+		},
+		{
+			name:    "tenant with allocation on selected site is forwarded",
+			body:    `{"organizationId":"` + tenantOrg + `"}`,
+			wantOrg: cutil.GetPtr(tenantOrg),
+		},
+		{
+			name:    "mixed-case organization resolves and is forwarded lowercased",
+			body:    `{"organizationId":"` + strings.ToUpper(tenantOrg) + `"}`,
+			wantOrg: cutil.GetPtr(tenantOrg),
+		},
+		{
+			name:      "unknown tenant organization is rejected before proxy dispatch",
+			body:      `{"organizationId":"` + unknownTenantOrg + `"}`,
+			wantError: "Could not find Tenant for organizationId specified in request data",
+		},
+		{
+			name:      "tenant allocated only on another site is rejected before proxy dispatch",
+			body:      `{"organizationId":"` + otherSiteTenantOrg + `"}`,
+			wantError: "Tenant organization does not have an allocation on the Site",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var proxiedRequest grpcproxy.Request
+			temporalClient := &tmocks.Client{}
+			if tt.wantError == "" {
+				workflowRun := &tmocks.WorkflowRun{}
+				workflowRun.On("Get", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+					response := args.Get(1).(*grpcproxy.Response)
+					response.ResponseJSON = responseJSON
+				}).Once()
+				temporalClient.On(
+					"ExecuteWorkflow",
+					mock.Anything,
+					mock.AnythingOfType("internal.StartWorkflowOptions"),
+					grpcproxy.Core.WorkflowName,
+					mock.MatchedBy(func(request grpcproxy.Request) bool {
+						proxiedRequest = request
+						return true
+					}),
+				).Return(workflowRun, nil).Once()
+			}
+			siteClientPool.IDClientMap[site.ID.String()] = temporalClient
+
+			httpRequest := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			httpRequest.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			recorder := httptest.NewRecorder()
+			echoContext := echoServer.NewContext(httpRequest, recorder)
+			echoContext.SetParamNames("orgName", "siteID")
+			echoContext.SetParamValues(providerOrg, site.ID.String())
+			echoContext.Set("user", providerUser)
+
+			require.NoError(t, handler.Handle(echoContext))
+			if tt.wantError != "" {
+				assert.Equal(t, http.StatusBadRequest, recorder.Code)
+				assert.Contains(t, recorder.Body.String(), tt.wantError)
+				assert.Zero(t, countMockCalls(&temporalClient.Mock, "ExecuteWorkflow"))
+				return
+			}
+			require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
+			assert.Equal(t, corev1.Forge_ReencryptTenantIdentitySecrets_FullMethodName, proxiedRequest.FullMethod)
+			var coreRequest corev1.ReencryptTenantIdentitySecretsRequest
+			require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
+			assert.Equal(t, tt.wantOrg, coreRequest.OrganizationId)
+			assert.Equal(t, tt.wantDryRun, coreRequest.GetDryRun())
+
+			assert.JSONEq(t, `{
+				"rowsExamined": 3,
+				"rowsUpdated": 2,
+				"rowsSkippedAllOnTarget": 1,
+				"fieldsReencrypted": 4,
+				"fieldsSkippedOnTarget": 2,
+				"rowsFailed": 0,
+				"failures": [],
+				"currentEncryptionKeyId": "key-2"
+			}`, recorder.Body.String())
+			temporalClient.AssertExpectations(t)
 		})
 	}
 }
@@ -238,7 +392,7 @@ func TestGetJWKS_AbsentCasesReturn404AndPresentPassesThrough(t *testing.T) {
 	successRun.On("GetID").Return("test-jwks-success-wf-id")
 	successRun.Mock.On("Get", mock.Anything, mock.Anything).
 		Return(nil).Run(func(args mock.Arguments) {
-		out := args.Get(1).(*cwssaws.Jwks)
+		out := args.Get(1).(*corev1.Jwks)
 		out.Jwks = `{"keys":[{"kty":"EC","kid":"real-key-id","alg":"ES256","crv":"P-256","x":"xxxx","y":"yyyy"}]}`
 	})
 
@@ -265,16 +419,16 @@ func TestGetJWKS_AbsentCasesReturn404AndPresentPassesThrough(t *testing.T) {
 		name       string
 		orgName    string
 		siteID     string
-		kind       cwssaws.JwksKind
+		kind       corev1.JwksKind
 		wantStatus int
 		wantBody   string
 	}{
-		{name: "absent: unknown site", orgName: tenantOrg, siteID: bogusSiteID, kind: cwssaws.JwksKind_Oidc, wantStatus: http.StatusNotFound},
-		{name: "absent: org is not a Tenant", orgName: unknownOrg, siteID: siteIDStr, kind: cwssaws.JwksKind_Oidc, wantStatus: http.StatusNotFound},
-		{name: "absent: Core gRPC API NOT_FOUND", orgName: tenantOrg, siteID: siteIDStr, kind: cwssaws.JwksKind_Spiffe, wantStatus: http.StatusNotFound},
-		{name: "present: real JWKS pass-through", orgName: tenantOrg, siteID: siteIDStr, kind: cwssaws.JwksKind_Oidc, wantStatus: http.StatusOK, wantBody: realJWKSBody},
+		{name: "absent: unknown site", orgName: tenantOrg, siteID: bogusSiteID, kind: corev1.JwksKind_Oidc, wantStatus: http.StatusNotFound},
+		{name: "absent: org is not a Tenant", orgName: unknownOrg, siteID: siteIDStr, kind: corev1.JwksKind_Oidc, wantStatus: http.StatusNotFound},
+		{name: "absent: Core gRPC API NOT_FOUND", orgName: tenantOrg, siteID: siteIDStr, kind: corev1.JwksKind_Spiffe, wantStatus: http.StatusNotFound},
+		{name: "present: real JWKS pass-through", orgName: tenantOrg, siteID: siteIDStr, kind: corev1.JwksKind_Oidc, wantStatus: http.StatusOK, wantBody: realJWKSBody},
 		// Tenant without an allocation on the site still resolves to JWKS so already-issued JWT-SVIDs remain verifiable.
-		{name: "present: tenant has no allocation, controller has keys", orgName: noAllocTenantOrg, siteID: siteIDStr, kind: cwssaws.JwksKind_Oidc, wantStatus: http.StatusOK, wantBody: realJWKSBody},
+		{name: "present: tenant has no allocation, controller has keys", orgName: noAllocTenantOrg, siteID: siteIDStr, kind: corev1.JwksKind_Oidc, wantStatus: http.StatusOK, wantBody: realJWKSBody},
 	}
 
 	for _, tt := range tests {
@@ -355,7 +509,7 @@ func TestGetJWKS_BodyValidation(t *testing.T) {
 			controllerBody := tt.controllerBody
 			run.Mock.On("Get", mock.Anything, mock.Anything).
 				Return(nil).Run(func(args mock.Arguments) {
-				out := args.Get(1).(*cwssaws.Jwks)
+				out := args.Get(1).(*corev1.Jwks)
 				out.Jwks = controllerBody
 			})
 			temporalClient.Mock.On("ExecuteWorkflow",
@@ -368,7 +522,7 @@ func TestGetJWKS_BodyValidation(t *testing.T) {
 			echoCtx.SetParamNames("orgName", "siteID")
 			echoCtx.SetParamValues(tenantOrg, siteIDStr)
 
-			require.NoError(t, NewGetJWKSHandler(dbSession, siteClientPool, cwssaws.JwksKind_Oidc).Handle(echoCtx))
+			require.NoError(t, NewGetJWKSHandler(dbSession, siteClientPool, corev1.JwksKind_Oidc).Handle(echoCtx))
 			assert.Equal(t, tt.wantCode, recorder.Code, "body=%s", recorder.Body.String())
 			if tt.wantBody != "" {
 				assert.JSONEq(t, tt.wantBody, recorder.Body.String())
@@ -512,7 +666,7 @@ func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing
 	createdConfigRun.On("GetID").Return("test-status-config-create-wf-id")
 	createdConfigRun.Mock.On("Get", mock.Anything, mock.Anything).
 		Return(nil).Run(func(args mock.Arguments) {
-		out := args.Get(1).(*cwssaws.TenantIdentityConfigResponse)
+		out := args.Get(1).(*corev1.TenantIdentityConfigResponse)
 		out.OrganizationId = tenantOrg
 		out.CreatedAt = timestamppb.New(now)
 		out.UpdatedAt = timestamppb.New(now)
@@ -521,7 +675,7 @@ func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing
 	updatedConfigRun.On("GetID").Return("test-status-config-update-wf-id")
 	updatedConfigRun.Mock.On("Get", mock.Anything, mock.Anything).
 		Return(nil).Run(func(args mock.Arguments) {
-		out := args.Get(1).(*cwssaws.TenantIdentityConfigResponse)
+		out := args.Get(1).(*corev1.TenantIdentityConfigResponse)
 		out.OrganizationId = tenantOrg
 		out.CreatedAt = timestamppb.New(now)
 		out.UpdatedAt = timestamppb.New(later)
@@ -531,7 +685,7 @@ func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing
 	createdDelegationRun.On("GetID").Return("test-status-delegation-create-wf-id")
 	createdDelegationRun.Mock.On("Get", mock.Anything, mock.Anything).
 		Return(nil).Run(func(args mock.Arguments) {
-		out := args.Get(1).(*cwssaws.TokenDelegationResponse)
+		out := args.Get(1).(*corev1.TokenDelegationResponse)
 		out.OrganizationId = tenantOrg
 		out.CreatedAt = timestamppb.New(now)
 		out.UpdatedAt = timestamppb.New(now)
@@ -540,7 +694,7 @@ func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing
 	updatedDelegationRun.On("GetID").Return("test-status-delegation-update-wf-id")
 	updatedDelegationRun.Mock.On("Get", mock.Anything, mock.Anything).
 		Return(nil).Run(func(args mock.Arguments) {
-		out := args.Get(1).(*cwssaws.TokenDelegationResponse)
+		out := args.Get(1).(*corev1.TokenDelegationResponse)
 		out.OrganizationId = tenantOrg
 		out.CreatedAt = timestamppb.New(now)
 		out.UpdatedAt = timestamppb.New(later)

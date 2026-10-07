@@ -16,7 +16,7 @@
  */
 
 use ::rpc::protos::measured_boot as pb;
-pub use ::rpc::{forge as rpc_forge, machine_discovery as rpc_md};
+use ::rpc::{forge as rpc_forge, machine_discovery as rpc_md};
 use carbide_uuid::machine::MachineId;
 use db::attestation::secret_ak_pub;
 use sqlx::PgConnection;
@@ -26,7 +26,7 @@ use crate::api::Api;
 use crate::measured_boot::rpc::{bundle, journal, machine, profile, report, site};
 use crate::{CarbideError, attestation as attest};
 
-pub(crate) async fn create_attest_key_bind_challenge(
+pub(super) async fn create_attest_key_bind_challenge(
     txn: &mut PgConnection,
     attest_key_info: &rpc_md::AttestKeyInfo,
     machine_id: &MachineId,
@@ -39,7 +39,7 @@ pub(crate) async fn create_attest_key_bind_challenge(
     .await?;
     if !matched {
         return Err(CarbideError::AttestBindKeyError(
-            "Certificate's public key did not match EK Pub Key".to_string(),
+            "certificate's public key did not match EK pub key".to_string(),
         )
         .into());
     }
@@ -58,7 +58,7 @@ pub(crate) async fn create_attest_key_bind_challenge(
     })
 }
 
-pub async fn create_system_profile(
+pub(crate) async fn create_system_profile(
     api: &Api,
     request: Request<pb::CreateMeasurementSystemProfileRequest>,
 ) -> Result<Response<pb::CreateMeasurementSystemProfileResponse>, Status> {
@@ -67,7 +67,7 @@ pub async fn create_system_profile(
         .map(Response::new)
 }
 
-pub async fn delete_system_profile(
+pub(crate) async fn delete_system_profile(
     api: &Api,
     request: Request<pb::DeleteMeasurementSystemProfileRequest>,
 ) -> Result<Response<pb::DeleteMeasurementSystemProfileResponse>, Status> {
@@ -76,7 +76,7 @@ pub async fn delete_system_profile(
         .map(Response::new)
 }
 
-pub async fn rename_system_profile(
+pub(crate) async fn rename_system_profile(
     api: &Api,
     request: Request<pb::RenameMeasurementSystemProfileRequest>,
 ) -> Result<Response<pb::RenameMeasurementSystemProfileResponse>, Status> {
@@ -85,7 +85,7 @@ pub async fn rename_system_profile(
         .map(Response::new)
 }
 
-pub async fn show_system_profile(
+pub(crate) async fn show_system_profile(
     api: &Api,
     request: Request<pb::ShowMeasurementSystemProfileRequest>,
 ) -> Result<Response<pb::ShowMeasurementSystemProfileResponse>, Status> {
@@ -94,7 +94,7 @@ pub async fn show_system_profile(
         .map(Response::new)
 }
 
-pub async fn show_system_profiles(
+pub(crate) async fn show_system_profiles(
     api: &Api,
     request: Request<pb::ShowMeasurementSystemProfilesRequest>,
 ) -> Result<Response<pb::ShowMeasurementSystemProfilesResponse>, Status> {
@@ -103,7 +103,7 @@ pub async fn show_system_profiles(
         .map(Response::new)
 }
 
-pub async fn list_system_profiles(
+pub(crate) async fn list_system_profiles(
     api: &Api,
     request: Request<pb::ListMeasurementSystemProfilesRequest>,
 ) -> Result<Response<pb::ListMeasurementSystemProfilesResponse>, Status> {
@@ -112,7 +112,7 @@ pub async fn list_system_profiles(
         .map(Response::new)
 }
 
-pub async fn list_system_profile_bundles(
+pub(crate) async fn list_system_profile_bundles(
     api: &Api,
     request: Request<pb::ListMeasurementSystemProfileBundlesRequest>,
 ) -> Result<Response<pb::ListMeasurementSystemProfileBundlesResponse>, Status> {
@@ -121,7 +121,7 @@ pub async fn list_system_profile_bundles(
         .map(Response::new)
 }
 
-pub async fn list_system_profile_machines(
+pub(crate) async fn list_system_profile_machines(
     api: &Api,
     request: Request<pb::ListMeasurementSystemProfileMachinesRequest>,
 ) -> Result<Response<pb::ListMeasurementSystemProfileMachinesResponse>, Status> {
@@ -130,7 +130,7 @@ pub async fn list_system_profile_machines(
         .map(Response::new)
 }
 
-pub async fn create_report(
+pub(crate) async fn create_report(
     api: &Api,
     request: Request<pb::CreateMeasurementReportRequest>,
 ) -> Result<Response<pb::CreateMeasurementReportResponse>, Status> {
@@ -139,7 +139,7 @@ pub async fn create_report(
         .map(Response::new)
 }
 
-pub async fn delete_report(
+pub(crate) async fn delete_report(
     api: &Api,
     request: Request<pb::DeleteMeasurementReportRequest>,
 ) -> Result<Response<pb::DeleteMeasurementReportResponse>, Status> {
@@ -148,7 +148,7 @@ pub async fn delete_report(
         .map(Response::new)
 }
 
-pub async fn promote_report(
+pub(crate) async fn promote_report(
     api: &Api,
     request: Request<pb::PromoteMeasurementReportRequest>,
 ) -> Result<Response<pb::PromoteMeasurementReportResponse>, Status> {
@@ -157,7 +157,7 @@ pub async fn promote_report(
         .map(Response::new)
 }
 
-pub async fn revoke_report(
+pub(crate) async fn revoke_report(
     api: &Api,
     request: Request<pb::RevokeMeasurementReportRequest>,
 ) -> Result<Response<pb::RevokeMeasurementReportResponse>, Status> {
@@ -166,7 +166,7 @@ pub async fn revoke_report(
         .map(Response::new)
 }
 
-pub async fn show_report_for_id(
+pub(crate) async fn show_report_for_id(
     api: &Api,
     request: Request<pb::ShowMeasurementReportForIdRequest>,
 ) -> Result<Response<pb::ShowMeasurementReportForIdResponse>, Status> {
@@ -175,7 +175,7 @@ pub async fn show_report_for_id(
         .map(Response::new)
 }
 
-pub async fn show_reports_for_machine(
+pub(crate) async fn show_reports_for_machine(
     api: &Api,
     request: Request<pb::ShowMeasurementReportsForMachineRequest>,
 ) -> Result<Response<pb::ShowMeasurementReportsForMachineResponse>, Status> {
@@ -184,7 +184,7 @@ pub async fn show_reports_for_machine(
         .map(Response::new)
 }
 
-pub async fn show_reports(
+pub(crate) async fn show_reports(
     api: &Api,
     request: Request<pb::ShowMeasurementReportsRequest>,
 ) -> Result<Response<pb::ShowMeasurementReportsResponse>, Status> {
@@ -193,7 +193,7 @@ pub async fn show_reports(
         .map(Response::new)
 }
 
-pub async fn list_report(
+pub(crate) async fn list_report(
     api: &Api,
     request: Request<pb::ListMeasurementReportRequest>,
 ) -> Result<Response<pb::ListMeasurementReportResponse>, Status> {
@@ -202,7 +202,7 @@ pub async fn list_report(
         .map(Response::new)
 }
 
-pub async fn match_report(
+pub(crate) async fn match_report(
     api: &Api,
     request: Request<pb::MatchMeasurementReportRequest>,
 ) -> Result<Response<pb::MatchMeasurementReportResponse>, Status> {
@@ -211,7 +211,7 @@ pub async fn match_report(
         .map(Response::new)
 }
 
-pub async fn create_bundle(
+pub(crate) async fn create_bundle(
     api: &Api,
     request: Request<pb::CreateMeasurementBundleRequest>,
 ) -> Result<Response<pb::CreateMeasurementBundleResponse>, Status> {
@@ -220,7 +220,7 @@ pub async fn create_bundle(
         .map(Response::new)
 }
 
-pub async fn delete_bundle(
+pub(crate) async fn delete_bundle(
     api: &Api,
     request: Request<pb::DeleteMeasurementBundleRequest>,
 ) -> Result<Response<pb::DeleteMeasurementBundleResponse>, Status> {
@@ -229,7 +229,7 @@ pub async fn delete_bundle(
         .map(Response::new)
 }
 
-pub async fn rename_bundle(
+pub(crate) async fn rename_bundle(
     api: &Api,
     request: Request<pb::RenameMeasurementBundleRequest>,
 ) -> Result<Response<pb::RenameMeasurementBundleResponse>, Status> {
@@ -238,7 +238,7 @@ pub async fn rename_bundle(
         .map(Response::new)
 }
 
-pub async fn update_bundle(
+pub(crate) async fn update_bundle(
     api: &Api,
     request: Request<pb::UpdateMeasurementBundleRequest>,
 ) -> Result<Response<pb::UpdateMeasurementBundleResponse>, Status> {
@@ -247,7 +247,7 @@ pub async fn update_bundle(
         .map(Response::new)
 }
 
-pub async fn show_bundle(
+pub(crate) async fn show_bundle(
     api: &Api,
     request: Request<pb::ShowMeasurementBundleRequest>,
 ) -> Result<Response<pb::ShowMeasurementBundleResponse>, Status> {
@@ -256,7 +256,7 @@ pub async fn show_bundle(
         .map(Response::new)
 }
 
-pub async fn show_bundles(
+pub(crate) async fn show_bundles(
     api: &Api,
     request: Request<pb::ShowMeasurementBundlesRequest>,
 ) -> Result<Response<pb::ShowMeasurementBundlesResponse>, Status> {
@@ -265,7 +265,7 @@ pub async fn show_bundles(
         .map(Response::new)
 }
 
-pub async fn list_bundles(
+pub(crate) async fn list_bundles(
     api: &Api,
     request: Request<pb::ListMeasurementBundlesRequest>,
 ) -> Result<Response<pb::ListMeasurementBundlesResponse>, Status> {
@@ -274,7 +274,7 @@ pub async fn list_bundles(
         .map(Response::new)
 }
 
-pub async fn list_bundle_machines(
+pub(crate) async fn list_bundle_machines(
     api: &Api,
     request: Request<pb::ListMeasurementBundleMachinesRequest>,
 ) -> Result<Response<pb::ListMeasurementBundleMachinesResponse>, Status> {
@@ -283,7 +283,7 @@ pub async fn list_bundle_machines(
         .map(Response::new)
 }
 
-pub async fn find_closest_bundle_match(
+pub(crate) async fn find_closest_bundle_match(
     api: &Api,
     request: Request<pb::FindClosestBundleMatchRequest>,
 ) -> Result<Response<pb::ShowMeasurementBundleResponse>, Status> {
@@ -292,7 +292,7 @@ pub async fn find_closest_bundle_match(
         .map(Response::new)
 }
 
-pub async fn delete_journal(
+pub(crate) async fn delete_journal(
     api: &Api,
     request: Request<pb::DeleteMeasurementJournalRequest>,
 ) -> Result<Response<pb::DeleteMeasurementJournalResponse>, Status> {
@@ -301,7 +301,7 @@ pub async fn delete_journal(
         .map(Response::new)
 }
 
-pub async fn show_journal(
+pub(crate) async fn show_journal(
     api: &Api,
     request: Request<pb::ShowMeasurementJournalRequest>,
 ) -> Result<Response<pb::ShowMeasurementJournalResponse>, Status> {
@@ -310,7 +310,7 @@ pub async fn show_journal(
         .map(Response::new)
 }
 
-pub async fn show_journals(
+pub(crate) async fn show_journals(
     api: &Api,
     request: Request<pb::ShowMeasurementJournalsRequest>,
 ) -> Result<Response<pb::ShowMeasurementJournalsResponse>, Status> {
@@ -319,7 +319,7 @@ pub async fn show_journals(
         .map(Response::new)
 }
 
-pub async fn list_journal(
+pub(crate) async fn list_journal(
     api: &Api,
     request: Request<pb::ListMeasurementJournalRequest>,
 ) -> Result<Response<pb::ListMeasurementJournalResponse>, Status> {
@@ -328,7 +328,7 @@ pub async fn list_journal(
         .map(Response::new)
 }
 
-pub async fn attest_candidate_machine(
+pub(crate) async fn attest_candidate_machine(
     api: &Api,
     request: Request<pb::AttestCandidateMachineRequest>,
 ) -> Result<Response<pb::AttestCandidateMachineResponse>, Status> {
@@ -337,7 +337,7 @@ pub async fn attest_candidate_machine(
         .map(Response::new)
 }
 
-pub async fn show_candidate_machine(
+pub(crate) async fn show_candidate_machine(
     api: &Api,
     request: Request<pb::ShowCandidateMachineRequest>,
 ) -> Result<Response<pb::ShowCandidateMachineResponse>, Status> {
@@ -346,7 +346,7 @@ pub async fn show_candidate_machine(
         .map(Response::new)
 }
 
-pub async fn show_candidate_machines(
+pub(crate) async fn show_candidate_machines(
     api: &Api,
     request: Request<pb::ShowCandidateMachinesRequest>,
 ) -> Result<Response<pb::ShowCandidateMachinesResponse>, Status> {
@@ -355,7 +355,7 @@ pub async fn show_candidate_machines(
         .map(Response::new)
 }
 
-pub async fn list_candidate_machines(
+pub(crate) async fn list_candidate_machines(
     api: &Api,
     request: Request<pb::ListCandidateMachinesRequest>,
 ) -> Result<Response<pb::ListCandidateMachinesResponse>, Status> {
@@ -364,7 +364,7 @@ pub async fn list_candidate_machines(
         .map(Response::new)
 }
 
-pub async fn import_site_measurements(
+pub(crate) async fn import_site_measurements(
     api: &Api,
     request: Request<pb::ImportSiteMeasurementsRequest>,
 ) -> Result<Response<pb::ImportSiteMeasurementsResponse>, Status> {
@@ -373,7 +373,7 @@ pub async fn import_site_measurements(
         .map(Response::new)
 }
 
-pub async fn export_site_measurements(
+pub(crate) async fn export_site_measurements(
     api: &Api,
     request: Request<pb::ExportSiteMeasurementsRequest>,
 ) -> Result<Response<pb::ExportSiteMeasurementsResponse>, Status> {
@@ -382,7 +382,7 @@ pub async fn export_site_measurements(
         .map(Response::new)
 }
 
-pub async fn add_trusted_machine(
+pub(crate) async fn add_trusted_machine(
     api: &Api,
     request: Request<pb::AddMeasurementTrustedMachineRequest>,
 ) -> Result<Response<pb::AddMeasurementTrustedMachineResponse>, Status> {
@@ -391,7 +391,7 @@ pub async fn add_trusted_machine(
         .map(Response::new)
 }
 
-pub async fn remove_trusted_machine(
+pub(crate) async fn remove_trusted_machine(
     api: &Api,
     request: Request<pb::RemoveMeasurementTrustedMachineRequest>,
 ) -> Result<Response<pb::RemoveMeasurementTrustedMachineResponse>, Status> {
@@ -400,7 +400,7 @@ pub async fn remove_trusted_machine(
         .map(Response::new)
 }
 
-pub async fn list_trusted_machines(
+pub(crate) async fn list_trusted_machines(
     api: &Api,
     request: Request<pb::ListMeasurementTrustedMachinesRequest>,
 ) -> Result<Response<pb::ListMeasurementTrustedMachinesResponse>, Status> {
@@ -409,7 +409,7 @@ pub async fn list_trusted_machines(
         .map(Response::new)
 }
 
-pub async fn add_trusted_profile(
+pub(crate) async fn add_trusted_profile(
     api: &Api,
     request: Request<pb::AddMeasurementTrustedProfileRequest>,
 ) -> Result<Response<pb::AddMeasurementTrustedProfileResponse>, Status> {
@@ -418,7 +418,7 @@ pub async fn add_trusted_profile(
         .map(Response::new)
 }
 
-pub async fn remove_trusted_profile(
+pub(crate) async fn remove_trusted_profile(
     api: &Api,
     request: Request<pb::RemoveMeasurementTrustedProfileRequest>,
 ) -> Result<Response<pb::RemoveMeasurementTrustedProfileResponse>, Status> {
@@ -427,7 +427,7 @@ pub async fn remove_trusted_profile(
         .map(Response::new)
 }
 
-pub async fn list_trusted_profiles(
+pub(crate) async fn list_trusted_profiles(
     api: &Api,
     request: Request<pb::ListMeasurementTrustedProfilesRequest>,
 ) -> Result<Response<pb::ListMeasurementTrustedProfilesResponse>, Status> {
@@ -436,7 +436,7 @@ pub async fn list_trusted_profiles(
         .map(Response::new)
 }
 
-pub async fn list_attestation_summary(
+pub(crate) async fn list_attestation_summary(
     api: &Api,
     request: Request<pb::ListAttestationSummaryRequest>,
 ) -> Result<Response<pb::ListAttestationSummaryResponse>, Status> {

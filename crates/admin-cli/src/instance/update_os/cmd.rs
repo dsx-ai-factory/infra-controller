@@ -20,7 +20,7 @@ use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn update_os(
+pub(super) async fn update_os(
     api_client: &ApiClient,
     update_request: Args,
     ctx: &RuntimeContext,

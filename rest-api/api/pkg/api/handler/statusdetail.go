@@ -13,6 +13,7 @@ import (
 	cerr "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 )
@@ -35,7 +36,7 @@ func handleEntityStatusDetails(ctx context.Context, echoCtx echo.Context, dbSess
 
 	// Get status details
 	sdDAO := cdbm.NewStatusDetailDAO(dbSession)
-	dbSds, total, serr := sdDAO.GetAllByEntityIDs(ctx, nil, []string{entityID}, pageRequest.Offset, pageRequest.Limit, pageRequest.OrderBy)
+	dbSds, total, serr := sdDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{entityID}}, cdbp.PageInput{Offset: pageRequest.Offset, Limit: pageRequest.Limit, OrderBy: pageRequest.OrderBy})
 	if serr != nil {
 		logger.Error().Err(serr).Msg("error retrieving Status Details")
 		return nil, cerr.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, "Failed to retrieve Status Details", nil)

@@ -46,23 +46,6 @@ fn verify_cmd_structure() {
 // including testing required arguments, as well as optional
 // flag-specific checking.
 
-// route names the parsed subcommand and surfaces its positional fields, so a
-// single table can assert that each valid invocation lands on the right
-// variant carrying the right (rack_id, node_id). Variants without a given
-// field report an empty string for it.
-fn route(cmd: &Cmd) -> (&'static str, String, String) {
-    match cmd {
-        Cmd::Inventory => ("inventory", String::new(), String::new()),
-        Cmd::PowerOnSequence(args) => ("power-on-sequence", args.rack_id.clone(), String::new()),
-        Cmd::PowerState(args) => ("power-state", args.rack_id.clone(), args.node_id.clone()),
-        Cmd::FirmwareInventory(args) => (
-            "firmware-inventory",
-            args.rack_id.clone(),
-            args.node_id.clone(),
-        ),
-    }
-}
-
 // Every valid invocation parses, routes to its subcommand variant, and carries
 // the expected positional arguments.
 #[test]
@@ -70,7 +53,23 @@ fn valid_invocations_route_to_their_subcommand() {
     scenarios!(
         run = |argv| {
             Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| route(&cmd))
+                .map(|cmd| match cmd {
+                    Cmd::Inventory => ("inventory", String::new(), String::new()),
+                    Cmd::PowerOnSequence(args) => {
+                        let request =
+                            librms::protos::rack_manager::GetRackPowerOnSequenceRequest::from(args);
+                        ("power-on-sequence", request.rack_id, String::new())
+                    }
+                    Cmd::PowerState(args) => {
+                        let request = librms::protos::rack_manager::GetPowerStateRequest::from(args);
+                        ("power-state", request.rack_id, request.node_id)
+                    }
+                    Cmd::FirmwareInventory(args) => {
+                        let request =
+                            librms::protos::rack_manager::GetNodeFirmwareInventoryRequest::from(args);
+                        ("firmware-inventory", request.rack_id, request.node_id)
+                    }
+                })
                 .map_err(drop)
         };
         "inventory takes no args" {

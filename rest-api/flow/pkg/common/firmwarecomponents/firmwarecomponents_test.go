@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	nicopb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestParseNICoNVSwitch(t *testing.T) {
@@ -23,20 +23,20 @@ func TestParseNICoNVSwitch(t *testing.T) {
 	t.Run("known names map to proto enums", func(t *testing.T) {
 		got, err := ParseNICoNVSwitch([]string{"bmc", "cpld", "bios", "nvos"})
 		require.NoError(t, err)
-		assert.Equal(t, []nicopb.NvSwitchComponent{
-			nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_BMC,
-			nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_CPLD,
-			nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_BIOS,
-			nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_NVOS,
+		assert.Equal(t, []corev1.NvSwitchComponent{
+			corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_BMC,
+			corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_CPLD,
+			corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_BIOS,
+			corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_NVOS,
 		}, got)
 	})
 
 	t.Run("uppercase and surrounding whitespace are tolerated", func(t *testing.T) {
 		got, err := ParseNICoNVSwitch([]string{" BMC ", "NVOS"})
 		require.NoError(t, err)
-		assert.Equal(t, []nicopb.NvSwitchComponent{
-			nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_BMC,
-			nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_NVOS,
+		assert.Equal(t, []corev1.NvSwitchComponent{
+			corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_BMC,
+			corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_NVOS,
 		}, got)
 	})
 
@@ -51,9 +51,9 @@ func TestParseNICoNVSwitch(t *testing.T) {
 func TestParseNICoPowerShelf(t *testing.T) {
 	got, err := ParseNICoPowerShelf([]string{"pmc", "psu"})
 	require.NoError(t, err)
-	assert.Equal(t, []nicopb.PowerShelfComponent{
-		nicopb.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC,
-		nicopb.PowerShelfComponent_POWER_SHELF_COMPONENT_PSU,
+	assert.Equal(t, []corev1.PowerShelfComponent{
+		corev1.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC,
+		corev1.PowerShelfComponent_POWER_SHELF_COMPONENT_PSU,
 	}, got)
 
 	_, err = ParseNICoPowerShelf([]string{"bmc"})
@@ -64,9 +64,9 @@ func TestParseNICoPowerShelf(t *testing.T) {
 func TestParseNICoComputeTray(t *testing.T) {
 	got, err := ParseNICoComputeTray([]string{"bmc", "bios"})
 	require.NoError(t, err)
-	assert.Equal(t, []nicopb.ComputeTrayComponent{
-		nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BMC,
-		nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BIOS,
+	assert.Equal(t, []corev1.ComputeTrayComponent{
+		corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BMC,
+		corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BIOS,
 	}, got)
 
 	_, err = ParseNICoComputeTray([]string{"nvos"})
@@ -138,6 +138,26 @@ func TestSplitNICoComputeTraySubTargets(t *testing.T) {
 	}
 }
 
+func TestIsNICoDPUOnlySubTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want bool
+	}{
+		{name: "empty"},
+		{name: "dpu only", in: []string{"dpu"}, want: true},
+		{name: "repeated dpu", in: []string{"DPU", " dpu "}, want: true},
+		{name: "compute only", in: []string{"bmc"}},
+		{name: "mixed compute and dpu", in: []string{"bmc", "dpu"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsNICoDPUOnlySubTargets(tt.in))
+		})
+	}
+}
+
 func TestSupportedNamesAreSortedAndImmutable(t *testing.T) {
 	names := SupportedNICoNVSwitchNames()
 	require.Equal(t, []string{"bios", "bmc", "cpld", "nvos"}, names)
@@ -188,13 +208,13 @@ func completenessFor[E ~int32](
 }
 
 func TestNICoNVSwitchMapIsComplete(t *testing.T) {
-	completenessFor(t, "NvSwitchComponent", nicopb.NvSwitchComponent_name, nicoNVSwitchByName)
+	completenessFor(t, "NvSwitchComponent", corev1.NvSwitchComponent_name, nicoNVSwitchByName)
 }
 
 func TestNICoPowerShelfMapIsComplete(t *testing.T) {
-	completenessFor(t, "PowerShelfComponent", nicopb.PowerShelfComponent_name, nicoPowerShelfByName)
+	completenessFor(t, "PowerShelfComponent", corev1.PowerShelfComponent_name, nicoPowerShelfByName)
 }
 
 func TestNICoComputeTrayMapIsComplete(t *testing.T) {
-	completenessFor(t, "ComputeTrayComponent", nicopb.ComputeTrayComponent_name, nicoComputeTrayByName)
+	completenessFor(t, "ComputeTrayComponent", corev1.ComputeTrayComponent_name, nicoComputeTrayByName)
 }

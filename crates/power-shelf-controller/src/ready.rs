@@ -20,7 +20,9 @@
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
 use db::power_shelf as db_power_shelf;
-use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfStatus};
+use model::power_shelf::{
+    PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
+};
 use sqlx::PgTransaction;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -28,15 +30,18 @@ use state_controller::state_handler::{
 
 use crate::context::PowerShelfStateHandlerContextObjects;
 use crate::maintenance::build_power_shelf_endpoint;
+use crate::reprovisioning::first_reprovisioning_state;
+use crate::rotating_bmc::should_enter_bmc_rotation;
 
 /// Handles the Ready state for a power shelf.
 ///
 /// If the power shelf is marked for deletion, transitions to `Deleting`.
 /// If a maintenance request has been posted via
 /// `power_shelf_maintenance_requested`, transitions to `Maintenance` with the
-/// requested operation (PowerOn / PowerOff). Otherwise polls the configured
-/// component manager backend for the current power state (best-effort
-/// observation) and idles.
+/// requested operation (PowerOn / PowerOff). If rack-level reprovisioning has
+/// been requested and `rack_firmware_reprovisioning_enabled` is set, transitions
+/// to `ReProvisioning`. Otherwise polls the configured component manager backend
+/// for the current power state (best-effort observation) and idles.
 ///
 /// TODO: Implement PowerShelf monitoring (health checks, status updates,
 /// power consumption / efficiency tracking).
@@ -51,6 +56,17 @@ pub async fn handle_ready(
         ));
     }
 
+    if state.decommission_requested {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        db_power_shelf::clear_decommission_requested(txn.as_mut(), *power_shelf_id).await?;
+        return Ok(
+            StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
+                decommissioning_state: PowerShelfDecommissioningState::SuppressingSiteExplorer,
+            })
+            .with_txn(txn),
+        );
+    }
+
     if let Some(req) = state.power_shelf_maintenance_requested.as_ref() {
         tracing::info!(
             operation = ?req.operation,
@@ -60,7 +76,81 @@ pub async fn handle_ready(
         return Ok(StateHandlerOutcome::transition(
             PowerShelfControllerState::Maintenance {
                 operation: req.operation,
+                request: Some(req.clone()),
             },
+        ));
+    }
+
+    if let Some(req) = &state.power_shelf_reprovisioning_requested {
+        if !ctx.services.rack_firmware_reprovisioning_enabled {
+            tracing::info!(
+                power_shelf_id = %power_shelf_id,
+                initiator = %req.initiator,
+                "Rack reprovision request ignored; rack_firmware_reprovisioning_enabled is false"
+            );
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db_power_shelf::clear_power_shelf_reprovisioning_requested(
+                txn.as_mut(),
+                *power_shelf_id,
+            )
+            .await?;
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+        }
+
+        if !req.initiator.starts_with("rack-") {
+            tracing::warn!(
+                initiator = %req.initiator,
+                "Unknown initiator for power shelf reprovisioning request",
+            );
+            let cause = format!(
+                "unknown initiator for power shelf reprovisioning request: {}",
+                req.initiator
+            );
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db_power_shelf::clear_power_shelf_reprovisioning_requested(
+                txn.as_mut(),
+                *power_shelf_id,
+            )
+            .await?;
+            return Ok(
+                StateHandlerOutcome::transition(PowerShelfControllerState::Error { cause })
+                    .with_txn(txn),
+            );
+        }
+
+        let Some(reprovisioning_state) = first_reprovisioning_state(req) else {
+            tracing::warn!(
+                power_shelf_id = %power_shelf_id,
+                initiator = %req.initiator,
+                "Rack reprovision request has no power-shelf-relevant activities; clearing request"
+            );
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db_power_shelf::clear_power_shelf_reprovisioning_requested(
+                txn.as_mut(),
+                *power_shelf_id,
+            )
+            .await?;
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+        };
+
+        tracing::info!(
+            ?reprovisioning_state,
+            "Rack-level reprovisioning requested — entering ReProvisioning"
+        );
+        return Ok(StateHandlerOutcome::transition(
+            PowerShelfControllerState::ReProvisioning {
+                reprovisioning_state,
+            },
+        ));
+    }
+
+    // Lowest precedence: only converge the PMC credential once the power shelf is
+    // otherwise idle in Ready, so rotation never contends with maintenance or
+    // reprovisioning. The site-flag gate and the operator force-converge override
+    // live in `should_enter_bmc_rotation`.
+    if should_enter_bmc_rotation(ctx.services, state).await? {
+        return Ok(StateHandlerOutcome::transition(
+            PowerShelfControllerState::RotatingBmc { retry_count: 0 },
         ));
     }
 
@@ -68,6 +158,7 @@ pub async fn handle_ready(
 
     Ok(StateHandlerOutcome::do_nothing().with_txn_opt(txn))
 }
+
 ///
 /// On a successful response, the observed power state for this power shelf is
 /// persisted to the `power_shelves.status` column and the in-memory `state`
@@ -99,7 +190,6 @@ async fn poll_power_state(
     let endpoint = match build_power_shelf_endpoint(
         power_shelf_id,
         state,
-        &ctx.services.db_pool,
         ctx.services.credential_manager.as_ref(),
     )
     .await

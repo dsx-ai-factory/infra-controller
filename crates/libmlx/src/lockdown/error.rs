@@ -20,40 +20,40 @@ use thiserror::Error;
 // MlxError is a custom error type for Mellanox NIC operations.
 #[derive(Error, Debug)]
 pub enum MlxError {
-    #[error("Command execution failed: {0}")]
+    #[error("command execution failed: {0}")]
     CommandFailed(String),
 
-    #[error("Device not found: {0}")]
+    #[error("device not found: {0}")]
     DeviceNotFound(String),
 
-    #[error("Invalid device ID format: {0}")]
+    #[error("invalid device ID format: {0}")]
     InvalidDeviceId(String),
 
-    #[error("Hardware access is already disabled")]
+    #[error("hardware access is already disabled")]
     AlreadyLocked,
 
-    #[error("Hardware access is already enabled")]
+    #[error("hardware access is already enabled")]
     AlreadyUnlocked,
 
-    #[error("Invalid key format or length")]
+    #[error("invalid key format or length")]
     InvalidKey,
 
-    #[error("Permission denied - requires root privileges")]
+    #[error("permission denied - requires root privileges")]
     PermissionDenied,
 
     #[error("flint tool not found or not executable")]
     FlintNotFound,
 
-    #[error("Failed to parse command output: {0}")]
+    #[error("failed to parse command output: {0}")]
     ParseError(String),
 
-    #[error("Dry run - would have executed: {0}")]
+    #[error("dry run - would have executed: {0}")]
     DryRun(String),
 
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("Serialization error: {0}")]
+    #[error("serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 }
 

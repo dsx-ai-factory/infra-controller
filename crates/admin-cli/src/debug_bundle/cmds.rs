@@ -494,35 +494,35 @@ impl LogEntry {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GrafanaResponse {
-    pub results: GrafanaResults,
+struct GrafanaResponse {
+    results: GrafanaResults,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GrafanaResults {
+struct GrafanaResults {
     #[serde(rename = "A")]
-    pub a: GrafanaFrameResult,
+    a: GrafanaFrameResult,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GrafanaFrameResult {
-    pub status: u16,
-    pub frames: Vec<GrafanaFrame>,
+struct GrafanaFrameResult {
+    status: u16,
+    frames: Vec<GrafanaFrame>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GrafanaFrame {
-    pub data: GrafanaFrameData,
+struct GrafanaFrame {
+    data: GrafanaFrameData,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GrafanaFrameData {
-    pub values: Vec<Vec<GrafanaValue>>,
+struct GrafanaFrameData {
+    values: Vec<Vec<GrafanaValue>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-pub enum GrafanaValue {
+enum GrafanaValue {
     Int(i64),       // For timestamps (values[1])
     String(String), // For log messages (values[2]) and nanosecond timestamps (values[3])
     Object(serde_json::Value),
@@ -559,10 +559,10 @@ struct LokiDatasource {
 // Grafana Datasource API Response Structs
 #[derive(Deserialize, Debug)]
 struct GrafanaDatasource {
-    pub uid: String,
-    pub name: String,
+    uid: String,
+    name: String,
     #[serde(rename = "type")]
-    pub datasource_type: String,
+    datasource_type: String,
 }
 
 // Site Controller Details - Holds BMC endpoint exploration data
@@ -783,7 +783,7 @@ async fn get_machine_analysis(
 /// let api_client = ApiClient::new(config).await?;
 /// handle_debug_bundle(bundle_config, &api_client).await?;
 /// ```
-pub async fn handle_debug_bundle(
+pub(crate) async fn handle_debug_bundle(
     debug_bundle: DebugBundle,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
@@ -1709,6 +1709,7 @@ impl<'a> ZipBundleCreator<'a> {
         })?;
 
         let machine = &analysis.machine;
+        let status = machine.status.as_ref();
 
         // Format SLA information
         let sla_info = machine.state_sla.as_ref().map(|sla| {
@@ -1732,18 +1733,18 @@ impl<'a> ZipBundleCreator<'a> {
 
         // Format reboot information
         let reboot_info = json!({
-            "last_reboot_time": machine.last_reboot_time.as_ref().map(|ts| {
+            "last_reboot_time": status.and_then(|status| status.last_reboot_time.as_ref()).map(|ts| {
                 DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_else(|| ts.seconds.to_string())
             }),
             "last_reboot_requested": {
-                "time": machine.last_reboot_requested_time.as_ref().map(|ts| {
+                "time": status.and_then(|status| status.last_reboot_requested_time.as_ref()).map(|ts| {
                     DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                         .map(|dt| dt.to_rfc3339())
                         .unwrap_or_else(|| ts.seconds.to_string())
                 }),
-                "mode": &machine.last_reboot_requested_mode,
+                "mode": status.and_then(|status| status.last_reboot_requested_mode.as_ref()),
             }
         });
 
@@ -1784,7 +1785,7 @@ impl<'a> ZipBundleCreator<'a> {
             },
             "sla": sla_info,
             "controller_state": controller_state,
-            "failure_details": machine.failure_details,
+            "failure_details": status.and_then(|status| status.failure_details.as_ref()),
             "reboot_information": reboot_info,
             "validation_results": validation_info,
         });
@@ -1959,7 +1960,12 @@ impl<'a> ZipBundleCreator<'a> {
             }
         }
 
-        if machine_analysis.machine.failure_details.is_some() {
+        if machine_analysis
+            .machine
+            .status
+            .as_ref()
+            .is_some_and(|status| status.failure_details.is_some())
+        {
             writeln!(zip, "  WARNING: Has Failure Details: Yes")?;
         }
 

@@ -28,7 +28,7 @@ use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 use crate::{async_write, async_write_table_as_csv};
 
-pub async fn versions(
+pub(super) async fn versions(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -68,7 +68,9 @@ impl From<Machine> for DpuVersions {
         let firmware_version;
         let bios_version;
 
-        if let Some(discovery_info) = machine.discovery_info {
+        let status = machine.status.unwrap_or_default();
+
+        if let Some(discovery_info) = status.discovery_info {
             if let Some(dmi_data) = discovery_info.dmi_data {
                 dpu_type = Some(
                     dmi_data
@@ -100,10 +102,10 @@ impl From<Machine> for DpuVersions {
             hbn_version: machine.inventory.and_then(|inv| {
                 inv.components
                     .into_iter()
-                    .find(|c| c.name == "doca_hbn")
+                    .find(|c| c.name.contains("hbn"))
                     .map(|c| c.version)
             }),
-            agent_version: machine.dpu_agent_version,
+            agent_version: status.dpu_agent_version,
         }
     }
 }
@@ -123,12 +125,12 @@ impl From<DpuVersions> for Row {
     }
 }
 
-pub fn generate_firmware_status_json(machines: Vec<Machine>) -> CarbideCliResult<String> {
+fn generate_firmware_status_json(machines: Vec<Machine>) -> CarbideCliResult<String> {
     let machines: Vec<DpuVersions> = machines.into_iter().map(DpuVersions::from).collect();
     Ok(serde_json::to_string_pretty(&machines)?)
 }
 
-pub fn generate_firmware_status_table(machines: Vec<Machine>) -> Box<Table> {
+fn generate_firmware_status_table(machines: Vec<Machine>) -> Box<Table> {
     let mut table = Table::new();
 
     let headers = vec![
@@ -144,7 +146,7 @@ pub fn generate_firmware_status_table(machines: Vec<Machine>) -> Box<Table> {
     Box::new(table)
 }
 
-pub async fn handle_dpu_versions(
+async fn handle_dpu_versions(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -173,17 +175,18 @@ pub async fn handle_dpu_versions(
         .into_iter()
         .filter(|m| {
             if updates_only {
-                let product_name = m
-                    .discovery_info
+                let discovery_info = m
+                    .status
                     .as_ref()
+                    .and_then(|status| status.discovery_info.as_ref());
+                let product_name = discovery_info
                     .and_then(|di| di.dmi_data.as_ref())
                     .map(|dmi_data| dmi_data.product_name.as_str())
                     .unwrap_or_default();
 
                 if let Some(expected_version) = expected_versions.get(product_name) {
                     expected_version
-                        != m.discovery_info
-                            .as_ref()
+                        != discovery_info
                             .and_then(|di| di.dpu_info.as_ref())
                             .map(|dpu| dpu.firmware_version.as_str())
                             .unwrap_or("")

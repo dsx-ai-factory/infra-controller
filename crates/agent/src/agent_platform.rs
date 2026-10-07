@@ -59,22 +59,22 @@ impl ManagedFile {
     /// comparison of timestamps or contents is performed.
     pub fn copy_if_not_present(self, source_path: &Path) -> eyre::Result<()> {
         let destination_exists = self.path.try_exists().context(format!(
-            "Couldn't check existence of destination file {f}",
+            "couldn't check existence of destination file {f}",
             f = self.path.display()
         ))?;
         if !destination_exists {
             safe_copy(self.path.as_path(), source_path).inspect(|_| {
                 tracing::info!(
-                    "Copied file contents from {src} to {dst}",
-                    src = source_path.display(),
-                    dst = self.path.display()
+                    source_path = %source_path.display(),
+                    destination_path = %self.path.display(),
+                    "Copied file contents"
                 );
             })
         } else {
             tracing::debug!(
-                "File {dst} already exists, will not be updated from {src}",
-                src = source_path.display(),
-                dst = self.path.display()
+                source_path = %source_path.display(),
+                destination_path = %self.path.display(),
+                "File already exists, will not be updated"
             );
             Ok(())
         }
@@ -83,7 +83,7 @@ impl ManagedFile {
     pub fn ensure_contents(&mut self, contents: &[u8]) -> eyre::Result<bool> {
         let destination_exists = self.path.try_exists().wrap_err_with(|| {
             format!(
-                "Couldn't check existence of destination file {f}",
+                "couldn't check existence of destination file {f}",
                 f = self.path.display()
             )
         })?;
@@ -93,7 +93,7 @@ impl ManagedFile {
             true => {
                 let current_contents = std::fs::read(self.path.as_path()).wrap_err_with(|| {
                     format!(
-                        "Couldn't read current file contents of {f}",
+                        "couldn't read current file contents of {f}",
                         f = self.path.display()
                     )
                 })?;
@@ -115,35 +115,35 @@ impl ManagedFile {
 fn safe_copy(destination_path: &Path, source_path: &Path) -> eyre::Result<()> {
     let destination_dirname = destination_path.parent().ok_or_else(|| {
         eyre!(
-            "Couldn't determine directory name of destination file {d}",
+            "couldn't determine directory name of destination file {d}",
             d = destination_path.display()
         )
     })?;
     let mut source_file = File::open(source_path)
-        .with_context(|| format!("Couldn't open source file {f}", f = source_path.display()))?;
+        .with_context(|| format!("couldn't open source file {f}", f = source_path.display()))?;
     let mut tmp_destination = NamedTempFile::with_suffix_in(".tmp", destination_dirname)
         .with_context(|| {
             format!(
-                "Couldn't create temporary file in destination directory {d}",
+                "couldn't create temporary file in destination directory {d}",
                 d = destination_dirname.display()
             )
         })?;
     std::io::copy(&mut source_file, &mut tmp_destination).with_context(|| {
         format!(
-            "Couldn't copy file contents from {s} to {d}",
+            "couldn't copy file contents from {s} to {d}",
             s = source_path.display(),
             d = tmp_destination.path().display()
         )
     })?;
     let destination_file = tmp_destination.persist(destination_path).with_context(|| {
         format!(
-            "Couldn't persist contents to destination file {d}",
+            "couldn't persist contents to destination file {d}",
             d = destination_path.display()
         )
     })?;
     destination_file.sync_all().with_context(|| {
         format!(
-            "Couldn't sync file data of destination file {d}",
+            "couldn't sync file data of destination file {d}",
             d = destination_path.display()
         )
     })?;
@@ -157,7 +157,7 @@ fn safe_copy(destination_path: &Path, source_path: &Path) -> eyre::Result<()> {
 fn safe_write(destination_path: &Path, contents: &[u8]) -> eyre::Result<()> {
     let destination_dirname = destination_path.parent().ok_or_else(|| {
         eyre!(
-            "Couldn't determine directory name of destination file {d}",
+            "couldn't determine directory name of destination file {d}",
             d = destination_path.display()
         )
     })?;
@@ -167,25 +167,25 @@ fn safe_write(destination_path: &Path, contents: &[u8]) -> eyre::Result<()> {
         .tempfile_in(destination_dirname)
         .with_context(|| {
             format!(
-                "Couldn't create temporary file in destination directory {d}",
+                "couldn't create temporary file in destination directory {d}",
                 d = destination_dirname.display()
             )
         })?;
     tmp_destination.write_all(contents).with_context(|| {
         format!(
-            "Couldn't write file contents to {d}",
+            "couldn't write file contents to {d}",
             d = destination_path.display()
         )
     })?;
     let destination_file = tmp_destination.persist(destination_path).with_context(|| {
         format!(
-            "Couldn't persist contents to destination file {d}",
+            "couldn't persist contents to destination file {d}",
             d = destination_path.display()
         )
     })?;
     destination_file.sync_all().with_context(|| {
         format!(
-            "Couldn't sync file data of destination file {d}",
+            "couldn't sync file data of destination file {d}",
             d = destination_path.display()
         )
     })?;
@@ -238,7 +238,7 @@ pub mod containerd {
             let c = self
                 .get_connection_channel()
                 .await
-                .context("Can't connect to containerd socket")?;
+                .context("can't connect to containerd socket")?;
 
             let mut images_client = ImagesClient::new(c);
 
@@ -252,7 +252,7 @@ pub mod containerd {
             let response = images_client
                 .list(request)
                 .await
-                .context("Can't list images")?
+                .context("can't list images")?
                 .into_inner();
             Ok(response.images)
         }

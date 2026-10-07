@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -33,9 +33,9 @@ func (s *CreateVpcPeeringTestSuite) AfterTest(suiteName, testName string) {
 
 func (s *CreateVpcPeeringTestSuite) Test_CreateVpcPeering_Success() {
 	var manager iActivity.ManageVpcPeering
-	request := &cwssaws.VpcPeeringCreationRequest{
-		VpcId:     &cwssaws.VpcId{Value: uuid.NewString()},
-		PeerVpcId: &cwssaws.VpcId{Value: uuid.NewString()},
+	request := &corev1.VpcPeeringCreationRequest{
+		VpcId:     &corev1.VpcId{Value: uuid.NewString()},
+		PeerVpcId: &corev1.VpcId{Value: uuid.NewString()},
 	}
 
 	// Mock CreateVpcPeeringOnSite activity
@@ -50,9 +50,9 @@ func (s *CreateVpcPeeringTestSuite) Test_CreateVpcPeering_Success() {
 
 func (s *CreateVpcPeeringTestSuite) Test_CreateVpcPeering_Failure() {
 	var manager iActivity.ManageVpcPeering
-	request := &cwssaws.VpcPeeringCreationRequest{
-		VpcId:     &cwssaws.VpcId{Value: uuid.NewString()},
-		PeerVpcId: &cwssaws.VpcId{Value: uuid.NewString()},
+	request := &corev1.VpcPeeringCreationRequest{
+		VpcId:     &corev1.VpcId{Value: uuid.NewString()},
+		PeerVpcId: &corev1.VpcId{Value: uuid.NewString()},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -89,8 +89,8 @@ func (s *DeleteVpcPeeringTestSuite) AfterTest(suiteName, testName string) {
 func (s *DeleteVpcPeeringTestSuite) Test_DeleteVpcPeering_Success() {
 	var vpcPeeringManager iActivity.ManageVpcPeering
 
-	request := &cwssaws.VpcPeeringDeletionRequest{
-		Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()},
+	request := &corev1.VpcPeeringDeletionRequest{
+		Id: &corev1.VpcPeeringId{Value: uuid.NewString()},
 	}
 
 	// Mock DeleteVpcPeeringOnSite activity
@@ -106,8 +106,8 @@ func (s *DeleteVpcPeeringTestSuite) Test_DeleteVpcPeering_Success() {
 func (s *DeleteVpcPeeringTestSuite) Test_DeleteVpcPeering_Failure() {
 	var vpcPeeringManager iActivity.ManageVpcPeering
 
-	request := &cwssaws.VpcPeeringDeletionRequest{
-		Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()},
+	request := &corev1.VpcPeeringDeletionRequest{
+		Id: &corev1.VpcPeeringId{Value: uuid.NewString()},
 	}
 
 	errMsg := "Site Controller communication error"

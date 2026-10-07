@@ -22,7 +22,7 @@ pub mod ssh_client;
 pub enum SshError {
     #[error("SSH error: {0}")]
     Russh(#[from] russh::Error),
-    #[error("Error reading SSH keys: {0}")]
+    #[error("error reading SSH keys: {0}")]
     SshKey(String),
     #[error("SSH authentication failed: {0}")]
     AuthenticationFailed(String),
@@ -30,7 +30,7 @@ pub enum SshError {
     CommandDidNotExit,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Error running SSH command: {0}")]
+    #[error("error running SSH command: {0}")]
     Command(String),
 }
 

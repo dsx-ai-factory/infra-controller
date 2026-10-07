@@ -24,6 +24,7 @@ prefix = "172.20.0.0/24"
 gateway = "172.20.0.1"
 mtu = 9000
 reserve_first = 5
+infer_slaac_eui64_addresses = true
 
 [networks.DEV1-C09-IPMI-01]
 type = "underlay"

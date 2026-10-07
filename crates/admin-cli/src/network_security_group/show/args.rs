@@ -28,7 +28,7 @@ Show one network security group by ID:
     $ nico-admin-cli network-security-group show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Optional, network security group ID to restrict the search")]
-    pub id: Option<String>,
+    pub(super) id: Option<String>,
 }

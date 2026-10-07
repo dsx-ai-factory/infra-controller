@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,19 @@ type Client struct {
 	TokenRefresh    func() (string, error)
 	AuthRetryMax    int
 	AuthRetryNotify func(AuthRetryEvent)
+}
+
+// http2StreamError matches net/http's private stream error through errors.As.
+type http2StreamError struct {
+	StreamID uint32
+	Code     uint32
+	Cause    error
+}
+
+const http2InternalErrorCode uint32 = 0x2
+
+func (hse http2StreamError) Error() string {
+	return fmt.Sprintf("HTTP/2 stream %d failed with code %d", hse.StreamID, hse.Code)
 }
 
 type AuthRetryAction string
@@ -106,7 +120,34 @@ func (c *Client) rewriteAPIName(path string) string {
 
 // Do executes an HTTP request against the API.
 func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
-	respBody, respHeader, err := c.do(method, pathTemplate, pathParams, queryParams, body)
+	doClient := c
+	respBody, respHeader, err := doClient.do(method, pathTemplate, pathParams, queryParams, body)
+	streamErr, isHTTP2StreamError := errors.AsType[http2StreamError](err)
+	if method == http.MethodGet && isHTTP2StreamError && streamErr.Code == http2InternalErrorCode {
+		var transport *http.Transport
+		switch currentTransport := c.HTTPClient.Transport.(type) {
+		case nil:
+			transport = http.DefaultTransport.(*http.Transport).Clone()
+		case *http.Transport:
+			transport = currentTransport.Clone()
+		}
+		if transport != nil {
+			protocols := new(http.Protocols)
+			protocols.SetHTTP1(true)
+			transport.Protocols = protocols
+			transport.TLSNextProto = nil
+			if transport.TLSClientConfig != nil {
+				transport.TLSClientConfig.NextProtos = nil
+			}
+
+			httpClient := *c.HTTPClient
+			httpClient.Transport = transport
+			retryClient := *c
+			retryClient.HTTPClient = &httpClient
+			doClient = &retryClient
+			respBody, respHeader, err = doClient.do(method, pathTemplate, pathParams, queryParams, body)
+		}
+	}
 	if isUnauthorizedError(err) && c.TokenRefresh != nil && !canReplayAfterAuthRefresh(method) {
 		apiErr := err.(*APIError)
 		c.notifyAuthRetry(AuthRetryEvent{
@@ -139,6 +180,7 @@ func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[str
 			return nil, nil, fmt.Errorf("refreshing auth token after unauthorized response: no token returned")
 		}
 		c.Token = token
+		doClient.Token = token
 		c.notifyAuthRetry(AuthRetryEvent{
 			Action:      AuthRetryActionRetry,
 			Attempt:     attempt,
@@ -147,7 +189,7 @@ func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[str
 			Status:      apiErr.Status,
 			Method:      method,
 		})
-		respBody, respHeader, err = c.do(method, pathTemplate, pathParams, queryParams, body)
+		respBody, respHeader, err = doClient.do(method, pathTemplate, pathParams, queryParams, body)
 	}
 	return respBody, respHeader, err
 }
@@ -262,7 +304,88 @@ func formatDebugBody(body []byte) string {
 	if len(body) == 0 {
 		return "<empty>"
 	}
-	return string(body)
+	var decoded interface{}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		return string(body)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return string(body)
+	}
+	redactSensitiveJSONFields(decoded)
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(decoded); err != nil {
+		return "<JSON body unavailable>"
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+func redactSensitiveJSONFields(value interface{}) {
+	redactSensitiveJSONValue(value, false)
+}
+
+func redactSensitiveJSONValue(value interface{}, inherited bool) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, nested := range typed {
+			sensitive := inherited || isSensitiveJSONField(key)
+			if sensitive && !isJSONContainer(nested) {
+				typed[key] = "<redacted>"
+				continue
+			}
+			redactSensitiveJSONValue(
+				nested,
+				inherited || isSensitiveJSONContainerField(key),
+			)
+		}
+	case []interface{}:
+		for i, nested := range typed {
+			if inherited && !isJSONContainer(nested) {
+				typed[i] = "<redacted>"
+				continue
+			}
+			redactSensitiveJSONValue(nested, inherited)
+		}
+	}
+}
+
+func isJSONContainer(value interface{}) bool {
+	switch value.(type) {
+	case map[string]interface{}, []interface{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSensitiveJSONField(name string) bool {
+	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
+	for _, fragment := range []string{"credential", "password", "secret", "privatekey", "apikey"} {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return normalized == "token" || strings.HasSuffix(normalized, "token")
+}
+
+func isSensitiveJSONContainerField(name string) bool {
+	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
+	for _, suffix := range []string{
+		"credential", "credentials",
+		"password", "passwords",
+		"secret", "secrets",
+		"privatekey", "privatekeys",
+		"apikey", "apikeys",
+		"token", "tokens",
+	} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatDebugHeaders(headers http.Header) string {

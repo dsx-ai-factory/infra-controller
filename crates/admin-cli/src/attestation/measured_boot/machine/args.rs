@@ -33,14 +33,15 @@ use carbide_uuid::machine::MachineId;
 use clap::Parser;
 use measured_boot::pcr::PcrRegisterValue;
 
+use crate::cfg::dispatch::Dispatch;
 use crate::cfg::measurement::parse_pcr_register_values;
 use crate::errors::CarbideCliError;
 
 /// CmdMachine provides a container for the `mock-machine`
 /// subcommand, which itself contains other subcommands
 /// for working with mock machines.
-#[derive(Parser, Debug)]
-pub enum CmdMachine {
+#[derive(Parser, Debug, Dispatch)]
+pub(crate) enum CmdMachine {
     #[clap(about = "Send measurements for a machine.", visible_alias = "a")]
     Attest(Attest),
 
@@ -63,9 +64,9 @@ Send a measurement report (two PCR values) for a mock machine:
     12345678-1234-5678-90ab-cdef01234567 0:abc123,7:def456
 
 ")]
-pub struct Attest {
+pub(crate) struct Attest {
     #[clap(help = "The machine ID of the machine to associate this report with.")]
-    pub machine_id: MachineId,
+    machine_id: MachineId,
 
     #[clap(
         required = true,
@@ -74,7 +75,7 @@ pub struct Attest {
         help = "Comma-separated list of {pcr_register:value,...} to associate with this report."
     )]
     #[arg(value_parser = parse_pcr_register_values)]
-    pub values: Vec<PcrRegisterValue>,
+    values: Vec<PcrRegisterValue>,
 }
 
 /// List lists all candidate machines.
@@ -86,7 +87,7 @@ List all mock machines:
     $ nico-admin-cli attestation measured-boot machine list
 
 ")]
-pub struct List {}
+pub(crate) struct List {}
 
 /// Show will get a candidate machine for the given ID, or all machines
 /// if no machine ID is provided.
@@ -102,9 +103,9 @@ Show one mock machine by ID:
     12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Show {
+pub(crate) struct Show {
     #[clap(help = "The machine ID to show.")]
-    pub machine_id: Option<MachineId>,
+    pub(super) machine_id: Option<MachineId>,
 }
 
 impl From<Attest> for AttestCandidateMachineRequest {

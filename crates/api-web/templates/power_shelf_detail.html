@@ -53,6 +53,12 @@
 <h2>BMC</h2>
 <table class="detailsview">
 	{% if let Some(bmc_info) = bmc_info %}
+	{% if let Some(machine_interface_id) = bmc_info.machine_interface_id %}
+	<tr>
+		<th>Machine Interface ID</th>
+		<td>{{ machine_interface_id }}</td>
+	</tr>
+	{% endif %}
 	{% if let Some(ip) = bmc_info.ip %}
 	<tr>
 		<th>BMC IP</th>

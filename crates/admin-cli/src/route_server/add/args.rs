@@ -33,7 +33,7 @@ Add ephemerally against config-file entries (break-glass):
     $ nico-admin-cli route-server add 10.0.0.1 --source-type config_file
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: AddressArgs,
+    pub(super) inner: AddressArgs,
 }

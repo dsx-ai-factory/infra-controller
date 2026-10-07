@@ -26,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -38,21 +39,19 @@ import (
 
 // CreateNetworkSecurityGroupHandler is the API Handler for creating a new NetworkSecurityGroup
 type CreateNetworkSecurityGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateNetworkSecurityGroupHandler initializes and returns a new handler for creating NetworkSecurityGroup
 func NewCreateNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateNetworkSecurityGroupHandler {
 	return CreateNetworkSecurityGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -68,7 +67,7 @@ func NewCreateNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalCli
 // @Success 201 {object} model.APINetworkSecurityGroup
 // @Router /v2/org/{org}/nico/network-security-group [post]
 func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Create", c, cnsgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -162,6 +161,24 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	// Get our DB DAO object ready.
 	nsgDAO := cdbm.NewNetworkSecurityGroupDAO(cnsgh.dbSession)
 
+	var networkSecurityGroupID *string
+	if apiRequest.ID != nil {
+		requestedNetworkSecurityGroupID := apiRequest.ID.String()
+		networkSecurityGroupID = &requestedNetworkSecurityGroupID
+
+		_, total, err := nsgDAO.GetAll(ctx, nil, cdbm.NetworkSecurityGroupFilterInput{NetworkSecurityGroupIDs: []string{requestedNetworkSecurityGroupID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.DefaultLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("error checking for NetworkSecurityGroup ID uniqueness")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to check for existing Network Security Group", nil)
+		}
+		if total > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Str("id", requestedNetworkSecurityGroupID).Msg("network security group with same ID already exists")
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "A Network Security Group with specified ID already exists", validation.Errors{
+				"id": errors.New(requestedNetworkSecurityGroupID),
+			})
+		}
+	}
+
 	// Check if an NSG already exists for the given name and Site ID
 	// Another case where we might want to leave this to NICo
 	// and simply return the error and map the response code from
@@ -197,8 +214,6 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 		rules[i] = &cdbm.NetworkSecurityGroupRule{NetworkSecurityGroupRuleAttributes: rule.ToProto()}
 	}
 
-	networkSecurityGroupID := uuid.NewString()
-
 	sdDAO := cdbm.NewStatusDetailDAO(cnsgh.dbSession)
 
 	// timeoutResp lets the closure signal an outer-scope handler — TerminateWorkflowOnTimeOut
@@ -217,7 +232,7 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 				TenantID:               tenant.ID,
 				TenantOrg:              tenant.Org,
 				SiteID:                 site.ID,
-				NetworkSecurityGroupID: cutil.GetPtr(networkSecurityGroupID),
+				NetworkSecurityGroupID: networkSecurityGroupID,
 				StatefulEgress:         apiRequest.StatefulEgress,
 				Rules:                  rules,
 				Labels:                 apiRequest.Labels,
@@ -226,19 +241,24 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 			},
 		)
 		if derr != nil {
+			if networkSecurityGroupID != nil && (&cdb.PostgresErrorChecker{}).IsUniqueConstraintError(derr) {
+				logger.Warn().Err(derr).Str("id", *networkSecurityGroupID).Msg("network security group with specified ID already exists")
+				return cutil.NewAPIError(http.StatusConflict, "A Network Security Group with specified ID already exists", validation.Errors{
+					"id": errors.New(*networkSecurityGroupID),
+				})
+			}
 			logger.Error().Err(derr).Msg("unable to create NetworkSecurityGroup record in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating Network Security Group record, DB error", nil)
 		}
 
 		// create the status detail record
-		statusDetail, derr := sdDAO.CreateFromParams(ctx, tx, nsg.ID, *cutil.GetPtr(cdbm.NetworkSecurityGroupStatusReady),
-			cutil.GetPtr("processed network security group creation request"))
+		statusDetail, derr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: nsg.ID, Status: *cutil.GetPtr(cdbm.NetworkSecurityGroupStatusReady), Message: cutil.GetPtr("processed network security group creation request")})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for Network Security Group, DB error", nil)
 		}
 		if statusDetail == nil {
-			logger.Error().Msg("Status Detail DB entry not returned from CreateFromParams")
+			logger.Error().Msg("Status Detail DB entry not returned from Create")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to get new Status Detail for Network Security Group", nil)
 		}
 		ssd = statusDetail
@@ -328,19 +348,17 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 
 // GetAllNetworkSecurityGroupHandler is the API Handler for getting all NetworkSecurityGroups
 type GetAllNetworkSecurityGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllNetworkSecurityGroupHandler initializes and returns a new handler for getting all NetworkSecurityGroups
 func NewGetAllNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllNetworkSecurityGroupHandler {
 	return GetAllNetworkSecurityGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -363,7 +381,7 @@ func NewGetAllNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalCli
 // @Success 200 {object} []model.APINetworkSecurityGroup
 // @Router /v2/org/{org}/nico/network-security-group [get]
 func (gansgh GetAllNetworkSecurityGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "GetAll", c, gansgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -436,7 +454,7 @@ func (gansgh GetAllNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gansgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	var statuses []string
@@ -450,7 +468,7 @@ func (gansgh GetAllNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = []string{statusQuery}
-		gansgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 	}
 
 	// Get and validate includeRelation params
@@ -595,19 +613,17 @@ func (gansgh GetAllNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 
 // GetAllNetworkSecurityGroupHandler is the API Handler for getting a NetworkSecurityGroup
 type GetNetworkSecurityGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllNetworkSecurityGroupHandler initializes and returns a new handler for getting all NetworkSecurityGroups
 func NewGetNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetNetworkSecurityGroupHandler {
 	return GetNetworkSecurityGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -627,7 +643,7 @@ func NewGetNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient
 // @Success 200 {object} []model.APINetworkSecurityGroup
 // @Router /v2/org/{org}/nico/network-security-group [get]
 func (gansgh GetNetworkSecurityGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Get", c, gansgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -753,21 +769,19 @@ func (gansgh GetNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 
 // DeleteNetworkSecurityGroupHandler is the API Handler for deleting a new NetworkSecurityGroup
 type DeleteNetworkSecurityGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteNetworkSecurityGroupHandler initializes and returns a new handler for creating NetworkSecurityGroup
 func NewDeleteNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteNetworkSecurityGroupHandler {
 	return DeleteNetworkSecurityGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -783,7 +797,7 @@ func NewDeleteNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalCli
 // @Success 202 {object} model.APINetworkSecurityGroup
 // @Router /v2/org/{org}/nico/network-security-group [post]
 func (dnsgh DeleteNetworkSecurityGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Delete", c, dnsgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -812,7 +826,7 @@ func (dnsgh DeleteNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	// Get NetworkSecurityGroup ID from URL param
 	nsgID := c.Param("id")
 
-	dnsgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("networksecuritygroup_id", nsgID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("networksecuritygroup_id", nsgID))
 
 	// Get NSG from DB
 	nsgDAO := cdbm.NewNetworkSecurityGroupDAO(dnsgh.dbSession)
@@ -891,8 +905,7 @@ func (dnsgh DeleteNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 		}
 
 		// Create status detail
-		_, derr = sdDAO.CreateFromParams(ctx, tx, nsg.ID, *cutil.GetPtr(cdbm.NetworkSecurityGroupStatusDeleting),
-			cutil.GetPtr("received request for deletion, pending processing"))
+		_, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: nsg.ID, Status: *cutil.GetPtr(cdbm.NetworkSecurityGroupStatusDeleting), Message: cutil.GetPtr("received request for deletion, pending processing")})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for Network Security Group", nil)
@@ -982,28 +995,26 @@ func (dnsgh DeleteNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	// Return response
 	logger.Info().Msg("finishing API handler")
 
-	return c.String(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }
 
 // ~~~~~ Delete Handler ~~~~~ //
 
 // DeleteNetworkSecurityGroupHandler is the API Handler for deleting a new NetworkSecurityGroup
 type UpdateNetworkSecurityGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteNetworkSecurityGroupHandler initializes and returns a new handler for creating NetworkSecurityGroup
 func NewUpdateNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateNetworkSecurityGroupHandler {
 	return UpdateNetworkSecurityGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1019,7 +1030,7 @@ func NewUpdateNetworkSecurityGroupHandler(dbSession *cdb.Session, tc temporalCli
 // @Success 200 {object} model.APINetworkSecurityGroup
 // @Router /v2/org/{org}/nico/network-security-group [post]
 func (dnsgh UpdateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Update", c, dnsgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NetworkSecurityGroup", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1048,7 +1059,7 @@ func (dnsgh UpdateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	// Get NetworkSecurityGroup ID from URL param
 	nsgID := c.Param("id")
 
-	dnsgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("networksecuritygroup_id", nsgID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("networksecuritygroup_id", nsgID))
 
 	// Validate request
 	// Bind request data to API model
@@ -1174,7 +1185,7 @@ func (dnsgh UpdateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 		}
 
 		// Get status details
-		statusDetails, _, derr := sdDAO.GetAllByEntityID(ctx, tx, updated.ID, nil, cutil.GetPtr(pagination.MaxPageSize), nil)
+		statusDetails, _, derr := sdDAO.GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{updated.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(pagination.MaxPageSize)})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Status Details for NetworkSecurityGroup from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Status Details for Network Security Group", nil)

@@ -21,7 +21,10 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn copy_bfb_to_dpu_rshim(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
+pub(super) async fn copy_bfb_to_dpu_rshim(
+    api_client: &ApiClient,
+    args: Args,
+) -> CarbideCliResult<()> {
     api_client
         .0
         .copy_bfb_to_dpu_rshim(CopyBfbToDpuRshimRequest {

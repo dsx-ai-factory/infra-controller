@@ -1,9 +1,9 @@
-# HELP carbide_pending_dpu_nic_firmware_update_count The number of machines in the system that need a firmware update.
+# HELP carbide_pending_dpu_nic_firmware_update_count Number of machines in the system that need a DPU/NIC firmware update
 # TYPE carbide_pending_dpu_nic_firmware_update_count gauge
 carbide_pending_dpu_nic_firmware_update_count 5
-# HELP carbide_running_dpu_updates_count The number of machines in the system that are running a firmware update.
+# HELP carbide_running_dpu_updates_count Number of machines in the system that are currently running a DPU/NIC firmware update
 # TYPE carbide_running_dpu_updates_count gauge
 carbide_running_dpu_updates_count 10
-# HELP carbide_unavailable_dpu_nic_firmware_update_count The number of machines in the system that need a firmware update but are unavailable for update.
+# HELP carbide_unavailable_dpu_nic_firmware_update_count Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update
 # TYPE carbide_unavailable_dpu_nic_firmware_update_count gauge
 carbide_unavailable_dpu_nic_firmware_update_count 15

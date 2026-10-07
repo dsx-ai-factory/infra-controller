@@ -21,7 +21,7 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::forge::InstanceTypeAllocationStats;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineIdSubtypeParseError};
 use config_version::ConfigVersion;
 use db::{ObjectFilter, compute_allocation, instance, instance_type};
 use model::instance_type::InstanceTypeMachineCapabilityFilter;
@@ -489,27 +489,14 @@ pub(crate) async fn associate_machines(
         .into());
     }
 
-    let mut machine_ids = Vec::<MachineId>::new();
-
     // Convert the rpc machine ID strings into MachineId, but reject if any
     // DPU machine IDs are found.
-    for mac_id in req.machine_ids {
-        machine_ids.push(
-            match mac_id.parse::<MachineId>().map_err(|e| {
-                CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string()))
-            }) {
-                Err(e) => return Err(e.into()),
-                Ok(m_id) => match m_id.machine_type().is_dpu() {
-                    false => m_id,
-                    true => {
-                        return Err(
-                            CarbideError::InvalidArgument(format!("{m_id} is a DPU")).into()
-                        );
-                    }
-                },
-            },
-        );
-    }
+    let machine_ids = req
+        .machine_ids
+        .into_iter()
+        .map(|id| id.parse::<HostMachineId>())
+        .collect::<Result<Vec<HostMachineId>, MachineIdSubtypeParseError>>()
+        .map_err(|e| CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string())))?;
 
     let instance_type_id = req
         .instance_type_id
@@ -596,7 +583,9 @@ pub(crate) async fn associate_machines(
 
     if ids.len() != machine_versions.len() {
         tracing::error!(
-            "Not all machine's instances updated. This should never happen because we take row-lock. Something is terribly wrong. ids: {ids:?}; versions: {machine_versions:?}"
+            ids = ?ids,
+            machine_versions = ?machine_versions,
+            "Not all machine-to-instance-type associations were updated; row locking should have prevented this",
         )
     }
 
@@ -619,7 +608,7 @@ pub(crate) async fn remove_machine_association(
     let machine_id = request
         .into_inner()
         .machine_id
-        .parse::<MachineId>()
+        .parse::<HostMachineId>()
         .map_err(|e| CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string())))?;
 
     // Prepare our txn to associate machines with the instance type
@@ -653,35 +642,37 @@ pub(crate) async fn remove_machine_association(
         && instance.deleted.is_none()
     {
         return Err(CarbideError::FailedPrecondition(format!(
-            "machine {} has instance assigned. This operation is allowed only in terminating state.",
-            &machine.id
+            "machine {} has instance assigned. this operation is allowed only in terminating state",
+            machine.id
         ))
         .into());
     }
 
-    if let Some(ref instance_type_id) = machine.instance_type_id {
+    if let Some(ref instance_type_id) = machine.config.instance_type_id {
         // Query the DB for the instance type so that we can use a row-level lock for coordination.
         // We need this so that ComputeAllocation additions and updates that increase allocations can't exceed the number
         // of machines associated with a type.
-        instance_type::find_by_ids(&mut txn, &[instance_type_id.to_owned()], true).await?;
+        instance_type::find_by_ids(&mut txn, std::slice::from_ref(instance_type_id), true).await?;
 
         // Check that removing the machine from the instance-type won't cause the number of machines associated with the instance-type
         // to drop below the total number of allocations for the instance-type.
 
         // Start by getting the number of existing machines for the instance type
         // and subtract 1.
-        let new_total_machine_count =
-            instance_type::get_association_details(&mut txn, &[instance_type_id.to_owned()])
-                .await?
-                .get(instance_type_id)
-                .ok_or_else(|| CarbideError::Internal {
-                    message: format!(
-                        "expected InstanceType for InstanceTypeID of machine {} but found none",
-                        machine.id
-                    ),
-                })?
-                .total_machines
-                .saturating_sub(1);
+        let new_total_machine_count = instance_type::get_association_details(
+            &mut txn,
+            std::slice::from_ref(instance_type_id),
+        )
+        .await?
+        .get(instance_type_id)
+        .ok_or_else(|| CarbideError::Internal {
+            message: format!(
+                "expected InstanceType for InstanceTypeID of machine {} but found none",
+                machine.id
+            ),
+        })?
+        .total_machines
+        .saturating_sub(1);
 
         // Next, get the sum of the active allocations for the instance type.
         let allocation_total = compute_allocation::sum_allocations(
@@ -700,7 +691,7 @@ pub(crate) async fn remove_machine_association(
 
         // Check if the new machine count would drop below the sum of active allocation counts.
         if new_total_machine_count < total_allocations {
-            let matchine_id = machine.id;
+            let machine_id = machine.id;
             // # enforce_if_present:  If allocations are found for instance type ID, enforce it; otherwise, it's like no limits.
             // # always:              Enforce allocations.  If none are found, its a constraint value of 0 (i.e., you get nothing).
             // # warn_only (default): Don't enforce, but log what would have happened if they were enforced.
@@ -716,10 +707,10 @@ pub(crate) async fn remove_machine_association(
                     ).into());
                 }
                 (false, ComputeAllocationEnforcement::EnforceIfPresent) => {
-                    tracing::debug!(%matchine_id, %instance_type_id, "EnforceIfPresent set but no allocations seen during machine removal from instance type");
+                    tracing::debug!(%machine_id, %instance_type_id, "EnforceIfPresent set but no allocations seen during machine removal from instance type");
                 }
                 (_, ComputeAllocationEnforcement::WarnOnly) => {
-                    tracing::warn!(%matchine_id, %instance_type_id, "request to remove machine from instance type would reduce associated machine count below current tenant allocations count but enforcement is not enabled");
+                    tracing::warn!(%machine_id, %instance_type_id, "request to remove machine from instance type would reduce associated machine count below current tenant allocations count but enforcement is not enabled");
                 }
             }
         }

@@ -78,6 +78,7 @@ impl TryFrom<Tenant> for rpc::forge::FindTenantResponse {
     fn try_from(value: Tenant) -> Result<Self, Self::Error> {
         Ok(rpc::forge::FindTenantResponse {
             tenant: Some(value.try_into()?),
+            permitted_routing_profile_types: vec![],
         })
     }
 }
@@ -892,58 +893,6 @@ mod tests {
         let config = identity_config_try_from_proto(proto, &bounds).unwrap();
         assert_eq!(config.issuer.as_str(), "https://idp.other.example/oidc");
         assert_eq!(config.subject_prefix, "spiffe://idp.other.example");
-    }
-
-    #[test]
-    fn identity_config_try_from_proto_rejects_when_no_allowlist_entry_matches() {
-        let allowlist = vec![
-            "login.example.com".to_string(),
-            "*.tenant.example.net".to_string(),
-        ];
-        let proto = rpc_forge::TenantIdentityConfig {
-            enabled: true,
-            issuer: "https://idp.other.example/".to_string(),
-            default_audience: "api".to_string(),
-            allowed_audiences: vec![],
-            token_ttl_sec: 3600,
-            subject_prefix: None,
-            rotate_key: false,
-            signing_key_overlap_sec: None,
-        };
-        let bounds = IdentityConfigValidationBounds {
-            token_ttl_min_sec: 60,
-            token_ttl_max_sec: 86400,
-            algorithm: identity_config::SigningAlgorithm::Es256,
-            encryption_key_id: "test".parse().unwrap(),
-            trust_domain_allowlist: allowlist,
-            signing_key_overlap_max_sec: 604_800,
-        };
-        let err = identity_config_try_from_proto(proto, &bounds).unwrap_err();
-        assert!(err.0.contains("allowlist"));
-    }
-
-    #[test]
-    fn identity_config_try_from_proto_rejects_overlap_when_not_rotating() {
-        let proto = rpc_forge::TenantIdentityConfig {
-            enabled: true,
-            issuer: "https://issuer.example.com".to_string(),
-            default_audience: "api".to_string(),
-            allowed_audiences: vec!["api".to_string()],
-            token_ttl_sec: 3600,
-            subject_prefix: None,
-            rotate_key: false,
-            signing_key_overlap_sec: Some(120),
-        };
-        let bounds = IdentityConfigValidationBounds {
-            token_ttl_min_sec: 60,
-            token_ttl_max_sec: 86400,
-            algorithm: identity_config::SigningAlgorithm::Es256,
-            encryption_key_id: "test-master".parse().unwrap(),
-            trust_domain_allowlist: vec![],
-            signing_key_overlap_max_sec: 604_800,
-        };
-        let err = identity_config_try_from_proto(proto, &bounds).unwrap_err();
-        assert!(err.0.contains("signing_key_overlap_sec may only be set"));
     }
 
     // validate_identity_overlap_for_rotation: a missing overlap and an

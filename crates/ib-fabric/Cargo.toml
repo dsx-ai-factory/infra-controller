@@ -5,22 +5,25 @@ edition.workspace = true
 description = "Carbide IB fabric"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_ib_fabric"
 
 [features]
 default = []
-test-support = []
+test-support = ["dep:config-version"]
 
 [dependencies]
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }
 carbide-health-report = { path = "../health-report" }
+carbide-instrument = { path = "../instrument" }
 carbide-secrets = { path = "../secrets" }
 carbide-tls = { path = "../tls" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
+config-version = { path = "../config-version", optional = true }
 
 # these are alphabetized
 async-trait = { workspace = true }
@@ -48,8 +51,14 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+# Self-dependency so the crate's own tests see the `test-support` fakes.
+axum = { workspace = true }
+carbide-ib-fabric = { path = ".", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 figment = { features = ["env", "test", "toml"], workspace = true }
+tempfile = { workspace = true }
+ufm-mock = { package = "carbide-ufm-mock", path = "../ufm-mock" }
 
 [lints]
 workspace = true

@@ -31,7 +31,7 @@ Find a machine interface by its MAC address:
     $ nico-admin-cli jump 00:11:22:33:44:55
 
 ")]
-pub struct Cmd {
+pub(crate) struct Cmd {
     #[clap(required(true), help = "The machine ID, IP, UUID, etc, to find")]
-    pub id: String,
+    pub(super) id: String,
 }

@@ -13,9 +13,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupOnSite(t *testing.T) {
@@ -32,7 +32,7 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupOnSite(t *testing.
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.UpdateNetworkSecurityGroupRequest
+		request *corev1.UpdateNetworkSecurityGroupRequest
 	}
 	tests := []struct {
 		name    string
@@ -47,13 +47,13 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupOnSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateNetworkSecurityGroupRequest{
+				request: &corev1.UpdateNetworkSecurityGroupRequest{
 					Id:                   uuid.NewString(),
 					TenantOrganizationId: "anything",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "updated_name",
 						Description: "updated_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -71,13 +71,13 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupOnSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateNetworkSecurityGroupRequest{
+				request: &corev1.UpdateNetworkSecurityGroupRequest{
 					Id:                   "",
 					TenantOrganizationId: "anything",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "updated_name",
 						Description: "updated_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -95,13 +95,13 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupOnSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateNetworkSecurityGroupRequest{
+				request: &corev1.UpdateNetworkSecurityGroupRequest{
 					Id:                   "anything",
 					TenantOrganizationId: "",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "updated_name",
 						Description: "updated_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -151,7 +151,7 @@ func TestManageNetworkSecurityGroup_CreateNetworkSecurityGroupOnSiteOnSite(t *te
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.CreateNetworkSecurityGroupRequest
+		request *corev1.CreateNetworkSecurityGroupRequest
 	}
 	tests := []struct {
 		name    string
@@ -166,13 +166,13 @@ func TestManageNetworkSecurityGroup_CreateNetworkSecurityGroupOnSiteOnSite(t *te
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateNetworkSecurityGroupRequest{
+				request: &corev1.CreateNetworkSecurityGroupRequest{
 					Id:                   util.GetStrPtr(uuid.NewString()),
 					TenantOrganizationId: "anything",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -203,13 +203,13 @@ func TestManageNetworkSecurityGroup_CreateNetworkSecurityGroupOnSiteOnSite(t *te
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateNetworkSecurityGroupRequest{
+				request: &corev1.CreateNetworkSecurityGroupRequest{
 					Id:                   util.GetStrPtr(""),
 					TenantOrganizationId: "anything",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -228,12 +228,12 @@ func TestManageNetworkSecurityGroup_CreateNetworkSecurityGroupOnSiteOnSite(t *te
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateNetworkSecurityGroupRequest{
+				request: &corev1.CreateNetworkSecurityGroupRequest{
 					Id: util.GetStrPtr("anything"),
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -252,13 +252,13 @@ func TestManageNetworkSecurityGroup_CreateNetworkSecurityGroupOnSiteOnSite(t *te
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateNetworkSecurityGroupRequest{
+				request: &corev1.CreateNetworkSecurityGroupRequest{
 					Id:                   nil,
 					TenantOrganizationId: "anything",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -369,7 +369,7 @@ func TestManageNetworkSecurityGroupInventory_DiscoverNetworkSecurityGroupInvento
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.NetworkSecurityGroupInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.NetworkSecurityGroupInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -378,12 +378,12 @@ func TestManageNetworkSecurityGroupInventory_DiscoverNetworkSecurityGroupInvento
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.NetworkSecurityGroups))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -399,7 +399,7 @@ func TestManageNetworkSecurityGroup_DeleteNetworkSecurityGroupOnSite(t *testing.
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.DeleteNetworkSecurityGroupRequest
+		request *corev1.DeleteNetworkSecurityGroupRequest
 	}
 	tests := []struct {
 		name    string
@@ -414,7 +414,7 @@ func TestManageNetworkSecurityGroup_DeleteNetworkSecurityGroupOnSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteNetworkSecurityGroupRequest{
+				request: &corev1.DeleteNetworkSecurityGroupRequest{
 					Id:                   uuid.NewString(),
 					TenantOrganizationId: "anything",
 				},
@@ -428,7 +428,7 @@ func TestManageNetworkSecurityGroup_DeleteNetworkSecurityGroupOnSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteNetworkSecurityGroupRequest{
+				request: &corev1.DeleteNetworkSecurityGroupRequest{
 					Id:                   "",
 					TenantOrganizationId: "anything",
 				},
@@ -442,7 +442,7 @@ func TestManageNetworkSecurityGroup_DeleteNetworkSecurityGroupOnSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteNetworkSecurityGroupRequest{
+				request: &corev1.DeleteNetworkSecurityGroupRequest{
 					Id:                   "anything",
 					TenantOrganizationId: "",
 				},

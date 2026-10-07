@@ -26,4 +26,4 @@ NICo monitors hardware health, firmware state, and machine status exclusively vi
 
 ## The network fabric stays static even during tenancy changes
 
-Leaf switches and routers are not reconfigured when tenants change or when hosts are provisioned and released. Isolation is enforced entirely at the DPU layer (Ethernet via HBN) and via fabric management APIs (InfiniBand via UFM, NVLink via NMX-M). Keeping the physical underlay stable reduces operational risk and simplifies network operations at scale.
+Leaf switches and routers are not reconfigured when tenants change or when hosts are provisioned and released. Isolation is enforced entirely at the DPU layer (Ethernet via HBN) and via fabric management APIs (InfiniBand via UFM, NVLink via NMX-C). Keeping the physical underlay stable reduces operational risk and simplifies network operations at scale.

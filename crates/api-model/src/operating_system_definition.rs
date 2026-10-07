@@ -37,7 +37,7 @@ pub struct OperatingSystem {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub tenant_organization_id: String,
+    pub tenant_organization_id: Option<String>,
     pub type_: String,
     pub status: String,
     pub is_active: bool,

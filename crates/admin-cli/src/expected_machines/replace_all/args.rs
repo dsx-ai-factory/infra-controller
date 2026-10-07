@@ -52,7 +52,7 @@ Replace the entire expected machines table from a JSON file:
     $ nico-admin-cli expected-machine replace-all --filename ./expected-machines.json
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long)]
-    pub filename: String,
+    pub(super) filename: String,
 }

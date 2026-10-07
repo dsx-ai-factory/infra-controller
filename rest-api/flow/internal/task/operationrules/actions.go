@@ -77,6 +77,24 @@ var actionRegistry = map[string]actionSpec{
 		description:          "Start firmware update and poll for completion (upgrade/downgrade)",
 		validateParams:       nil,
 	},
+	ActionDecommissionControl: {
+		requiredParams:       []string{},
+		optionalParams:       []string{},
+		requiresPollInterval: false,
+		requiresTimeout:      false,
+		implementation:       "activity.DecommissionControl",
+		description:          "Initiate decommission of target components",
+		validateParams:       nil,
+	},
+	ActionWaitDecommissioned: {
+		requiredParams:       []string{},
+		optionalParams:       []string{},
+		requiresPollInterval: true,
+		requiresTimeout:      true,
+		implementation:       "activity.GetDecommissionStatus (poll loop)",
+		description:          "Poll until all components reach the Decommissioned state",
+		validateParams:       nil,
+	},
 }
 
 // Validate validates an action configuration

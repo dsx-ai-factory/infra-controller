@@ -183,6 +183,19 @@ pub struct MockRmsApi {
         Mutex<VecDeque<Result<rms::UpdateSwitchSystemPasswordResponse, RackManagerError>>>,
     update_switch_system_password_calls: Mutex<Vec<rms::UpdateSwitchSystemPasswordRequest>>,
 
+    batch_reset_switch_sdn_factory_default_responses:
+        Mutex<VecDeque<Result<rms::BatchResetSwitchSdnFactoryDefaultResponse, RackManagerError>>>,
+    batch_reset_switch_sdn_factory_default_calls:
+        Mutex<Vec<rms::BatchResetSwitchSdnFactoryDefaultRequest>>,
+
+    batch_reset_switch_factory_default_responses:
+        Mutex<VecDeque<Result<rms::BatchResetSwitchFactoryDefaultResponse, RackManagerError>>>,
+    batch_reset_switch_factory_default_calls:
+        Mutex<Vec<rms::BatchResetSwitchFactoryDefaultRequest>>,
+
+    get_job_status_responses: Mutex<VecDeque<Result<rms::GetJobStatusResponse, RackManagerError>>>,
+    get_job_status_calls: Mutex<Vec<rms::GetJobStatusRequest>>,
+
     get_firmware_job_status_responses:
         Mutex<VecDeque<Result<rms::GetFirmwareJobStatusResponse, RackManagerError>>>,
     get_firmware_job_status_calls: Mutex<Vec<rms::GetFirmwareJobStatusRequest>>,
@@ -196,26 +209,21 @@ pub struct MockRmsApi {
         Mutex<VecDeque<Result<rms::PushSwitchFirmwareResponse, RackManagerError>>>,
     push_switch_firmware_calls: Mutex<Vec<rms::PushSwitchFirmwareRequest>>,
 
-    upgrade_switch_firmware_responses:
-        Mutex<VecDeque<Result<rms::UpgradeSwitchFirmwareResponse, RackManagerError>>>,
-    upgrade_switch_firmware_calls: Mutex<Vec<rms::UpgradeSwitchFirmwareRequest>>,
+    // Switch certificate calls.
+    configure_switch_certificate_responses:
+        Mutex<VecDeque<Result<rms::ConfigureSwitchCertificateResponse, RackManagerError>>>,
+    configure_switch_certificate_calls: Mutex<Vec<rms::ConfigureSwitchCertificateRequest>>,
+
+    get_configure_switch_certificate_job_status_responses: Mutex<
+        VecDeque<Result<rms::GetConfigureSwitchCertificateJobStatusResponse, RackManagerError>>,
+    >,
+    get_configure_switch_certificate_job_status_calls:
+        Mutex<Vec<rms::GetConfigureSwitchCertificateJobStatusRequest>>,
 
     // Switch system images calls.
-    fetch_switch_system_image_responses:
-        Mutex<VecDeque<Result<rms::FetchSwitchSystemImageResponse, RackManagerError>>>,
-    fetch_switch_system_image_calls: Mutex<Vec<rms::FetchSwitchSystemImageRequest>>,
-
-    install_switch_system_image_responses:
-        Mutex<VecDeque<Result<rms::InstallSwitchSystemImageResponse, RackManagerError>>>,
-    install_switch_system_image_calls: Mutex<Vec<rms::InstallSwitchSystemImageRequest>>,
-
     list_switch_system_images_responses:
         Mutex<VecDeque<Result<rms::ListSwitchSystemImagesResponse, RackManagerError>>>,
     list_switch_system_images_calls: Mutex<Vec<rms::ListSwitchSystemImagesRequest>>,
-
-    poll_switch_firmware_job_status_responses:
-        Mutex<VecDeque<Result<rms::PollSwitchFirmwareJobStatusResponse, RackManagerError>>>,
-    poll_switch_firmware_job_status_calls: Mutex<Vec<rms::PollSwitchFirmwareJobStatusRequest>>,
 
     get_switch_system_image_job_status_responses:
         Mutex<VecDeque<Result<rms::GetSwitchSystemImageJobStatusResponse, RackManagerError>>>,
@@ -330,22 +338,24 @@ impl MockRmsApi {
             update_switch_system_image_calls: Default::default(),
             update_switch_system_password_responses: Default::default(),
             update_switch_system_password_calls: Default::default(),
+            batch_reset_switch_sdn_factory_default_responses: Default::default(),
+            batch_reset_switch_sdn_factory_default_calls: Default::default(),
+            batch_reset_switch_factory_default_responses: Default::default(),
+            batch_reset_switch_factory_default_calls: Default::default(),
+            get_job_status_responses: Default::default(),
+            get_job_status_calls: Default::default(),
             get_firmware_job_status_responses: Default::default(),
             get_firmware_job_status_calls: Default::default(),
             list_switch_firmware_responses: Default::default(),
             list_switch_firmware_calls: Default::default(),
             push_switch_firmware_responses: Default::default(),
             push_switch_firmware_calls: Default::default(),
-            upgrade_switch_firmware_responses: Default::default(),
-            upgrade_switch_firmware_calls: Default::default(),
-            fetch_switch_system_image_responses: Default::default(),
-            fetch_switch_system_image_calls: Default::default(),
-            install_switch_system_image_responses: Default::default(),
-            install_switch_system_image_calls: Default::default(),
+            configure_switch_certificate_responses: Default::default(),
+            configure_switch_certificate_calls: Default::default(),
+            get_configure_switch_certificate_job_status_responses: Default::default(),
+            get_configure_switch_certificate_job_status_calls: Default::default(),
             list_switch_system_images_responses: Default::default(),
             list_switch_system_images_calls: Default::default(),
-            poll_switch_firmware_job_status_responses: Default::default(),
-            poll_switch_firmware_job_status_calls: Default::default(),
             get_switch_system_image_job_status_responses: Default::default(),
             get_switch_system_image_job_status_calls: Default::default(),
             configure_scale_up_fabric_manager_responses: Default::default(),
@@ -633,6 +643,34 @@ impl MockRmsApi {
         rms::UpdateSwitchSystemPasswordRequest,
         rms::UpdateSwitchSystemPasswordResponse
     );
+
+    impl_enqueue_inspect!(
+        enqueue_batch_reset_switch_sdn_factory_default,
+        batch_reset_switch_sdn_factory_default_calls,
+        batch_reset_switch_sdn_factory_default_responses,
+        batch_reset_switch_sdn_factory_default_calls,
+        rms::BatchResetSwitchSdnFactoryDefaultRequest,
+        rms::BatchResetSwitchSdnFactoryDefaultResponse
+    );
+
+    impl_enqueue_inspect!(
+        enqueue_batch_reset_switch_factory_default,
+        batch_reset_switch_factory_default_calls,
+        batch_reset_switch_factory_default_responses,
+        batch_reset_switch_factory_default_calls,
+        rms::BatchResetSwitchFactoryDefaultRequest,
+        rms::BatchResetSwitchFactoryDefaultResponse
+    );
+
+    impl_enqueue_inspect!(
+        enqueue_get_job_status,
+        get_job_status_calls,
+        get_job_status_responses,
+        get_job_status_calls,
+        rms::GetJobStatusRequest,
+        rms::GetJobStatusResponse
+    );
+
     impl_enqueue_inspect!(
         enqueue_get_firmware_job_status,
         get_firmware_job_status_calls,
@@ -659,32 +697,26 @@ impl MockRmsApi {
         rms::PushSwitchFirmwareRequest,
         rms::PushSwitchFirmwareResponse
     );
+
+    // Switch certificate
     impl_enqueue_inspect!(
-        enqueue_upgrade_switch_firmware,
-        upgrade_switch_firmware_calls,
-        upgrade_switch_firmware_responses,
-        upgrade_switch_firmware_calls,
-        rms::UpgradeSwitchFirmwareRequest,
-        rms::UpgradeSwitchFirmwareResponse
+        enqueue_configure_switch_certificate,
+        configure_switch_certificate_calls,
+        configure_switch_certificate_responses,
+        configure_switch_certificate_calls,
+        rms::ConfigureSwitchCertificateRequest,
+        rms::ConfigureSwitchCertificateResponse
+    );
+    impl_enqueue_inspect!(
+        enqueue_get_configure_switch_certificate_job_status,
+        get_configure_switch_certificate_job_status_calls,
+        get_configure_switch_certificate_job_status_responses,
+        get_configure_switch_certificate_job_status_calls,
+        rms::GetConfigureSwitchCertificateJobStatusRequest,
+        rms::GetConfigureSwitchCertificateJobStatusResponse
     );
 
     // Switch system images
-    impl_enqueue_inspect!(
-        enqueue_fetch_switch_system_image,
-        fetch_switch_system_image_calls,
-        fetch_switch_system_image_responses,
-        fetch_switch_system_image_calls,
-        rms::FetchSwitchSystemImageRequest,
-        rms::FetchSwitchSystemImageResponse
-    );
-    impl_enqueue_inspect!(
-        enqueue_install_switch_system_image,
-        install_switch_system_image_calls,
-        install_switch_system_image_responses,
-        install_switch_system_image_calls,
-        rms::InstallSwitchSystemImageRequest,
-        rms::InstallSwitchSystemImageResponse
-    );
     impl_enqueue_inspect!(
         enqueue_list_switch_system_images,
         list_switch_system_images_calls,
@@ -693,14 +725,7 @@ impl MockRmsApi {
         rms::ListSwitchSystemImagesRequest,
         rms::ListSwitchSystemImagesResponse
     );
-    impl_enqueue_inspect!(
-        enqueue_poll_switch_firmware_job_status,
-        poll_switch_firmware_job_status_calls,
-        poll_switch_firmware_job_status_responses,
-        poll_switch_firmware_job_status_calls,
-        rms::PollSwitchFirmwareJobStatusRequest,
-        rms::PollSwitchFirmwareJobStatusResponse
-    );
+
     impl_enqueue_inspect!(
         enqueue_get_switch_system_image_job_status,
         get_switch_system_image_job_status_calls,
@@ -961,22 +986,49 @@ impl MockRmsApi {
         }
     }
 
-    /// Success response for `poll_switch_firmware_job_status`.
-    pub fn poll_switch_firmware_job_status_ok(
+    /// Success response for `get_switch_system_image_job_status`.
+    pub fn switch_system_image_job_status_ok(
         state: &str,
-    ) -> rms::PollSwitchFirmwareJobStatusResponse {
-        rms::PollSwitchFirmwareJobStatusResponse {
+    ) -> rms::GetSwitchSystemImageJobStatusResponse {
+        rms::GetSwitchSystemImageJobStatusResponse {
             status: rms::ReturnCode::Success as i32,
             state: state.to_owned(),
             ..Default::default()
         }
     }
 
-    /// Success response for `get_switch_system_image_job_status`.
-    pub fn switch_system_image_job_status_ok(
+    /// Success response for `configure_switch_certificate` with a child job ID.
+    pub fn configure_switch_certificate_ok(
+        node_id: &str,
+        job_id: &str,
+    ) -> rms::ConfigureSwitchCertificateResponse {
+        rms::ConfigureSwitchCertificateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                stats: Some(rms::NodeOperationStats {
+                    total_nodes: 1,
+                    successful_nodes: 1,
+                    failed_nodes: 0,
+                }),
+                node_results: vec![rms::NodeOperationResult {
+                    node_id: node_id.to_owned(),
+                    status: rms::ReturnCode::Success as i32,
+                    error_message: String::new(),
+                }],
+                ..Default::default()
+            }),
+            jobs: vec![rms::ConfigureSwitchCertificateJobInfo {
+                node_id: node_id.to_owned(),
+                job_id: job_id.to_owned(),
+            }],
+        }
+    }
+
+    /// Success response for `get_configure_switch_certificate_job_status`.
+    pub fn configure_switch_certificate_job_status_ok(
         state: &str,
-    ) -> rms::GetSwitchSystemImageJobStatusResponse {
-        rms::GetSwitchSystemImageJobStatusResponse {
+    ) -> rms::GetConfigureSwitchCertificateJobStatusResponse {
+        rms::GetConfigureSwitchCertificateJobStatusResponse {
             status: rms::ReturnCode::Success as i32,
             state: state.to_owned(),
             ..Default::default()
@@ -1066,6 +1118,49 @@ impl RmsApi for MockRmsApi {
             .push(cmd);
         pop_or_err(&mut self.update_switch_system_password_responses.lock().await)
     }
+
+    async fn batch_reset_switch_sdn_factory_default(
+        &self,
+        cmd: rms::BatchResetSwitchSdnFactoryDefaultRequest,
+    ) -> Result<rms::BatchResetSwitchSdnFactoryDefaultResponse, RackManagerError> {
+        self.batch_reset_switch_sdn_factory_default_calls
+            .lock()
+            .await
+            .push(cmd);
+
+        pop_or_err(
+            &mut self
+                .batch_reset_switch_sdn_factory_default_responses
+                .lock()
+                .await,
+        )
+    }
+
+    async fn batch_reset_switch_factory_default(
+        &self,
+        cmd: rms::BatchResetSwitchFactoryDefaultRequest,
+    ) -> Result<rms::BatchResetSwitchFactoryDefaultResponse, RackManagerError> {
+        self.batch_reset_switch_factory_default_calls
+            .lock()
+            .await
+            .push(cmd);
+
+        pop_or_err(
+            &mut self
+                .batch_reset_switch_factory_default_responses
+                .lock()
+                .await,
+        )
+    }
+
+    async fn get_job_status(
+        &self,
+        cmd: rms::GetJobStatusRequest,
+    ) -> Result<rms::GetJobStatusResponse, RackManagerError> {
+        self.get_job_status_calls.lock().await.push(cmd);
+        pop_or_err(&mut self.get_job_status_responses.lock().await)
+    }
+
     async fn get_power_state(
         &self,
         cmd: rms::GetPowerStateRequest,
@@ -1337,29 +1432,42 @@ impl RmsApi for MockRmsApi {
         self.push_switch_firmware_calls.lock().await.push(cmd);
         pop_or_err(&mut self.push_switch_firmware_responses.lock().await)
     }
-    async fn upgrade_switch_firmware(
+
+    async fn configure_switch_certificate(
         &self,
-        cmd: rms::UpgradeSwitchFirmwareRequest,
-    ) -> Result<rms::UpgradeSwitchFirmwareResponse, RackManagerError> {
-        self.upgrade_switch_firmware_calls.lock().await.push(cmd);
-        pop_or_err(&mut self.upgrade_switch_firmware_responses.lock().await)
-    }
-    async fn fetch_switch_system_image(
-        &self,
-        cmd: rms::FetchSwitchSystemImageRequest,
-    ) -> Result<rms::FetchSwitchSystemImageResponse, RackManagerError> {
-        self.fetch_switch_system_image_calls.lock().await.push(cmd);
-        pop_or_err(&mut self.fetch_switch_system_image_responses.lock().await)
-    }
-    async fn install_switch_system_image(
-        &self,
-        cmd: rms::InstallSwitchSystemImageRequest,
-    ) -> Result<rms::InstallSwitchSystemImageResponse, RackManagerError> {
-        self.install_switch_system_image_calls
+        cmd: rms::ConfigureSwitchCertificateRequest,
+    ) -> Result<rms::ConfigureSwitchCertificateResponse, RackManagerError> {
+        self.configure_switch_certificate_calls
             .lock()
             .await
             .push(cmd);
-        pop_or_err(&mut self.install_switch_system_image_responses.lock().await)
+        pop_or_err(&mut self.configure_switch_certificate_responses.lock().await)
+    }
+
+    async fn batch_disable_switch_mtls(
+        &self,
+        _cmd: rms::BatchDisableSwitchMtlsRequest,
+    ) -> Result<rms::BatchDisableSwitchMtlsResponse, RackManagerError> {
+        Err(
+            tonic::Status::unimplemented("BatchDisableSwitchMtls is not implemented by MockRmsApi")
+                .into(),
+        )
+    }
+
+    async fn get_configure_switch_certificate_job_status(
+        &self,
+        cmd: rms::GetConfigureSwitchCertificateJobStatusRequest,
+    ) -> Result<rms::GetConfigureSwitchCertificateJobStatusResponse, RackManagerError> {
+        self.get_configure_switch_certificate_job_status_calls
+            .lock()
+            .await
+            .push(cmd);
+        pop_or_err(
+            &mut self
+                .get_configure_switch_certificate_job_status_responses
+                .lock()
+                .await,
+        )
     }
     async fn list_switch_system_images(
         &self,
@@ -1367,16 +1475,6 @@ impl RmsApi for MockRmsApi {
     ) -> Result<rms::ListSwitchSystemImagesResponse, RackManagerError> {
         self.list_switch_system_images_calls.lock().await.push(cmd);
         pop_or_err(&mut self.list_switch_system_images_responses.lock().await)
-    }
-    async fn poll_switch_firmware_job_status(
-        &self,
-        cmd: rms::PollSwitchFirmwareJobStatusRequest,
-    ) -> Result<rms::PollSwitchFirmwareJobStatusResponse, RackManagerError> {
-        self.poll_switch_firmware_job_status_calls
-            .lock()
-            .await
-            .push(cmd);
-        pop_or_err(&mut self.poll_switch_firmware_job_status_responses.lock().await)
     }
 
     async fn get_switch_system_image_job_status(

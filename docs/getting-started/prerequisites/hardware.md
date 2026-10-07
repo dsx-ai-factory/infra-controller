@@ -4,7 +4,7 @@ This page covers the hardware requirements for both the NICo site controller and
 
 ## Site Controller
 
-The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability; 5 nodes are recommended for large GB200-class sites.
+The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability. For large GB200-class sites, plan 5 nodes or nodes with more cores than the minimum below. As a reference point, 3 nodes with 96 cores and 251 GiB of allocatable memory each ingested a 250-rack site. In the runs at machine state controller concurrency 80 to 140 the busiest node peaked at 54 cores. One node reached 62 GiB in the 20-hour run at the default concurrency. That site had 4,500 managed hosts with 9,000 data processing units (DPUs), 2,250 NVLink switches, and 2,000 power shelves. At that scale the 512 GiB memory recommendation is growth headroom. Refer to [Large Site Sizing and Settings](../../development/large-site-sizing-and-settings.md) for the measurements and the ingestion settings that go with them.
 
 | Component | Requirement |
 |---|---|
@@ -22,12 +22,27 @@ The site controller runs the NICo control plane on a Kubernetes cluster. A minim
 
 **Storage layout**: Total local NVMe capacity should be 4 TiB or greater. Mount 1.7 TiB on `/` (root) on the NVMe OS disk (ext4 or xfs) — typical usage is 200–500 GiB. Mount `/var/lib/containerd` and `/var/lib/kubelet` on a separate NVMe data disk (1+ TiB, ext4/xfs, `noatime`). Consider a dedicated `/var/log` if there is heavy logging. Persistent app storage (SAN/NAS, Rook-Ceph) is not required for NICo itself.
 
-### DPUs on Site Controller (Optional)
+### DPUs on Site Controller
 
-DPUs on site controller nodes are optional and site-owned. If DPUs are installed, ensure the following requirements are met:
-- Verify the correct DPU power cable has been ordered from the server vendor.
+DPUs are generally preferred in nodes hosting the NICo control plane components, but not strictly required. DPUs in these nodes are, however, the configuration that NICo QA regularly tests. If your site controller nodes are equipped with Bluefield-3 DPUs, ensure the following requirements are met:
+
+- You have the correct DPU power cable from the server vendor.
+- The Bluefield-3's operating mode is DPU mode.
 - For BF3 DPUs, verify link speed and optics: BF3 runs at 200 Gb, so match ports to 200 Gb-capable optics, fiber, or DACs.
-- A basic onboard NIC for management is sufficient--no extra ConnectX NICs are needed.
+- Verify that the DPU can connect to the outside world (`curl -I https://www.nvidia.com`).
+- The DPUs use the [tested BlueField-3 software versions](../../hcl.md#dpus).
+
+### NICo Pod Network Reachability
+
+NICo's control plane pods (DHCP, DNS, API, PXE, SSH console, and others) must be externally reachable from the networks they serve. Regardless of whether site controller nodes have DPUs, these pods must be routable to and from:
+
+- DPU BMCs and Host BMCs of managed machines
+- The admin network
+- Tenant VPCs
+
+The reference architecture is MetalLB advertising L3 LoadBalancer VIPs to the site controller's DPU uplinks (if DPUs are present) or directly to the ToR switches (if site controller nodes have no DPUs).
+
+For better traffic isolation and routing, configure the LoadBalancer endpoints for NICo pods as route-tagged prefixes and import them into the admin and VPC routing profiles. See [VPC Routing Profiles](../../manuals/vpc/vpc_routing_profiles.md).
 
 ## Compute Systems (Managed Hosts)
 

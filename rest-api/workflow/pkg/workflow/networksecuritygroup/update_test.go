@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateNetworkSecurityGroupTestSuite struct {
@@ -37,8 +37,8 @@ func (s *UpdateNetworkSecurityGroupTestSuite) Test_UpdateNetworkSecurityGroupInv
 	var networkSecurityGroupManager networkSecurityGroupActivity.ManageNetworkSecurityGroup
 
 	siteID := uuid.New()
-	networkSecurityGroupInventory := &cwssaws.NetworkSecurityGroupInventory{
-		NetworkSecurityGroups: []*cwssaws.NetworkSecurityGroup{
+	networkSecurityGroupInventory := &corev1.NetworkSecurityGroupInventory{
+		NetworkSecurityGroups: []*corev1.NetworkSecurityGroup{
 			{
 				Id: uuid.NewString(),
 			},
@@ -63,8 +63,8 @@ func (s *UpdateNetworkSecurityGroupTestSuite) Test_UpdateNetworkSecurityGroupInv
 	var networkSecurityGroupManager networkSecurityGroupActivity.ManageNetworkSecurityGroup
 
 	siteID := uuid.New()
-	networkSecurityGroupInventory := &cwssaws.NetworkSecurityGroupInventory{
-		NetworkSecurityGroups: []*cwssaws.NetworkSecurityGroup{
+	networkSecurityGroupInventory := &corev1.NetworkSecurityGroupInventory{
+		NetworkSecurityGroups: []*corev1.NetworkSecurityGroup{
 			{
 				Id: uuid.NewString(),
 			},

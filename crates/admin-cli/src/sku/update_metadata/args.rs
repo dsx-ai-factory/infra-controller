@@ -33,13 +33,13 @@ Update both at once:
     --description \"DGX H100 640GB\" --device-type gpu-server
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "SKU ID of the SKU to update")]
-    pub sku_id: String,
+    pub(in crate::sku) sku_id: String,
     #[clap(help = "Update the SKU's description", long, group("group"))]
-    pub description: Option<String>,
+    pub(in crate::sku) description: Option<String>,
     #[clap(help = "Update the SKU's device type", long, group("group"))]
-    pub device_type: Option<String>,
+    pub(in crate::sku) device_type: Option<String>,
 }
 
 impl From<Args> for ::rpc::forge::SkuUpdateMetadataRequest {

@@ -1,0 +1,50 @@
+# =============================================================================
+# operators/dpf/dpfoperatorconfig.yaml.tmpl — DPFOperatorConfig for NICo
+#
+# Rendered by setup.sh with:
+#   envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT}'
+# Only the two whitelisted variables are substituted.
+#
+# NICo-specific choices (docs/manuals/dpf.md §3.2):
+#   - dpuDetector disabled: NICo feeds DPUs in explicitly, no auto-discovery.
+#   - installViaRedfish + skipDPUNodeDiscovery: provisioning driven through the
+#     host BMC, DPUNodes registered by carbide-api rather than detected.
+#   - argoCDNamespace matches the helm-prereqs Argo CD install
+#     (dpf-operator-system, same as upstream deploy/helmfiles/prereqs.yaml).
+# =============================================================================
+---
+apiVersion: operator.dpu.nvidia.com/v1alpha1
+kind: DPFOperatorConfig
+metadata:
+  name: dpfoperatorconfig
+  namespace: dpf-operator-system
+spec:
+  # NOTE: newer DPF releases make spec.deploymentMode a required field (with CEL
+  # rules: zero-trust requires installViaRedfish; host-trusted forbids it). It
+  # does not exist in v26.4.0 (the helm-prereqs/doca-platform submodule pin and
+  # NICO_DPF_IMAGE_TAG default), so it is omitted here. When bumping the pin to
+  # a release that requires it, add e.g.
+  #   deploymentMode: zero-trust
+  # or the apply will be rejected with "spec.deploymentMode: Required value".
+  dpuDetector:
+    disable: true
+  provisioningController:
+    osInstallTimeout: "90m"
+    installInterface:
+      installViaRedfish:
+        skipDPUNodeDiscovery: true
+  overrides:
+    # Host-cluster API server VIP/port that DPUs must be able to reach.
+    kubernetesAPIServerVIP: "${NICO_DPF_K8S_API_VIP}"
+    # Must render as an integer — do not quote.
+    kubernetesAPIServerPort: ${NICO_DPF_K8S_API_PORT}
+    argoCDNamespace: dpf-operator-system
+  kamajiClusterManager:
+    disable: false
+  networking:
+    highSpeedMTU: 9000
+  # No imagePullSecrets: the GA nvidia/doca operand images are public and pull
+  # anonymously. A registry-scoped secret without nvidia/doca entitlement would
+  # make nvcr.io 403 the pull. For a private DPF/DOCA registry/mirror, add:
+  #   imagePullSecrets:
+  #     - <your-doca-pull-secret>

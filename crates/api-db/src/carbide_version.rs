@@ -61,7 +61,8 @@ pub async fn observe_as_latest_version(
     } else if superseded_count > 1 {
         tracing::warn!(
             version,
-            "observed a new forge version, superseded {superseded_count} versions"
+            superseded_version_count = superseded_count,
+            "observed a new forge version, superseded versions",
         );
     }
 

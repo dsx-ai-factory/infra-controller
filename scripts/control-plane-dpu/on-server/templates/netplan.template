@@ -1,0 +1,15 @@
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      mtu: {{.MTU}}
+      match:
+        macaddress: {{.MAC}}
+      dhcp4: no
+      addresses: [{{.IP}}]
+      nameservers:
+        addresses: [{{.NameServer}}]
+      routes:
+      - to: default
+        via: {{.RouteVia}}

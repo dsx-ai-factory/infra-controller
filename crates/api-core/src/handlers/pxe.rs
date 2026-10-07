@@ -18,7 +18,6 @@
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
-use db;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -39,9 +38,12 @@ pub(crate) async fn get_pxe_instructions(
 
     let pxe_request: PxeInstructionRequest = request.into_inner().try_into()?;
 
-    // Resolve the client_ip carbide-pxe observed (XFF or TCP peer) to
-    // a host machine_interface, either via direct machine_interface_addresses
-    // lookup or via instance_address for tenant-allocated machines.
+    // Keep address ownership and provisioning instructions in one transaction.
+    // Instance allocation takes ACCESS EXCLUSIVE on instance_addresses, so it
+    // cannot add another owner while Core builds the response for this request.
+    // Resolve the client_ip carbide-pxe observed (XFF or TCP peer) to a host
+    // machine_interface, either via direct machine_interface_addresses lookup
+    // or via instance_address for tenant-allocated machines.
     let iface = resolve_machine_interface(txn.as_pgconn(), pxe_request.client_ip).await?;
 
     let input = PxeInstructionsInput {
@@ -95,7 +97,7 @@ pub(crate) async fn get_cloud_init_instructions(
     let ip_str = &request.into_inner().ip;
     let ip: IpAddr = ip_str
         .parse()
-        .map_err(|e| CarbideError::InvalidArgument(format!("Failed parsing IP '{ip_str}': {e}")))?;
+        .map_err(|e| CarbideError::InvalidArgument(format!("failed parsing IP '{ip_str}': {e}")))?;
 
     // Note that this code path supports IPv6 at the *API layer*, but won't be
     // able to be exercised until DHCPv6 is working, which is a whole other thing
@@ -104,10 +106,14 @@ pub(crate) async fn get_cloud_init_instructions(
     // prefix, network segment, and IP allocators behind the scenes for supporting
     // dual stacking interfaces, none of that means much until DHCPv6 is working
     // to actually hand those addresses out.
-    let mut conn = api.database_connection.acquire().await.map_err(|e| {
-        CarbideError::internal(format!("Failed to acquire database connection: {e}"))
-    })?;
-    let instructions = resolve_cloud_init_instructions(api, &mut conn, ip).await?;
+
+    // Keep address ownership, readiness, and response material in one
+    // transaction. Instance allocation takes ACCESS EXCLUSIVE on
+    // instance_addresses, so a second owner cannot appear while Core selects
+    // tenant data.
+    let mut txn = api.txn_begin().await?;
+    let instructions = resolve_cloud_init_instructions(api, txn.as_pgconn(), ip).await?;
+    txn.commit().await?;
 
     Ok(Response::new(instructions))
 }

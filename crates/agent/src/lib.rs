@@ -14,9 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::fs::File;
-use std::io::Cursor;
+use std::future::Future;
+use std::io::{Cursor, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,9 +34,10 @@ use carbide_utils::arch::CpuArchitecture;
 pub use command_line::{AgentCommand, AgentPlatformType, Options, RunOptions, WriteTarget};
 use eyre::WrapErr;
 use forge_tls::client_config::ClientCert;
+use futures_util::TryStreamExt;
 use mac_address::MacAddress;
 use network_monitor::{NetworkPingerType, Ping};
-use tokio::fs;
+use tokio::io::AsyncReadExt;
 use version_compare::{Part, Version};
 
 use crate::duppet::{SummaryFormat, SyncOptions};
@@ -46,12 +48,13 @@ pub mod dpu;
 
 mod acl_rules;
 pub mod agent_platform;
+mod astra_weave;
 mod command_line;
 pub mod containerd;
 mod dhcp;
 mod dhcp_server_grpc_client;
 mod ethernet_virtualization;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 pub use ethernet_virtualization::FPath;
 pub mod extension_services;
 mod fmds_client;
@@ -63,6 +66,7 @@ mod host_machine_id;
 mod instance_metadata_endpoint;
 pub mod instrumentation;
 pub mod lldp;
+mod local_api;
 mod machine_inventory_updater;
 mod main_loop;
 mod managed_files;
@@ -73,12 +77,15 @@ pub mod network_monitor;
 pub mod nvue; // pub so that integration tests can read nvue::PATH
 mod ovs;
 mod periodic_config_fetcher;
+mod supplemental_config;
 mod sysfs;
 #[cfg(test)]
 mod tests;
-pub mod traffic_intercept_bridging;
 pub mod upgrade;
 pub mod util;
+pub mod weave_ew_vpc_client;
+#[cfg(test)]
+pub mod weave_ew_vpc_mock_server;
 
 /// The minimum version of HBN that FMDS supports
 pub const FMDS_MINIMUM_HBN_VERSION: &str = "1.5.0-doca2.2.0";
@@ -87,20 +94,289 @@ pub const FMDS_MINIMUM_HBN_VERSION: &str = "1.5.0-doca2.2.0";
 /// supported configuration path, DPUs running older HBN versions cannot be configured.
 pub const NVUE_MINIMUM_HBN_VERSION: &str = "2.0.0-doca2.5.0";
 
-// Downloads cert (pem) file in case of dpu-agent is running as initcontainer.
-async fn download_cert() -> eyre::Result<()> {
-    let url = "http://carbide-pxe.forge/api/v0/tls/root_ca";
-    let output_file = "/opt/forge/forge_root.pem";
-    let permissions = std::fs::Permissions::from_mode(0o644);
+/// Subdirectory holding a second copy of the trust anchor, and nothing else.
+///
+/// Co-located services need the root CA but must never see the machine private
+/// key that lives beside it (issue #355). A container can only be given one or
+/// the other: mounting the credentials directory exposes the key, and mounting
+/// the CA file alone by `subPath` bind-mounts its inode, so the atomic rename
+/// in `install_bootstrap_ca` would never reach a running consumer. A directory
+/// containing only the CA gives both properties — no key, and renames resolve.
+///
+/// Placed beside whichever CA path is configured rather than at a fixed
+/// location, so it tracks a deployment that moves the credentials directory —
+/// token-mode fmds watches `<certsDir>/pub/<rootCaFile>` and would otherwise
+/// block forever. With the defaults on both sides this resolves to
+/// `/opt/forge/pub/forge_root.pem`.
+const BOOTSTRAP_CA_PUBLIC_SUBDIR: &str = "pub";
+const MOUNTED_BOOTSTRAP_CA_PATH: &str = "/var/run/secrets/nico-bootstrap-ca/ca.pem";
+const MAX_BOOTSTRAP_CA_BYTES: usize = 1024 * 1024;
+const BOOTSTRAP_CA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+const PEM_BEGIN_MARKER: &[u8] = b"-----BEGIN ";
+const CERTIFICATE_PEM_BEGIN_MARKER: &[u8] = b"-----BEGIN CERTIFICATE-----";
 
-    let response = reqwest::get(url).await?;
+async fn acquire_bootstrap_ca(
+    source: command_line::InitContainerBootstrapCaSource,
+    legacy_download_url: &url::Url,
+) -> eyre::Result<Vec<u8>> {
+    match source {
+        command_line::InitContainerBootstrapCaSource::LegacyDownload => {
+            download_bootstrap_ca(legacy_download_url).await
+        }
+        command_line::InitContainerBootstrapCaSource::Mounted => {
+            read_bootstrap_ca_file(Path::new(MOUNTED_BOOTSTRAP_CA_PATH)).await
+        }
+    }
+}
 
-    let mut file = File::create(output_file)?;
-    let mut content = Cursor::new(response.bytes().await?);
-    std::io::copy(&mut content, &mut file)?;
-    fs::set_permissions(output_file, permissions).await?;
+async fn read_bootstrap_ca_file(path: &Path) -> eyre::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .wrap_err_with(|| format!("failed to open bootstrap CA at {}", path.display()))?;
+    let mut contents = Vec::new();
+    file.take((MAX_BOOTSTRAP_CA_BYTES + 1) as u64)
+        .read_to_end(&mut contents)
+        .await
+        .wrap_err_with(|| format!("failed to read bootstrap CA at {}", path.display()))?;
+    if contents.len() > MAX_BOOTSTRAP_CA_BYTES {
+        eyre::bail!(
+            "bootstrap CA at {} exceeds the {MAX_BOOTSTRAP_CA_BYTES}-byte size limit",
+            path.display()
+        );
+    }
+
+    Ok(contents)
+}
+
+async fn download_bootstrap_ca(url: &url::Url) -> eyre::Result<Vec<u8>> {
+    download_bootstrap_ca_with_timeout(url, BOOTSTRAP_CA_DOWNLOAD_TIMEOUT).await
+}
+
+async fn download_bootstrap_ca_with_timeout(
+    url: &url::Url,
+    timeout: Duration,
+) -> eyre::Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .wrap_err("failed to build bootstrap CA download client")?;
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .wrap_err_with(|| format!("failed to download bootstrap CA from {url}"))?
+        .error_for_status()
+        .wrap_err_with(|| format!("bootstrap CA download from {url} returned an error status"))?;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BOOTSTRAP_CA_BYTES as u64)
+    {
+        eyre::bail!("bootstrap CA from {url} exceeds the {MAX_BOOTSTRAP_CA_BYTES}-byte size limit");
+    }
+
+    let mut contents = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .wrap_err_with(|| format!("failed while reading bootstrap CA response from {url}"))?
+    {
+        let new_len = contents
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| eyre::eyre!("bootstrap CA size overflow"))?;
+        if new_len > MAX_BOOTSTRAP_CA_BYTES {
+            eyre::bail!(
+                "bootstrap CA from {url} exceeds the {MAX_BOOTSTRAP_CA_BYTES}-byte size limit"
+            );
+        }
+        contents.extend_from_slice(&chunk);
+    }
+
+    Ok(contents)
+}
+
+fn validate_bootstrap_ca(contents: &[u8]) -> eyre::Result<()> {
+    if contents.len() > MAX_BOOTSTRAP_CA_BYTES {
+        eyre::bail!("bootstrap CA exceeds the {MAX_BOOTSTRAP_CA_BYTES}-byte size limit");
+    }
+    if contains_unsupported_pem_begin_marker(contents) {
+        eyre::bail!("bootstrap CA contains unsupported PEM material");
+    }
+
+    let items = rustls_pemfile::read_all(&mut Cursor::new(contents))
+        .collect::<Result<Vec<_>, _>>()
+        .wrap_err("bootstrap CA contains invalid PEM")?;
+
+    let mut trust_anchors = rustls::RootCertStore::empty();
+    for item in items {
+        let rustls_pemfile::Item::X509Certificate(certificate) = item else {
+            eyre::bail!("bootstrap CA contains non-certificate PEM material");
+        };
+        trust_anchors
+            .add(certificate)
+            .wrap_err("bootstrap CA contains an invalid certificate")?;
+    }
+    if trust_anchors.is_empty() {
+        eyre::bail!("bootstrap CA contains no certificates");
+    }
 
     Ok(())
+}
+
+fn contains_unsupported_pem_begin_marker(contents: &[u8]) -> bool {
+    let mut search_offset = 0;
+    while let Some(relative_offset) = contents[search_offset..]
+        .windows(PEM_BEGIN_MARKER.len())
+        .position(|marker| marker == PEM_BEGIN_MARKER)
+    {
+        let begin_offset = search_offset + relative_offset;
+        let line_end = contents[begin_offset..]
+            .iter()
+            .position(|byte| matches!(*byte, b'\n' | b'\r'))
+            .map_or(contents.len(), |line_end| begin_offset + line_end);
+        if &contents[begin_offset..line_end] != CERTIFICATE_PEM_BEGIN_MARKER {
+            return true;
+        }
+        search_offset = begin_offset + PEM_BEGIN_MARKER.len();
+    }
+    false
+}
+
+fn install_bootstrap_ca(contents: &[u8], output_path: &Path) -> eyre::Result<()> {
+    // Validate before creating a temporary file so a bad source cannot disturb
+    // the last known-good trust anchor.
+    validate_bootstrap_ca(contents)?;
+
+    let parent = output_path.parent().ok_or_else(|| {
+        eyre::eyre!(
+            "bootstrap CA output path has no parent: {}",
+            output_path.display()
+        )
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).wrap_err_with(|| {
+        format!(
+            "failed to create temporary bootstrap CA in {}",
+            parent.display()
+        )
+    })?;
+    temporary
+        .write_all(contents)
+        .wrap_err("failed to write temporary bootstrap CA")?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o644))
+        .wrap_err("failed to set bootstrap CA permissions")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .wrap_err("failed to sync temporary bootstrap CA")?;
+    temporary.persist(output_path).map_err(|error| {
+        eyre::eyre!(
+            "failed to atomically install bootstrap CA at {}: {}",
+            output_path.display(),
+            error.error
+        )
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .wrap_err_with(|| format!("failed to sync bootstrap CA directory {}", parent.display()))?;
+
+    Ok(())
+}
+
+async fn provision_bootstrap_ca(
+    options: &command_line::InitContainerOptions,
+    root_ca_path: &str,
+) -> eyre::Result<()> {
+    let contents =
+        acquire_bootstrap_ca(options.bootstrap_ca_source, &options.bootstrap_ca_url).await?;
+    // Installed where the agent will later look for it, rather than at a
+    // constant of its own. The two were equal by coincidence -- `[forge-system]
+    // root-ca` defaults to the same path -- and nothing kept them that way, so
+    // a deployment that moved the CA would have had the init container write
+    // one place and every reader look in another.
+    let output_path = Path::new(root_ca_path);
+    install_bootstrap_ca(&contents, output_path)?;
+    publish_bootstrap_ca(&contents, output_path)
+}
+
+/// Mirrors the trust anchor into a `pub/` subdirectory beside `source_ca_path`
+/// for key-less consumers. Same atomic install, so a consumer with the
+/// directory mounted picks up a replacement without restarting.
+///
+/// Derived from the configured CA rather than a constant: token-mode fmds
+/// waits on `<certsDir>/pub/<rootCaFile>`, so a deployment that moves the
+/// credentials directory would otherwise have the agent publish to the default
+/// location while fmds watched the configured one — leaving its init container
+/// blocked forever with nothing to say why.
+fn publish_bootstrap_ca(contents: &[u8], source_ca_path: &Path) -> eyre::Result<()> {
+    let dir = source_ca_path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("CA path has no parent: {}", source_ca_path.display()))?;
+    let file_name = source_ca_path
+        .file_name()
+        .ok_or_else(|| eyre::eyre!("CA path has no file name: {}", source_ca_path.display()))?;
+    let parent = dir.join(BOOTSTRAP_CA_PUBLIC_SUBDIR);
+    std::fs::create_dir_all(&parent)
+        .wrap_err_with(|| format!("failed to create public CA directory {}", parent.display()))?;
+    install_bootstrap_ca(contents, &parent.join(file_name))
+}
+
+/// How often the published copy of the trust anchor is reconciled against the
+/// configured one. Matches the API listener's own reload cadence, so a rotation
+/// reaches key-less consumers on roughly the same clock as it reaches the
+/// listener and the token validator.
+const CA_REPUBLISH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Copies the configured trust anchor into its `pub/` mirror when the two
+/// differ.
+///
+/// Publishing only at startup is not enough. `pub/` is the only trust anchor a
+/// token-mode consumer has — it does not mount the credentials directory — so a
+/// CA rotated while the agent is running would leave fmds pinned to the old
+/// issuer indefinitely, and it would stop being able to verify the API the
+/// moment that issuer is retired. The API listener re-reads the same material
+/// every few minutes; the published copy has to keep pace.
+///
+/// Compares before writing so a steady state costs a read rather than an atomic
+/// rename every interval, and best-effort throughout: a missing or unreadable
+/// CA is the pre-registration case, and a failed write leaves the previous copy
+/// in place for the next pass.
+fn republish_bootstrap_ca_if_changed(root_ca_path: &str) {
+    let source = Path::new(root_ca_path);
+    let Ok(contents) = std::fs::read(source) else {
+        tracing::debug!(
+            target: "node_auth",
+            path = %root_ca_path,
+            "node-auth: no root CA to publish for co-located services yet"
+        );
+        return;
+    };
+
+    let published = source
+        .parent()
+        .zip(source.file_name())
+        .map(|(dir, name)| dir.join(BOOTSTRAP_CA_PUBLIC_SUBDIR).join(name));
+    if let Some(published) = &published
+        && std::fs::read(published).is_ok_and(|existing| existing == contents)
+    {
+        return;
+    }
+
+    match publish_bootstrap_ca(&contents, source) {
+        Ok(()) => tracing::info!(
+            target: "node_auth",
+            path = %root_ca_path,
+            "node-auth: published the root CA for co-located services"
+        ),
+        Err(error) => tracing::warn!(
+            target: "node_auth",
+            %error,
+            "node-auth: could not publish the root CA for co-located services"
+        ),
+    }
 }
 
 pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
@@ -115,7 +391,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         // development overrides
         Some(config_path) => (
             AgentConfig::load_from(&config_path).wrap_err(format!(
-                "Error loading agent configuration from {}",
+                "error loading agent configuration from {}",
                 config_path.display()
             ))?,
             config_path.display().to_string(),
@@ -125,12 +401,25 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         .machine_identity
         .validate()
         .map_err(|e| eyre::eyre!("invalid [machine-identity] in agent config: {e}"))?;
-    tracing::info!("Using configuration from {path}: {agent:?}");
+    tracing::info!(config_path = path.as_str(), ?agent, "Using configuration");
 
     if agent.machine.is_fake_dpu {
         tracing::warn!("Pretending local host is a DPU. Dev only.");
     }
 
+    // Published once here so it exists before anything else starts, then kept
+    // current by `main_loop::run_single_iteration`, which reconciles it beside
+    // certificate renewal.
+    republish_bootstrap_ca_if_changed(&agent.forge_system.root_ca);
+
+    // Node-auth (#355): the agent is the only process on the DPU that holds
+    // the machine key. This minter signs bearer JWTs for the agent's own API
+    // calls AND backs the local API socket that brokers tokens to co-located
+    // services (fmds, ...). Ignored by the API unless [node_auth] is enabled.
+    let node_jwt_minter = ::rpc::node_jwt::NodeJwtMinter::new(
+        agent.forge_system.client_cert.clone(),
+        agent.forge_system.client_key.clone(),
+    );
     let forge_client_config = Arc::new(
         ForgeClientConfig::new(
             agent.forge_system.root_ca.clone(),
@@ -139,6 +428,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                 key_path: agent.forge_system.client_key.clone(),
             }),
         )
+        .with_token_provider(node_jwt_minter.clone())
         .use_mgmt_vrf()?,
     );
 
@@ -152,6 +442,19 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             if options.skip_upgrade_check {
                 tracing::warn!("Upgrades disabled. Dev only");
             }
+
+            let local_api = {
+                let minter = node_jwt_minter.clone();
+                let socket_path = agent.forge_system.local_api_socket.clone();
+                async move {
+                    loop {
+                        if let Err(error) = local_api::serve(minter.clone(), &socket_path).await {
+                            tracing::warn!(target: "node_auth", %error, "node-auth: agent local API server failed; retrying");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                }
+            };
 
             let Registration {
                 machine_id,
@@ -167,15 +470,18 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                     factory_mac_address: "11:22:33:44:55:66".parse().unwrap(),
                 },
             };
-            main_loop::setup_and_run(
-                machine_id,
-                factory_mac_address,
-                forge_client_config,
-                agent,
-                *options,
-            )
-            .await
-            .wrap_err("main_loop error exit")?;
+            let main_loop_result = tokio::select! {
+                result = main_loop::setup_and_run(
+                    machine_id,
+                    factory_mac_address,
+                    forge_client_config,
+                    agent,
+                    *options,
+                ) => result.wrap_err("main_loop error exit"),
+                () = local_api => unreachable!("the agent local API retry loop cannot finish"),
+            };
+
+            main_loop_result?;
             tracing::info!("Agent exit");
         }
 
@@ -197,10 +503,10 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             }
         }
 
-        // Init-container entry point: download cert + snapshot hardware to the shared volume.
+        // Init-container entry point: provision the CA + snapshot hardware to the shared volume.
         // Output path is fixed (HW_CACHE_PATH) so the main container can always find it.
-        Some(AgentCommand::InitContainer) => {
-            download_cert().await?;
+        Some(AgentCommand::InitContainer(options)) => {
+            provision_bootstrap_ca(&options, &agent.forge_system.root_ca).await?;
             enumerate_and_save_hardware().await?;
             util::save_host_nameservers()?;
         }
@@ -218,6 +524,9 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                 has_changed_configs: false,
                 min_healthy_links: 2,
                 route_servers: &[],
+                // Standalone checks lack managed-host config to establish that
+                // the FNN IPv6 underlay is active.
+                should_check_ipv6_unicast: false,
                 hbn_device_names: HBNDeviceNames::hbn_23(),
                 include_dhcp_server: false,
                 run_restricted_mode_check: true,
@@ -225,6 +534,13 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             .await;
             println!("{}", serde_json::to_string_pretty(&health_report)?);
         }
+
+        Some(AgentCommand::LldpNeighbors(options)) => {
+            let neighbors = collect_lldp_neighbors(&options.agent_platform_type).await?;
+            println!("{neighbors:#?}");
+        }
+
+        Some(AgentCommand::SidecarMode) => run_lldp_sidecar().await,
 
         // One-off network monitor check.
         // dumps JSON-formatted peer DPU network reachability and latency status
@@ -239,7 +555,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                 None => NetworkPingerType::OobNetBind,
             };
 
-            tracing::info!("Using {}", pinger_type);
+            tracing::info!(%pinger_type, "Using pinger");
             let pinger: Arc<dyn Ping> = Arc::from(pinger_type);
 
             let mut network_monitor =
@@ -295,7 +611,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             {
                 Ok(id) => id,
                 Err(e) => {
-                    tracing::error!("get_host_machine_id_retry() failed: {:?}", e);
+                    tracing::error!(error = ?e, "Failed to get host machine ID after retries");
                     return Err(e);
                 }
             };
@@ -309,7 +625,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             // Legacy ETV write targets are no longer supported
             WriteTarget::Frr(_) | WriteTarget::Interfaces(_) | WriteTarget::Dhcp(_) => {
                 eyre::bail!(
-                    "Legacy ETV write targets (frr, interfaces, dhcp) are no longer supported. Use 'write nvue' instead."
+                    "legacy ETV write targets (frr, interfaces, dhcp) are no longer supported. use 'write nvue' instead"
                 );
             }
 
@@ -378,10 +694,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                     use_admin_network: true,
                     tenancy_enabled: true,
                     loopback_ip: opts.loopback_ip,
-                    secondary_overlay_vtep_ip: opts.secondary_overlay_vtep_ip,
-                    internal_bridge_routing_prefix: opts.internal_bridge_routing_prefix,
-                    vf_intercept_bridge_port_name: opts.vf_intercept_bridge_port_name,
-                    host_intercept_bridge_port_name: opts.host_intercept_bridge_port_name,
+                    loopback_ip_v6: opts.loopback_ip_v6,
                     asn: opts.asn,
                     datacenter_asn: opts.datacenter_asn,
                     anycast_site_prefixes: vec!["5.255.255.0/24".to_string()],
@@ -397,8 +710,6 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                     dhcp_servers: opts.dhcp_servers,
                     deny_prefixes: vec![],
                     site_fabric_prefixes: vec![],
-                    traffic_intercept_public_prefixes: vec![],
-                    vf_intercept_bridge_sf: opts.vf_intercept_bridge_sf,
                     use_vpc_isolation: true,
                     network_security_policy_override_rules,
                     stateful_acls_enabled: opts.stateful_acls_enabled,
@@ -427,8 +738,88 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Collect LLDP neighbors from the source appropriate for this agent platform.
+///
+/// Periodic topology publishers must retain their last successful topology when
+/// this returns an error, then log the failure and retry on their normal interval.
+pub async fn collect_lldp_neighbors(
+    platform_type: &AgentPlatformType,
+) -> carbide_host_support::lldp_collector::LldpCollectorResult<
+    Vec<carbide_host_support::lldp_collector::LldpNeighbor>,
+> {
+    collect_lldp_neighbors_with_collectors(
+        platform_type,
+        carbide_host_support::lldp_collector::collect_lldp_neighbors,
+        carbide_host_support::lldp_collector::collect_lldp_neighbors_from_snapshot,
+    )
+    .await
+}
+
+async fn collect_lldp_neighbors_with_collectors<DpuCollector, DpuFuture>(
+    platform_type: &AgentPlatformType,
+    dpu_os_collector: DpuCollector,
+    containerized_collector: impl FnOnce() -> carbide_host_support::lldp_collector::LldpCollectorResult<
+        Vec<carbide_host_support::lldp_collector::LldpNeighbor>,
+    >,
+) -> carbide_host_support::lldp_collector::LldpCollectorResult<
+    Vec<carbide_host_support::lldp_collector::LldpNeighbor>,
+>
+where
+    DpuCollector: FnOnce() -> DpuFuture,
+    DpuFuture: Future<
+        Output = carbide_host_support::lldp_collector::LldpCollectorResult<
+            Vec<carbide_host_support::lldp_collector::LldpNeighbor>,
+        >,
+    >,
+{
+    match platform_type {
+        AgentPlatformType::DpuOs => dpu_os_collector().await,
+        AgentPlatformType::Containerized => containerized_collector(),
+    }
+}
+
+const LLDP_SIDECAR_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+const LLDP_SIDECAR_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Continuously refreshes the LLDP snapshot consumed by the containerized agent.
+pub async fn run_lldp_sidecar() {
+    run_lldp_sidecar_loop(
+        carbide_host_support::lldp_collector::publish_lldp_snapshot,
+        None,
+    )
+    .await;
+}
+
+async fn run_lldp_sidecar_loop<Capture, CaptureFuture>(
+    mut capture: Capture,
+    attempt_limit: Option<usize>,
+) where
+    Capture: FnMut() -> CaptureFuture,
+    CaptureFuture: Future<Output = carbide_host_support::lldp_collector::LldpCollectorResult<()>>,
+{
+    let mut attempts = 0;
+    loop {
+        let delay = match capture().await {
+            Ok(()) => LLDP_SIDECAR_REFRESH_INTERVAL,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    retry_interval_seconds = LLDP_SIDECAR_RETRY_INTERVAL.as_secs(),
+                    "Could not refresh LLDP sidecar snapshot; retaining the last successful snapshot"
+                );
+                LLDP_SIDECAR_RETRY_INTERVAL
+            }
+        };
+        attempts += 1;
+        if attempt_limit.is_some_and(|limit| attempts >= limit) {
+            return;
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
 struct Registration {
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
 }
 
@@ -442,7 +833,7 @@ struct HBNDeviceNames {
 }
 
 impl HBNDeviceNames {
-    pub fn pre_23() -> HBNDeviceNames {
+    fn pre_23() -> HBNDeviceNames {
         HBNDeviceNames {
             uplinks: ["p0_sf", "p1_sf"],
             reps: ["pf0hpf_sf", "pf1hpf_sf"],
@@ -452,7 +843,7 @@ impl HBNDeviceNames {
         }
     }
 
-    pub fn hbn_23() -> HBNDeviceNames {
+    fn hbn_23() -> HBNDeviceNames {
         HBNDeviceNames {
             uplinks: ["p0_if", "p1_if"],
             reps: ["pf0hpf_if", "pf1hpf_if"],
@@ -461,7 +852,7 @@ impl HBNDeviceNames {
             sf_id: "_if",
         }
     }
-    pub fn new(hbn_version: Version) -> Self {
+    fn new(hbn_version: Version) -> Self {
         let min_version: Version = Version::from_parts(
             "2.3.0-doca2.8.0",
             vec![
@@ -480,7 +871,7 @@ impl HBNDeviceNames {
             HBNDeviceNames::hbn_23()
         }
     }
-    pub fn build_virt(&self, virt_rep_id: u32) -> String {
+    fn build_virt(&self, virt_rep_id: u32) -> String {
         format!("{}{}{}", self.virt_rep_begin, virt_rep_id, self.sf_id)
     }
 }
@@ -505,12 +896,12 @@ async fn register(
     let factory_mac_address: MacAddress = match hardware_info.dpu_info.as_ref() {
         Some(dpu_info) => dpu_info.factory_mac_address.parse().map_err(|e| {
             eyre::eyre!(
-                "Failed to parse factory MAC address from DPU info: {} (err: {})",
+                "failed to parse factory MAC address from DPU info: {} (err: {})",
                 dpu_info.factory_mac_address,
                 e
             )
         })?,
-        None => eyre::bail!("Missing DPU info, should be impossible"),
+        None => eyre::bail!("missing DPU info, should be impossible"),
     };
 
     let (registration_data, ..) = register_machine(
@@ -530,7 +921,8 @@ async fn register(
     )
     .await?;
 
-    let machine_id = registration_data.machine_id;
+    let machine_id = DpuMachineId::try_from(registration_data.machine_id)
+        .context("invalid machine_id returned from DiscoverMachine")?;
     tracing::info!(%machine_id, %factory_mac_address, "Successfully discovered machine");
 
     Ok(Registration {
@@ -598,4 +990,15 @@ fn fill_fake_dpu_info(hardware_info: &mut DiscoveryInfo) {
         firmware_date: "01/01/1970".to_string(),
         switches: vec![],
     });
+}
+
+/// Return Some(s) if s is not empty, otherwise None. Used to avoid repetition
+/// when dealing with gRPC-sourced fields that use an empty string to indicate
+/// an absent value.
+pub fn get_non_empty_str<S>(s: &S) -> Option<&str>
+where
+    S: AsRef<str>,
+{
+    let s = s.as_ref();
+    if s.is_empty() { None } else { Some(s) }
 }

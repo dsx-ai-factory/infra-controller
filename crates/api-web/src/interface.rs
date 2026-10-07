@@ -151,7 +151,7 @@ impl From<forgerpc::MachineInterface> for InterfaceRowDisplay {
 }
 
 /// List machine interfaces
-pub async fn show_html(
+pub(super) async fn show_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<PaginationParams>,
     uri: OriginalUri,
@@ -159,7 +159,7 @@ pub async fn show_html(
     let machine_interfaces = match fetch_machine_interfaces(state.clone()).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "find_interfaces");
+            tracing::error!(error = %err, "find_interfaces");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading machine interfaces",
@@ -179,7 +179,7 @@ pub async fn show_html(
     {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "find_domain");
+            tracing::error!(error = %err, "find_domain");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading domains").into_response();
         }
     };
@@ -209,11 +209,11 @@ pub async fn show_html(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let machine_interfaces = match fetch_machine_interfaces(state).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "fetch_machine_interfaces");
+            tracing::error!(error = %err, "fetch_machine_interfaces");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading machine interfaces",
@@ -307,7 +307,7 @@ impl From<forgerpc::MachineInterface> for InterfaceDetail {
 }
 
 /// View machine interface details
-pub async fn detail(
+pub(super) async fn detail(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(interface_id): AxumPath<String>,
 ) -> Response {
@@ -341,7 +341,7 @@ pub async fn detail(
             return super::not_found_response(interface_id_string);
         }
         Err(err) => {
-            tracing::error!(%err, "find_interfaces");
+            tracing::error!(error = %err, "find_interfaces");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading machine interface",
@@ -351,7 +351,12 @@ pub async fn detail(
     };
 
     if machine_interfaces.interfaces.len() != 1 {
-        tracing::error!(%interface_id, "Expected exactly 1 match, found {}", machine_interfaces.interfaces.len());
+        tracing::error!(
+            machine_interface_id = %interface_id,
+            expected_interface_count = 1,
+            matching_interface_count = machine_interfaces.interfaces.len(),
+            "Unexpected number of matching interfaces",
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Expected exactly one interface to match",

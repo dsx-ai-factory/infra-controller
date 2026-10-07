@@ -40,6 +40,8 @@ import (
 //   - Compute / NVSwitch power and firmware ops use
 //     RequireComponentOverlap=true: isolated to their targeted components.
 //   - BringUp has RequireComponentOverlap=false (rack-level): comprehensive.
+//   - Decommission has RequireComponentOverlap=false (rack-level): rack-
+//     destructive; exclusive with every other rack operation including itself.
 //   - ComponentTypeUnknown (zero value) acts as a wildcard — matches any
 //     component type including tasks with nil ComponentsByType (old tasks).
 //
@@ -140,6 +142,19 @@ var builtinRule = &Rule{ //nolint
 		{
 			A: OperationSpec{
 				OperationType: string(taskcommon.TaskTypeBringUp),
+			},
+			B: OperationSpec{
+				OperationType: "*",
+			},
+		},
+		// Decommission is rack-destructive and exclusive with allocation,
+		// power, firmware, bring-up, maintenance, and another decommission
+		// (see docs/design/decommissioning/rack-decommissioning.md). Flow
+		// has no separate allocation/maintenance TaskType today, so the
+		// wildcard covers every current and future rack task type.
+		{
+			A: OperationSpec{
+				OperationType: string(taskcommon.TaskTypeDecommission),
 			},
 			B: OperationSpec{
 				OperationType: "*",

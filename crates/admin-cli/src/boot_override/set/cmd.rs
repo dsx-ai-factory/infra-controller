@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn set(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn set(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let req: MachineBootOverride = args.try_into()?;
     api_client.0.set_machine_boot_override(req).await?;
     Ok(())

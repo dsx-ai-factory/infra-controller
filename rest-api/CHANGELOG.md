@@ -1,35 +1,41 @@
 # Changelog
 
-All notable changes to **NVIDIA Infra Controller REST** are documented in this file.
-Each release lists pull requests grouped by category, with the most recent version first.
+This file is the historical record for independent **NVIDIA Infra Controller REST**
+releases through v1.6.0. Future release information is maintained only in the
+[unified NICo changelog](https://docs.nvidia.com/infra-controller/changelog).
+
+Each release lists pull requests grouped by category, with the most recent version
+first. Entries within each category preserve their published order.
 
 ---
 
 ## [v1.6.0](https://github.com/NVIDIA/infra-controller/rest-api/releases/tag/v1.6.0)
 
-> [!NOTE]
-> This release is compatible with Core **v0.10.x**.
+<Note>
+This release is compatible with Core **v0.10.x**.
+</Note>
 
-> [!IMPORTANT]
-> This is the last independent release of NICo REST. Future releases will be part of the unified NICo repository located at [infra-controller](https://github.com/NVIDIA/infra-controller).
-
+<Warning>
+This is the last independent release of NICo REST. Future releases are documented
+in the [unified NICo changelog](https://docs.nvidia.com/infra-controller/changelog).
+</Warning>
 
 ### Features
 
 - **Add support for online repair of Machines, allowing repair without Instance deletion** ([#415](https://github.com/NVIDIA/infra-controller/rest-api/pull/415))
-  Introduces Machine online repair, enabling operators to perform maintenance on machines without first deleting the associated Instance. The repair workflow transitions the machine through a maintenance state and back, preserving the instance assignment throughout. See [Machine](https://nvidia.github.io/infra-controller-rest/#tag/Machine) endpoints.
+  Introduces Machine online repair, enabling operators to perform maintenance on machines without first deleting the associated Instance. The repair workflow transitions the machine through a maintenance state and back, preserving the instance assignment throughout. See [Machine](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/machine) endpoints.
 
 - **Support IP Usage stats in VPC Prefix and Subnet** ([#480](https://github.com/NVIDIA/infra-controller/rest-api/pull/480))
-  VPC Prefix and Subnet responses now include IP usage statistics showing total, used, and available IP addresses, giving operators visibility into address pool utilization without external IPAM queries. See the updated response fields on [VPC Prefix](https://nvidia.github.io/infra-controller-rest/#tag/VPC-Prefix) and [Subnet](https://nvidia.github.io/infra-controller-rest/#tag/Subnet) endpoints.
+  VPC Prefix and Subnet responses now include IP usage statistics showing total, used, and available IP addresses, giving operators visibility into address pool utilization without external IPAM queries. See the updated response fields on [VPC Prefix](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/vpc-prefix) and [Subnet](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/subnet) endpoints.
 
 - **Add Flow task-list endpoints and root /task endpoints** ([#543](https://github.com/NVIDIA/infra-controller/rest-api/pull/543))
-  Exposes new REST API endpoints for listing and querying Flow (formerly RLA) tasks, including a root `/task` endpoint that provides a unified view of all task types. See the [Task](https://nvidia.github.io/infra-controller-rest/#tag/Task) section in the API schema.
+  Exposes new REST API endpoints for listing and querying Flow (formerly RLA) tasks, including a root `/task` endpoint that provides a unified view of all task types. See the [Task](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/task) section in the API schema.
 
 - **Add tray-level firmware update target selection in Tray FW Update API** ([#541](https://github.com/NVIDIA/infra-controller/rest-api/pull/541))
-  The Tray firmware update endpoint now supports selecting specific firmware update targets at the tray level, allowing operators to target individual components within a tray rather than updating all at once. See the updated [Tray](https://nvidia.github.io/infra-controller-rest/#tag/Tray) firmware update endpoint.
+  The Tray firmware update endpoint now supports selecting specific firmware update targets at the tray level, allowing operators to target individual components within a tray rather than updating all at once. See the updated [Tray](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray) firmware update endpoint.
 
 - **Support filter by location info in Flow Tray API** ([#545](https://github.com/NVIDIA/infra-controller/rest-api/pull/545))
-  Adds location-based filtering to the Flow Tray API, enabling queries by physical rack position and other location metadata. See the updated query parameters on the [Tray](https://nvidia.github.io/infra-controller-rest/#tag/Tray) endpoints.
+  Adds location-based filtering to the Flow Tray API, enabling queries by physical rack position and other location metadata. See the updated query parameters on the [Tray](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray) endpoints.
 
 - **Support filter ListTasks by component_id in Flow** ([#542](https://github.com/NVIDIA/infra-controller/rest-api/pull/542))
   Adds a `component_id` filter to the Flow task list endpoint, enabling operators to retrieve all tasks associated with a specific hardware component.
@@ -93,7 +99,7 @@ Each release lists pull requests grouped by category, with the most recent versi
   Decomposes the monolithic component manager interface into granular per-operation interfaces and separates registry wiring from business logic, improving testability and enabling capability-aware dispatch.
 
 - **Improve readability for terminology and NVSwitch naming in Flow** ([#544](https://github.com/NVIDIA/infra-controller/rest-api/pull/544))
-  Standardizes variable naming and terminology across the Flow service, aligning NVSwitch references with the official product naming convention. See the updated naming in the [API reference](https://nvidia.github.io/infra-controller-rest/).
+  Standardizes variable naming and terminology across the Flow service, aligning NVSwitch references with the official product naming convention. See the updated naming in the [API reference](https://docs.nvidia.com/infra-controller/rest-api-reference/getting-started).
 
 - **Apply layered ToProto convention to MachineInstanceType and VPC handlers** ([#533](https://github.com/NVIDIA/infra-controller/rest-api/pull/533), [#505](https://github.com/NVIDIA/infra-controller/rest-api/pull/505))
   Extends the layered proto conversion pattern to MachineInstanceType and VPC handlers, moving protobuf request construction onto DB models for consistent separation between API and data layers.
@@ -136,24 +142,28 @@ Each release lists pull requests grouped by category, with the most recent versi
 
 ## [v1.5.0](https://github.com/NVIDIA/infra-controller/rest-api/releases/tag/v1.5.0)
 
-> [!NOTE]
-> This release is compatible with Core **v0.9.x**.
+<Note>
+This release is compatible with Core **v0.9.x**.
+</Note>
 
-> [!IMPORTANT]
-> In our effort to unify the product name, starting from `v1.5.0` the image names are now prefixed with `nico-` instead of `carbide-`. Docker images produced by the make commands will now have the `nico-` prefix.
+<Warning>
+In our effort to unify the product name, starting from `v1.5.0` the image names
+are now prefixed with `nico-` instead of `carbide-`. Docker images produced by
+the make commands will now have the `nico-` prefix.
+</Warning>
 
 ### Features
 - **Rename carbide/forge to NVIDIA Infrastructure Controller (NICo)** ([#432](https://github.com/NVIDIA/infra-controller/rest-api/pull/432))
-  Comprehensive rebranding of the project from Carbide/Forge to NVIDIA Infrastructure Controller (NICo). All API path segments, CLI binary names, Helm chart names, configuration keys, and documentation are updated. The OpenAPI schema now uses the NICo naming throughout — see the updated [API reference](https://nvidia.github.io/infra-controller-rest/).
+  Comprehensive rebranding of the project from Carbide/Forge to NVIDIA Infrastructure Controller (NICo). All API path segments, CLI binary names, Helm chart names, configuration keys, and documentation are updated. The OpenAPI schema now uses the NICo naming throughout — see the updated [API reference](https://docs.nvidia.com/infra-controller/rest-api-reference/getting-started).
 
 - **Add API model and CRUD endpoints for ExpectedRack** ([#444](https://github.com/NVIDIA/infra-controller/rest-api/pull/444))
-  Introduces full CRUD REST API endpoints for managing Expected Rack inventory, enabling operators to define expected rack configurations before physical deployment. See [Expected Rack](https://nvidia.github.io/infra-controller-rest/#tag/Expected-Rack) endpoints in the API schema.
+  Introduces full CRUD REST API endpoints for managing Expected Rack inventory, enabling operators to define expected rack configurations before physical deployment. See [Expected Rack](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/expected-rack) endpoints in the API schema.
 
 - **Allow updating Site capabilities using Site update API endpoint** ([#470](https://github.com/NVIDIA/infra-controller/rest-api/pull/470))
-  Site capabilities (native networking, network security groups, NVLink partitioning, rack-level administration) can now be modified via the existing Site update endpoint, removing the need to delete and recreate sites for configuration changes. See the updated `config` field on [Update Site](https://nvidia.github.io/infra-controller-rest/#tag/Site/operation/updateSite).
+  Site capabilities (native networking, network security groups, NVLink partitioning, rack-level administration) can now be modified via the existing Site update endpoint, removing the need to delete and recreate sites for configuration changes. See the updated `config` field on [Update Site](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/site/update-site).
 
 - **Add a REST endpoint to cancel a task in Flow (formerly RLA)** ([#489](https://github.com/NVIDIA/infra-controller/rest-api/pull/489))
-  Exposes a new endpoint for cancelling in-progress rack-level tasks (firmware upgrades, power operations, etc.), giving operators the ability to abort long-running operations. See the [Task](https://nvidia.github.io/infra-controller-rest/#tag/Task) endpoints.
+  Exposes a new endpoint for cancelling in-progress rack-level tasks (firmware upgrades, power operations, etc.), giving operators the ability to abort long-running operations. See the [Task](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/task) endpoints.
 
 - **Support firmware updates to unregistered devices in NSM and PSM** ([#442](https://github.com/NVIDIA/infra-controller/rest-api/pull/442))
   NVSwitch Manager and PowerShelf Manager can now perform firmware updates on devices that have not been formally registered, streamlining initial rack provisioning when firmware must be updated before registration.
@@ -194,10 +204,10 @@ Each release lists pull requests grouped by category, with the most recent versi
   Fixes a bug where the dynamic TLS certificate loader would retain a previous error state even after a successful certificate refresh, causing services to report unhealthy TLS status.
 
 - **No-op Instance update when requested NVLink Interfaces match current state** ([#438](https://github.com/NVIDIA/infra-controller/rest-api/pull/438))
-  Prevents unnecessary Instance updates to the Site Controller when the requested NVLink Interface configuration is identical to the current state, avoiding spurious status transitions. See [Update Instance](https://nvidia.github.io/infra-controller-rest/#tag/Instance/operation/updateInstance).
+  Prevents unnecessary Instance updates to the Site Controller when the requested NVLink Interface configuration is identical to the current state, avoiding spurious status transitions. See [Update Instance](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/instance/update-instance).
 
 - **Mark nullable fields correctly in OpenAPI spec** ([#440](https://github.com/NVIDIA/infra-controller/rest-api/pull/440))
-  Adds `nullable: true` annotations to multiple fields across the OpenAPI schema that can legitimately be null in API responses, fixing strict SDK client deserialization failures. See the updated field definitions across the [API reference](https://nvidia.github.io/infra-controller-rest/).
+  Adds `nullable: true` annotations to multiple fields across the OpenAPI schema that can legitimately be null in API responses, fixing strict SDK client deserialization failures. See the updated field definitions across the [API reference](https://docs.nvidia.com/infra-controller/rest-api-reference/getting-started).
 
 - **Verify if Site has FNN enabled when updating VPC to FNN** ([#466](https://github.com/NVIDIA/infra-controller/rest-api/pull/466))
   Validates that the target Site supports Fabric Native Networking before allowing a VPC virtualization type update to FNN. *(Also in v1.4.3)*
@@ -258,7 +268,7 @@ Each release lists pull requests grouped by category, with the most recent versi
 ### Documentation
 
 - **Improve Allocation guidance, fix Machine ID format in OpenAPI spec** ([#488](https://github.com/NVIDIA/infra-controller/rest-api/pull/488))
-  Adds guidance on Allocation lifecycle and constraint management to the OpenAPI schema, and corrects the Machine ID format from integer to UUID. See the updated [Allocation](https://nvidia.github.io/infra-controller-rest/#tag/Allocation) documentation.
+  Adds guidance on Allocation lifecycle and constraint management to the OpenAPI schema, and corrects the Machine ID format from integer to UUID. See the updated [Allocation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/allocation) documentation.
 
 - **Fix nicocli help text and clean up CLI README** ([#495](https://github.com/NVIDIA/infra-controller/rest-api/pull/495))
   Updates CLI help text and README to reflect the NICo rebranding, corrects command examples, and removes outdated references.
@@ -277,10 +287,10 @@ Each release lists pull requests grouped by category, with the most recent versi
   Renames the Rack Level Administration (RLA) service to "Flow" across the entire codebase — directory structure, package names, configuration keys, Helm chart values, and documentation. The rebrand is split across three PRs for incremental review: core flow directory (#508), inner flow directory (#520), and external references (#525).
 
 - **Update Go module path to remove ncx and match GitHub repo** ([#482](https://github.com/NVIDIA/infra-controller/rest-api/pull/482))
-  Updates the Go module path from `github.com/NVIDIA/infra-controller/rest-api` to match the current GitHub repository URL, fixing import resolution for downstream consumers. See the updated module paths in the [API reference](https://nvidia.github.io/infra-controller-rest/).
+  Updates the Go module path from `github.com/NVIDIA/infra-controller/rest-api` to match the current GitHub repository URL, fixing import resolution for downstream consumers. See the updated module paths in the [API reference](https://docs.nvidia.com/infra-controller/rest-api-reference/getting-started).
 
 - **Expose BMC IP Address Option for Expected Components** ([#445](https://github.com/NVIDIA/infra-controller/rest-api/pull/445))
-  Adds an optional `bmcIpAddress` field to Expected Machine, Expected PowerShelf, and Expected Switch create/update requests, allowing operators to pre-configure BMC IP addresses during inventory planning. See the updated fields on [Expected Machine](https://nvidia.github.io/infra-controller-rest/#tag/Expected-Machine), [Expected Power Shelf](https://nvidia.github.io/infra-controller-rest/#tag/Expected-Power-Shelf), and [Expected Switch](https://nvidia.github.io/infra-controller-rest/#tag/Expected-Switch) endpoints.
+  Adds an optional `bmcIpAddress` field to Expected Machine, Expected PowerShelf, and Expected Switch create/update requests, allowing operators to pre-configure BMC IP addresses during inventory planning. See the updated fields on [Expected Machine](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/expected-machine), [Expected Power Shelf](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/expected-power-shelf), and [Expected Switch](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/expected-switch) endpoints.
 
 - **Add unique BMC + site constraint to expected_power_shelf and expected_switch** ([#450](https://github.com/NVIDIA/infra-controller/rest-api/pull/450))
   Adds database-level unique constraints on BMC MAC address per site for Expected PowerShelf and Expected Switch tables, matching the existing Expected Machine constraint and preventing duplicate registrations.
@@ -319,22 +329,23 @@ Each release lists pull requests grouped by category, with the most recent versi
 
 ## [v1.4.0](https://github.com/NVIDIA/infra-controller/rest-api/releases/tag/v1.4.0)
 
-> [!NOTE]
-> This release is compatible with Core **v0.8.x**.
+<Note>
+This release is compatible with Core **v0.8.x**.
+</Note>
 
 ### Features
 
 - **Add support for filtering VPCs by NVLink Logical Partition** ([#380](https://github.com/NVIDIA/infra-controller/rest-api/pull/380))
-  VPCs can now be filtered by their associated default NVLink Logical Partition ID. Other VPC filters have also been enhanced to accept multiple values, and network security group filter validation has been improved. See the updated query parameters on [Retrieve all VPCs](https://nvidia.github.io/infra-controller-rest/#tag/VPC/operation/get-all-vpc).
+  VPCs can now be filtered by their associated default NVLink Logical Partition ID. Other VPC filters have also been enhanced to accept multiple values, and network security group filter validation has been improved. See the updated query parameters on [Retrieve all VPCs](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/vpc/get-all-vpc).
 
 - **Allow setting routing profile when creating VPCs** ([#350](https://github.com/NVIDIA/infra-controller/rest-api/pull/350))
-  Callers can now include `routingProfile` when creating a VPC with FNN network virtualization. The field is only accepted for FNN-type VPCs and is reflected in the API response accordingly. See the `routingProfile` field on [Create VPC](https://nvidia.github.io/infra-controller-rest/#tag/VPC/operation/create-vpc).
+  Callers can now include `routingProfile` when creating a VPC with FNN network virtualization. The field is only accepted for FNN-type VPCs and is reflected in the API response accordingly. See the `routingProfile` field on [Create VPC](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/vpc/create-vpc).
 
 - **Allow power control to NSM and PSM without registration** ([#368](https://github.com/NVIDIA/infra-controller/rest-api/pull/368))
   NVSwitch Manager and PowerShelf Manager can now receive power control commands (on/off/cycle) without requiring prior component registration, simplifying initial rack bring-up workflows.
 
 - **Update Site Agent Helm chart to adopt Core prereqs for installation** ([#416](https://github.com/NVIDIA/infra-controller/rest-api/pull/416))
-  Updates the README and Helm chart to reference the `helm-prereqs` chart from infra-controller-core as the recommended installation path for bare-metal cluster setup. Also adds username keys to the common DB credentials secret template.
+  Updates the README and Helm chart to reference the `helm-prereqs` chart, now located in this repository's `helm-prereqs/` directory, as the recommended installation path for bare-metal cluster setup. Also adds username keys to the common DB credentials secret template.
 
 - **Hint at label filter syntax after TUI list output** ([#406](https://github.com/NVIDIA/infra-controller/rest-api/pull/406))
   After running a list command in the TUI, a context-sensitive hint now displays available label keys and the syntax for `--label`, `--sort-label`, and `scope label` filtering. The hint is suppressed once any label filter is active.
@@ -357,7 +368,7 @@ Each release lists pull requests grouped by category, with the most recent versi
   Adds the missing VPC Peering manager to the Site Agent and fixes VPC Peering workflows to correctly require the VPC Peering ID during creation on Site.
 
 - **Mark ipBlockId as required in VPC Prefix create request** ([#414](https://github.com/NVIDIA/infra-controller/rest-api/pull/414))
-  Corrects the OpenAPI schema and CLI/TUI to reflect that `ipBlockId` is a required field when creating a VPC Prefix, matching the server-side validation that already enforced this. See [Create VPC Prefix](https://nvidia.github.io/infra-controller-rest/#tag/VPC-Prefix/operation/create-vpc-prefix).
+  Corrects the OpenAPI schema and CLI/TUI to reflect that `ipBlockId` is a required field when creating a VPC Prefix, matching the server-side validation that already enforced this. See [Create VPC Prefix](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/vpc-prefix/create-vpc-prefix).
 
 - **Prompt for allocation constraints in TUI allocation create** ([#413](https://github.com/NVIDIA/infra-controller/rest-api/pull/413))
   Fixes the TUI allocation creation flow to properly prompt for the required constraint (resource type, IP block selection, constraint type, and value), which was previously missing.
@@ -366,7 +377,7 @@ Each release lists pull requests grouped by category, with the most recent versi
   Fixes IP Block creation in the CLI/TUI by including the `protocolVersion` and `routingType` parameters that were previously omitted from the request, causing creation failures.
 
 - **Fix Expected Machine OpenAPI misnamed fields for BMC default credentials** ([#421](https://github.com/NVIDIA/infra-controller/rest-api/pull/421))
-  Corrects field names for BMC default username and password in the Expected Machine OpenAPI schema, resolving mismatches between the spec and the actual API behavior. See [Expected Machine](https://nvidia.github.io/infra-controller-rest/#tag/Expected-Machine) endpoints.
+  Corrects field names for BMC default username and password in the Expected Machine OpenAPI schema, resolving mismatches between the spec and the actual API behavior. See [Expected Machine](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/expected-machine) endpoints.
 
 - **Resolve RLA inventory component manager ID sync issue** ([#409](https://github.com/NVIDIA/infra-controller/rest-api/pull/409))
   Ensures machine IDs are synced on every inventory loop iteration, removing a conditional skip that could leave `external_id` stale and cause leak detection to fail. Also updates default operation timeouts and fixes misleading error messages in component target resolution.
@@ -384,7 +395,7 @@ Each release lists pull requests grouped by category, with the most recent versi
   Adds detection of misordered flags placed after positional arguments in `carbidecli`, providing a clear error message instead of sending a malformed HTTP request.
 
 - **Remove deprecated Instance/Allocation relationships** ([#371](https://github.com/NVIDIA/infra-controller/rest-api/pull/371))
-  Completes the transition from per-instance allocation linkage to aggregate allocation enforcement. Instance creation now validates against total reserved capacity for a tenant's instance type at a site, and allocation constraint updates check against total instance usage. See the updated [Allocation](https://nvidia.github.io/infra-controller-rest/#tag/Allocation) schema.
+  Completes the transition from per-instance allocation linkage to aggregate allocation enforcement. Instance creation now validates against total reserved capacity for a tenant's instance type at a site, and allocation constraint updates check against total instance usage. See the updated [Allocation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/allocation) schema.
 
 - **Move machine ID lock acquisition before record pull** ([#405](https://github.com/NVIDIA/infra-controller/rest-api/pull/405))
   Fixes a race condition in instance creation where the machine record could become stale between initial read and lock acquisition. The lock is now acquired before pulling the record, ensuring all subsequent checks operate on current data.
@@ -393,10 +404,10 @@ Each release lists pull requests grouped by category, with the most recent versi
   Corrects 20 URL path segments in the TUI that were using hyphenated display names instead of the actual API paths (e.g., `ip-block` instead of `ipblock`), fixing silent 404s on list, get, create, update, and delete operations for these four resource types.
 
 - **Revise Allocation status enum and attribute descriptions in OpenAPI spec** ([#395](https://github.com/NVIDIA/infra-controller/rest-api/pull/395))
-  Aligns the Allocation status enum values in the OpenAPI schema with database constants (e.g., `Registered` was missing), fixing deserialization errors when listing Allocations. Adds comprehensive attribute descriptions across Allocation models. See the updated [Allocation](https://nvidia.github.io/infra-controller-rest/#tag/Allocation) schema.
+  Aligns the Allocation status enum values in the OpenAPI schema with database constants (e.g., `Registered` was missing), fixing deserialization errors when listing Allocations. Adds comprehensive attribute descriptions across Allocation models. See the updated [Allocation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/allocation) schema.
 
 - **Infer Provider/Tenant from org for Site update and Fabric retrieval endpoints** ([#372](https://github.com/NVIDIA/infra-controller/rest-api/pull/372))
-  Extends org-based identity inference to Site update and Fabric retrieval endpoints, removing the need to pass `infrastructureProviderId` or `tenantId` query parameters. See updated parameters on [Update Site](https://nvidia.github.io/infra-controller-rest/#tag/Site/operation/update-site) and [Retrieve all Sites](https://nvidia.github.io/infra-controller-rest/#tag/Site/operation/get-all-site).
+  Extends org-based identity inference to Site update and Fabric retrieval endpoints, removing the need to pass `infrastructureProviderId` or `tenantId` query parameters. See updated parameters on [Update Site](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/site/update-site) and [Retrieve all Sites](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/site/get-all-site).
 
 - **Support reflashing the same firmware version in PSM** ([#393](https://github.com/NVIDIA/infra-controller/rest-api/pull/393))
   Allows PowerShelf Manager to re-apply the same firmware version that is already installed, enabling recovery scenarios where a re-flash is needed without a version change.
@@ -412,7 +423,7 @@ Each release lists pull requests grouped by category, with the most recent versi
 ### Documentation
 
 - **Add Getting Started section in OpenAPI schema** ([#402](https://github.com/NVIDIA/infra-controller/rest-api/pull/402))
-  Adds a [Getting Started](https://nvidia.github.io/infra-controller-rest/#section/Getting-Started) section to the API documentation, providing a clear onboarding path for new users. HTTP 200 and 201 responses are now auto-expanded for better discoverability of response schemas.
+  Adds a [Getting Started](https://docs.nvidia.com/infra-controller/rest-api-reference/getting-started) section to the API documentation, providing a clear onboarding path for new users. HTTP 200 and 201 responses are now auto-expanded for better discoverability of response schemas.
 
 ### CI/CD
 
@@ -452,8 +463,9 @@ Each release lists pull requests grouped by category, with the most recent versi
 
 ## [v1.3.0](https://github.com/NVIDIA/infra-controller/rest-api/releases/tag/v1.3.0)
 
-> [!NOTE]
-> This release is compatible with Core **v0.7.x**.
+<Note>
+This release is compatible with Core **v0.7.x**.
+</Note>
 
 ### Features
 
@@ -530,8 +542,9 @@ Each release lists pull requests grouped by category, with the most recent versi
 
 ## [v1.2.1](https://github.com/NVIDIA/infra-controller/rest-api/releases/tag/v1.2.1)
 
-> [!NOTE]
-> This release is compatible with Core **v0.6.x**.
+<Note>
+This release is compatible with Core **v0.6.x**.
+</Note>
 
 ### Features
 
@@ -609,8 +622,9 @@ Each release lists pull requests grouped by category, with the most recent versi
 
 ## [v1.2.0](https://github.com/NVIDIA/infra-controller/rest-api/releases/tag/v1.2.0)
 
-> [!NOTE]
-> This release is compatible with Core **v0.6.x**.
+<Note>
+This release is compatible with Core **v0.6.x**.
+</Note>
 
 ### Features
 
@@ -1311,8 +1325,8 @@ Each release lists pull requests grouped by category, with the most recent versi
 - **Only run promotion workflow on main branch** ([#42](https://github.com/NVIDIA/infra-controller/rest-api/pull/42))
   Restricts the release promotion job to the main branch, preventing unmerged PR branches from showing a perpetually pending "Promote to Release Candidate" check.
 
-- **Updated Go version to 1.25.4 and fixed unit tests** ([#31](https://github.com/NVIDIA/infra-controller/rest-api/pull/31))
-  Upgrades the Go toolchain to 1.25.4 across all modules and fixes unit tests affected by the version change.
+- **Updated Go version to 1.25.11 and fixed unit tests** ([#31](https://github.com/NVIDIA/infra-controller/rest-api/pull/31))
+  Upgrades the Go toolchain to 1.25.11 across all modules and fixes unit tests affected by the version change.
 
 - **Add golangci-lint and revive config files** ([#30](https://github.com/NVIDIA/infra-controller/rest-api/pull/30))
   Adds the previously missing golangci-lint and revive configuration files required for consistent linting across the project.

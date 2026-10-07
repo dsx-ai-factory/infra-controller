@@ -22,7 +22,7 @@
 // CERTIFICATE and END CERTIFICATE are important. Because we are not actually validating these
 // certs, it doesn't matter if they expire
 
-pub static CLIENT_CERT_DHCP: &str = r#"
+pub(super) static CLIENT_CERT_DHCP: &str = r#"
 Certificate:
     Data:
         Version: 3 (0x2)
@@ -95,7 +95,7 @@ UmYTQJU8jSOcryZ3TIY=
 -----END CERTIFICATE-----
 "#;
 
-pub static CLIENT_CERT_EXTERNAL: &str = r#"
+pub(super) static CLIENT_CERT_EXTERNAL: &str = r#"
 Certificate:
     Data:
         Version: 3 (0x2)
@@ -188,7 +188,7 @@ b+klRUxemVllC/FxAMzMZKpzUg==
 -----END CERTIFICATE-----
 "#;
 
-pub static CLIENT_CERT_MACHINEATRON: &str = r#"
+pub(super) static CLIENT_CERT_MACHINEATRON: &str = r#"
 Certificate:
     Data:
         Version: 3 (0x2)
@@ -261,7 +261,7 @@ nH/JzT/nBRj3CJNBtQTtMsQZ
 -----END CERTIFICATE-----
 "#;
 
-pub static CLIENT_CERT_OTHER_APP: &str = r#"
+pub(super) static CLIENT_CERT_OTHER_APP: &str = r#"
 Certificate:
     Data:
         Version: 3 (0x2)
@@ -398,7 +398,7 @@ kpBnYU0MA+E=
 -----END CERTIFICATE-----
 "#;
 
-pub static CLIENT_CERT_CI: &str = r#"
+pub(super) static CLIENT_CERT_CI: &str = r#"
 Certificate:
     Data:
         Version: 3 (0x2)

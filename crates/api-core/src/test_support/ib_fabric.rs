@@ -23,7 +23,7 @@ use carbide_secrets::credentials::CredentialManager;
 
 use crate::cfg::file::CarbideConfig;
 
-pub fn ib_fabric_test_manager(
+pub(crate) fn ib_fabric_test_manager(
     config: &CarbideConfig,
     credential_manager: Arc<dyn CredentialManager>,
 ) -> Arc<IBFabricManagerImpl> {

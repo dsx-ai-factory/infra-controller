@@ -70,7 +70,7 @@ pub fn collect_metric_infos(metrics_endpoints: &[SocketAddr]) -> eyre::Result<Ve
         }
     }
 
-    let mut infos: Vec<MetricInfo> = metric_infos
+    let infos: Vec<MetricInfo> = metric_infos
         .into_iter()
         .map(|(name, (ty, help))| MetricInfo {
             name,
@@ -78,8 +78,6 @@ pub fn collect_metric_infos(metrics_endpoints: &[SocketAddr]) -> eyre::Result<Ve
             ty: ty.unwrap_or_default(),
         })
         .collect();
-
-    infos.sort_by(|e1, e2| e1.name.cmp(&e2.name));
 
     Ok(infos)
 }

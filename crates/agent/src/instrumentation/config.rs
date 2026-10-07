@@ -42,14 +42,14 @@ struct InstrumentationSingleton {
 
 impl InstrumentationSingleton {
     // Build the standard instrumentation config for dpu-agent.
-    fn try_init_for_dpu_agent() -> eyre::Result<Self> {
+    fn try_init_for_dpu_agent(set_global_meter: bool) -> eyre::Result<Self> {
         let prometheus_registry = Registry::new();
         let exporter = ExporterBuilder::default()
             .with_registry(prometheus_registry.clone())
             .without_scope_info()
             .without_target_info()
             .build()
-            .context("Could not build Prometheus exporter")?;
+            .context("could not build prometheus exporter")?;
 
         // This defines attributes that are set on the exported logs **and** metrics
         let resource_attributes = opentelemetry_sdk::Resource::builder()
@@ -63,12 +63,12 @@ impl InstrumentationSingleton {
             .with_reader(exporter)
             .with_resource(resource_attributes)
             .with_view(
-                create_retry_histogram_view().context("Couldn't create retry histogram View")?,
+                create_retry_histogram_view().context("couldn't create retry histogram view")?,
             )
             .with_view(
-                create_network_latency_view().context("Couldn't create network latency View")?,
+                create_network_latency_view().context("couldn't create network latency view")?,
             )
-            .with_view(create_network_loss_view().context("Couldn't create network loss View")?)
+            .with_view(create_network_loss_view().context("couldn't create network loss view")?)
             .build();
 
         let dpu_agent_meter = meter_provider.meter("forge-dpu-agent");
@@ -76,7 +76,9 @@ impl InstrumentationSingleton {
         // We expect our internal users to use the interfaces inside this module,
         // but if there are other OpenTelemetry users in our dependencies, let's
         // make sure they pick up our provider.
-        opentelemetry::global::set_meter_provider(meter_provider.clone());
+        if set_global_meter {
+            opentelemetry::global::set_meter_provider(meter_provider.clone());
+        }
 
         Ok(InstrumentationSingleton {
             _meter_provider: meter_provider,
@@ -91,7 +93,7 @@ impl InstrumentationSingleton {
     // upgrades of the crates involved. There's a unit test below that should
     // ensure it always succeeds.
     fn init_for_dpu_agent() -> Self {
-        Self::try_init_for_dpu_agent().unwrap()
+        Self::try_init_for_dpu_agent(true).unwrap()
     }
 }
 
@@ -163,7 +165,10 @@ mod tests {
 
     #[test]
     fn test_singleton_init_function() {
-        let _s = InstrumentationSingleton::try_init_for_dpu_agent().expect(
+        // `false` keeps this construction test from replacing the process-global
+        // provider. Event instruments cache that provider on first use, and the
+        // `MetricsCapture` tests in this binary must keep reading the same one.
+        let _s = InstrumentationSingleton::try_init_for_dpu_agent(false).expect(
             "The instrumentaion singleton's initialization function must not return an error",
         );
     }

@@ -20,10 +20,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 # [local-dependencies]
 carbide-metrics-utils = { path = "../metrics-utils" }
+carbide-instrument = { path = "../instrument" }
 # [end local-dependencies]
 
 hyper = { workspace = true }
@@ -37,6 +39,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
+socket2 = { workspace = true }
 
 prometheus = { workspace = true }
 tracing = { workspace = true }
@@ -49,6 +52,9 @@ opentelemetry-prometheus = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = [
   "spec_unstable_metrics_views",
 ] }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 
 [lints]
 workspace = true

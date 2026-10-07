@@ -4,7 +4,6 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tClient "go.temporal.io/sdk/client"
-	tp "go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -25,32 +23,30 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 // ~~~~~ Get Rack Handler ~~~~~ //
 
 // GetRackHandler is the API Handler for getting a Rack by ID
 type GetRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetRackHandler initializes and returns a new handler for getting a Rack
 func NewGetRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetRackHandler {
 	return GetRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -68,7 +64,7 @@ func NewGetRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Client
 // @Success 200 {object} model.APIRack
 // @Router /v2/org/{org}/nico/rack/{id} [get]
 func (grh GetRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Get", c, grh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -117,7 +113,7 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	grh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Validate the site
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, grh.dbSession)
@@ -161,35 +157,15 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 	}
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       fmt.Sprintf("rack-get-%s", rackStrID),
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "GetRack", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute GetRack workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to get Rack details", nil)
-	}
-
-	// Get workflow result
 	var flowResponse flowv1.GetRackInfoResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, fmt.Sprintf("rack-get-%s", rackStrID), err, "Rack", "GetRack")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from GetRack workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to get Rack details: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_GetRackInfoByID_FullMethodName,
+		flowRequest, &flowResponse,
+		fmt.Sprintf("rack-get-%s", rackStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -208,21 +184,19 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 
 // GetAllRackHandler is the API Handler for getting all Racks
 type GetAllRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllRackHandler initializes and returns a new handler for getting all Racks
 func NewGetAllRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllRackHandler {
 	return GetAllRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -244,7 +218,7 @@ func NewGetAllRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Success 200 {array} model.APIRack
 // @Router /v2/org/{org}/nico/rack [get]
 func (garh GetAllRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "GetAll", c, garh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -326,6 +300,9 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.RackDefaultOrderBy)
+	}
 
 	// Validate pagination attributes
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.RackOrderByFieldMap)))
@@ -367,35 +344,15 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("rack-get-all-%s", common.QueryParamHash(apiRequest.QueryValues()))
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       workflowID,
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "GetRacks", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute GetRacks workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to get Racks", nil)
-	}
-
-	// Get workflow result
 	var flowResponse flowv1.GetListOfRacksResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, workflowID, err, "Rack", "GetRacks")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from GetRacks workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to get Racks: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_GetListOfRacks_FullMethodName,
+		flowRequest, &flowResponse,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -423,21 +380,19 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 
 // ValidateRackHandler is the API Handler for validating a Rack's components
 type ValidateRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateRackHandler initializes and returns a new handler for validating a Rack
 func NewValidateRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateRackHandler {
 	return ValidateRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -454,7 +409,7 @@ func NewValidateRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/rack/{id}/validation [get]
 func (vrh ValidateRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Validate", c, vrh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Validate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -492,7 +447,7 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	vrh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Get site ID from query param (required)
 	siteStrID := c.QueryParam("siteId")
@@ -542,9 +497,7 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 				Racks: &flowv1.RackTargets{
 					Targets: []*flowv1.RackTarget{
 						{
-							Identifier: &flowv1.RackTarget_Id{
-								Id: &flowv1.UUID{Id: rackStrID},
-							},
+							Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 						},
 					},
 				},
@@ -553,35 +506,15 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 	}
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       fmt.Sprintf("rack-validate-%s", rackStrID),
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "ValidateRackComponents", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute ValidateComponents workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Rack", nil)
-	}
-
-	// Get workflow result
 	var flowResponse flowv1.ValidateComponentsResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, fmt.Sprintf("rack-validate-%s", rackStrID), err, "Rack", "ValidateRackComponents")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from ValidateComponents workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to validate Rack: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_ValidateComponents_FullMethodName,
+		flowRequest, &flowResponse,
+		fmt.Sprintf("rack-validate-%s", rackStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -597,21 +530,19 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 // ValidateRacksHandler is the API Handler for validating Racks with optional filters.
 // If no filter is specified, validates all racks in the Site.
 type ValidateRacksHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateRacksHandler initializes and returns a new handler for validating Racks
 func NewValidateRacksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateRacksHandler {
 	return ValidateRacksHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -629,7 +560,7 @@ func NewValidateRacksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/rack/validation [get]
 func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "ValidateRacks", c, vrsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "ValidateRacks", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -718,35 +649,15 @@ func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("rack-validate-all-%s", common.QueryParamHash(apiRequest.QueryValues()))
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       workflowID,
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "ValidateRackComponents", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute ValidateComponents workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Racks", nil)
-	}
-
-	// Get workflow result
 	var flowResponse flowv1.ValidateComponentsResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, workflowID, err, "Rack", "ValidateRackComponents")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from ValidateComponents workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to validate Racks: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_ValidateComponents_FullMethodName,
+		flowRequest, &flowResponse,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -761,27 +672,25 @@ func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
 
 // UpdateRackPowerStateHandler is the API Handler for power controlling a single Rack by ID
 type UpdateRackPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateRackPowerStateHandler initializes and returns a new handler for power controlling a Rack
 func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateRackPowerStateHandler {
 	return UpdateRackPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Power control a Rack
-// @Description Power control a Rack identified by Rack UUID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Rack identified by Rack ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -792,7 +701,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/rack/{id}/power [patch]
 func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControl", c, pcrh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControl", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -830,7 +739,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	pcrh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdatePowerStateRequest{}
@@ -874,19 +783,17 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
 		},
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", apiRequest.State, rackStrID), "Rack")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), rackStrID), "Rack")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", apiRequest.State).Msg("finishing API handler")
@@ -897,27 +804,25 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 // BatchUpdateRackPowerStateHandler is the API Handler for power controlling Racks with optional filters
 type BatchUpdateRackPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateRackPowerStateHandler initializes and returns a new handler for batch power controlling Racks
 func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateRackPowerStateHandler {
 	return BatchUpdateRackPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Power control Racks
-// @Description Power control Racks with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all racks in the Site.
+// @Description Power control Racks with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all racks in the Site.
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -927,7 +832,7 @@ func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/rack/power [patch]
 func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControlBatch", c, pcrbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControlBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1001,10 +906,10 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	// Build TargetSpec from filter (nil filter = all racks)
 	targetSpec := request.Filter.ToTargetSpec()
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Rack")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Rack")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -1015,38 +920,36 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 // UpdateRackFirmwareHandler is the API Handler for upgrading firmware on a single Rack by ID
 type UpdateRackFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateRackFirmwareHandler initializes and returns a new handler for firmware upgrading a Rack
 func NewUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateRackFirmwareHandler {
 	return UpdateRackFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Firmware update a Rack
-// @Description Update firmware on a Rack identified by Rack UUID.
+// @Description Update firmware on a Rack identified by Rack ID.
 // @Tags rack
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param body body model.APIUpdateFirmwareRequest true "Firmware update request"
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/{id}/firmware [patch]
 func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdate", c, furh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1084,12 +987,12 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	furh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1126,19 +1029,19 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
 		},
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
-		nil, apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
+		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
+		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
+		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1149,21 +1052,19 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 // BatchUpdateRackFirmwareHandler is the API Handler for firmware upgrading Racks with optional filters
 type BatchUpdateRackFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateRackFirmwareHandler initializes and returns a new handler for batch firmware upgrading Racks
 func NewBatchUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateRackFirmwareHandler {
 	return BatchUpdateRackFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1179,7 +1080,7 @@ func NewBatchUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/firmware [patch]
 func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdateBatch", c, furbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdateBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1187,7 +1088,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchRackFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch rack firmware update request")
@@ -1253,10 +1154,12 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Build TargetSpec from filter (nil filter = all racks)
 	targetSpec := request.Filter.ToTargetSpec()
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
-		nil, request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
+		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
+		request.OverrideReadinessCheck, request.OverrideVersionCheck,
+		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1267,38 +1170,36 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 // BringUpRackHandler is the API Handler for bringing up a single Rack by ID
 type BringUpRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBringUpRackHandler initializes and returns a new handler for bringing up a Rack
 func NewBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BringUpRackHandler {
 	return BringUpRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Bring up a Rack
-// @Description Bring up a Rack identified by Rack UUID
+// @Description Bring up a Rack identified by Rack ID
 // @Tags rack
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param body body model.APIBringUpRackRequest true "Bring up request"
 // @Success 200 {object} model.APIBringUpRackResponse
 // @Router /v2/org/{org}/nico/rack/{id}/bringup [post]
 func (burh BringUpRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUp", c, burh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUp", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1336,7 +1237,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	burh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIBringUpRackRequest{}
@@ -1379,9 +1280,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
@@ -1393,10 +1292,10 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 		description = fmt.Sprintf("API bring up Rack %s", rackStrID)
 	}
 
-	flowResp, err := common.ExecuteBringUpRackWorkflow(ctx, c, logger, stc, targetSpec, description,
+	flowResp, proxyErr := common.ExecuteBringUpRackWorkflow(ctx, logger, stc, targetSpec, description,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-%s", rackStrID), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1407,21 +1306,19 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 
 // BatchBringUpRackHandler is the API Handler for bringing up Racks with optional filters
 type BatchBringUpRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchBringUpRackHandler initializes and returns a new handler for batch bringing up Racks
 func NewBatchBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchBringUpRackHandler {
 	return BatchBringUpRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1437,7 +1334,7 @@ func NewBatchBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *
 // @Success 200 {object} model.APIBringUpRackResponse
 // @Router /v2/org/{org}/nico/rack/bringup [post]
 func (bbuh BatchBringUpRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUpBatch", c, bbuh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUpBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1516,10 +1413,10 @@ func (bbuh BatchBringUpRackHandler) Handle(c echo.Context) error {
 		description = "API batch bring up Racks"
 	}
 
-	flowResp, err := common.ExecuteBringUpRackWorkflow(ctx, c, logger, stc, targetSpec, description,
+	flowResp, proxyErr := common.ExecuteBringUpRackWorkflow(ctx, logger, stc, targetSpec, description,
 		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-batch-%s", common.RequestHash(request.Filter)), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

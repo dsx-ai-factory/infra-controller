@@ -19,7 +19,7 @@ use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 
-pub trait JsonExt {
+pub(super) trait JsonExt {
     fn patch(self, patch: impl JsonPatch) -> serde_json::Value
     where
         Self: Sized;
@@ -76,7 +76,7 @@ impl JsonExt for serde_json::Value {
     }
 }
 
-pub trait JsonPatch {
+pub(super) trait JsonPatch {
     fn json_patch(&self) -> serde_json::Value;
 }
 
@@ -86,7 +86,7 @@ impl JsonPatch for serde_json::Value {
     }
 }
 
-pub fn json_patch(target: &mut serde_json::Value, patch: serde_json::Value) {
+pub(super) fn json_patch(target: &mut serde_json::Value, patch: serde_json::Value) {
     match (target, patch) {
         (serde_json::Value::Object(target_obj), serde_json::Value::Object(patch_obj)) => {
             for (k, v_patch) in patch_obj {

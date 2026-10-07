@@ -29,16 +29,42 @@ Disable site-explorer:
     $ nico-admin-cli set site-explorer --disable
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, group = "toggle", help = "Enable site-explorer")]
-    pub enable: bool,
+    enable: bool,
 
     #[clap(long, group = "toggle", help = "Disable site-explorer")]
-    pub disable: bool,
+    disable: bool,
 }
 
 impl Args {
-    pub fn is_enabled(&self) -> bool {
+    pub(super) fn is_enabled(&self) -> bool {
         self.enable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::Args;
+
+    #[test]
+    fn is_enabled_follows_enable_flag() {
+        value_scenarios!(
+            run = |args: Args| args.is_enabled();
+            "enabled" {
+                Args {
+                    enable: true,
+                    disable: false,
+                } => true,
+            }
+            "disabled" {
+                Args {
+                    enable: false,
+                    disable: true,
+                } => false,
+            }
+        );
     }
 }

@@ -20,7 +20,7 @@ use std::iter;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use itertools::Itertools;
 use mac_address::MacAddress;
 
@@ -50,7 +50,7 @@ pub struct ManagedHostExplorationResults {
 }
 
 impl ManagedHostExplorationResults {
-    pub fn dpu_machine_ids(&self) -> HashMap<u8, MachineId> {
+    pub fn dpu_machine_ids(&self) -> HashMap<u8, DpuMachineId> {
         self.dpu_reports
             .iter()
             .map(|dpu_report| {
@@ -59,7 +59,9 @@ impl ManagedHostExplorationResults {
                     dpu_report
                         .report
                         .machine_id
-                        .expect("DPU exploration report should have a generated machine id"),
+                        .expect("DPU exploration report should have a generated machine id")
+                        .try_into()
+                        .expect("should be a valid DPU machine ID"),
                 )
             })
             .collect()
@@ -101,6 +103,10 @@ pub struct ManagedHostConfig {
     /// Default: Dell. Override to exercise vendor-dependent paths
     /// (e.g. the post-`set_nic_mode` host power cycle).
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The hardware class the host's exploration report presents, in the shape
+    /// exploration derives. Attestation keys a profile on this, so set `None`
+    /// to model an endpoint no successful exploration has recorded one for.
+    pub hardware_class: Option<String>,
 }
 
 impl ManagedHostConfig {
@@ -215,6 +221,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 model: Some("BlueField-3 P-Series DPU 200GbE/".to_string()),
                 part_number: Some("900-9D3B6-00CV-A".to_string()),
                 serial_number: Some(dpu.serial.clone()),
+                port_mac_addresses: Vec::new(),
             })
             .chain(iter::once(NetworkAdapter {
                 id: format!("slot-{next_nic_index}"),
@@ -222,6 +229,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 model: Some("5720".to_string()),
                 part_number: Some("SN30L21970".to_string()),
                 serial_number: Some("L2NV97J018G".to_string()),
+                port_mac_addresses: Vec::new(),
             }))
             .collect();
 
@@ -282,9 +290,13 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: value.vendor,
+            hardware_class: value.hardware_class,
             managers: vec![Manager {
                 id: "iDRAC.Embedded.1".to_string(),
+                ipmi_port: None,
                 ethernet_interfaces: vec![EthernetInterface {
                     id: Some("NIC.1".to_string()),
                     description: Some("Management Network Interface".to_string()),
@@ -306,6 +318,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
+                serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
                 id: "System.Embedded.1".to_string(),

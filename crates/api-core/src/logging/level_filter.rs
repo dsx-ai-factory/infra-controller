@@ -45,20 +45,20 @@ impl<S> Reloadable for ReloadableFilter<S> {
     }
 }
 
-pub type ReloadHandle<S> = reload::Handle<EnvFilter, S>;
+pub(crate) type ReloadHandle<S> = reload::Handle<EnvFilter, S>;
 
 /// The current RUST_LOG setting.
 /// Immutable. Owner holds it in an ArcSwap and replaces the whole object using one of `with_base` or
 /// `reset_from`.
 pub struct ActiveLevel {
     /// Handle to reload the logging level.
-    pub reload_handle: Option<Box<dyn Reloadable>>,
+    reload_handle: Option<Box<dyn Reloadable>>,
 
     /// The current RUST_LOG
-    pub current: ArcSwap<String>,
+    current: ArcSwap<String>,
 
     /// The RUST_LOG we had on startup
-    pub base: String,
+    base: String,
 
     /// When to switch back to the RUST_LOG we had on startup
     expiry: ArcSwap<Option<DateTime<Utc>>>,
@@ -96,7 +96,11 @@ impl ActiveLevel {
     }
 
     // Build a new ActiveLevel with the same 'base' as caller
-    pub fn update(&self, filter: &str, until: Option<DateTime<Utc>>) -> Result<(), eyre::Error> {
+    pub(crate) fn update(
+        &self,
+        filter: &str,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<(), eyre::Error> {
         let current = dep_log_filter(EnvFilter::builder().parse(filter)?);
         self.expiry.store(until.into());
         if let Some(handle) = self.reload_handle.as_ref() {
@@ -107,7 +111,7 @@ impl ActiveLevel {
     }
 
     // Build a new ActiveLevel use 'base' as the RUST_LOG
-    pub fn reset_if_expired(&self) -> Result<(), eyre::Error> {
+    pub(crate) fn reset_if_expired(&self) -> Result<(), eyre::Error> {
         if let Some(expiry) = self.expiry.load().as_ref()
             && *expiry < chrono::Utc::now()
         {

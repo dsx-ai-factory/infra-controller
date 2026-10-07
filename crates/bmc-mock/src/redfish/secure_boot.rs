@@ -23,7 +23,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn resource<'a>(system_id: &'a str) -> redfish::Resource<'a> {
+pub(super) fn resource<'a>(system_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!(
         "{}/SecureBoot",
         redfish::computer_system::resource(system_id).odata_id
@@ -36,13 +36,13 @@ pub fn resource<'a>(system_id: &'a str) -> redfish::Resource<'a> {
     }
 }
 
-pub fn builder(resource: &redfish::Resource) -> SecureBootBuilder {
+pub(super) fn builder(resource: &redfish::Resource) -> SecureBootBuilder {
     SecureBootBuilder {
         value: resource.json_patch(),
     }
 }
 
-pub struct SecureBootBuilder {
+pub(super) struct SecureBootBuilder {
     value: serde_json::Value,
 }
 
@@ -55,11 +55,11 @@ impl Builder for SecureBootBuilder {
 }
 
 impl SecureBootBuilder {
-    pub fn secure_boot_enable(self, v: bool) -> Self {
+    pub(super) fn secure_boot_enable(self, v: bool) -> Self {
         self.apply_patch(json!({"SecureBootEnable": v}))
     }
 
-    pub fn secure_boot_current_boot(self, enabled: bool) -> Self {
+    pub(super) fn secure_boot_current_boot(self, enabled: bool) -> Self {
         if enabled {
             self.add_str_field("SecureBootCurrentBoot", "Enabled")
         } else {
@@ -67,7 +67,7 @@ impl SecureBootBuilder {
         }
     }
 
-    pub fn build(self) -> serde_json::Value {
+    pub(super) fn build(self) -> serde_json::Value {
         self.value
     }
 }

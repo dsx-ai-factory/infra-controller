@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateInstanceTypeTestSuite struct {
@@ -37,8 +37,8 @@ func (s *UpdateInstanceTypeTestSuite) Test_UpdateInstanceTypeInventory_Success()
 	var instanceTypeManager instanceTypeActivity.ManageInstanceType
 
 	siteID := uuid.New()
-	instanceTypeInventory := &cwssaws.InstanceTypeInventory{
-		InstanceTypes: []*cwssaws.InstanceType{
+	instanceTypeInventory := &corev1.InstanceTypeInventory{
+		InstanceTypes: []*corev1.InstanceType{
 			{
 				Id: uuid.NewString(),
 			},
@@ -63,8 +63,8 @@ func (s *UpdateInstanceTypeTestSuite) Test_UpdateInstanceTypeInventory_ActivityF
 	var instanceTypeManager instanceTypeActivity.ManageInstanceType
 
 	siteID := uuid.New()
-	instanceTypeInventory := &cwssaws.InstanceTypeInventory{
-		InstanceTypes: []*cwssaws.InstanceType{
+	instanceTypeInventory := &corev1.InstanceTypeInventory{
+		InstanceTypes: []*corev1.InstanceType{
 			{
 				Id: uuid.NewString(),
 			},

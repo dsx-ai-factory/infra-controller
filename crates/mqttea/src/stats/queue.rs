@@ -26,6 +26,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::Meter;
+
 // QueueStats stores a snapshot of received message processing
 // statistics.
 #[derive(Debug, Clone)]
@@ -190,6 +193,99 @@ impl QueueStatsTracker {
         self.failed_count.store(0, Ordering::Relaxed);
         self.event_loop_errors.store(0, Ordering::Relaxed);
         self.unmatched_topics.store(0, Ordering::Relaxed);
+    }
+
+    // register_metrics registers observable instruments over the tracker's
+    // atomics on the given meter: gauges for the point-in-time pending
+    // counters, and observable counters for the monotonic totals. Every
+    // series is labeled client=<client> so multiple clients in one process
+    // stay distinct; the value must be a compile-time literal (it is the
+    // cardinality bound). Call once per tracker -- a second registration
+    // would mint duplicate series.
+    //
+    // The callbacks read the atomics at collection time; nothing on the
+    // message path changes. Note that reset_counters() shows up on the
+    // observable counters as an ordinary Prometheus counter reset.
+    pub fn register_metrics(&self, meter: &Meter, client: &'static str) {
+        let gauges = [
+            (
+                "carbide_mqtt_queue_pending_messages",
+                "Number of received MQTT messages currently waiting in the client's processing queue",
+                &self.pending_count,
+            ),
+            (
+                "carbide_mqtt_queue_pending_bytes",
+                "Number of bytes of received MQTT messages currently waiting in the client's processing queue",
+                &self.pending_bytes,
+            ),
+        ];
+        for (name, description, value) in gauges {
+            let value = value.clone();
+            meter
+                .u64_observable_gauge(name)
+                .with_description(description)
+                .with_callback(move |observer| {
+                    observer.observe(
+                        value.load(Ordering::Relaxed) as u64,
+                        &[KeyValue::new("client", client)],
+                    );
+                })
+                .build();
+        }
+
+        // Monotonic totals; the Prometheus exporter appends the `_total`
+        // suffix, so these expose as `carbide_mqtt_messages_processed_total`
+        // and so on.
+        let counters = [
+            (
+                "carbide_mqtt_messages_processed",
+                "Number of received MQTT messages successfully processed by a registered handler",
+                &self.processed_count,
+            ),
+            (
+                "carbide_mqtt_processed_bytes",
+                "Number of bytes of received MQTT messages successfully processed by a registered handler",
+                &self.processed_bytes,
+            ),
+            (
+                "carbide_mqtt_messages_failed",
+                "Number of received MQTT messages whose handler failed or that had no handler registered",
+                &self.failed_count,
+            ),
+            (
+                "carbide_mqtt_messages_dropped",
+                "Number of received MQTT messages dropped because the client's processing queue was full",
+                &self.dropped_count,
+            ),
+            (
+                "carbide_mqtt_dropped_bytes",
+                "Number of bytes of received MQTT messages dropped because the client's processing queue was full",
+                &self.dropped_bytes,
+            ),
+            (
+                "carbide_mqtt_event_loop_errors",
+                "Number of connection errors encountered by the MQTT client's event loop",
+                &self.event_loop_errors,
+            ),
+            (
+                "carbide_mqtt_unmatched_topics",
+                "Number of received MQTT messages whose topic matched no registered handler pattern",
+                &self.unmatched_topics,
+            ),
+        ];
+        for (name, description, total) in counters {
+            let total = total.clone();
+            meter
+                .u64_observable_counter(name)
+                .with_description(description)
+                .with_callback(move |observer| {
+                    observer.observe(
+                        total.load(Ordering::Relaxed) as u64,
+                        &[KeyValue::new("client", client)],
+                    );
+                })
+                .build();
+        }
     }
 
     // to_stats will create an immutable snapshot of current statistics.

@@ -9,16 +9,35 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 const (
-	PowerControlStateOn         = "on"
-	PowerControlStateOff        = "off"
-	PowerControlStateCycle      = "cycle"
-	PowerControlStateForceOff   = "forceoff"
-	PowerControlStateForceCycle = "forcecycle"
+	PowerControlStateOn         = "On"
+	PowerControlStateOff        = "Off"
+	PowerControlStateCycle      = "Cycle"
+	PowerControlStateForceOff   = "ForceOff"
+	PowerControlStateForceCycle = "ForceCycle"
+	PowerControlStateACCycle    = "ACPowerCycle"
 )
+
+var legacyPowerControlStates = map[string]string{
+	"on":           PowerControlStateOn,
+	"off":          PowerControlStateOff,
+	"cycle":        PowerControlStateCycle,
+	"forceoff":     PowerControlStateForceOff,
+	"forcecycle":   PowerControlStateForceCycle,
+	"acpowercycle": PowerControlStateACCycle,
+}
+
+var powerControlStateWorkflowTokens = map[string]string{
+	PowerControlStateOn:         "on",
+	PowerControlStateOff:        "off",
+	PowerControlStateCycle:      "cycle",
+	PowerControlStateForceOff:   "forceoff",
+	PowerControlStateForceCycle: "forcecycle",
+	PowerControlStateACCycle:    "acpowercycle",
+}
 
 // ValidPowerControlStates defines the valid states for power control operations
 var ValidPowerControlStates = []string{
@@ -27,6 +46,7 @@ var ValidPowerControlStates = []string{
 	PowerControlStateCycle,
 	PowerControlStateForceOff,
 	PowerControlStateForceCycle,
+	PowerControlStateACCycle,
 }
 
 var validPowerControlStatesAny = func() []interface{} {
@@ -36,6 +56,22 @@ var validPowerControlStatesAny = func() []interface{} {
 	}
 	return result
 }()
+
+func normalizePowerControlState(state string) string {
+	if normalized, ok := legacyPowerControlStates[state]; ok {
+		return normalized
+	}
+	return state
+}
+
+// PowerControlStateWorkflowToken returns the stable lowercase token used in
+// workflow identities before the REST enum was changed to CapitalCase.
+func PowerControlStateWorkflowToken(state string) string {
+	if token, ok := powerControlStateWorkflowTokens[normalizePowerControlState(state)]; ok {
+		return token
+	}
+	return state
+}
 
 // ========== Power Control Request ==========
 
@@ -56,6 +92,7 @@ type APIUpdatePowerStateRequest struct {
 
 // Validate validates the power control request
 func (r *APIUpdatePowerStateRequest) Validate() error {
+	r.State = normalizePowerControlState(r.State)
 	return validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.State,
@@ -109,6 +146,7 @@ type APIBatchUpdateRackPowerStateRequest struct {
 
 // Validate checks required fields and power state validity.
 func (r *APIBatchUpdateRackPowerStateRequest) Validate() error {
+	r.State = normalizePowerControlState(r.State)
 	if r.SiteID == "" {
 		return fmt.Errorf("siteId is required")
 	}
@@ -138,6 +176,7 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 
 // Validate checks required fields, power state validity, and filter constraints.
 func (r *APIBatchUpdateTrayPowerStateRequest) Validate() error {
+	r.State = normalizePowerControlState(r.State)
 	if r.SiteID == "" {
 		return fmt.Errorf("siteId is required")
 	}

@@ -23,15 +23,12 @@ mod list_applied;
 mod revoke;
 mod show;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Create a remediation")]
     Create(create::Args),
     #[clap(about = "Approve a remediation")]

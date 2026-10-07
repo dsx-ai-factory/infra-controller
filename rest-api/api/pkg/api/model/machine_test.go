@@ -6,6 +6,7 @@ package model
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -13,265 +14,288 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestMachine_NewAPIMachine(t *testing.T) {
 	mID := uuid.NewString()
+	stateVersion := "state-version-1"
+	stateSetAt := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 
-	machineInfo1 := &cwssaws.MachineInfo{
-		Machine: &cwssaws.Machine{
-			Id:    &cwssaws.MachineId{Id: mID},
-			State: "Ready",
-			DiscoveryInfo: &cwssaws.DiscoveryInfo{
-				NetworkInterfaces: []*cwssaws.NetworkInterface{
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "0x14e4",
-							Device:      "0x165f",
-							Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.0/net/eno8303",
-							Description: cutil.GetPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
+	machineInfo1 := &corev1.MachineInfo{
+		Machine: &corev1.Machine{
+			Id:           &corev1.MachineId{Id: mID},
+			State:        "Ready",
+			StateVersion: stateVersion,
+			StateSla: &corev1.StateSla{
+				Sla:                 durationpb.New(5 * time.Minute),
+				TimeInStateAboveSla: false,
+			},
+			Events: []*corev1.MachineEvent{
+				{
+					Event:   "Provisioning",
+					Version: "older-version",
+					Time:    timestamppb.New(stateSetAt.Add(-time.Hour)),
+				},
+				{
+					Event:   "Ready",
+					Version: stateVersion,
+					Time:    timestamppb.New(stateSetAt),
+				},
+			},
+			Status: &corev1.MachineStatus{
+				DiscoveryInfo: &corev1.DiscoveryInfo{
+					NetworkInterfaces: []*corev1.NetworkInterface{
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "0x14e4",
+								Device:      "0x165f",
+								Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.0/net/eno8303",
+								Description: cutil.GetPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
+							},
+						},
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "0x14e4",
+								Device:      "0x165f",
+								Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.1/net/eno8403",
+								Description: cutil.GetPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
+							},
+						},
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "0x14e4",
+								Device:      "0x16d7",
+								Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.0/net/eno12399np0",
+								Description: cutil.GetPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
+							},
+						},
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "0x14e4",
+								Device:      "0x16d7",
+								Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.1/net/eno12409np1",
+								Description: cutil.GetPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
+							},
+						},
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "0x15b3",
+								Device:      "0xa2d6",
+								Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.0/net/enp177s0f0np0",
+								NumaNode:    1,
+								Description: cutil.GetPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
+							},
+						},
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "0x15b3",
+								Device:      "0xa2d6",
+								Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.1/net/enp177s0f1np1",
+								NumaNode:    1,
+								Description: cutil.GetPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
+							},
 						},
 					},
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "0x14e4",
-							Device:      "0x165f",
-							Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.1/net/eno8403",
-							Description: cutil.GetPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
+					BlockDevices: []*corev1.BlockDevice{
+						{
+							Model:    "NO_MODEL",
+							Revision: "NO_REVISION",
+						},
+						{
+							Model:    "LOGICAL_VOLUME",
+							Revision: "3.53",
+							Serial:   "600508b1001cb4d1a278bf3ee7a72228",
+						},
+						{
+							Model:    "Dell Ent NVMe CM6 RI 1.92TB",
+							Revision: "2.1.3",
+						},
+						{
+							Model:    "SSDPF2KE016T9L",
+							Revision: "2CV1L028",
+						},
+						{
+							Model:    "DELLBOSS_VD",
+							Revision: "MV.R00-0",
 						},
 					},
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "0x14e4",
-							Device:      "0x16d7",
-							Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.0/net/eno12399np0",
-							Description: cutil.GetPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
+					DmiData: &corev1.DmiData{
+						BoardName:     "7Z23CTOLWW",
+						BoardVersion:  "06",
+						BiosVersion:   "U8E122J-1.51",
+						ProductSerial: "J1050ACR",
+						BoardSerial:   ".C1KS2CS001G.",
+						ChassisSerial: "J1050ACR",
+						BiosDate:      "03/30/2023",
+						ProductName:   "ThinkSystem SR670 V2",
+						SysVendor:     "Lenovo",
+					},
+					NvmeDevices: []*corev1.NvmeDevice{
+						{
+							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
+							FirmwareRev: "2.1.3",
+						},
+						{
+							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
+							FirmwareRev: "2.1.3",
+						},
+						{
+							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
+							FirmwareRev: "2.1.3",
 						},
 					},
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "0x14e4",
-							Device:      "0x16d7",
-							Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.1/net/eno12409np1",
-							Description: cutil.GetPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
+					Gpus: []*corev1.Gpu{
+						{
+							Name:           "NVIDIA H100 PCIe",
+							Serial:         "1654422005434",
+							DriverVersion:  "530.30.02",
+							VbiosVersion:   "96.00.30.00.01",
+							InforomVersion: "1010.0200.00.02",
+							TotalMemory:    "81559 MiB",
+							Frequency:      "1755 MHz",
+							PciBusId:       "00000000:17:00.0",
 						},
 					},
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "0x15b3",
-							Device:      "0xa2d6",
-							Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.0/net/enp177s0f0np0",
-							NumaNode:    1,
-							Description: cutil.GetPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
+					InfinibandInterfaces: []*corev1.InfinibandInterface{
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "Mellanox Technologies",
+								Device:      "MT28908 Family [ConnectX-6]",
+								Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.0/infiniband/rocep202s0f0",
+								NumaNode:    1,
+								Description: cutil.GetPtr("MT28908 Family [ConnectX-6]"),
+								Slot:        cutil.GetPtr("0000:ca:00.0"),
+							},
+							Guid: "1070fd0300bd43ac",
 						},
-					},
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "0x15b3",
-							Device:      "0xa2d6",
-							Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.1/net/enp177s0f1np1",
-							NumaNode:    1,
-							Description: cutil.GetPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
+						{
+							PciProperties: &corev1.PciDeviceProperties{
+								Vendor:      "Mellanox Technologies",
+								Device:      "MT28908 Family [ConnectX-6]",
+								Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.1/infiniband/rocep202s0f1",
+								NumaNode:    1,
+								Description: cutil.GetPtr("MT28908 Family [ConnectX-6]"),
+								Slot:        cutil.GetPtr("0000:ca:00.1"),
+							},
+							Guid: "1070fd0300bd43ad",
 						},
 					},
 				},
-				BlockDevices: []*cwssaws.BlockDevice{
-					{
-						Model:    "NO_MODEL",
-						Revision: "NO_REVISION",
-					},
-					{
-						Model:    "LOGICAL_VOLUME",
-						Revision: "3.53",
-						Serial:   "600508b1001cb4d1a278bf3ee7a72228",
-					},
-					{
-						Model:    "Dell Ent NVMe CM6 RI 1.92TB",
-						Revision: "2.1.3",
-					},
-					{
-						Model:    "SSDPF2KE016T9L",
-						Revision: "2CV1L028",
-					},
-					{
-						Model:    "DELLBOSS_VD",
-						Revision: "MV.R00-0",
-					},
-				},
-				DmiData: &cwssaws.DmiData{
-					BoardName:     "7Z23CTOLWW",
-					BoardVersion:  "06",
-					BiosVersion:   "U8E122J-1.51",
-					ProductSerial: "J1050ACR",
-					BoardSerial:   ".C1KS2CS001G.",
-					ChassisSerial: "J1050ACR",
-					BiosDate:      "03/30/2023",
-					ProductName:   "ThinkSystem SR670 V2",
-					SysVendor:     "Lenovo",
-				},
-				NvmeDevices: []*cwssaws.NvmeDevice{
-					{
-						Model:       "Dell Ent NVMe CM6 RI 1.92TB",
-						FirmwareRev: "2.1.3",
-					},
-					{
-						Model:       "Dell Ent NVMe CM6 RI 1.92TB",
-						FirmwareRev: "2.1.3",
-					},
-					{
-						Model:       "Dell Ent NVMe CM6 RI 1.92TB",
-						FirmwareRev: "2.1.3",
-					},
-				},
-				Gpus: []*cwssaws.Gpu{
-					{
-						Name:           "NVIDIA H100 PCIe",
-						Serial:         "1654422005434",
-						DriverVersion:  "530.30.02",
-						VbiosVersion:   "96.00.30.00.01",
-						InforomVersion: "1010.0200.00.02",
-						TotalMemory:    "81559 MiB",
-						Frequency:      "1755 MHz",
-						PciBusId:       "00000000:17:00.0",
-					},
-				},
-				InfinibandInterfaces: []*cwssaws.InfinibandInterface{
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "Mellanox Technologies",
-							Device:      "MT28908 Family [ConnectX-6]",
-							Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.0/infiniband/rocep202s0f0",
-							NumaNode:    1,
-							Description: cutil.GetPtr("MT28908 Family [ConnectX-6]"),
-							Slot:        cutil.GetPtr("0000:ca:00.0"),
+				Health: &corev1.HealthReport{
+					Source: "aggregate-host-health",
+					Successes: []*corev1.HealthProbeSuccess{
+						{
+							Id:     "BgpDaemonEnabled",
+							Target: nil,
 						},
-						Guid: "1070fd0300bd43ac",
-					},
-					{
-						PciProperties: &cwssaws.PciDeviceProperties{
-							Vendor:      "Mellanox Technologies",
-							Device:      "MT28908 Family [ConnectX-6]",
-							Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.1/infiniband/rocep202s0f1",
-							NumaNode:    1,
-							Description: cutil.GetPtr("MT28908 Family [ConnectX-6]"),
-							Slot:        cutil.GetPtr("0000:ca:00.1"),
+						{
+							Id:     "BgpStats",
+							Target: nil,
 						},
-						Guid: "1070fd0300bd43ad",
+						{
+							Id:     "ContainerExists",
+							Target: nil,
+						},
+						{
+							Id:     "DhcpServer",
+							Target: nil,
+						},
+						{
+							Id:     "FileExists",
+							Target: cutil.GetPtr("/var/lib/hbn/etc/frr/daemons"),
+						},
+						{
+							Id:     "FileExists",
+							Target: cutil.GetPtr("/var/lib/hbn/etc/frr/frr.conf"),
+						},
+						{
+							Id:     "FileExists",
+							Target: cutil.GetPtr("/var/lib/hbn/etc/network/interfaces"),
+						},
+						{
+							Id:     "FileExists",
+							Target: cutil.GetPtr("/var/lib/hbn/etc/supervisor/conf.d/default-nico-dhcp-server.conf"),
+						},
+						{
+							Id:     "FileExists",
+							Target: cutil.GetPtr("/var/lib/hbn/etc/supervisor/conf.d/default-isc-dhcp-relay.conf"),
+						},
+						{
+							Id:     "FileIsValid",
+							Target: cutil.GetPtr("etc/frr/daemons"),
+						},
+						{
+							Id:     "FileIsValid",
+							Target: cutil.GetPtr("etc/frr/frr.conf"),
+						},
+						{
+							Id:     "FileIsValid",
+							Target: cutil.GetPtr("etc/network/interfaces"),
+						},
+						{
+							Id:     "FileIsValid",
+							Target: cutil.GetPtr("etc/supervisor/conf.d/default-nico-dhcp-server.conf"),
+						},
+						{
+							Id:     "FileIsValid",
+							Target: cutil.GetPtr("etc/supervisor/conf.d/default-isc-dhcp-relay.conf"),
+						},
+						{
+							Id:     "Ifreload",
+							Target: nil,
+						},
+						{
+							Id:     "RestrictedMode",
+							Target: nil,
+						},
+						{
+							Id:     "ServiceRunning",
+							Target: cutil.GetPtr("frr"),
+						},
+						{
+							Id:     "ServiceRunning",
+							Target: cutil.GetPtr("nl2doca"),
+						},
+						{
+							Id:     "ServiceRunning",
+							Target: cutil.GetPtr("rsyslog"),
+						},
+						{
+							Id:     "SupervisorctlStatus",
+							Target: nil,
+						},
+					},
+					Alerts: []*corev1.HealthProbeAlert{
+						{
+							Id:            "HeartbeatTimeout",
+							Target:        cutil.GetPtr("hardware-health"),
+							InAlertSince:  nil,
+							Message:       "",
+							TenantMessage: nil,
+							Classifications: []string{
+								"PreventAllocations",
+								"PreventHostStateChanges",
+							},
+						},
 					},
 				},
 			},
-			BmcInfo: &cwssaws.BmcInfo{
+			BmcInfo: &corev1.BmcInfo{
 				Ip:  cutil.GetPtr("10.100.1.1"),
 				Mac: cutil.GetPtr("00-B0-D0-63-C2-26"),
-			},
-			Health: &cwssaws.HealthReport{
-				Source: "aggregate-host-health",
-				Successes: []*cwssaws.HealthProbeSuccess{
-					{
-						Id:     "BgpDaemonEnabled",
-						Target: nil,
-					},
-					{
-						Id:     "BgpStats",
-						Target: nil,
-					},
-					{
-						Id:     "ContainerExists",
-						Target: nil,
-					},
-					{
-						Id:     "DhcpServer",
-						Target: nil,
-					},
-					{
-						Id:     "FileExists",
-						Target: cutil.GetPtr("/var/lib/hbn/etc/frr/daemons"),
-					},
-					{
-						Id:     "FileExists",
-						Target: cutil.GetPtr("/var/lib/hbn/etc/frr/frr.conf"),
-					},
-					{
-						Id:     "FileExists",
-						Target: cutil.GetPtr("/var/lib/hbn/etc/network/interfaces"),
-					},
-					{
-						Id:     "FileExists",
-						Target: cutil.GetPtr("/var/lib/hbn/etc/supervisor/conf.d/default-nico-dhcp-server.conf"),
-					},
-					{
-						Id:     "FileExists",
-						Target: cutil.GetPtr("/var/lib/hbn/etc/supervisor/conf.d/default-isc-dhcp-relay.conf"),
-					},
-					{
-						Id:     "FileIsValid",
-						Target: cutil.GetPtr("etc/frr/daemons"),
-					},
-					{
-						Id:     "FileIsValid",
-						Target: cutil.GetPtr("etc/frr/frr.conf"),
-					},
-					{
-						Id:     "FileIsValid",
-						Target: cutil.GetPtr("etc/network/interfaces"),
-					},
-					{
-						Id:     "FileIsValid",
-						Target: cutil.GetPtr("etc/supervisor/conf.d/default-nico-dhcp-server.conf"),
-					},
-					{
-						Id:     "FileIsValid",
-						Target: cutil.GetPtr("etc/supervisor/conf.d/default-isc-dhcp-relay.conf"),
-					},
-					{
-						Id:     "Ifreload",
-						Target: nil,
-					},
-					{
-						Id:     "RestrictedMode",
-						Target: nil,
-					},
-					{
-						Id:     "ServiceRunning",
-						Target: cutil.GetPtr("frr"),
-					},
-					{
-						Id:     "ServiceRunning",
-						Target: cutil.GetPtr("nl2doca"),
-					},
-					{
-						Id:     "ServiceRunning",
-						Target: cutil.GetPtr("rsyslog"),
-					},
-					{
-						Id:     "SupervisorctlStatus",
-						Target: nil,
-					},
-				},
-				Alerts: []*cwssaws.HealthProbeAlert{
-					{
-						Id:            "HeartbeatTimeout",
-						Target:        cutil.GetPtr("hardware-health"),
-						InAlertSince:  nil,
-						Message:       "",
-						TenantMessage: nil,
-						Classifications: []string{
-							"PreventAllocations",
-							"PreventHostStateChanges",
-						},
-					},
-				},
 			},
 		},
 	}
 
 	// Convert Machine Health info data into health report interface
 	var machineHealth map[string]interface{}
-	machineHealthJSON, _ := json.Marshal(machineInfo1.Machine.Health)
+	machineHealthJSON, _ := json.Marshal(machineInfo1.Machine.GetStatus().GetHealth())
 	_ = json.Unmarshal(machineHealthJSON, &machineHealth)
 
 	dbm := &cdbm.Machine{
@@ -411,58 +435,129 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		}
 
 		if apimi.Metadata.DMIData != nil {
-			assert.Equal(t, *apimi.Metadata.DMIData.BoardName, machineInfo1.Machine.DiscoveryInfo.DmiData.BoardName)
-			assert.Equal(t, *apimi.Metadata.DMIData.BoardVersion, machineInfo1.Machine.DiscoveryInfo.DmiData.BoardVersion)
-			assert.Equal(t, *apimi.Metadata.DMIData.BiosDate, machineInfo1.Machine.DiscoveryInfo.DmiData.BiosDate)
-			assert.Equal(t, *apimi.Metadata.DMIData.BiosVersion, machineInfo1.Machine.DiscoveryInfo.DmiData.BiosVersion)
-			assert.Equal(t, *apimi.Metadata.DMIData.ProductSerial, machineInfo1.Machine.DiscoveryInfo.DmiData.ProductSerial)
-			assert.Equal(t, *apimi.Metadata.DMIData.BoardSerial, machineInfo1.Machine.DiscoveryInfo.DmiData.BoardSerial)
-			assert.Equal(t, *apimi.Metadata.DMIData.ChassisSerial, machineInfo1.Machine.DiscoveryInfo.DmiData.ChassisSerial)
-			assert.Equal(t, *apimi.Metadata.DMIData.SysVendor, machineInfo1.Machine.DiscoveryInfo.DmiData.SysVendor)
+			assert.Equal(t, *apimi.Metadata.DMIData.BoardName, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.BoardName)
+			assert.Equal(t, *apimi.Metadata.DMIData.BoardVersion, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.BoardVersion)
+			assert.Equal(t, *apimi.Metadata.DMIData.BiosDate, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.BiosDate)
+			assert.Equal(t, *apimi.Metadata.DMIData.BiosVersion, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.BiosVersion)
+			assert.Equal(t, *apimi.Metadata.DMIData.ProductSerial, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.ProductSerial)
+			assert.Equal(t, *apimi.Metadata.DMIData.BoardSerial, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.BoardSerial)
+			assert.Equal(t, *apimi.Metadata.DMIData.ChassisSerial, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.ChassisSerial)
+			assert.Equal(t, *apimi.Metadata.DMIData.SysVendor, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().DmiData.SysVendor)
 		}
 
 		if apimi.Metadata.GPUs != nil {
-			assert.Equal(t, *apimi.Metadata.GPUs[0].Name, machineInfo1.Machine.DiscoveryInfo.Gpus[0].Name)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].Serial, machineInfo1.Machine.DiscoveryInfo.Gpus[0].Serial)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].DriverVersion, machineInfo1.Machine.DiscoveryInfo.Gpus[0].DriverVersion)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].VbiosVersion, machineInfo1.Machine.DiscoveryInfo.Gpus[0].VbiosVersion)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].InforomVersion, machineInfo1.Machine.DiscoveryInfo.Gpus[0].InforomVersion)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].TotalMemory, machineInfo1.Machine.DiscoveryInfo.Gpus[0].TotalMemory)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].Frequency, machineInfo1.Machine.DiscoveryInfo.Gpus[0].Frequency)
-			assert.Equal(t, *apimi.Metadata.GPUs[0].PciBusId, machineInfo1.Machine.DiscoveryInfo.Gpus[0].PciBusId)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].Name, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].Name)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].Serial, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].Serial)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].DriverVersion, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].DriverVersion)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].VbiosVersion, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].VbiosVersion)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].InforomVersion, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].InforomVersion)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].TotalMemory, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].TotalMemory)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].Frequency, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].Frequency)
+			assert.Equal(t, *apimi.Metadata.GPUs[0].PciBusId, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].PciBusId)
 		}
 
 		if apimi.Metadata.NetworkInterfaces != nil {
-			assert.Equal(t, len(apimi.Metadata.NetworkInterfaces), len(machineInfo1.Machine.DiscoveryInfo.NetworkInterfaces))
+			assert.Equal(t, len(apimi.Metadata.NetworkInterfaces), len(machineInfo1.Machine.GetStatus().GetDiscoveryInfo().NetworkInterfaces))
 		}
 
 		if apimi.Metadata.InfiniBandInterfaces != nil {
-			assert.Equal(t, len(apimi.Metadata.InfiniBandInterfaces), len(machineInfo1.Machine.DiscoveryInfo.InfinibandInterfaces))
+			assert.Equal(t, len(apimi.Metadata.InfiniBandInterfaces), len(machineInfo1.Machine.GetStatus().GetDiscoveryInfo().InfinibandInterfaces))
 		}
+
+		require.NotNil(t, apimi.Metadata.LifecycleState)
+		assert.Equal(t, machineInfo1.Machine.State, apimi.Metadata.LifecycleState.Value)
+		assert.Equal(t, machineInfo1.Machine.StateSla.TimeInStateAboveSla, apimi.Metadata.LifecycleState.IsAboveSLA)
+		assert.Equal(t, machineInfo1.Machine.StateSla.Sla.GetSeconds(), apimi.Metadata.LifecycleState.SLASeconds)
+		require.NotNil(t, apimi.Metadata.LifecycleState.Updated)
+		assert.True(t, stateSetAt.Equal(*apimi.Metadata.LifecycleState.Updated))
 	}
 
 	if apimi.Health != nil {
-		assert.Equal(t, apimi.Health.Source, machineInfo1.Machine.Health.Source)
+		assert.Equal(t, apimi.Health.Source, machineInfo1.Machine.GetStatus().GetHealth().Source)
 		if apimi.Health.ObservedAt != nil {
-			assert.Equal(t, apimi.Health.ObservedAt, machineInfo1.Machine.Health.ObservedAt)
+			assert.Equal(t, apimi.Health.ObservedAt, machineInfo1.Machine.GetStatus().GetHealth().ObservedAt)
 		}
-		assert.Equal(t, len(apimi.Health.Successes), len(machineInfo1.Machine.Health.Successes))
+		assert.Equal(t, len(apimi.Health.Successes), len(machineInfo1.Machine.GetStatus().GetHealth().Successes))
 		if apimi.Health.Alerts != nil {
-			assert.Equal(t, apimi.Health.Alerts[0].ID, machineInfo1.Machine.Health.Alerts[0].Id)
+			assert.Equal(t, apimi.Health.Alerts[0].ID, machineInfo1.Machine.GetStatus().GetHealth().Alerts[0].Id)
 			if apimi.Health.Alerts[0].Target != nil {
-				assert.Equal(t, *apimi.Health.Alerts[0].Target, *machineInfo1.Machine.Health.Alerts[0].Target)
+				assert.Equal(t, *apimi.Health.Alerts[0].Target, *machineInfo1.Machine.GetStatus().GetHealth().Alerts[0].Target)
 			}
 			if apimi.Health.Alerts[0].TenantMessage != nil {
-				assert.Equal(t, *apimi.Health.Alerts[0].TenantMessage, *machineInfo1.Machine.Health.Alerts[0].TenantMessage)
+				assert.Equal(t, *apimi.Health.Alerts[0].TenantMessage, *machineInfo1.Machine.GetStatus().GetHealth().Alerts[0].TenantMessage)
 			}
-			assert.Equal(t, apimi.Health.Alerts[0].Message, machineInfo1.Machine.Health.Alerts[0].Message)
-			assert.Equal(t, len(apimi.Health.Alerts[0].Classifications), len(machineInfo1.Machine.Health.Alerts[0].Classifications))
+			assert.Equal(t, apimi.Health.Alerts[0].Message, machineInfo1.Machine.GetStatus().GetHealth().Alerts[0].Message)
+			assert.Equal(t, len(apimi.Health.Alerts[0].Classifications), len(machineInfo1.Machine.GetStatus().GetHealth().Alerts[0].Classifications))
 		}
 	}
 
-	assert.Equal(t, apimi.Labels, dbm.Labels)
+	assert.Equal(t, map[string]string(apimi.Labels), dbm.Labels)
 	assert.Equal(t, dbm.HwSkuDeviceType, apimi.HwSkuDeviceType)
 	assert.Equal(t, dbm.IsUsableByTenant, apimi.IsUsableByTenant)
+	t.Run("assignment observed after Ready machine snapshot", func(t *testing.T) {
+		ready := *dbm
+		ready.Status = cdbm.MachineStatusReady
+		ready.IsAssigned = false
+		instance := &cdbm.Instance{ID: uuid.New()}
+		response := NewAPIMachine(&ready, dbmcs, dbmis, dbsds, instance, false, true)
+		assert.Equal(t, cdbm.MachineStatusInUse, response.Status)
+		require.NotNil(t, response.InstanceID)
+		assert.Equal(t, instance.ID.String(), *response.InstanceID)
+		assert.Equal(t, cdbm.MachineStatusReady, ready.Status)
+	})
+}
+
+func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
+	statusVersion := "2.6.1"
+
+	tests := []struct {
+		name     string
+		metadata *cdbm.SiteControllerMachine
+		want     *string
+	}{
+		{
+			name: "uses Machine status value",
+			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
+				Status: &corev1.MachineStatus{LastScoutObservedVersion: &statusVersion},
+			}},
+			want: &statusVersion,
+		},
+		{
+			name:     "returns null when version is unknown",
+			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{}},
+			want:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiMachine := NewAPIMachine(
+				&cdbm.Machine{Metadata: tt.metadata},
+				nil,
+				nil,
+				nil,
+				nil,
+				false,
+				false,
+			)
+
+			assert.Equal(t, tt.want, apiMachine.ScoutVersion)
+
+			response, err := json.Marshal(apiMachine)
+			require.NoError(t, err)
+
+			var fields map[string]interface{}
+			require.NoError(t, json.Unmarshal(response, &fields))
+			assert.NotContains(t, fields, "lastScoutObservedVersion")
+			value, found := fields["scoutVersion"]
+			require.True(t, found)
+			if tt.want == nil {
+				assert.Nil(t, value)
+			} else {
+				assert.Equal(t, *tt.want, value)
+			}
+		})
+	}
 }
 
 func TestMachine_NewAPIMachineSummary(t *testing.T) {
@@ -791,7 +886,7 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 			require.NotNil(t, got.MachineId)
 			assert.Equal(t, tt.machineID, got.MachineId.Id)
 			require.NotNil(t, got.HealthReportEntry)
-			assert.Equal(t, cwssaws.HealthReportApplyMode_Merge, got.HealthReportEntry.Mode)
+			assert.Equal(t, corev1.HealthReportApplyMode_Merge, got.HealthReportEntry.Mode)
 			require.NotNil(t, got.HealthReportEntry.Report)
 			assert.Equal(t, MachineHealthOverrideSourceOnlineRepair, got.HealthReportEntry.Report.Source)
 

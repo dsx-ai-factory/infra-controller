@@ -8,9 +8,9 @@ import (
 	"errors"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -25,7 +25,7 @@ type ManageNVLinkLogicalPartitionInventory struct {
 func (mmi *ManageNVLinkLogicalPartitionInventory) DiscoverNVLinkLogicalPartitionInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverNVLinkLogicalPartitionInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[*cwssaws.NVLinkLogicalPartitionId, *cwssaws.NVLinkLogicalPartition, *cwssaws.NVLinkLogicalPartitionInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.NVLinkLogicalPartitionId, *corev1.NVLinkLogicalPartition, *corev1.NVLinkLogicalPartitionInventory]{
 		itemType:               "NVLinkLogicalPartition",
 		config:                 mmi.config,
 		internalFindIDs:        nvllpFindIDs,
@@ -42,22 +42,22 @@ func NewManageNVLinkLogicalPartitionInventory(config ManageInventoryConfig) Mana
 	}
 }
 
-func nvllpFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.NVLinkLogicalPartitionId, error) {
+func nvllpFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.NVLinkLogicalPartitionId, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	resp, err := grpcServiceClient.FindNVLinkLogicalPartitionIds(ctx, &cwssaws.NVLinkLogicalPartitionSearchFilter{})
+	resp, err := grpcServiceClient.FindNVLinkLogicalPartitionIds(ctx, &corev1.NVLinkLogicalPartitionSearchFilter{})
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]*cwssaws.NVLinkLogicalPartitionId, len(resp.GetPartitionIds()))
+	ids := make([]*corev1.NVLinkLogicalPartitionId, len(resp.GetPartitionIds()))
 	for i, id := range resp.GetPartitionIds() {
 		ids[i] = id
 	}
 	return ids, nil
 }
 
-func nvllpFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.NVLinkLogicalPartitionId) ([]*cwssaws.NVLinkLogicalPartition, error) {
+func nvllpFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.NVLinkLogicalPartitionId) ([]*corev1.NVLinkLogicalPartition, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	req := &cwssaws.NVLinkLogicalPartitionsByIdsRequest{
+	req := &corev1.NVLinkLogicalPartitionsByIdsRequest{
 		PartitionIds: ids,
 	}
 	resp, err := grpcServiceClient.FindNVLinkLogicalPartitionsByIds(ctx, req)
@@ -67,14 +67,14 @@ func nvllpFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids
 	return resp.GetPartitions(), nil
 }
 
-func nvllpPagedInventory(allItemIDs []*cwssaws.NVLinkLogicalPartitionId, pagedItems []*cwssaws.NVLinkLogicalPartition, input *pagedInventoryInput) *cwssaws.NVLinkLogicalPartitionInventory {
+func nvllpPagedInventory(allItemIDs []*corev1.NVLinkLogicalPartitionId, pagedItems []*corev1.NVLinkLogicalPartition, input *pagedInventoryInput) *corev1.NVLinkLogicalPartitionInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of NVLinkLogicalPartitions
-	inventory := &cwssaws.NVLinkLogicalPartitionInventory{
+	inventory := &corev1.NVLinkLogicalPartitionInventory{
 		Partitions: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),
@@ -104,7 +104,7 @@ func NewManageNVLinkLogicalPartition(coreGrpcClient *cClient.CoreGrpcAtomicClien
 }
 
 // Function to create NVLinkLogical Partition with NICo
-func (mnvllp *ManageNVLinkLogicalPartition) CreateNVLinkLogicalPartitionOnSite(ctx context.Context, request *cwssaws.NVLinkLogicalPartitionCreationRequest) (*cwssaws.NVLinkLogicalPartition, error) {
+func (mnvllp *ManageNVLinkLogicalPartition) CreateNVLinkLogicalPartitionOnSite(ctx context.Context, request *corev1.NVLinkLogicalPartitionCreationRequest) (*corev1.NVLinkLogicalPartition, error) {
 	logger := log.With().Str("Activity", "CreateNVLinkLogicalPartitionOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -138,18 +138,20 @@ func (mnvllp *ManageNVLinkLogicalPartition) CreateNVLinkLogicalPartitionOnSite(c
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call Core gRPC endpoint
+	start := time.Now()
 	nvLinkLogicalPartition, err := grpcServiceClient.CreateNVLinkLogicalPartition(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create NVLink Logical Partition using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create NVLink Logical Partition using Core gRPC API")
 		return nil, swe.WrapErr(err)
 	}
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
-	logger.Info().Msg("Completed activity")
 	return nvLinkLogicalPartition, nil
 }
 
 // Function to update NVLinkLogical Partition with NICo
-func (mnvllp *ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionOnSite(ctx context.Context, request *cwssaws.NVLinkLogicalPartitionUpdateRequest) error {
+func (mnvllp *ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionOnSite(ctx context.Context, request *corev1.NVLinkLogicalPartitionUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateNVLinkLogicalPartitionOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -181,19 +183,20 @@ func (mnvllp *ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionOnSite(c
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call Core gRPC endpoint
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateNVLinkLogicalPartition(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update NVLink Logical Partition using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update NVLink Logical Partition using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to delete NVLinkLogical Partition on NICo
-func (mnvllp *ManageNVLinkLogicalPartition) DeleteNVLinkLogicalPartitionOnSite(ctx context.Context, request *cwssaws.NVLinkLogicalPartitionDeletionRequest) error {
+func (mnvllp *ManageNVLinkLogicalPartition) DeleteNVLinkLogicalPartitionOnSite(ctx context.Context, request *corev1.NVLinkLogicalPartitionDeletionRequest) error {
 	logger := log.With().Str("Activity", "DeleteNVLinkLogicalPartitionOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -218,13 +221,14 @@ func (mnvllp *ManageNVLinkLogicalPartition) DeleteNVLinkLogicalPartitionOnSite(c
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteNVLinkLogicalPartition(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete NVLink Logical Partition using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete NVLink Logical Partition using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }

@@ -13,7 +13,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type InventorySSHKeyGroupTestSuite struct {
@@ -84,8 +84,8 @@ func (cvv2ts *CreateSSHKeyGroupV2TestSuite) AfterTest(suiteName, testName string
 func (cvv2ts *CreateSSHKeyGroupV2TestSuite) Test_CreateSSHKeyGroupV2_Success() {
 	var sshKeyGroupManager iActivity.ManageSSHKeyGroup
 
-	request := &cwssaws.CreateTenantKeysetRequest{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	request := &corev1.CreateTenantKeysetRequest{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId:       "the_id",
 			OrganizationId: "the_org",
 		},
@@ -105,8 +105,8 @@ func (cvv2ts *CreateSSHKeyGroupV2TestSuite) Test_CreateSSHKeyGroupV2_Success() {
 func (cvv2ts *CreateSSHKeyGroupV2TestSuite) Test_CreateSSHKeyGroupV2_Failure() {
 	var sshKeyGroupManager iActivity.ManageSSHKeyGroup
 
-	request := &cwssaws.CreateTenantKeysetRequest{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	request := &corev1.CreateTenantKeysetRequest{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId:       "the_id",
 			OrganizationId: "the_org",
 		},
@@ -147,8 +147,8 @@ func (uvts *UpdateSSHKeyGroupV2TestSuite) AfterTest(suiteName, testName string) 
 func (uvts *UpdateSSHKeyGroupV2TestSuite) Test_UpdateSSHKeyGroupV2_Success() {
 	var sshKeyGroupManager iActivity.ManageSSHKeyGroup
 
-	request := &cwssaws.UpdateTenantKeysetRequest{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	request := &corev1.UpdateTenantKeysetRequest{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId:       "the_id",
 			OrganizationId: "the_org",
 		},
@@ -168,8 +168,8 @@ func (uvts *UpdateSSHKeyGroupV2TestSuite) Test_UpdateSSHKeyGroupV2_Success() {
 func (uvts *UpdateSSHKeyGroupV2TestSuite) Test_UpdateSSHKeyGroupV2_Failure() {
 	var sshKeyGroupManager iActivity.ManageSSHKeyGroup
 
-	request := &cwssaws.UpdateTenantKeysetRequest{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	request := &corev1.UpdateTenantKeysetRequest{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId:       "the_id",
 			OrganizationId: "the_org",
 		},
@@ -210,8 +210,8 @@ func (cvv2ts *DeleteSSHKeyGroupV2TestSuite) AfterTest(suiteName, testName string
 func (cvv2ts *DeleteSSHKeyGroupV2TestSuite) Test_DeleteSSHKeyGroupV2_Success() {
 	var sshKeyGroupManager iActivity.ManageSSHKeyGroup
 
-	request := &cwssaws.DeleteTenantKeysetRequest{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	request := &corev1.DeleteTenantKeysetRequest{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId:       "the_id",
 			OrganizationId: "the_org",
 		},
@@ -230,8 +230,8 @@ func (cvv2ts *DeleteSSHKeyGroupV2TestSuite) Test_DeleteSSHKeyGroupV2_Success() {
 func (cvv2ts *DeleteSSHKeyGroupV2TestSuite) Test_DeleteSSHKeyGroupV2_Failure() {
 	var sshKeyGroupManager iActivity.ManageSSHKeyGroup
 
-	request := &cwssaws.DeleteTenantKeysetRequest{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	request := &corev1.DeleteTenantKeysetRequest{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId:       "the_id",
 			OrganizationId: "the_org",
 		},

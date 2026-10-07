@@ -2,7 +2,12 @@ syntax = "proto3";
 
 package scout_firmware_upgrade;
 
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
 message ScoutFirmwareUpgradeTask {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   string upgrade_task_id = 1;
   string component_type = 2;
   string target_version = 3;
@@ -13,6 +18,8 @@ message ScoutFirmwareUpgradeTask {
 }
 
 message FileArtifact {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   string url = 1;
   string sha256 = 2;
 }

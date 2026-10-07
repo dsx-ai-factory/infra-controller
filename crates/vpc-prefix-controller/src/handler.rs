@@ -72,14 +72,14 @@ impl StateHandler for VpcPrefixStateHandler {
                     // New prefixes are immediately considered ready once persisted.
                     VpcPrefixControllerState::Ready
                 };
-                tracing::info!(%vpc_prefix_id, state = ?new_state, "VPC Prefix state transition");
+                tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
                 Ok(StateHandlerOutcome::transition(new_state))
             }
             VpcPrefixControllerState::Ready => {
                 if state.is_marked_as_deleted() {
                     // Start the drain window after the API marks the prefix deleted.
                     let new_state = self.drain_state();
-                    tracing::info!(%vpc_prefix_id, state = ?new_state, "VPC Prefix state transition");
+                    tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
                     Ok(StateHandlerOutcome::transition(new_state))
                 } else {
                     // Ready prefixes have no periodic work until deletion is requested.
@@ -103,14 +103,14 @@ impl StateHandler for VpcPrefixStateHandler {
                             vpc_prefix = %state.id,
                             "VPC Prefix still has network prefix references",
                         );
-                        tracing::info!(%vpc_prefix_id, state = ?new_state, "VPC Prefix state transition");
+                        tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
                         Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                     } else if chrono::Utc::now() >= *delete_at {
                         // Move to the terminal database delete state after the drain deadline.
                         let new_state = VpcPrefixControllerState::Deleting {
                             deletion_state: VpcPrefixDeletionState::DBDelete,
                         };
-                        tracing::info!(%vpc_prefix_id, state = ?new_state, "VPC Prefix state transition");
+                        tracing::info!(%vpc_prefix_id, next_state = ?new_state, "VPC Prefix state transition");
                         Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                     } else {
                         // The dependency graph is drained, but the grace deadline has not passed.

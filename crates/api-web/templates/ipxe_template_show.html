@@ -10,7 +10,7 @@
 	<thead>
 		<th>Name</th>
 		<th>Description</th>
-		<th>Scope</th>
+		<th>Visibility</th>
 		<th>Required Params</th>
 		<th>Required Artifacts</th>
 	</thead>
@@ -19,7 +19,7 @@
 		<tr>
 			<td><a href="/admin/ipxe-template/{{ tmpl.id|option_fmt }}">{{ tmpl.name }}</a></td>
 			<td>{{ tmpl.description }}</td>
-			<td>{{ tmpl.scope|ipxe_template_scope_fmt }}</td>
+			<td>{{ tmpl.visibility|ipxe_template_visibility_fmt }}</td>
 			<td>{{ tmpl.required_params.len() }}</td>
 			<td>{{ tmpl.required_artifacts.len() }}</td>
 		</tr>

@@ -28,6 +28,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
@@ -37,19 +38,17 @@ import (
 
 // CreateSSHKeyHandler is the API Handler for creating new SSHKey
 type CreateSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateSSHKeyHandler initializes and returns a new handler for creating SSH Key
 func NewCreateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateSSHKeyHandler {
 	return CreateSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -65,7 +64,7 @@ func NewCreateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 201 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey [post]
 func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Create", c, cskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -118,7 +117,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating SSH Key creation request data", verr)
 	}
 
-	cskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name))
 
 	// check for name uniqueness for the tenant, ie, tenant cannot have another SSH Key with same name at the site
 	skDAO := cdbm.NewSSHKeyDAO(cskh.dbSession)
@@ -148,7 +147,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 
 	if apiRequest.SSHKeyGroupID != nil {
 		skgID := *apiRequest.SSHKeyGroupID
-		cskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshKeyGroupID", skgID), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("sshKeyGroupID", skgID))
 
 		var serr error
 		dbskg, serr = common.GetSSHKeyGroupFromIDString(ctx, nil, skgID, cskh.dbSession, nil)
@@ -243,7 +242,11 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			skaDAO := cdbm.NewSSHKeyAssociationDAO(cskh.dbSession)
-			_, derr = skaDAO.CreateFromParams(ctx, tx, dbsk.ID, dbskg.ID, dbUser.ID)
+			_, derr = skaDAO.Create(ctx, tx, cdbm.SSHKeyAssociationCreateInput{
+				SSHKeyID:      dbsk.ID,
+				SSHKeyGroupID: dbskg.ID,
+				CreatedBy:     dbUser.ID,
+			})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("unable to create the SSH Key Association record in DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to associate SSH Key with SSH Key Group due to data store error", nil)
@@ -256,33 +259,38 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set updated version for SSH Key Group", nil)
 			}
 
-			// Update SSH Key Group status to Syncing
-			_, derr = skgDAO.Update(
-				ctx,
-				tx,
-				cdbm.SSHKeyGroupUpdateInput{
-					SSHKeyGroupID: dbskg.ID,
-					Status:        cutil.GetPtr(cdbm.SSHKeyGroupStatusSyncing),
-				},
-			)
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error updating SSH Key Group in DB")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SSH Key Group status", nil)
-			}
-
-			// Create a status detail record for the SSH Key Group
-			sdDAO := cdbm.NewStatusDetailDAO(cskh.dbSession)
-			_, derr = sdDAO.CreateFromParams(ctx, tx, dbskg.ID.String(), cdbm.SSHKeyGroupStatusSyncing, cutil.GetPtr("Sync required due to SSH Key creation, pending processing"))
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for SSH Key Group", nil)
-			}
-
 			skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(cskh.dbSession)
-			skgsas, _, derr = skgsaDAO.GetAll(ctx, tx, []uuid.UUID{dbskg.ID}, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+			skgsas, _, derr = skgsaDAO.GetAll(ctx, tx, cdbm.SSHKeyGroupSiteAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{dbskg.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error retrieving SSH Key Group Association from DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SSH Key Group Association from DB", nil)
+			}
+
+			// Only mark the group as Syncing if it actually has a site to
+			// sync with -- otherwise there's nothing for the sync workflow
+			// to do, and the group would get stuck in Syncing forever.
+			if len(skgsas) > 0 {
+				// Update SSH Key Group status to Syncing
+				_, derr = skgDAO.Update(
+					ctx,
+					tx,
+					cdbm.SSHKeyGroupUpdateInput{
+						SSHKeyGroupID: dbskg.ID,
+						Status:        cutil.GetPtr(cdbm.SSHKeyGroupStatusSyncing),
+					},
+				)
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error updating SSH Key Group in DB")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SSH Key Group status", nil)
+				}
+
+				// Create a status detail record for the SSH Key Group
+				sdDAO := cdbm.NewStatusDetailDAO(cskh.dbSession)
+				_, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: dbskg.ID.String(), Status: cdbm.SSHKeyGroupStatusSyncing, Message: cutil.GetPtr("Sync required due to SSH Key creation, pending processing")})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for SSH Key Group", nil)
+				}
 			}
 		}
 		return nil
@@ -318,19 +326,17 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 
 // UpdateSSHKeyHandler is the API Handler for updating a SSH Key
 type UpdateSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateSSHKeyHandler initializes and returns a new handler for updating SSH Key
 func NewUpdateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateSSHKeyHandler {
 	return UpdateSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -347,7 +353,7 @@ func NewUpdateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey/{id} [patch]
 func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Update", c, uskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -376,7 +382,7 @@ func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
 	// Get SSH Key ID from URL param
 	sshKeyStrID := c.Param("id")
 
-	uskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID))
 
 	sshKeyID, err := uuid.Parse(sshKeyStrID)
 	if err != nil {
@@ -414,7 +420,7 @@ func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
 	// Get Tenant for this org
 	tnDAO := cdbm.NewTenantDAO(uskh.dbSession)
 
-	tenants, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tenants, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant for org", nil)
@@ -472,7 +478,7 @@ func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SSH Key due to data store error", nil)
 		}
 
-		skas, _, derr = skaDAO.GetAll(ctx, tx, []uuid.UUID{sk.ID}, nil, nil, nil, cutil.GetPtr(paginator.TotalLimit), nil)
+		skas, _, derr = skaDAO.GetAll(ctx, tx, cdbm.SSHKeyAssociationFilterInput{SSHKeyIDs: []uuid.UUID{sk.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving SSH Key association from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SSH Key Association from DB", nil)
@@ -494,19 +500,17 @@ func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
 
 // GetSSHKeyHandler is the API Handler for getting an SSH Key
 type GetSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetSSHKeyHandler initializes and returns a new handler for getting SSH Key
 func NewGetSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetSSHKeyHandler {
 	return GetSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -523,7 +527,7 @@ func NewGetSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Success 200 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey/{id} [get]
 func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Get", c, gskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -552,7 +556,7 @@ func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
 	// Get  ID from URL param
 	sshKeyStrID := c.Param("id")
 
-	gskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID))
 
 	sshKeyID, err := uuid.Parse(sshKeyStrID)
 	if err != nil {
@@ -582,7 +586,7 @@ func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
 	// Get Tenant for this org
 	tnDAO := cdbm.NewTenantDAO(gskh.dbSession)
 
-	tenants, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tenants, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant for org", nil)
@@ -599,7 +603,7 @@ func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
 	}
 
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(gskh.dbSession)
-	skas, _, err := skaDAO.GetAll(ctx, nil, []uuid.UUID{sk.ID}, nil, nil, nil, cutil.GetPtr(paginator.TotalLimit), nil)
+	skas, _, err := skaDAO.GetAll(ctx, nil, cdbm.SSHKeyAssociationFilterInput{SSHKeyIDs: []uuid.UUID{sk.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving SSH Key association from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SSH Key Association from DB", nil)
@@ -616,19 +620,17 @@ func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
 
 // GetAllSSHKeyHandler is the API Handler for retrieving all SSH Keys
 type GetAllSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSSHKeyHandler initializes and returns a new handler for retreiving all SSH Keys
 func NewGetAllSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllSSHKeyHandler {
 	return GetAllSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -649,7 +651,7 @@ func NewGetAllSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {array} []model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey [get]
 func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "GetAll", c, gaskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -702,7 +704,7 @@ func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
 	// Get Tenant for this org
 	tnDAO := cdbm.NewTenantDAO(gaskh.dbSession)
 
-	tenants, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tenants, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant for org", nil)
@@ -732,7 +734,7 @@ func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get all SSH Keys by Tenant
@@ -762,7 +764,7 @@ func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
 	apiSSHKeys := []model.APISSHKey{}
 
 	for _, sk := range dbSSHKeys {
-		skas, _, err := skaDAO.GetAll(ctx, nil, []uuid.UUID{sk.ID}, nil, nil, nil, cutil.GetPtr(paginator.TotalLimit), nil)
+		skas, _, err := skaDAO.GetAll(ctx, nil, cdbm.SSHKeyAssociationFilterInput{SSHKeyIDs: []uuid.UUID{sk.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 		if err != nil {
 			logger.Error().Err(err).Msg("error getting SSH Key association records")
 		}
@@ -791,19 +793,17 @@ func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
 
 // DeleteSSHKeyHandler is the API Handler for deleting an SSH Key
 type DeleteSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteSSHKeyHandler initializes and returns a new handler for deleting a SSH Key
 func NewDeleteSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteSSHKeyHandler {
 	return DeleteSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -819,7 +819,7 @@ func NewDeleteSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 202
 // @Router /v2/org/{org}/nico/sshkey/{id} [delete]
 func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Delete", c, dskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -848,7 +848,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	// Get Tenant for this org
 	tnDAO := cdbm.NewTenantDAO(dskh.dbSession)
 
-	tenants, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tenants, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant for org", nil)
@@ -862,7 +862,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	// Get ID from URL param
 	sshKeyStrID := c.Param("id")
 
-	dskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID))
 
 	sshKeyID, err := uuid.Parse(sshKeyStrID)
 	if err != nil {
@@ -894,7 +894,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	var skgsasToSync []cdbm.SSHKeyGroupSiteAssociation
 
 	err = cdb.WithTx(ctx, dskh.dbSession, func(tx *cdb.Tx) error {
-		skas, _, derr := skaDAO.GetAll(ctx, tx, []uuid.UUID{sk.ID}, nil, []string{cdbm.SSHKeyGroupRelationName}, nil, cutil.GetPtr(paginator.TotalLimit), nil)
+		skas, _, derr := skaDAO.GetAll(ctx, tx, cdbm.SSHKeyAssociationFilterInput{SSHKeyIDs: []uuid.UUID{sk.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, []string{cdbm.SSHKeyGroupRelationName})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving SSH Key association from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SSH Key Association from DB", nil)
@@ -912,7 +912,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			// Delete Key Association
-			derr = skaDAO.DeleteByID(ctx, tx, ska.ID)
+			derr = skaDAO.Delete(ctx, tx, ska.ID)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("unable to delete SSH Key Association record in DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete SSH Key Association due to data store error", nil)
@@ -940,7 +940,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete SSH Key due to data store error", nil)
 		}
 
-		skgsasToSync, _, derr = skgsaDAO.GetAll(ctx, tx, skgIDs, nil, nil, nil, []string{cdbm.SSHKeyGroupRelationName}, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+		skgsasToSync, _, derr = skgsaDAO.GetAll(ctx, tx, cdbm.SSHKeyGroupSiteAssociationFilterInput{SSHKeyGroupIDs: skgIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SSHKeyGroupRelationName})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving SSH Key Group Associations related to SSH Key from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SSH Key Group Associations from DB", nil)
@@ -971,7 +971,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			// Create a status detail record for the SSH Key Group
-			_, derr = sdDAO.CreateFromParams(ctx, tx, skgsa.SSHKeyGroupID.String(), cdbm.SSHKeyGroupStatusSyncing, cutil.GetPtr("Sync required due to SSH Key deletion, pending processing"))
+			_, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: skgsa.SSHKeyGroupID.String(), Status: cdbm.SSHKeyGroupStatusSyncing, Message: cutil.GetPtr("Sync required due to SSH Key deletion, pending processing")})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for SSH Key Group", nil)
@@ -1008,5 +1008,5 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	// Return response
 	logger.Info().Msg("finishing API handler")
 
-	return c.String(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

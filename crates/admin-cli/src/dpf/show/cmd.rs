@@ -16,24 +16,20 @@
  */
 
 use ::rpc::admin_cli::OutputFormat;
+use carbide_uuid::machine::HostMachineId;
 use prettytable::row;
 
 use crate::dpf::common::DpfQuery;
-use crate::errors::{CarbideCliError, CarbideCliResult};
+use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn show(
+pub(super) async fn show(
     query: &DpfQuery,
     _format: OutputFormat,
     page_size: usize,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     let machine_ids = if let Some(host) = query.host {
-        if host.machine_type() == carbide_uuid::machine::MachineType::Dpu {
-            return Err(CarbideCliError::GenericError(
-                "Only host id is expected!!".to_string(),
-            ));
-        }
         vec![host]
     } else {
         api_client
@@ -45,6 +41,9 @@ pub async fn show(
             })
             .await?
             .machine_ids
+            .into_iter()
+            .filter_map(|id| HostMachineId::try_from(id).ok())
+            .collect()
     };
 
     let response = api_client.get_dpf_state(machine_ids, page_size).await?;

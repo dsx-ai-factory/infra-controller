@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn autoupdate(cfg: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn autoupdate(cfg: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let _response = api_client.machine_set_auto_update(cfg).await?;
     Ok(())
 }

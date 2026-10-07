@@ -1,0 +1,57 @@
+suite: NVSwitch server certificate generation
+templates:
+  - nvswitch-server-certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: is absent by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the server identity with DNS and IP SANs
+    set:
+      nvSwitchTls:
+        switchServer:
+          enabled: true
+          dnsNames:
+            - nvswitch.nico.local
+          ipAddresses:
+            - 192.0.2.10
+    asserts:
+      - equal:
+          path: spec.secretName
+          value: nvswitch-server-certificate
+      - equal:
+          path: spec.usages
+          value:
+            - digital signature
+            - server auth
+            - client auth
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nvswitch.nico.local
+      - equal:
+          path: spec.ipAddresses
+          value:
+            - 192.0.2.10
+      - equal:
+          path: spec.privateKey
+          value:
+            algorithm: ECDSA
+            size: 384
+            rotationPolicy: Always
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: vault-nico-issuer
+            group: cert-manager.io
+
+  - it: rejects a missing DNS or IP SAN
+    set:
+      nvSwitchTls.switchServer.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: nvSwitchTls.switchServer must contain at least one dnsNames or ipAddresses SAN matching nmx_c_tls_authority"

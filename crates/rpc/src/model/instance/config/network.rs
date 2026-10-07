@@ -20,12 +20,15 @@ use std::net::IpAddr;
 
 use itertools::Itertools;
 use model::instance::config::network::{
-    DeviceLocator, InstanceInterfaceConfig, InstanceInterfaceRoutingProfile, InstanceNetworkConfig,
-    InterfaceFunctionId, InterfaceFunctionType, Ipv6InterfaceConfig, NetworkDetails,
+    DeviceLocator, InstanceInterfaceConfig, InstanceInterfaceIpFamilyMode,
+    InstanceInterfaceRoutingProfile, InstanceInterfaceVpcSelection, InstanceNetworkAutoConfig,
+    InstanceNetworkConfig, InterfaceFunctionId, InterfaceFunctionType, Ipv6InterfaceConfig,
+    NetworkDetails,
 };
 
 use crate as rpc;
 use crate::errors::RpcDataConversionError;
+use crate::forge;
 
 impl TryFrom<rpc::InterfaceFunctionType> for InterfaceFunctionType {
     type Error = RpcDataConversionError;
@@ -47,6 +50,68 @@ impl From<InterfaceFunctionType> for rpc::InterfaceFunctionType {
     }
 }
 
+impl TryFrom<forge::InstanceInterfaceIpFamilyMode> for InstanceInterfaceIpFamilyMode {
+    type Error = RpcDataConversionError;
+
+    /// Converts a concrete wire family mode, rejecting the `Unspecified` sentinel.
+    fn try_from(value: forge::InstanceInterfaceIpFamilyMode) -> Result<Self, Self::Error> {
+        match value {
+            forge::InstanceInterfaceIpFamilyMode::Unspecified => {
+                Err(RpcDataConversionError::InvalidArgument(
+                    "InstanceInterfaceVpcSelection::family_mode must be specified".to_string(),
+                ))
+            }
+            forge::InstanceInterfaceIpFamilyMode::Ipv4Only => Ok(Self::Ipv4Only),
+            forge::InstanceInterfaceIpFamilyMode::Ipv6Only => Ok(Self::Ipv6Only),
+            forge::InstanceInterfaceIpFamilyMode::DualStack => Ok(Self::DualStack),
+        }
+    }
+}
+
+impl From<InstanceInterfaceIpFamilyMode> for forge::InstanceInterfaceIpFamilyMode {
+    /// Converts an internal family mode to the corresponding wire enum.
+    fn from(value: InstanceInterfaceIpFamilyMode) -> Self {
+        match value {
+            InstanceInterfaceIpFamilyMode::Ipv4Only => Self::Ipv4Only,
+            InstanceInterfaceIpFamilyMode::Ipv6Only => Self::Ipv6Only,
+            InstanceInterfaceIpFamilyMode::DualStack => Self::DualStack,
+        }
+    }
+}
+
+impl TryFrom<forge::InstanceInterfaceVpcSelection> for InstanceInterfaceVpcSelection {
+    type Error = RpcDataConversionError;
+
+    /// Validates the required VPC and concrete family fields before conversion.
+    fn try_from(value: forge::InstanceInterfaceVpcSelection) -> Result<Self, Self::Error> {
+        let wire_family_mode = forge::InstanceInterfaceIpFamilyMode::try_from(value.family_mode)
+            .map_err(|_| {
+                RpcDataConversionError::InvalidArgument(format!(
+                    "unknown InstanceInterfaceVpcSelection::family_mode: {}",
+                    value.family_mode
+                ))
+            })?;
+        let family_mode = InstanceInterfaceIpFamilyMode::try_from(wire_family_mode)?;
+
+        Ok(Self {
+            vpc_id: value.vpc_id.ok_or(RpcDataConversionError::MissingArgument(
+                "InstanceInterfaceVpcSelection::vpc_id",
+            ))?,
+            family_mode,
+        })
+    }
+}
+
+impl From<InstanceInterfaceVpcSelection> for forge::InstanceInterfaceVpcSelection {
+    /// Serializes caller-owned automatic VPC-selection intent.
+    fn from(value: InstanceInterfaceVpcSelection) -> Self {
+        Self {
+            vpc_id: Some(value.vpc_id),
+            family_mode: forge::InstanceInterfaceIpFamilyMode::from(value.family_mode) as i32,
+        }
+    }
+}
+
 #[derive(PartialEq)]
 enum VFAllocationType {
     // Only physical interface is defined. No virtual function is defined.
@@ -59,6 +124,15 @@ enum VFAllocationType {
 
 type DeviceVFIdsMap =
     HashMap<(Option<String>, u32), Vec<(rpc::InterfaceFunctionType, Option<u32>)>>;
+
+/// Converts one explicit wire VF identity without allowing a wider protobuf value to alias a VF.
+fn convert_wire_virtual_function_id(wire_id: u32) -> Result<u8, RpcDataConversionError> {
+    let model_id = u8::try_from(wire_id)
+        .map_err(|_| RpcDataConversionError::InvalidVirtualFunctionId(wire_id as usize))?;
+    InterfaceFunctionId::try_virtual_from(model_id)
+        .map(|_| model_id)
+        .map_err(|_| RpcDataConversionError::InvalidVirtualFunctionId(wire_id as usize))
+}
 
 fn validate_virtual_function_ids_and_get_allocation_method(
     interfaces: &[rpc::InstanceInterfaceConfig],
@@ -95,6 +169,10 @@ fn validate_virtual_function_ids_and_get_allocation_method(
             "Mix of VF".to_string(),
             "Mix of valid virtual_function_id and None is found.".to_string(),
         ));
+    }
+
+    for wire_id in all_vf_ids.iter().filter_map(|vf_info| vf_info.1) {
+        convert_wire_virtual_function_id(wire_id)?;
     }
 
     for vf_info in device_vf_ids.values() {
@@ -135,7 +213,7 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
 
     fn try_from(config: rpc::InstanceNetworkConfig) -> Result<Self, Self::Error> {
         // try_from for interfaces:
-        let auto = config.auto;
+        let auto = config.auto_config.is_some();
 
         if auto && !config.interfaces.is_empty() {
             return Err(RpcDataConversionError::InvalidArgument(
@@ -163,10 +241,6 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
             let function_id = match iface_type {
                 InterfaceFunctionType::Physical => InterfaceFunctionId::Physical {},
                 InterfaceFunctionType::Virtual => {
-                    // Note that this might overflow if the RPC call delivers more than
-                    // 256 VFs. However that's ok - the `InstanceNetworkConfig.validate()`
-                    // call will declare those configs as invalid later on anyway.
-                    // We mainly don't want to crash here.
                     InterfaceFunctionId::Virtual {
                         id: if allocation_type == VFAllocationType::Carbide {
                             let assigned_vfs = assigned_vfs_map
@@ -176,38 +250,62 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
                             *assigned_vfs = assigned_vfs.saturating_add(1);
                             id
                         } else {
-                            // Already validated.
-                            iface.virtual_function_id.unwrap_or_default() as u8
+                            // Keep conversion defensive even though the complete wire inventory
+                            // was range-checked before per-interface conversion.
+                            convert_wire_virtual_function_id(
+                                iface.virtual_function_id.unwrap_or_default(),
+                            )?
                         },
                     }
                 }
             };
 
-            // If network_details is present, that gets precedence and we'll pull the network_segment_id from that
-            // if it's a NetworkSegment.
-            let (network_details, network_segment_id) = if let Some(x) = iface.network_details {
-                let nd: NetworkDetails = x.try_into()?;
-                let ns_id = match nd {
-                    NetworkDetails::NetworkSegment(network_segment_id) => Some(network_segment_id),
-                    NetworkDetails::VpcPrefixId(_uuid) => None,
-                };
-
-                (Some(nd), ns_id)
-            } else {
-                // If network_details wasn't set, then the caller is required to
-                // send network_segment_id.
-                // This is old model. Let's use network segment id as such.
-                // TODO: This should be removed in future.
-                let ns_id =
-                    iface
-                        .network_segment_id
-                        .ok_or(RpcDataConversionError::MissingArgument(
-                            "InstanceInterfaceConfig::network_segment_id",
-                        ))?;
-
-                // And then we'll populate network_details from that as well.
-                (Some(NetworkDetails::NetworkSegment(ns_id)), Some(ns_id))
+            // The protobuf oneof makes segment, explicit-prefix, and automatic
+            // VPC selection mutually exclusive for all generated clients.
+            let (network_details, vpc_selection, network_segment_id) = match iface.network_details {
+                Some(rpc::forge::instance_interface_config::NetworkDetails::SegmentId(
+                    network_segment_id,
+                )) => (
+                    Some(NetworkDetails::NetworkSegment(network_segment_id)),
+                    None,
+                    Some(network_segment_id),
+                ),
+                Some(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(
+                    vpc_prefix_id,
+                )) => (Some(NetworkDetails::VpcPrefixId(vpc_prefix_id)), None, None),
+                Some(rpc::forge::instance_interface_config::NetworkDetails::Vpc(selection)) => (
+                    None,
+                    Some(InstanceInterfaceVpcSelection::try_from(selection)?),
+                    None,
+                ),
+                None => {
+                    // Legacy callers may still populate only the standalone
+                    // segment field; canonicalize that into the selector.
+                    let network_segment_id =
+                        iface
+                            .network_segment_id
+                            .ok_or(RpcDataConversionError::MissingArgument(
+                                "InstanceInterfaceConfig::network_segment_id",
+                            ))?;
+                    (
+                        Some(NetworkDetails::NetworkSegment(network_segment_id)),
+                        None,
+                        Some(network_segment_id),
+                    )
+                }
             };
+
+            // Automatic intent owns the interface's family set. Dual-stack
+            // automatic selection chooses both families; auto-IPv4 plus
+            // explicit-IPv6 is not a supported hybrid.
+            if vpc_selection.is_some()
+                && (iface.ip_address.is_some() || iface.ipv6_interface_config.is_some())
+            {
+                return Err(RpcDataConversionError::InvalidArgument(
+                    "automatic VPC selection cannot be combined with explicit IP configuration"
+                        .to_string(),
+                ));
+            }
 
             if iface.ip_address.is_some()
                 && matches!(network_details, Some(NetworkDetails::NetworkSegment(..)))
@@ -293,6 +391,7 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
                 function_id,
                 network_segment_id,
                 network_details,
+                vpc_selection,
                 ip_addrs: HashMap::default(),
                 requested_ip_addr: iface
                     .ip_address
@@ -306,10 +405,27 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
                 host_inband_mac_address: None,
                 device_locator,
                 internal_uuid: uuid::Uuid::new_v4(),
+                vpc_id: None,
             });
         }
 
-        Ok(Self { interfaces, auto })
+        Ok(Self {
+            interfaces,
+            auto_config: config.auto_config.map(TryInto::try_into).transpose()?,
+            service_interfaces: vec![],
+        })
+    }
+}
+
+impl TryFrom<forge::InstanceNetworkAutoConfig> for InstanceNetworkAutoConfig {
+    type Error = RpcDataConversionError;
+
+    fn try_from(value: forge::InstanceNetworkAutoConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            vpc_id: value
+                .vpc_id
+                .ok_or(RpcDataConversionError::MissingArgument("vpc_id"))?,
+        })
     }
 }
 
@@ -317,19 +433,38 @@ impl TryFrom<InstanceNetworkConfig> for rpc::InstanceNetworkConfig {
     type Error = RpcDataConversionError;
 
     fn try_from(config: InstanceNetworkConfig) -> Result<rpc::InstanceNetworkConfig, Self::Error> {
-        // This is where we prep the interface for "external" viewing,
-        // stripping resolved interfaces in the case of an auto config,
-        // but leaving them untouched otherwise.
+        // Service-interface records are always hidden from external callers. Automatic
+        // configs also hide resolved host interfaces while explicit ones remain visible.
         let config = config.into_external_view();
-        let auto = config.auto;
         let mut interfaces = Vec::with_capacity(config.interfaces.len());
         for iface in config.interfaces.into_iter() {
             let function_type = iface.function_id.function_type();
 
-            // Update network segment id based on network details.
-            let network_details: Option<rpc::forge::instance_interface_config::NetworkDetails> =
-                iface.network_details.map(|x| x.into());
+            // Caller-owned automatic intent replaces the internal explicit
+            // resolution when projecting config back onto the wire.
+            let network_details = match iface.vpc_selection {
+                Some(selection) => Some(
+                    rpc::forge::instance_interface_config::NetworkDetails::Vpc(selection.into()),
+                ),
+                None => iface.network_details.map(Into::into),
+            };
             let network_segment_id = iface.network_segment_id;
+
+            // Automatic mode owns address selection, so never leak persisted
+            // resolution details back as explicit caller requests.
+            let (ip_address, ipv6_interface_config) = if iface.vpc_selection.is_some() {
+                (None, None)
+            } else {
+                (
+                    iface.requested_ip_addr.map(|ip| ip.to_string()),
+                    iface.ipv6_interface_config.map(|ipv6| {
+                        rpc::forge::InstanceInterfaceIpv6Config {
+                            vpc_prefix_id: Some(ipv6.vpc_prefix_id),
+                            ip_address: ipv6.requested_ip_addr.map(|ip| ip.to_string()),
+                        }
+                    }),
+                )
+            };
 
             let (device, device_instance) = match iface.device_locator {
                 Some(dl) => (Some(dl.device), dl.device_instance as u32),
@@ -348,13 +483,8 @@ impl TryFrom<InstanceNetworkConfig> for rpc::InstanceNetworkConfig {
                 device,
                 device_instance,
                 virtual_function_id,
-                ip_address: iface.requested_ip_addr.map(|i| i.to_string()),
-                ipv6_interface_config: iface.ipv6_interface_config.map(|v6| {
-                    rpc::forge::InstanceInterfaceIpv6Config {
-                        vpc_prefix_id: Some(v6.vpc_prefix_id),
-                        ip_address: v6.requested_ip_addr.map(|i| i.to_string()),
-                    }
-                }),
+                ip_address,
+                ipv6_interface_config,
                 routing_profile: iface.routing_profile.map(|profile| {
                     rpc::forge::InstanceInterfaceRoutingProfile {
                         allowed_anycast_prefixes: profile
@@ -369,7 +499,20 @@ impl TryFrom<InstanceNetworkConfig> for rpc::InstanceNetworkConfig {
             });
         }
 
-        Ok(rpc::InstanceNetworkConfig { interfaces, auto })
+        Ok(rpc::InstanceNetworkConfig {
+            interfaces,
+            auto_config: config.auto_config.map(Into::into),
+            #[allow(deprecated)]
+            auto: config.auto_config.is_some(),
+        })
+    }
+}
+
+impl From<InstanceNetworkAutoConfig> for forge::InstanceNetworkAutoConfig {
+    fn from(value: InstanceNetworkAutoConfig) -> Self {
+        Self {
+            vpc_id: Some(value.vpc_id),
+        }
     }
 }
 
@@ -413,6 +556,11 @@ impl TryFrom<rpc::forge::instance_interface_config::NetworkDetails> for NetworkD
             rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(vpc_prefix_id) => {
                 NetworkDetails::VpcPrefixId(vpc_prefix_id)
             }
+            rpc::forge::instance_interface_config::NetworkDetails::Vpc(_) => {
+                return Err(RpcDataConversionError::InvalidArgument(
+                    "automatic VPC selection is not an explicit NetworkDetails value".to_string(),
+                ));
+            }
         })
     }
 }
@@ -422,7 +570,7 @@ mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{scenarios, value_scenarios};
     use carbide_uuid::network::NetworkSegmentId;
-    use carbide_uuid::vpc::VpcPrefixId;
+    use carbide_uuid::vpc::{VpcId, VpcPrefixId};
     use model::instance::config::network::{INTERFACE_VFID_MAX, INTERFACE_VFID_MIN};
 
     use super::*;
@@ -432,6 +580,223 @@ mod tests {
     const BASE_SEGMENT_ID: uuid::Uuid = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c0000");
     fn offset_segment_id(offset: u8) -> NetworkSegmentId {
         uuid::Uuid::from_u128(BASE_SEGMENT_ID.as_u128() + offset as u128).into()
+    }
+
+    /// Builds one wire interface whose network selector is automatic VPC
+    /// intent, allowing invalid raw enum values to exercise boundary checks.
+    fn rpc_vpc_interface(vpc_id: Option<VpcId>, family_mode: i32) -> rpc::InstanceInterfaceConfig {
+        rpc::InstanceInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical as i32,
+            network_segment_id: None,
+            network_details: Some(rpc::forge::instance_interface_config::NetworkDetails::Vpc(
+                forge::InstanceInterfaceVpcSelection {
+                    vpc_id,
+                    family_mode,
+                },
+            )),
+            device: None,
+            device_instance: 0,
+            virtual_function_id: None,
+            ip_address: None,
+            ipv6_interface_config: None,
+            routing_profile: None,
+        }
+    }
+
+    /// Converts one-interface wire config and reports boundary
+    /// acceptance without coupling cases to a particular error string.
+    fn accepts_rpc_interface(interface: rpc::InstanceInterfaceConfig) -> bool {
+        InstanceNetworkConfig::try_from(rpc::InstanceNetworkConfig {
+            interfaces: vec![interface],
+            #[allow(deprecated)]
+            auto: false,
+            auto_config: None,
+        })
+        .is_ok()
+    }
+
+    /// Typed family conversion accepts every concrete mode and rejects the
+    /// unspecified sentinel.
+    #[test]
+    fn convert_vpc_selection_family_modes() {
+        value_scenarios!(
+            run = |family_mode| InstanceInterfaceIpFamilyMode::try_from(family_mode).ok();
+            "IPv4 only" {
+                forge::InstanceInterfaceIpFamilyMode::Ipv4Only => Some(InstanceInterfaceIpFamilyMode::Ipv4Only),
+            }
+            "IPv6 only" {
+                forge::InstanceInterfaceIpFamilyMode::Ipv6Only => Some(InstanceInterfaceIpFamilyMode::Ipv6Only),
+            }
+            "dual stack" {
+                forge::InstanceInterfaceIpFamilyMode::DualStack => Some(InstanceInterfaceIpFamilyMode::DualStack),
+            }
+            "unspecified" {
+                forge::InstanceInterfaceIpFamilyMode::Unspecified => None,
+            }
+        );
+    }
+
+    /// The inbound RPC boundary accepts every concrete family mode while
+    /// rejecting unspecified, unknown, and incomplete requests.
+    #[test]
+    fn validate_inbound_vpc_selection_modes() {
+        let vpc_id = VpcId::new();
+
+        value_scenarios!(
+            run = |(vpc_id, family_mode)| accepts_rpc_interface(rpc_vpc_interface(vpc_id, family_mode));
+            "IPv4 only" {
+                (Some(vpc_id), forge::InstanceInterfaceIpFamilyMode::Ipv4Only as i32) => true,
+            }
+            "IPv6 only" {
+                (Some(vpc_id), forge::InstanceInterfaceIpFamilyMode::Ipv6Only as i32) => true,
+            }
+            "dual stack" {
+                (Some(vpc_id), forge::InstanceInterfaceIpFamilyMode::DualStack as i32) => true,
+            }
+            "unspecified" {
+                (Some(vpc_id), forge::InstanceInterfaceIpFamilyMode::Unspecified as i32) => false,
+            }
+            "unknown raw value" {
+                (Some(vpc_id), i32::MAX) => false,
+            }
+            "missing VPC" {
+                (None, forge::InstanceInterfaceIpFamilyMode::Ipv4Only as i32) => false,
+            }
+        );
+    }
+
+    /// Automatic VPC selection owns all address choices and therefore rejects
+    /// both primary and IPv6 explicit address configuration.
+    #[test]
+    fn reject_explicit_addresses_with_vpc_selection() {
+        let vpc_id = VpcId::new();
+        let mut primary_ip = rpc_vpc_interface(
+            Some(vpc_id),
+            forge::InstanceInterfaceIpFamilyMode::Ipv4Only as i32,
+        );
+        primary_ip.ip_address = Some("192.0.2.10".to_string());
+
+        let mut ipv6_config = rpc_vpc_interface(
+            Some(vpc_id),
+            forge::InstanceInterfaceIpFamilyMode::Ipv4Only as i32,
+        );
+        ipv6_config.ipv6_interface_config = Some(forge::InstanceInterfaceIpv6Config {
+            vpc_prefix_id: Some(VpcPrefixId::new()),
+            ip_address: None,
+        });
+
+        value_scenarios!(
+            run = accepts_rpc_interface;
+            "primary IP" {
+                primary_ip => false,
+            }
+            "IPv6 configuration" {
+                ipv6_config => false,
+            }
+        );
+    }
+
+    /// Outbound config preserves every typed family intent and hides the
+    /// rolling-compatible explicit prefix and address representation.
+    #[test]
+    fn outbound_vpc_selection_suppresses_internal_resolution() {
+        let vpc_id = VpcId::new();
+        let ipv4_vpc_prefix_id = VpcPrefixId::new();
+        let ipv6_vpc_prefix_id = VpcPrefixId::new();
+
+        value_scenarios!(
+            run = |family_mode| {
+                let (primary_vpc_prefix_id, requested_ip_addr, ipv6_interface_config) =
+                    match family_mode {
+                        InstanceInterfaceIpFamilyMode::Ipv4Only => (
+                            ipv4_vpc_prefix_id,
+                            Some("192.0.2.10".parse().unwrap()),
+                            None,
+                        ),
+                        InstanceInterfaceIpFamilyMode::Ipv6Only => (
+                            ipv6_vpc_prefix_id,
+                            Some("2001:db8::10".parse().unwrap()),
+                            None,
+                        ),
+                        InstanceInterfaceIpFamilyMode::DualStack => (
+                            ipv4_vpc_prefix_id,
+                            Some("192.0.2.10".parse().unwrap()),
+                            Some(Ipv6InterfaceConfig {
+                                vpc_prefix_id: ipv6_vpc_prefix_id,
+                                requested_ip_addr: Some("2001:db8::10".parse().unwrap()),
+                            }),
+                        ),
+                    };
+                let config = InstanceNetworkConfig {
+                    interfaces: vec![InstanceInterfaceConfig {
+                        function_id: InterfaceFunctionId::Physical {},
+                        network_segment_id: Some(offset_segment_id(0)),
+                        network_details: Some(NetworkDetails::VpcPrefixId(
+                            primary_vpc_prefix_id,
+                        )),
+                        vpc_selection: Some(InstanceInterfaceVpcSelection {
+                            vpc_id,
+                            family_mode,
+                        }),
+                        ip_addrs: HashMap::default(),
+                        requested_ip_addr,     // We'll confirm that this...
+                        ipv6_interface_config, // and this, are suppressed because vpc_selection above is set.
+                        routing_profile: None,
+                        interface_prefixes: HashMap::default(),
+                        network_segment_gateways: HashMap::default(),
+                        host_inband_mac_address: None,
+                        device_locator: None,
+                        internal_uuid: uuid::Uuid::new_v4(),
+                        vpc_id: Some(vpc_id),
+                    }],
+                    auto_config: None,
+                    service_interfaces: vec![],
+                };
+
+                let wire: rpc::InstanceNetworkConfig = config.try_into().unwrap();
+                let interface = wire.interfaces.into_iter().next().unwrap();
+                let selection = match interface.network_details.unwrap() {
+                    rpc::forge::instance_interface_config::NetworkDetails::Vpc(selection) => {
+                        selection
+                    }
+                    other => panic!("expected VPC selection, got {other:?}"),
+                };
+                (
+                    selection.vpc_id,
+                    selection.family_mode,
+                    interface.ip_address,
+                    interface.ipv6_interface_config,
+                    interface.network_segment_id,
+                )
+            };
+            "IPv4 only" {
+                InstanceInterfaceIpFamilyMode::Ipv4Only => (
+                    Some(vpc_id),
+                    forge::InstanceInterfaceIpFamilyMode::Ipv4Only as i32,
+                    None,
+                    None,
+                    Some(offset_segment_id(0)),
+                ),
+            }
+            "IPv6 only" {
+                InstanceInterfaceIpFamilyMode::Ipv6Only => (
+                    Some(vpc_id),
+                    forge::InstanceInterfaceIpFamilyMode::Ipv6Only as i32,
+                    None,
+                    None,
+                    Some(offset_segment_id(0)),
+                ),
+            }
+            "dual stack" {
+                InstanceInterfaceIpFamilyMode::DualStack => (
+                    Some(vpc_id),
+                    forge::InstanceInterfaceIpFamilyMode::DualStack as i32,
+                    None,
+                    None,
+                    Some(offset_segment_id(0)),
+                ),
+            }
+        );
     }
 
     #[test]
@@ -448,7 +813,9 @@ mod tests {
                 ipv6_interface_config: None,
                 routing_profile: None,
             }],
+            #[allow(deprecated)]
             auto: false,
+            auto_config: None,
         };
 
         let netconfig: InstanceNetworkConfig = config.try_into().unwrap();
@@ -465,8 +832,10 @@ mod tests {
                 network_segment_gateways: HashMap::new(),
                 host_inband_mac_address: None,
                 network_details: Some(NetworkDetails::NetworkSegment(BASE_SEGMENT_ID.into()),),
+                vpc_selection: None,
                 device_locator: None,
                 internal_uuid: netconfig.interfaces.first().unwrap().internal_uuid,
+                vpc_id: None,
             }]
         );
     }
@@ -500,7 +869,9 @@ mod tests {
 
         let config = rpc::InstanceNetworkConfig {
             interfaces,
+            #[allow(deprecated)]
             auto: false,
+            auto_config: None,
         };
         let netconfig: InstanceNetworkConfig = config.try_into().unwrap();
         let mut netconf_interfaces_iter = netconfig.interfaces.iter();
@@ -516,8 +887,10 @@ mod tests {
             network_segment_gateways: HashMap::new(),
             host_inband_mac_address: None,
             network_details: Some(NetworkDetails::NetworkSegment(BASE_SEGMENT_ID.into())),
+            vpc_selection: None,
             device_locator: None,
             internal_uuid: netconf_interfaces_iter.next().unwrap().internal_uuid,
+            vpc_id: None,
         }];
 
         for vfid in INTERFACE_VFID_MIN..=INTERFACE_VFID_MAX {
@@ -533,8 +906,10 @@ mod tests {
                 network_segment_gateways: HashMap::new(),
                 host_inband_mac_address: None,
                 network_details: Some(NetworkDetails::NetworkSegment(segment_id)),
+                vpc_selection: None,
                 device_locator: None,
                 internal_uuid: netconf_interfaces_iter.next().unwrap().internal_uuid,
+                vpc_id: None,
             });
         }
         assert_eq!(netconfig.interfaces, &expected_interfaces[..]);
@@ -629,7 +1004,8 @@ mod tests {
             run = |interfaces| {
                 let network_config = rpc::InstanceNetworkConfig {
                     interfaces,
-                    auto: false,
+                    #[allow(deprecated)] auto: false,
+                    auto_config: None,
                 };
                 let network_config =
                     InstanceNetworkConfig::try_from(network_config).map_err(drop)?;
@@ -708,6 +1084,7 @@ mod tests {
                 function_id: InterfaceFunctionId::Physical {},
                 network_segment_id: None,
                 network_details: Some(NetworkDetails::VpcPrefixId(v4_id)),
+                vpc_selection: None,
                 ip_addrs: HashMap::default(),
                 requested_ip_addr: None,
                 ipv6_interface_config: Some(Ipv6InterfaceConfig {
@@ -720,8 +1097,10 @@ mod tests {
                 host_inband_mac_address: None,
                 device_locator: None,
                 internal_uuid: uuid::Uuid::new_v4(),
+                vpc_id: None,
             }],
-            auto: false,
+            auto_config: None,
+            service_interfaces: vec![],
         };
 
         // Model -> RPC
@@ -780,7 +1159,9 @@ mod tests {
                     }],
                 }),
             }],
+            #[allow(deprecated)]
             auto: false,
+            auto_config: None,
         };
 
         let model: InstanceNetworkConfig = rpc_config.try_into().unwrap();
@@ -829,7 +1210,9 @@ mod tests {
                     }],
                 }),
             }],
+            #[allow(deprecated)]
             auto: false,
+            auto_config: None,
         };
 
         let result: Result<InstanceNetworkConfig, _> = rpc_config.try_into();
@@ -907,7 +1290,8 @@ mod tests {
             run = |iface| {
                 let rpc_config = rpc::InstanceNetworkConfig {
                     interfaces: vec![iface],
-                    auto: false,
+                    #[allow(deprecated)] auto: false,
+                    auto_config: None,
                 };
                 InstanceNetworkConfig::try_from(rpc_config).is_ok()
             };
@@ -943,7 +1327,9 @@ mod tests {
                 ipv6_interface_config: None,
                 routing_profile: None,
             }],
+            #[allow(deprecated)]
             auto: false,
+            auto_config: None,
         };
         let model: InstanceNetworkConfig = rpc_config.try_into().unwrap();
         assert_eq!(
@@ -969,7 +1355,11 @@ mod tests {
                 ipv6_interface_config: None,
                 routing_profile: None,
             }],
+            #[allow(deprecated)]
             auto: true,
+            auto_config: Some(forge::InstanceNetworkAutoConfig {
+                vpc_id: Some(VpcId::new()),
+            }),
         };
         let result: Result<InstanceNetworkConfig, _> = rpc_config.try_into();
         let err = result.expect_err("auto + non-empty interfaces should be rejected");
@@ -982,15 +1372,20 @@ mod tests {
 
     #[test]
     fn test_auto_allows_empty_interfaces() {
+        let vpc_id = VpcId::new();
         // Verify "auto" requests work.
         let rpc_config = rpc::InstanceNetworkConfig {
             interfaces: vec![],
-            auto: true,
+            #[allow(deprecated)]
+            auto: false,
+            auto_config: Some(forge::InstanceNetworkAutoConfig {
+                vpc_id: Some(vpc_id),
+            }),
         };
         let model: InstanceNetworkConfig = rpc_config
             .try_into()
             .expect("auto + empty should round-trip");
-        assert!(model.auto);
         assert!(model.interfaces.is_empty());
+        assert_eq!(model.auto_config.unwrap().vpc_id, vpc_id);
     }
 }

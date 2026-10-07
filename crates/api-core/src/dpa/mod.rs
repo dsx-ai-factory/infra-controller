@@ -15,5 +15,5 @@
  * limitations under the License.
  */
 
-pub mod handler;
-pub mod lockdown;
+pub(crate) mod handler;
+pub(crate) mod lockdown;

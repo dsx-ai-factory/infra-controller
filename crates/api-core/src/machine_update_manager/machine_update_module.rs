@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use async_trait::async_trait;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 
@@ -32,25 +32,25 @@ use crate::CarbideResult;
 /// NOTE: Updating machines are treated as managed hosts and identified by the host machine id.  DPU
 /// updates are identified by using the host machine id, and the host/DPU pair should be treated as one.
 #[async_trait]
-pub trait MachineUpdateModule: Send + Sync + fmt::Display {
+pub(crate) trait MachineUpdateModule: Send + Sync + fmt::Display {
     async fn get_updates_in_progress(
         &self,
         txn: &mut PgConnection,
-    ) -> CarbideResult<HashSet<MachineId>>;
+    ) -> CarbideResult<HashSet<HostMachineId>>;
 
     async fn start_updates(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
         available_updates: i32,
-        updating_host_machines: &HashSet<MachineId>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
-    ) -> CarbideResult<HashSet<MachineId>>;
+        updating_host_machines: &HashSet<HostMachineId>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
+    ) -> CarbideResult<HashSet<HostMachineId>>;
 
     async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()>;
 
     async fn update_metrics(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()>;
 }

@@ -15,17 +15,14 @@
  * limitations under the License.
  */
 
-pub mod health_report;
-
-#[cfg(test)]
-mod tests;
+mod health_report;
 
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(
         about = "Manage NVLink domain health report sources",
         subcommand,

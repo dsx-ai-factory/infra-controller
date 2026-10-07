@@ -29,9 +29,14 @@
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
 use clap::{CommandFactory, Parser};
+use mac_address::MacAddress;
 
-use super::common::{BmcCredentialType, UefiCredentialType, password_validator, url_validator};
+use super::common::{
+    BmcCredentialType, RotationCredentialKind, UefiCredentialType, map_ufm_credential_api_error,
+    password_validator, url_validator,
+};
 use super::*;
+use crate::test_support::{parse_with_leaf_matches, raw_value};
 
 // verify_cmd_structure runs a baseline clap debug_assert()
 // to do basic command configuration checking and validation,
@@ -41,6 +46,24 @@ use super::*;
 #[test]
 fn verify_cmd_structure() {
     Cmd::command().debug_assert();
+}
+
+#[test]
+fn ufm_failed_precondition_has_operator_specific_error() {
+    let error = map_ufm_credential_api_error(tonic::Status::failed_precondition(
+        "UFM fabric \"default\" is supplied by a watched-file credential; update that file",
+    ));
+
+    assert_eq!(
+        error.to_string(),
+        "ufm credential command is unavailable: UFM fabric \"default\" is supplied by a \
+         watched-file credential; update that file"
+    );
+
+    assert!(matches!(
+        map_ufm_credential_api_error(tonic::Status::unavailable("server unavailable")),
+        crate::errors::CarbideCliError::ApiInvocationError(_)
+    ));
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -56,10 +79,19 @@ fn verify_cmd_structure() {
 fn parse_add_ufm_fields() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::AddUFM(args) => (args.url, args.token),
-                    _ => panic!("expected AddUFM variant"),
+            parse_with_leaf_matches::<Cmd>(argv, &["add-ufm"])
+                .map(|(cmd, matches)| {
+                    assert!(matches!(cmd, Cmd::AddUFM(_)));
+                    (
+                        matches
+                            .get_one::<String>("url")
+                            .expect("url is required")
+                            .clone(),
+                        matches
+                            .get_one::<String>("token")
+                            .expect("token has an empty-string default")
+                            .clone(),
+                    )
                 })
                 .map_err(drop)
         };
@@ -83,72 +115,146 @@ fn parse_add_ufm_fields() {
     );
 }
 
+// The retained NMX-M commands accept both argument-free invocations and the
+// legacy credential flags before returning their unsupported-operation error.
+#[test]
+fn parse_nmx_m_compatibility_commands() {
+    scenarios!(
+        run = |argv| {
+            let subcommand = argv[1];
+            parse_with_leaf_matches::<Cmd>(argv, &[subcommand])
+                .map(|(cmd, matches)| {
+                    match cmd {
+                        Cmd::AddNmxM(_) => (
+                            "add",
+                            raw_value(&matches, "username"),
+                            raw_value(&matches, "password"),
+                        ),
+                        Cmd::DeleteNmxM(_) => {
+                            ("delete", raw_value(&matches, "username"), None)
+                        }
+                        _ => panic!("expected an NMX-M compatibility command"),
+                    }
+                })
+                .map_err(drop)
+        };
+        "add without legacy arguments" {
+            &["credential", "add-nmx-m"][..] => Yields(("add", None, None)),
+        }
+
+        "add with legacy arguments" {
+            &[
+                "credential",
+                "add-nmx-m",
+                "--username",
+                "admin",
+                "--password",
+                "mypassword",
+            ][..] => Yields((
+                "add",
+                Some("admin".to_string()),
+                Some("mypassword".to_string()),
+            )),
+        }
+
+        "delete without legacy arguments" {
+            &["credential", "delete-nmx-m"][..] => Yields(("delete", None, None)),
+        }
+
+        "delete with legacy arguments" {
+            &["credential", "delete-nmx-m", "--username", "admin"][..] => Yields((
+                "delete",
+                Some("admin".to_string()),
+                None,
+            )),
+        }
+    );
+}
+
 // parse_add_bmc_with_all_args ensures add-bmc parses
 // with all arguments.
 #[test]
 fn parse_add_bmc_with_all_args() {
-    let cmd = Cmd::try_parse_from([
-        "credential",
-        "add-bmc",
-        "--kind=site-wide-root",
-        "--password",
-        "secret123",
-        "--username",
-        "admin",
-        "--mac-address",
-        "00:11:22:33:44:55",
-    ])
+    let (cmd, matches) = parse_with_leaf_matches::<Cmd>(
+        &[
+            "credential",
+            "add-bmc",
+            "--kind=site-wide-root",
+            "--password",
+            "secret123",
+            "--username",
+            "admin",
+            "--mac-address",
+            "00:11:22:33:44:55",
+        ],
+        &["add-bmc"],
+    )
     .expect("should parse add-bmc");
 
-    match cmd {
-        Cmd::AddBMC(args) => {
-            assert!(matches!(args.kind, BmcCredentialType::SiteWideRoot));
-            assert_eq!(args.password, "secret123");
-            assert_eq!(args.username, Some("admin".to_string()));
-            assert!(args.mac_address.is_some());
-        }
-        _ => panic!("expected AddBMC variant"),
-    }
+    assert!(matches!(cmd, Cmd::AddBMC(_)));
+    assert!(matches!(
+        matches.get_one::<BmcCredentialType>("kind"),
+        Some(BmcCredentialType::SiteWideRoot)
+    ));
+    assert_eq!(
+        raw_value(&matches, "password").as_deref(),
+        Some("secret123")
+    );
+    assert_eq!(raw_value(&matches, "username").as_deref(), Some("admin"));
+    assert_eq!(
+        matches
+            .get_one::<MacAddress>("mac_address")
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("00:11:22:33:44:55")
+    );
 }
 
 // parse_add_uefi ensures add-uefi parses correctly.
 #[test]
 fn parse_add_uefi() {
-    let cmd = Cmd::try_parse_from([
-        "credential",
-        "add-uefi",
-        "--kind=dpu",
-        "--password=uefi-password",
-    ])
+    let (cmd, matches) = parse_with_leaf_matches::<Cmd>(
+        &[
+            "credential",
+            "add-uefi",
+            "--kind=dpu",
+            "--password=uefi-password",
+        ],
+        &["add-uefi"],
+    )
     .expect("should parse add-uefi");
 
-    match cmd {
-        Cmd::AddUefi(args) => {
-            assert!(matches!(args.kind, UefiCredentialType::Dpu));
-            assert_eq!(args.password, "uefi-password");
-        }
-        _ => panic!("expected AddUefi variant"),
-    }
+    assert!(matches!(cmd, Cmd::AddUefi(_)));
+    assert!(matches!(
+        matches.get_one::<UefiCredentialType>("kind"),
+        Some(UefiCredentialType::Dpu)
+    ));
+    assert_eq!(
+        raw_value(&matches, "password").as_deref(),
+        Some("uefi-password")
+    );
 }
 
 // parse_add_nic_lockdown_ikm ensures add-nic-lockdown-ikm parses with the
 // required password.
 #[test]
 fn parse_add_nic_lockdown_ikm() {
-    let cmd = Cmd::try_parse_from([
-        "credential",
-        "add-nic-lockdown-ikm",
-        "--password",
-        "ikm-secret",
-    ])
+    let (cmd, matches) = parse_with_leaf_matches::<Cmd>(
+        &[
+            "credential",
+            "add-nic-lockdown-ikm",
+            "--password",
+            "ikm-secret",
+        ],
+        &["add-nic-lockdown-ikm"],
+    )
     .expect("should parse add-nic-lockdown-ikm");
 
-    match cmd {
-        Cmd::AddNicLockdownIkm(args) => {
-            assert_eq!(args.password, "ikm-secret");
-        }
-        _ => panic!("expected AddNicLockdownIkm variant"),
-    }
+    assert!(matches!(cmd, Cmd::AddNicLockdownIkm(_)));
+    assert_eq!(
+        raw_value(&matches, "password").as_deref(),
+        Some("ikm-secret")
+    );
 }
 
 // Every malformed invocation is rejected at parse time -- a subcommand missing
@@ -182,23 +288,119 @@ fn invalid_invocations_are_rejected() {
     );
 }
 
-// add_nic_lockdown_ikm_maps_to_proto ensures the parsed args convert into a
-// CredentialCreationRequest carrying the SiteWideNicLockdownIkm type.
+// parse_rotate covers both shapes: an auto-generate rotation (password omitted)
+// and an explicit-password rotation with a reason note.
 #[test]
-fn add_nic_lockdown_ikm_maps_to_proto() {
-    use rpc::forge::{self as forgerpc, CredentialType};
+fn parse_rotate() {
+    let (cmd, auto) =
+        parse_with_leaf_matches::<Cmd>(&["credential", "rotate", "--type=bmc"], &["rotate"])
+            .expect("should parse auto-generate rotate");
+    assert!(matches!(cmd, Cmd::Rotate(_)));
+    assert!(matches!(
+        auto.get_one::<RotationCredentialKind>("credential_type"),
+        Some(RotationCredentialKind::Bmc)
+    ));
+    assert!(auto.get_one::<String>("password").is_none());
+    assert!(auto.get_one::<String>("reason").is_none());
 
-    let args = add_nic_lockdown_ikm::Args {
-        password: "ikm-secret".to_string(),
-    };
-    let req = forgerpc::CredentialCreationRequest::try_from(args).expect("convert");
+    let (cmd, explicit) = parse_with_leaf_matches::<Cmd>(
+        &[
+            "credential",
+            "rotate",
+            "--type=host-uefi",
+            "--password=mynewpassword",
+            "--reason",
+            "quarterly rotation",
+        ],
+        &["rotate"],
+    )
+    .expect("should parse explicit rotate");
+    assert!(matches!(cmd, Cmd::Rotate(_)));
+    assert!(matches!(
+        explicit.get_one::<RotationCredentialKind>("credential_type"),
+        Some(RotationCredentialKind::HostUefi)
+    ));
     assert_eq!(
-        req.credential_type,
-        CredentialType::SiteWideNicLockdownIkm as i32
+        raw_value(&explicit, "password").as_deref(),
+        Some("mynewpassword")
     );
-    assert_eq!(req.password, "ikm-secret");
-    assert!(req.username.is_none());
-    assert!(req.mac_address.is_none());
+    assert_eq!(
+        raw_value(&explicit, "reason").as_deref(),
+        Some("quarterly rotation")
+    );
+}
+
+// parse_rotation_status ensures rotation-status parses with its required --type
+// and that the optional --mac-address defaults to None (site-wide) or is parsed
+// into a MAC for a device-scoped query.
+#[test]
+fn parse_rotation_status() {
+    let (cmd, site_wide) = parse_with_leaf_matches::<Cmd>(
+        &["credential", "rotation-status", "--type=lockdown-ikm"],
+        &["rotation-status"],
+    )
+    .expect("should parse site-wide rotation-status");
+    assert!(matches!(cmd, Cmd::RotationStatus(_)));
+    assert!(matches!(
+        site_wide.get_one::<RotationCredentialKind>("credential_type"),
+        Some(RotationCredentialKind::LockdownIkm)
+    ));
+    assert!(
+        site_wide.get_one::<MacAddress>("mac_address").is_none(),
+        "omitting --mac-address means a site-wide query"
+    );
+
+    let (cmd, per_device) = parse_with_leaf_matches::<Cmd>(
+        &[
+            "credential",
+            "rotation-status",
+            "--type=bmc",
+            "--mac-address",
+            "00:11:22:33:44:55",
+        ],
+        &["rotation-status"],
+    )
+    .expect("should parse device-scoped rotation-status");
+    assert!(matches!(cmd, Cmd::RotationStatus(_)));
+    assert!(matches!(
+        per_device.get_one::<RotationCredentialKind>("credential_type"),
+        Some(RotationCredentialKind::Bmc)
+    ));
+    assert_eq!(
+        per_device
+            .get_one::<MacAddress>("mac_address")
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("00:11:22:33:44:55")
+    );
+}
+
+// rotate without its required --type, and --type without the = separator, are
+// both rejected at parse time.
+#[test]
+fn invalid_rotate_invocations_are_rejected() {
+    scenarios!(
+        run = |argv| {
+            Cmd::try_parse_from(argv.iter().copied())
+                .map(|_| ())
+                .map_err(drop)
+        };
+        "rotate without required --type" {
+            &["credential", "rotate"][..] => Fails,
+        }
+
+        "rotate --type without the = separator" {
+            &["credential", "rotate", "--type", "bmc"][..] => Fails,
+        }
+
+        "rotation-status without required --type" {
+            &["credential", "rotation-status"][..] => Fails,
+        }
+
+        "rotation-status with a malformed --mac-address" {
+            &["credential", "rotation-status", "--type=bmc", "--mac-address", "nope"][..] => Fails,
+        }
+    );
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -241,6 +443,39 @@ fn uefi_credential_type_to_proto() {
     assert!(matches!(
         CredentialType::from(UefiCredentialType::Host),
         CredentialType::HostUefi
+    ));
+}
+
+// rotation_credential_kind_to_proto ensures RotationCredentialKind converts to
+// the supported arm of the protobuf RotationCredentialType.
+#[test]
+fn rotation_credential_kind_to_proto() {
+    use rpc::forge::RotationCredentialType;
+
+    assert!(matches!(
+        RotationCredentialType::from(RotationCredentialKind::Bmc),
+        RotationCredentialType::RotationBmc
+    ));
+    assert!(matches!(
+        RotationCredentialType::from(RotationCredentialKind::HostUefi),
+        RotationCredentialType::RotationHostUefi
+    ));
+    assert!(matches!(
+        RotationCredentialType::from(RotationCredentialKind::DpuUefi),
+        RotationCredentialType::RotationDpuUefi
+    ));
+
+    assert!(matches!(
+        RotationCredentialType::from(RotationCredentialKind::Nvos),
+        RotationCredentialType::RotationNvos
+    ));
+    assert!(matches!(
+        RotationCredentialType::from(RotationCredentialKind::LockdownIkm),
+        RotationCredentialType::RotationLockdownIkm
+    ));
+    assert!(matches!(
+        RotationCredentialType::from(RotationCredentialKind::DpuBmcService),
+        RotationCredentialType::RotationDpuBmcService
     ));
 }
 
@@ -288,6 +523,39 @@ fn uefi_credential_type_value_enum() {
         Ok(UefiCredentialType::Host)
     ));
     assert!(UefiCredentialType::from_str("invalid", false).is_err());
+}
+
+// rotation_credential_kind_value_enum ensures RotationCredentialKind parses from
+// kebab-case strings.
+#[test]
+fn rotation_credential_kind_value_enum() {
+    use clap::ValueEnum;
+
+    assert!(matches!(
+        RotationCredentialKind::from_str("bmc", false),
+        Ok(RotationCredentialKind::Bmc)
+    ));
+    assert!(matches!(
+        RotationCredentialKind::from_str("host-uefi", false),
+        Ok(RotationCredentialKind::HostUefi)
+    ));
+    assert!(matches!(
+        RotationCredentialKind::from_str("dpu-uefi", false),
+        Ok(RotationCredentialKind::DpuUefi)
+    ));
+    assert!(matches!(
+        RotationCredentialKind::from_str("nvos", false),
+        Ok(RotationCredentialKind::Nvos)
+    ));
+    assert!(matches!(
+        RotationCredentialKind::from_str("lockdown-ikm", false),
+        Ok(RotationCredentialKind::LockdownIkm)
+    ));
+    assert!(matches!(
+        RotationCredentialKind::from_str("dpu-bmc-service", false),
+        Ok(RotationCredentialKind::DpuBmcService)
+    ));
+    assert!(RotationCredentialKind::from_str("invalid", false).is_err());
 }
 
 /////////////////////////////////////////////////////////////////////////////

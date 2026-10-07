@@ -18,8 +18,10 @@
 // src/mqttea/stats/mod.rs
 // Re-exports for stats module.
 
+pub mod connection;
 pub mod publish;
 pub mod queue;
 
+pub use connection::ConnectionStateTracker;
 pub use publish::{PublishStats, PublishStatsTracker};
 pub use queue::{QueueStats, QueueStatsTracker};

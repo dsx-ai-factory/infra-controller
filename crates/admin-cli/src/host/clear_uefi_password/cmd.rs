@@ -19,7 +19,10 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn clear_uefi_password(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn clear_uefi_password(
+    data: Args,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
     let response = api_client.0.clear_host_uefi_password(data).await?;
     println!(
         "successfully cleared UEFI password for host (jid: {:#?})",

@@ -14,18 +14,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
+
 use std::fmt::Debug;
 use std::net::SocketAddr;
 
+use axum::Router;
 use axum::middleware::{map_request, map_response};
-use axum::{Router, ServiceExt};
 use axum_client_ip::ClientIpSource;
 use axum_template::engine::Engine;
+use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
 use clap::Parser;
 use common::AppState;
 use tera::Tera;
 use tower_http::services::ServeDir;
 use tower_layer::Layer;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer as _};
 
 mod common;
 mod config;
@@ -34,11 +41,17 @@ mod metrics;
 mod middleware;
 mod routes;
 mod rpc_error;
+mod server;
+
+/// The URL prefix the static-file directory is served under. Anything building
+/// a URL into that directory composes it from this, so the path served and the
+/// path advertised cannot drift.
+pub(crate) const STATIC_URL_PREFIX: &str = "/public";
 
 #[derive(Parser, Debug)]
 struct Args {
     #[clap(long, default_value = "false", help = "Print version number and exit")]
-    pub version: bool,
+    version: bool,
 
     #[clap(short, long, default_value = "static")]
     static_dir: String,
@@ -48,25 +61,44 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts = Args::parse();
     if opts.version {
+        // The --version flag writes the bare version to stdout by design (a
+        // machine-readable value, not a log line), so it stays a println.
         println!("{}", carbide_version::version!());
         return Ok(());
     }
 
+    let tracing = setup_tracing()?;
+
     let static_path = std::path::Path::new(&opts.static_dir);
     if !&static_path.exists() {
-        println!(
-            "Static path {} does not exist. Creating directory",
-            &static_path.display()
+        tracing::info!(
+            static_path = %static_path.display(),
+            "static path does not exist; creating directory"
         );
 
         match std::fs::create_dir_all(static_path) {
-            Ok(_) => println!("Directory {}, created", &static_path.display()),
-            Err(e) => eprintln!("Could not create directory: {e}"),
+            Ok(_) => {
+                tracing::info!(static_path = %static_path.display(), "created static directory")
+            }
+            Err(e) => tracing::error!(error = %e, "could not create static directory"),
         }
     }
 
-    println!("Start carbide-pxe version {}", carbide_version::version!());
+    tracing::info!(version = %carbide_version::version!(), "starting carbide-pxe");
     let prometheus_handle = metrics::setup_prometheus();
+
+    // The instrumentation framework's events resolve their instruments from
+    // the global OTel meter, so it installs before the router (and any first
+    // emit) exists. The returned setup owns the meter provider and must stay
+    // alive for the process lifetime -- dropping it stops collection.
+    let otel_metrics = metrics_endpoint::new_metrics_setup("carbide-pxe", "carbide", true)
+        .expect("unable to install the OTel meter provider?");
+
+    // Bind the log-events counter -- installed as a subscriber layer in
+    // setup_tracing so it counts from startup -- to the meter now that the
+    // provider exists, so carbide_log_events_total exports pxe's log volume and
+    // error rate like every other fleet binary.
+    carbide_instrument::log_events::register(&otel_metrics.meter);
 
     let runtime_config =
         config::RuntimeConfig::from_env().expect("unable to build runtime config?");
@@ -77,13 +109,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app_state = AppState {
         engine: Engine::from(tera),
+        static_dir: opts.static_dir.clone(),
         runtime_config,
         prometheus_handle,
+        otel_registry: otel_metrics.registry.clone(),
     };
 
     let app = Router::new()
         .nest_service(
-            "/public",
+            "/public/scout-firmware-scripts",
+            ServeDir::new(SCOUT_FIRMWARE_SCRIPTS_DIR)
+                .with_buf_chunk_size(1024 * 1024 * 10 /* 10 MiB*/),
+        )
+        .nest_service(
+            STATIC_URL_PREFIX,
             ServeDir::new(opts.static_dir.clone())
                 .with_buf_chunk_size(1024 * 1024 * 10 /* 10 MiB*/),
         )
@@ -107,18 +146,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request_normalizing_middleware = map_request(middleware::normalize_url);
     let final_app = request_normalizing_middleware.layer(app); // this one has to wrap all the others for the map_request to be able to affect routing
 
-    let listener = tokio::net::TcpListener::bind(socket_addr)
+    let listener = metrics_endpoint::bind_tcp_listener(socket_addr)
         .await
         .map_err(|err| {
-            eprintln!("unable to bind to tcp listener with error: {err}");
+            tracing::error!(error = %err, "unable to bind tcp listener");
             err
         })?;
 
-    axum::serve(
+    tracing::info!(
+        listen_address = %socket_addr,
+        header_read_timeout_seconds = server::HEADER_READ_TIMEOUT.as_secs(),
+        "serving http"
+    );
+    server::serve(
         listener,
-        final_app.into_make_service_with_connect_info::<SocketAddr>(),
+        final_app,
+        server::HEADER_READ_TIMEOUT,
+        shutdown_signal(),
     )
     .await?;
 
+    // Flush completed spans after the connection drain finishes or times out.
+    tracing.shutdown().await;
+
     Ok(())
+}
+
+/// Waits for SIGTERM signal
+async fn shutdown_signal() {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                // SIGTERM ends the process without connections draining
+                tracing::warn!(%error, "failed to register SIGTERM handler");
+                return std::future::pending().await;
+            }
+        };
+
+    terminate.recv().await;
+    tracing::info!("shutdown signal received, draining in-flight requests");
+}
+
+/// Installs the tracing subscriber: logfmt logs, the `carbide_log_events_total`
+/// counter and OTLP span export. Log levels default to `INFO` and follow
+/// `RUST_LOG`. `main` shuts down the returned value to send the last spans.
+fn setup_tracing() -> Result<carbide_instrument::otlp_tracing::Tracing, Box<dyn std::error::Error>>
+{
+    let log_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy()
+        .add_directive("hyper=warn".parse()?)
+        .add_directive("h2=warn".parse()?)
+        .add_directive("tower=warn".parse()?)
+        .add_directive("rustls=warn".parse()?)
+        .add_directive("tokio_util::codec=warn".parse()?);
+
+    // Filter each log layer separately so RUST_LOG does not limit span export.
+    let (span_layer, tracing) = carbide_instrument::otlp_tracing::setup(
+        carbide_instrument::otlp_tracing::Config::new("nico-pxe"),
+    );
+
+    // Counts log lines from startup. `main` binds the counter to the meter later.
+    let log_events = carbide_instrument::LogEventsMetric::new("nico-pxe");
+    tracing_subscriber::registry()
+        .with(log_events.layer().with_filter(log_filter.clone()))
+        .with(span_layer)
+        .with(
+            logfmt::layer()
+                .with_event_fields([logfmt::EventField::with_default("component", "nico-pxe")])
+                .with_filter(log_filter),
+        )
+        .try_init()?;
+
+    tracing.report();
+
+    Ok(tracing)
 }

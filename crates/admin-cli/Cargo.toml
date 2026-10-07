@@ -20,6 +20,7 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "nico-admin-cli"
@@ -29,6 +30,7 @@ path = "src/main.rs"
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 bmc-vendor = { path = "../bmc-vendor" }
+carbide-api-model = { path = "../api-model" }
 carbide-macros = { path = "../macros" }
 carbide-network = { path = "../network" }
 carbide-ssh = { path = "../ssh" }
@@ -43,6 +45,7 @@ carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-rpc = { path = "../rpc", features = ["cli"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
+config-version = { path = "../config-version" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 chrono = { workspace = true }
@@ -76,9 +79,14 @@ urlencoding = { workspace = true }
 uuid = { workspace = true }
 x509-parser = { features = ["validate"], workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
+hex.workspace = true
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
 
 [build-dependencies]
 clap = { workspace = true }

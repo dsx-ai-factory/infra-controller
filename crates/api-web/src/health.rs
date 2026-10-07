@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -60,17 +60,17 @@ struct HealthPage {
 #[derive(Template)]
 #[template(path = "health_history_table.html")]
 pub(super) struct HealthHistoryTable {
-    pub records: Vec<HealthHistoryRecord>,
+    pub(super) records: Vec<HealthHistoryRecord>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub(super) struct HealthHistoryRecord {
-    pub timestamp: String,
-    pub health: health_report::HealthReport,
+    timestamp: String,
+    health: health_report::HealthReport,
 }
 
 impl HealthHistoryRecord {
-    pub fn from_rpc_convert_invalid(record: ::rpc::forge::HealthHistoryRecord) -> Self {
+    fn from_rpc_convert_invalid(record: ::rpc::forge::HealthHistoryRecord) -> Self {
         HealthHistoryRecord {
             timestamp: record.time.map(|time| time.to_string()).unwrap_or_default(),
             health: record
@@ -139,11 +139,11 @@ impl HealthObject {
 
     fn history_url(&self) -> Option<String> {
         match self {
-            HealthObject::Machine(id) => Some(format!("/admin/machine/{id}/health-history")),
+            HealthObject::Machine(_)
+            | HealthObject::PowerShelf(_)
+            | HealthObject::Rack(_)
+            | HealthObject::Switch(_) => Some(format!("{}/health-history", self.detail_url())),
             HealthObject::NvLinkDomain(_) => None,
-            HealthObject::PowerShelf(_) => None,
-            HealthObject::Rack(_) => None,
-            HealthObject::Switch(_) => None,
         }
     }
 
@@ -174,7 +174,7 @@ struct MachineHealthSnapshot {
 }
 
 /// View machine health.
-pub async fn machine_health(
+pub(super) async fn machine_health(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(machine_id): AxumPath<String>,
 ) -> Response {
@@ -191,7 +191,7 @@ pub async fn machine_health(
 }
 
 /// View rack health.
-pub async fn rack_health(
+pub(super) async fn rack_health(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(rack_id): AxumPath<String>,
 ) -> Response {
@@ -208,7 +208,7 @@ pub async fn rack_health(
 }
 
 /// View power shelf health.
-pub async fn power_shelf_health(
+pub(super) async fn power_shelf_health(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(power_shelf_id): AxumPath<String>,
 ) -> Response {
@@ -225,7 +225,7 @@ pub async fn power_shelf_health(
 }
 
 /// View switch health.
-pub async fn switch_health(
+pub(super) async fn switch_health(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(switch_id): AxumPath<String>,
 ) -> Response {
@@ -242,7 +242,7 @@ pub async fn switch_health(
 }
 
 /// View NVLink domain health.
-pub async fn nvlink_domain_health(
+pub(super) async fn nvlink_domain_health(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(domain_id): AxumPath<String>,
 ) -> Response {
@@ -259,7 +259,7 @@ pub async fn nvlink_domain_health(
 }
 
 /// Redirect NVLink domain details to the health page.
-pub async fn nvlink_domain_detail(AxumPath(domain_id): AxumPath<String>) -> Response {
+pub(super) async fn nvlink_domain_detail(AxumPath(domain_id): AxumPath<String>) -> Response {
     let Ok(domain_id) = NvLinkDomainId::from_str(&domain_id) else {
         return (StatusCode::BAD_REQUEST, "invalid NVLink domain id").into_response();
     };
@@ -307,6 +307,10 @@ fn render_health(object: HealthObject, data: HealthPageData) -> Response {
     (StatusCode::OK, Html(display.render().unwrap())).into_response()
 }
 
+fn not_found_response(kind: &str, id: &impl fmt::Display) -> Response {
+    (StatusCode::NOT_FOUND, format!("{kind} not found: {id}")).into_response()
+}
+
 async fn fetch_machine_health_page_data(
     api: &Api,
     machine_id: &MachineId,
@@ -316,16 +320,16 @@ async fn fetch_machine_health_page_data(
         Ok(entries) => entries,
         Err(err) if err.code() == tonic::Code::NotFound => Vec::new(),
         Err(err) => {
-            tracing::error!(%err, %machine_id, "list_health_report_entries");
+            tracing::error!(error = %err, %machine_id, "list_health_report_entries");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
     let health_contributors =
         fetch_dpu_health_contributors(api, machine_id, snapshot.associated_dpu_machine_ids).await?;
-    let history = match fetch_health_history(api, machine_id).await {
+    let history = match fetch_machine_health_history(api, machine_id).await {
         Ok(records) => HealthHistoryTable { records },
         Err(err) => {
-            tracing::error!(%err, %machine_id, "find_machine_health_histories");
+            tracing::error!(error = %err, %machine_id, "find_machine_health_histories");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -347,7 +351,14 @@ async fn fetch_rack_health_page_data(
         Ok(entries) => entries,
         Err(err) if err.code() == tonic::Code::NotFound => Vec::new(),
         Err(err) => {
-            tracing::error!(%err, %rack_id, "list_rack_health_report_overrides");
+            tracing::error!(error = %err, %rack_id, "list_rack_health_report_overrides");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    };
+    let history = match fetch_rack_health_history(api, rack_id).await {
+        Ok(records) => HealthHistoryTable { records },
+        Err(err) => {
+            tracing::error!(error = %err, %rack_id, "find_rack_health_histories");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -356,9 +367,7 @@ async fn fetch_rack_health_page_data(
         entries,
         aggregate_health,
         health_contributors: Vec::new(),
-        history: HealthHistoryTable {
-            records: Vec::new(),
-        },
+        history,
     })
 }
 
@@ -371,7 +380,14 @@ async fn fetch_power_shelf_health_page_data(
         Ok(entries) => entries,
         Err(err) if err.code() == tonic::Code::NotFound => Vec::new(),
         Err(err) => {
-            tracing::error!(%err, %power_shelf_id, "list_power_shelf_health_reports");
+            tracing::error!(error = %err, %power_shelf_id, "list_power_shelf_health_reports");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    };
+    let history = match fetch_power_shelf_health_history(api, power_shelf_id).await {
+        Ok(records) => HealthHistoryTable { records },
+        Err(err) => {
+            tracing::error!(error = %err, %power_shelf_id, "find_power_shelf_health_histories");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -380,9 +396,7 @@ async fn fetch_power_shelf_health_page_data(
         entries,
         aggregate_health,
         health_contributors: Vec::new(),
-        history: HealthHistoryTable {
-            records: Vec::new(),
-        },
+        history,
     })
 }
 
@@ -395,7 +409,14 @@ async fn fetch_switch_health_page_data(
         Ok(entries) => entries,
         Err(err) if err.code() == tonic::Code::NotFound => Vec::new(),
         Err(err) => {
-            tracing::error!(%err, %switch_id, "list_switch_health_reports");
+            tracing::error!(error = %err, %switch_id, "list_switch_health_reports");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    };
+    let history = match fetch_switch_health_history(api, switch_id).await {
+        Ok(records) => HealthHistoryTable { records },
+        Err(err) => {
+            tracing::error!(error = %err, %switch_id, "find_switch_health_histories");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -404,9 +425,7 @@ async fn fetch_switch_health_page_data(
         entries,
         aggregate_health,
         health_contributors: Vec::new(),
-        history: HealthHistoryTable {
-            records: Vec::new(),
-        },
+        history,
     })
 }
 
@@ -414,11 +433,20 @@ async fn fetch_nvlink_domain_health_page_data(
     api: &Api,
     domain_id: &NvLinkDomainId,
 ) -> Result<HealthPageData, Response> {
+    match db::nvlink_domain_health_report::find(api.db_reader().as_mut(), domain_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(not_found_response("NVLink domain", domain_id)),
+        Err(err) => {
+            tracing::error!(error = %err, %domain_id, "find_nvlink_domain_health_reports");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    }
+
     let entries = match list_nvlink_domain_health_report_entries(api, domain_id).await {
         Ok(entries) => entries,
         Err(err) if err.code() == tonic::Code::NotFound => Vec::new(),
         Err(err) => {
-            tracing::error!(%err, %domain_id, "list_nvlink_domain_health_reports");
+            tracing::error!(error = %err, %domain_id, "list_nvlink_domain_health_reports");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -455,7 +483,7 @@ async fn fetch_dpu_health_contributors(
         Ok(m) => m.machines,
         Err(err) if err.code() == tonic::Code::NotFound => Vec::new(),
         Err(err) => {
-            tracing::error!(%err, %host_machine_id, "find_dpu_machines_by_ids");
+            tracing::error!(error = %err, %host_machine_id, "find_dpu_machines_by_ids");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -467,7 +495,11 @@ async fn fetch_dpu_health_contributors(
                 "DPU Health {}",
                 dpu.id.map(|id| id.to_string()).unwrap_or_default()
             ),
-            report: dpu.health.map(health_report_from_rpc_convert_invalid),
+            report: dpu
+                .status
+                .unwrap_or_default()
+                .health
+                .map(health_report_from_rpc_convert_invalid),
         })
         .collect())
 }
@@ -549,7 +581,9 @@ async fn fetch_machine_health_snapshot(
         .await
         .map(|response| response.into_inner())
     {
-        Ok(m) if m.machines.is_empty() => None,
+        Ok(m) if m.machines.is_empty() => {
+            return Err(not_found_response("Machine", machine_id));
+        }
         Ok(m) if m.machines.len() != 1 => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -560,22 +594,25 @@ async fn fetch_machine_health_snapshot(
             )
                 .into_response());
         }
-        Ok(mut m) => Some(m.machines.remove(0)),
-        Err(err) if err.code() == tonic::Code::NotFound => None,
+        Ok(mut m) => m.machines.remove(0),
+        Err(err) if err.code() == tonic::Code::NotFound => {
+            return Err(not_found_response("Machine", machine_id));
+        }
         Err(err) => {
-            tracing::error!(%err, %machine_id, "find_machines_by_ids");
+            tracing::error!(error = %err, %machine_id, "find_machines_by_ids");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
 
+    let status = machine.status.unwrap_or_default();
+
     Ok(MachineHealthSnapshot {
-        aggregate_health: machine
-            .as_ref()
-            .and_then(|m| m.health.as_ref())
-            .map(|health| health_report_from_rpc_convert_invalid(health.clone())),
-        associated_dpu_machine_ids: machine
-            .map(|m| m.associated_dpu_machine_ids)
-            .unwrap_or_default(),
+        aggregate_health: status.health.map(health_report_from_rpc_convert_invalid),
+        associated_dpu_machine_ids: status
+            .associated_dpu_machine_ids
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     })
 }
 
@@ -590,7 +627,7 @@ async fn fetch_rack_aggregate_health(
         .await
         .map(|response| response.into_inner())
     {
-        Ok(r) if r.racks.is_empty() => None,
+        Ok(r) if r.racks.is_empty() => return Err(not_found_response("Rack", rack_id)),
         Ok(r) if r.racks.len() != 1 => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -598,17 +635,19 @@ async fn fetch_rack_aggregate_health(
             )
                 .into_response());
         }
-        Ok(mut r) => Some(r.racks.remove(0)),
-        Err(err) if err.code() == tonic::Code::NotFound => None,
+        Ok(mut r) => r.racks.remove(0),
+        Err(err) if err.code() == tonic::Code::NotFound => {
+            return Err(not_found_response("Rack", rack_id));
+        }
         Err(err) => {
-            tracing::error!(%err, %rack_id, "find_racks_by_ids");
+            tracing::error!(error = %err, %rack_id, "find_racks_by_ids");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
 
     Ok(rack
+        .status
         .as_ref()
-        .and_then(|rack| rack.status.as_ref())
         .and_then(|status| status.health.as_ref())
         .map(|health| health_report_from_rpc_convert_invalid(health.clone())))
 }
@@ -624,7 +663,9 @@ async fn fetch_power_shelf_aggregate_health(
         .await
         .map(|response| response.into_inner())
     {
-        Ok(r) if r.power_shelves.is_empty() => None,
+        Ok(r) if r.power_shelves.is_empty() => {
+            return Err(not_found_response("Power shelf", power_shelf_id));
+        }
         Ok(r) if r.power_shelves.len() != 1 => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -635,17 +676,19 @@ async fn fetch_power_shelf_aggregate_health(
             )
                 .into_response());
         }
-        Ok(mut r) => Some(r.power_shelves.remove(0)),
-        Err(err) if err.code() == tonic::Code::NotFound => None,
+        Ok(mut r) => r.power_shelves.remove(0),
+        Err(err) if err.code() == tonic::Code::NotFound => {
+            return Err(not_found_response("Power shelf", power_shelf_id));
+        }
         Err(err) => {
-            tracing::error!(%err, %power_shelf_id, "find_power_shelves_by_ids");
+            tracing::error!(error = %err, %power_shelf_id, "find_power_shelves_by_ids");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
 
     Ok(power_shelf
+        .status
         .as_ref()
-        .and_then(|power_shelf| power_shelf.status.as_ref())
         .and_then(|status| status.health.as_ref())
         .map(|health| health_report_from_rpc_convert_invalid(health.clone())))
 }
@@ -661,7 +704,7 @@ async fn fetch_switch_aggregate_health(
         .await
         .map(|response| response.into_inner())
     {
-        Ok(r) if r.switches.is_empty() => None,
+        Ok(r) if r.switches.is_empty() => return Err(not_found_response("Switch", switch_id)),
         Ok(r) if r.switches.len() != 1 => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -672,23 +715,25 @@ async fn fetch_switch_aggregate_health(
             )
                 .into_response());
         }
-        Ok(mut r) => Some(r.switches.remove(0)),
-        Err(err) if err.code() == tonic::Code::NotFound => None,
+        Ok(mut r) => r.switches.remove(0),
+        Err(err) if err.code() == tonic::Code::NotFound => {
+            return Err(not_found_response("Switch", switch_id));
+        }
         Err(err) => {
-            tracing::error!(%err, %switch_id, "find_switches_by_ids");
+            tracing::error!(error = %err, %switch_id, "find_switches_by_ids");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
 
     Ok(switch
+        .status
         .as_ref()
-        .and_then(|switch| switch.status.as_ref())
         .and_then(|status| status.health.as_ref())
         .map(|health| health_report_from_rpc_convert_invalid(health.clone())))
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-pub struct HealthReportEntry {
+pub(super) struct HealthReportEntry {
     mode: String,
     health_report: HealthReport,
 }
@@ -735,11 +780,11 @@ impl TryFrom<HealthReportEntry> for ::rpc::forge::HealthReportEntry {
 }
 
 #[derive(serde::Deserialize)]
-pub struct RemoveHealthReport {
+pub(super) struct RemoveHealthReport {
     source: String,
 }
 
-pub async fn add_machine_health_report(
+pub(super) async fn add_machine_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(machine_id): AxumPath<String>,
     auth_context: Option<axum::Extension<AuthContext>>,
@@ -759,7 +804,7 @@ pub async fn add_machine_health_report(
     .await
 }
 
-pub async fn add_rack_health_report(
+pub(super) async fn add_rack_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(rack_id): AxumPath<String>,
     auth_context: Option<axum::Extension<AuthContext>>,
@@ -773,7 +818,7 @@ pub async fn add_rack_health_report(
     add_health_report_for(state, HealthObject::Rack(rack_id), auth_context, payload).await
 }
 
-pub async fn add_power_shelf_health_report(
+pub(super) async fn add_power_shelf_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(power_shelf_id): AxumPath<String>,
     auth_context: Option<axum::Extension<AuthContext>>,
@@ -793,7 +838,7 @@ pub async fn add_power_shelf_health_report(
     .await
 }
 
-pub async fn add_switch_health_report(
+pub(super) async fn add_switch_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(switch_id): AxumPath<String>,
     auth_context: Option<axum::Extension<AuthContext>>,
@@ -814,7 +859,7 @@ pub async fn add_switch_health_report(
 }
 
 /// Insert an NVLink domain health report from the admin web UI.
-pub async fn add_nvlink_domain_health_report(
+pub(super) async fn add_nvlink_domain_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(domain_id): AxumPath<String>,
     auth_context: Option<axum::Extension<AuthContext>>,
@@ -920,14 +965,14 @@ async fn add_health_report_for(
             (StatusCode::NOT_FOUND, format!("Not found: {object_id}")).into_response()
         }
         Err(err) => {
-            tracing::error!(%err, %object_id, object_kind, "insert_health_report");
+            tracing::error!(error = %err, %object_id, object_kind, "insert_health_report");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
         Ok(_) => (StatusCode::OK, String::new()).into_response(),
     }
 }
 
-pub async fn remove_machine_health_report(
+pub(super) async fn remove_machine_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(machine_id): AxumPath<String>,
     extract::Json(payload): extract::Json<RemoveHealthReport>,
@@ -940,7 +985,7 @@ pub async fn remove_machine_health_report(
     remove_health_report_for(state, HealthObject::Machine(machine_id), payload).await
 }
 
-pub async fn remove_rack_health_report(
+pub(super) async fn remove_rack_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(rack_id): AxumPath<String>,
     extract::Json(payload): extract::Json<RemoveHealthReport>,
@@ -953,7 +998,7 @@ pub async fn remove_rack_health_report(
     remove_health_report_for(state, HealthObject::Rack(rack_id), payload).await
 }
 
-pub async fn remove_power_shelf_health_report(
+pub(super) async fn remove_power_shelf_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(power_shelf_id): AxumPath<String>,
     extract::Json(payload): extract::Json<RemoveHealthReport>,
@@ -966,7 +1011,7 @@ pub async fn remove_power_shelf_health_report(
     remove_health_report_for(state, HealthObject::PowerShelf(power_shelf_id), payload).await
 }
 
-pub async fn remove_switch_health_report(
+pub(super) async fn remove_switch_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(switch_id): AxumPath<String>,
     extract::Json(payload): extract::Json<RemoveHealthReport>,
@@ -980,7 +1025,7 @@ pub async fn remove_switch_health_report(
 }
 
 /// Remove an NVLink domain health report from the admin web UI.
-pub async fn remove_nvlink_domain_health_report(
+pub(super) async fn remove_nvlink_domain_health_report(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(domain_id): AxumPath<String>,
     extract::Json(payload): extract::Json<RemoveHealthReport>,
@@ -1047,7 +1092,7 @@ async fn remove_health_report_for(
             (StatusCode::NOT_FOUND, format!("Not found: {object_id}")).into_response()
         }
         Err(err) => {
-            tracing::error!(%err, %object_id, object_kind, "remove_health_report");
+            tracing::error!(error = %err, %object_id, object_kind, "remove_health_report");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
         Ok(_) => (StatusCode::OK, String::new()).into_response(),
@@ -1085,11 +1130,26 @@ fn aggregate_health_report_entries(
     replace.or_else(|| has_merge.then_some(aggregate))
 }
 
-pub(super) async fn fetch_health_history(
+/// Extracts and converts the records for `object_id` from a `HealthHistories`
+/// response map, dropping entries for any other object id.
+fn health_history_records_for(
+    mut histories: std::collections::HashMap<String, ::rpc::forge::HealthHistoryRecords>,
+    object_id: &str,
+) -> Vec<HealthHistoryRecord> {
+    histories
+        .remove(object_id)
+        .unwrap_or_default()
+        .records
+        .into_iter()
+        .map(HealthHistoryRecord::from_rpc_convert_invalid)
+        .collect()
+}
+
+pub(super) async fn fetch_machine_health_history(
     api: &Api,
     machine_id: &MachineId,
 ) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
-    let records = api
+    let histories = api
         .find_machine_health_histories(tonic::Request::new(
             ::rpc::forge::MachineHealthHistoriesRequest {
                 machine_ids: vec![*machine_id],
@@ -1099,17 +1159,75 @@ pub(super) async fn fetch_health_history(
         ))
         .await
         .map(|response| response.into_inner())?
-        .histories
-        .remove(&machine_id.to_string())
-        .unwrap_or_default()
-        .records;
+        .histories;
 
-    let records = records
-        .into_iter()
-        .map(HealthHistoryRecord::from_rpc_convert_invalid)
-        .collect();
+    Ok(health_history_records_for(
+        histories,
+        &machine_id.to_string(),
+    ))
+}
 
-    Ok(records)
+pub(super) async fn fetch_switch_health_history(
+    api: &Api,
+    switch_id: &SwitchId,
+) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
+    let histories = api
+        .find_switch_health_histories(tonic::Request::new(
+            ::rpc::forge::SwitchHealthHistoriesRequest {
+                switch_ids: vec![*switch_id],
+                start_time: None,
+                end_time: None,
+            },
+        ))
+        .await
+        .map(|response| response.into_inner())?
+        .histories;
+
+    Ok(health_history_records_for(
+        histories,
+        &switch_id.to_string(),
+    ))
+}
+
+pub(super) async fn fetch_rack_health_history(
+    api: &Api,
+    rack_id: &RackId,
+) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
+    let histories = api
+        .find_rack_health_histories(tonic::Request::new(
+            ::rpc::forge::RackHealthHistoriesRequest {
+                rack_ids: vec![rack_id.clone()],
+                start_time: None,
+                end_time: None,
+            },
+        ))
+        .await
+        .map(|response| response.into_inner())?
+        .histories;
+
+    Ok(health_history_records_for(histories, rack_id.as_ref()))
+}
+
+pub(super) async fn fetch_power_shelf_health_history(
+    api: &Api,
+    power_shelf_id: &PowerShelfId,
+) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
+    let histories = api
+        .find_power_shelf_health_histories(tonic::Request::new(
+            ::rpc::forge::PowerShelfHealthHistoriesRequest {
+                power_shelf_ids: vec![*power_shelf_id],
+                start_time: None,
+                end_time: None,
+            },
+        ))
+        .await
+        .map(|response| response.into_inner())?
+        .histories;
+
+    Ok(health_history_records_for(
+        histories,
+        &power_shelf_id.to_string(),
+    ))
 }
 
 impl super::Base for HealthPage {}

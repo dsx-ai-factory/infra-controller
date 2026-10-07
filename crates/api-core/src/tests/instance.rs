@@ -16,29 +16,29 @@
  */
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::ops::DerefMut;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use ::rpc::forge::forge_server::Forge;
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
 use carbide_uuid::machine_validation::MachineValidationId;
-use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use chrono::Utc;
 use common::api_fixtures::instance::{
     advance_created_instance_into_ready_state, default_os_config, default_tenant_config,
     interface_network_config_with_devices, single_interface_network_config,
-    single_interface_network_config_with_vpc_prefix, update_instance_network_status_observation,
+    single_interface_network_config_with_vpc_prefix,
 };
 use common::api_fixtures::tenant::create_fixture_tenant;
 use common::api_fixtures::tpm_attestation::{CA_CERT_SERIALIZED, EK_CERT_SERIALIZED};
 use common::api_fixtures::{
-    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides, dpu,
-    get_config, get_vpc_fixture_id, inject_machine_measurements, network_configured_with_health,
+    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
+    get_config, inject_machine_measurements, network_configured_with_health,
     network_configured_with_health_and_ext_services, persist_machine_validation_result,
     populate_network_security_groups, site_explorer,
 };
@@ -47,49 +47,55 @@ use db::instance_address::UsedOverlayNetworkIpResolver;
 use db::ip_allocator::UsedIpResolver;
 use db::network_segment::IdColumn;
 use db::{self, ObjectColumnFilter};
+use futures_util::future::join_all;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use itertools::Itertools;
 use mac_address::MacAddress;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpu_machine_update::DpuMachineUpdate;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
-use model::instance::config::infiniband::InstanceInfinibandConfig;
+use model::expected_machine::ExpectedInterface;
+use model::extension_service::ExtensionServiceLifecycleState;
+use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::instance::config::network::{
-    DeviceLocator, InstanceNetworkConfig, InterfaceFunctionId, NetworkDetails,
-};
-use model::instance::config::nvlink::InstanceNvLinkConfig;
-use model::instance::config::spx::InstanceSpxConfig;
-use model::instance::status::network::{
-    InstanceInterfaceStatusObservation, InstanceNetworkStatusObservation,
+    DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
+    InstanceNetworkConfig, InstanceServiceInterfaceConfig, InterfaceFunctionId,
+    Ipv6InterfaceConfig, NetworkDetails,
 };
 use model::machine::{
-    AttestationMode, CleanupContext, CleanupState, FailureDetails, InstanceState, MachineState,
-    MachineValidatingState, ManagedHostState, MeasuringState, NetworkConfigUpdateState,
-    SpdmMeasuringState, ValidationState,
+    AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine, InstanceState,
+    MachineState, MachineValidatingState, ManagedHostState, MeasuringState,
+    NetworkConfigUpdateState, SpdmMeasuringState, ValidationState,
 };
 use model::metadata::Metadata;
-use model::network_security_group::NetworkSecurityGroupStatusObservation;
-use model::network_segment::{NetworkSegmentSearchConfig, NetworkSegmentSearchFilter};
+use model::network_prefix::NewNetworkPrefix;
+use model::network_segment::{
+    NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
+    NewNetworkSegment,
+};
+use model::resource_pool::{OwnerType, ResourcePoolEntryState};
+use model::tenant::TenantOrganizationId;
 use model::test_support::ManagedHostConfig;
 use model::vpc_prefix::VpcPrefixConfig;
 use rpc::forge::{
-    DpuExtensionService, Issue, IssueCategory, ManagedHostQuarantineMode, TpmCaCert, TpmCaCertId,
+    AdminForceDeleteMachineRequest, DpuExtensionService, Issue, IssueCategory,
+    ManagedHostQuarantineMode, TpmCaCert, TpmCaCertId,
 };
-use rpc::{InstanceReleaseRequest, InterfaceFunctionType, Timestamp};
+use rpc::{InstanceReleaseRequest, Timestamp};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tonic::Request;
 
 use crate::cfg::file::VmaasConfig;
-use crate::instance::{allocate_instance, allocate_network};
+use crate::instance::allocate_network;
 use crate::network_segment::allocate::PrefixAllocator;
 use crate::test_support::fixture_config::FixtureDefault as _;
+use crate::test_support::metadata;
+use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
-use crate::tests::common::api_fixtures::instance::{
-    advance_created_instance_into_state, single_interface_network_config_with_vfs,
-};
+use crate::tests::common::api_fixtures::instance::single_interface_network_config_with_vfs;
 use crate::tests::common::api_fixtures::rpc_instance::RpcInstance;
 use crate::tests::common::api_fixtures::{
-    TestEnv, create_managed_host_multi_dpu, create_managed_host_with_ek,
+    TestEnv, TestManagedHost, create_managed_host_multi_dpu, create_managed_host_with_ek,
     remove_health_report_entry, send_health_report_entry, update_time_params,
 };
 use crate::tests::common::attestation::spdm_attestation_run_to_failed_then_to_success;
@@ -97,7 +103,16 @@ use crate::tests::common::rpc_builder::{
     InstanceAllocationRequest, InstanceConfig, InstanceConfigExt, VpcCreationRequest,
 };
 
-pub async fn find_instances_by_label(
+/// Returns tenant config matching the shared VPC fixture so ownership
+/// validation does not obscure the scenario under test.
+fn fixture_tenant_config() -> rpc::TenantConfig {
+    rpc::TenantConfig {
+        tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+        ..default_tenant_config()
+    }
+}
+
+pub(in crate::tests) async fn find_instances_by_label(
     env: &TestEnv,
     label: rpc::forge::Label,
 ) -> rpc::forge::InstanceList {
@@ -161,6 +176,20 @@ async fn test_allocate_and_release_instance_impl(
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
     let env = create_test_env(pool).await;
     let segment_ids = env.create_vpc_and_tenant_segments(dpu_count).await;
+
+    let vpc_ids: Vec<VpcId> = join_all(segment_ids.iter().map(|id| {
+        let pool = env.pool.clone();
+        async move {
+            db::vpc::find_by_segment(&pool, *id)
+                .await
+                .map(|vpc| vpc.expect("missing VPC for created segment").id)
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<_, _>>()
+    .unwrap();
+
     let mh = create_managed_host_multi_dpu(&env, dpu_count).await;
 
     let (used_dpu_ids, _unused_dpu_ids) = mh.dpu_ids.split_at(instance_interface_count);
@@ -216,7 +245,7 @@ async fn test_allocate_and_release_instance_impl(
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(&fetched_instance.machine_id, &mh.host().id);
+    assert_eq!(&fetched_instance.machine_id, &mh.host().id.into());
     for (segment_index, segment_id) in segment_ids.iter().enumerate() {
         let expected_count = if segment_index < instance_interface_count {
             1
@@ -243,7 +272,7 @@ async fn test_allocate_and_release_instance_impl(
     }
     assert_eq!(
         network_config_no_addresses,
-        InstanceNetworkConfig::for_segment_ids(&segment_ids, &device_locators,)
+        InstanceNetworkConfig::for_segment_ids(&segment_ids, &device_locators, &vpc_ids)
     );
 
     assert!(!fetched_instance.observations.network.is_empty());
@@ -256,14 +285,16 @@ async fn test_allocate_and_release_instance_impl(
 
     let mut txn = env.db_txn().await;
     // TODO: The MAC here doesn't matter. It's not used for lookup
-    let record = db::instance_address::find_by_instance_id_and_segment_id(
+    let records = db::instance_address::find_all_by_instance_id_and_segment_id(
         &mut txn,
         &fetched_instance.id,
         segment_ids.first().unwrap(),
     )
     .await
-    .unwrap()
     .unwrap();
+    let [record] = records.as_slice() else {
+        panic!("expected one address on the first segment")
+    };
 
     // This should the first IP. Algo does not look into machine_interface_addresses
     // table for used addresses for instance.
@@ -279,7 +310,7 @@ async fn test_allocate_and_release_instance_impl(
     );
 
     assert_eq!(
-        format!("{}/32", &record.address),
+        format!("{}/32", record.address),
         network_config.interfaces[0]
             .interface_prefixes
             .iter()
@@ -316,8 +347,7 @@ async fn test_allocate_and_release_instance_impl(
     txn.commit().await.unwrap();
 }
 
-#[crate::sqlx_test]
-async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready(
+async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) {
@@ -336,6 +366,11 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
 
     let env = create_test_env_with_overrides(pool, overrides).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
+    let vpc_id = db::vpc::find_by_segment(&env.pool, segment_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
     // add CA cert to pass attestation process
     let add_ca_request = tonic::Request::new(TpmCaCert {
         ca_cert: CA_CERT_SERIALIZED.to_vec(),
@@ -367,7 +402,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     txn.commit().await.unwrap();
 
     let device_locator = host_machine
-        .get_device_locator_for_dpu_id(&mh.dpu().id)
+        .get_device_locator_for_dpu_id(&mh.dpu_ids[0])
         .unwrap();
 
     // send the request to create the instance
@@ -383,6 +418,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
     let instance_id = env
         .api
@@ -449,7 +485,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.host().id);
+    assert_eq!(fetched_instance.machine_id, mh.host().id.into());
     assert_eq!(
         db::instance_address::count_by_segment_id(&mut txn, &segment_id)
             .await
@@ -470,7 +506,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     }
     assert_eq!(
         network_config_no_addresses,
-        InstanceNetworkConfig::for_segment_ids(&[segment_id], &[device_locator],)
+        InstanceNetworkConfig::for_segment_ids(&[segment_id], &[device_locator], &[vpc_id])
     );
 
     assert!(!fetched_instance.observations.network.is_empty());
@@ -489,14 +525,16 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     let segment = db::network_segment::find_by_name(&mut txn, "TENANT")
         .await
         .unwrap();
-    let record = db::instance_address::find_by_instance_id_and_segment_id(
+    let records = db::instance_address::find_all_by_instance_id_and_segment_id(
         &mut txn,
         &fetched_instance.id,
         &segment.id,
     )
     .await
-    .unwrap()
     .unwrap();
+    let [record] = records.as_slice() else {
+        panic!("expected one address on the tenant segment")
+    };
 
     // This should the first IP. Algo does not look into machine_interface_addresses
     // table for used addresses for instance.
@@ -512,7 +550,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     );
 
     assert_eq!(
-        format!("{}/32", &record.address),
+        format!("{}/32", record.address),
         network_config.interfaces[0]
             .interface_prefixes
             .iter()
@@ -536,6 +574,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
             id: Some(instance_id),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .expect("Delete instance failed.");
@@ -546,7 +585,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
 
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
-        7,
+        8,
         ManagedHostState::Assigned {
             instance_state: model::machine::InstanceState::HostPlatformConfiguration {
                 platform_config_state:
@@ -793,6 +832,25 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     txn.commit().await.unwrap();
 }
 
+#[test]
+fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(PgPoolOptions, PgConnectOptions) -> _ =
+        test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .expect("failed to spawn measurement test thread")
+        .join()
+        .expect("measurement test thread panicked");
+}
+
 #[crate::sqlx_test]
 async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
@@ -846,7 +904,7 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.host().id);
+    assert_eq!(fetched_instance.machine_id, mh.host().id.into());
 
     assert_eq!(fetched_instance.metadata.name, "test_instance_with_labels");
     assert_eq!(
@@ -892,7 +950,7 @@ async fn test_allocate_instance_with_invalid_metadata(_: PgPoolOptions, options:
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(true) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(true) {
         let tenant_config = default_tenant_config();
         let config = InstanceConfig::builder()
             .tenant(tenant_config)
@@ -1009,7 +1067,9 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
                 routing_profile: None,
             },
         ],
+        #[allow(deprecated)]
         auto: false,
+        auto_config: None,
     };
 
     // Create instance with hostname
@@ -1024,7 +1084,7 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.dpu().id.into(),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1048,7 +1108,10 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
         .unwrap()
         .into_inner();
 
-    tracing::info!("dns_record is {:?}: ", dns_record);
+    tracing::info!(
+        dns_record = ?dns_record,
+        "Fetched DNS record",
+    );
     assert_eq!(dns_record.records.first().unwrap().content, "192.0.2.3");
 
     //DHCP response uses hostname set during allocation
@@ -1083,7 +1146,7 @@ async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.dpu().id.into(),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1275,11 +1338,24 @@ async fn test_instance_deletion_before_provisioning_finishes(
 
     let instance_id = instance.id.expect("Missing instance ID");
 
+    // Stop provisioning at the point that normally requires a DPU network-status
+    // observation. Releasing here must not wait for that observation.
+    env.run_network_segment_controller_iteration().await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkConfig,
+        },
+    )
+    .await;
+
     env.api
         .release_instance(tonic::Request::new(InstanceReleaseRequest {
             id: Some(instance_id),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .expect("Delete instance failed.");
@@ -1287,23 +1363,363 @@ async fn test_instance_deletion_before_provisioning_finishes(
     let instance = env.one_instance(instance_id).await;
     assert_eq!(instance.status().tenant(), rpc::TenantState::Terminating);
 
-    // Advance the instance into the "ready" state and then cleanup.
-    // The next state that requires external input is HostPlatformConfiguration.
-    // To the tenant it will however still show up as terminating
-    advance_created_instance_into_state(&env, &mh, |machine| {
-        matches!(
-            machine.state.value,
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::HostPlatformConfiguration { .. },
-            }
-        )
-    })
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForRebootToReady,
+        },
+    )
     .await;
-    let instance = env.one_instance(instance_id).await;
-    assert_eq!(instance.status().tenant(), rpc::TenantState::Terminating);
 
     // Now go through regular deletion
     mh.delete_instance(&env, instance_id).await;
+}
+
+#[crate::sqlx_test]
+async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    const PRIMARY_DPU_BGP_WAIT_REASON: &str =
+        "Waiting for the primary DPU p0 BGP session to be established";
+    const HOST_HEALTH_WAIT_REASON: &str =
+        "Waiting for lifecycle-blocking host health alerts to clear before PXE reboot";
+
+    fn dpu_health_alert(
+        id: &str,
+        target: Option<&str>,
+        classifications: Vec<health_report::HealthAlertClassification>,
+    ) -> rpc::health::HealthReport {
+        rpc::health::HealthReport {
+            source: "forge-dpu-agent".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: vec![rpc::health::HealthProbeAlert {
+                id: id.to_string(),
+                target: target.map(str::to_string),
+                in_alert_since: None,
+                message: "test lifecycle gate".to_string(),
+                tenant_message: None,
+                classifications: classifications
+                    .into_iter()
+                    .map(|classification| classification.to_string())
+                    .collect(),
+            }],
+        }
+    }
+
+    fn post_config_wait_health() -> rpc::health::HealthReport {
+        dpu_health_alert(
+            health_report::HealthProbeId::post_config_check_wait().as_str(),
+            None,
+            vec![
+                health_report::HealthAlertClassification::prevent_allocations(),
+                health_report::HealthAlertClassification::prevent_host_state_changes(),
+            ],
+        )
+    }
+
+    fn bgp_tor_health(target: &str, prevent_allocations: bool) -> rpc::health::HealthReport {
+        let classifications = prevent_allocations
+            .then(health_report::HealthAlertClassification::prevent_allocations)
+            .into_iter()
+            .collect();
+        dpu_health_alert(
+            health_report::HealthProbeId::bgp_peering_tor().as_str(),
+            Some(target),
+            classifications,
+        )
+    }
+
+    fn pxe_blocking_bgp_merge(source: &str) -> health_report::HealthReport {
+        health_report::HealthReport {
+            source: source.to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: vec![health_report::HealthProbeAlert {
+                id: health_report::HealthProbeId::bgp_peering_tor(),
+                target: Some("p0_if".to_string()),
+                in_alert_since: None,
+                message: "test additive PXE gate".to_string(),
+                tenant_message: None,
+                classifications: vec![
+                    health_report::HealthAlertClassification::prevent_allocations(),
+                ],
+            }],
+        }
+    }
+
+    async fn assert_instance_state(env: &TestEnv, mh: &TestManagedHost, expected: InstanceState) {
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            mh.host().db_machine(&mut txn).await.current_state(),
+            &ManagedHostState::Assigned {
+                instance_state: expected,
+            }
+        );
+        txn.commit().await.unwrap();
+    }
+
+    async fn assert_pxe_reboot_wait_outcome(
+        env: &TestEnv,
+        mh: &TestManagedHost,
+        expected_reason: &str,
+    ) {
+        let mut txn = env.db_txn().await;
+        let host_machine = mh.host().db_machine(&mut txn).await;
+        let Some(PersistentStateHandlerOutcome::Wait {
+            reason,
+            source_ref: Some(source_ref),
+        }) = &host_machine.controller_state_outcome
+        else {
+            panic!("The PXE reboot gate should persist a Wait outcome with a source reference");
+        };
+        assert_eq!(reason, expected_reason);
+        assert!(source_ref.file.ends_with("/handler.rs"));
+        txn.commit().await.unwrap();
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let dpu_id = mh.dpu_ids[0];
+
+    let config = InstanceConfig::default_tenant_and_os()
+        .network(single_interface_network_config(segment_id));
+    env.api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(mh.host().id)
+                .config(config)
+                .metadata(rpc::Metadata {
+                    name: "test_instance".to_string(),
+                    description: "tests/instance".to_string(),
+                    labels: Vec::new(),
+                })
+                .tonic_request(),
+        )
+        .await
+        .expect("Create instance failed.");
+
+    env.run_network_segment_controller_iteration().await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkConfig,
+        },
+    )
+    .await;
+
+    // Both the configuration settle period and a failed p0 session hold the
+    // initial network configuration gate.
+    network_configured_with_health(&env, &dpu_id, Some(post_config_wait_health())).await;
+    env.run_machine_state_controller_iteration().await;
+    assert_instance_state(&env, &mh, InstanceState::WaitingForNetworkConfig).await;
+
+    network_configured_with_health(&env, &dpu_id, Some(bgp_tor_health("p0_if", true))).await;
+    env.run_machine_state_controller_iteration().await;
+    assert_instance_state(&env, &mh, InstanceState::WaitingForNetworkConfig).await;
+
+    // An empty DPU Replace report masks the agent Merge report and allows
+    // provisioning to advance to the reboot gate.
+    send_health_report_entry(
+        &env,
+        &dpu_id,
+        (
+            health_report::HealthReport::empty("test-pxe-bgp-override".to_string()),
+            health_report::HealthReportApplyMode::Replace,
+        ),
+    )
+    .await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForRebootToReady,
+        },
+    )
+    .await;
+
+    // Removing the Replace report exposes the agent p0 alert again, so the
+    // reboot gate must recheck it before restarting the host.
+    remove_health_report_entry(&env, &dpu_id, "test-pxe-bgp-override".to_string()).await;
+    env.run_machine_state_controller_iteration().await;
+    assert_instance_state(&env, &mh, InstanceState::WaitingForRebootToReady).await;
+    assert_pxe_reboot_wait_outcome(&env, &mh, PRIMARY_DPU_BGP_WAIT_REASON).await;
+
+    // The reboot gate also rechecks health alerts that block host state
+    // changes and persists a diagnosable wait reason.
+    network_configured_with_health(&env, &dpu_id, Some(post_config_wait_health())).await;
+    env.run_machine_state_controller_iteration().await;
+    assert_instance_state(&env, &mh, InstanceState::WaitingForRebootToReady).await;
+    assert_pxe_reboot_wait_outcome(&env, &mh, HOST_HEALTH_WAIT_REASON).await;
+
+    // A visible p1 alert permits reboot, but an additional primary DPU Merge
+    // report that carries the p0 classification still blocks it.
+    network_configured_with_health(&env, &dpu_id, Some(bgp_tor_health("p1_if", false))).await;
+    send_health_report_entry(
+        &env,
+        &dpu_id,
+        (
+            pxe_blocking_bgp_merge("test-pxe-bgp-merge"),
+            health_report::HealthReportApplyMode::Merge,
+        ),
+    )
+    .await;
+    env.run_machine_state_controller_iteration().await;
+    assert_instance_state(&env, &mh, InstanceState::WaitingForRebootToReady).await;
+
+    // Clearing the last PXE blocking Merge report lets provisioning reach Ready.
+    remove_health_report_entry(&env, &dpu_id, "test-pxe-bgp-merge".to_string()).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await;
+}
+
+#[crate::sqlx_test]
+async fn test_instance_release_waits_for_primary_dpu_network_health_before_discovery_reboot(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    const DPU_NETWORK_READY_WAIT_REASON: &str =
+        "Waiting for the primary DPU network to become ready before PXE reboot";
+
+    fn agent_health(alert_id: Option<health_report::HealthProbeId>) -> rpc::health::HealthReport {
+        rpc::health::HealthReport {
+            source: "forge-dpu-agent".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: alert_id
+                .map(|id| rpc::health::HealthProbeAlert {
+                    id: id.to_string(),
+                    target: None,
+                    in_alert_since: None,
+                    message: "test primary DPU network health".to_string(),
+                    tenant_message: None,
+                    classifications: vec![
+                        health_report::HealthAlertClassification::prevent_allocations().to_string(),
+                        health_report::HealthAlertClassification::prevent_host_state_changes()
+                            .to_string(),
+                    ],
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    async fn assert_release_is_waiting(env: &TestEnv, mh: &TestManagedHost, scenario: &str) {
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForDpusToUp,
+            },
+            "{scenario}",
+        );
+        let Some(PersistentStateHandlerOutcome::Wait { reason, .. }) =
+            &host.controller_state_outcome
+        else {
+            panic!("{scenario}: release gate should persist a Wait outcome");
+        };
+        assert_eq!(reason, DPU_NETWORK_READY_WAIT_REASON, "{scenario}");
+        txn.commit().await.unwrap();
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let instance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    env.api
+        .release_instance(tonic::Request::new(InstanceReleaseRequest {
+            id: Some(instance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect("Delete instance failed.");
+
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &mh.host().id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForDpusToUp,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let redfish_checkpoint = env.redfish_sim.timepoint();
+    network_configured_with_health(
+        &env,
+        &mh.dpu_ids[0],
+        Some(agent_health(Some(
+            health_report::HealthProbeId::nvue_api_running(),
+        ))),
+    )
+    .await;
+    env.run_machine_state_controller_iteration().await;
+    assert_release_is_waiting(&env, &mh, "NVUE API is unavailable").await;
+
+    let power_actions = env
+        .redfish_sim
+        .actions_since(&redfish_checkpoint)
+        .all_hosts()
+        .into_iter()
+        .filter(|action| matches!(action, RedfishSimAction::Power(_)))
+        .collect::<Vec<_>>();
+    assert!(
+        power_actions.is_empty(),
+        "release must not reboot the host before primary DPU network health is ready: {power_actions:?}",
+    );
+
+    network_configured_with_health(&env, &mh.dpu_ids[0], Some(agent_health(None))).await;
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        mh.host().db_machine(&mut txn).await.current_state(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: model::machine::RetryInfo { count: 0 },
+            },
+        }
+    );
+    txn.commit().await.unwrap();
+
+    let power_actions = env
+        .redfish_sim
+        .actions_since(&redfish_checkpoint)
+        .all_hosts()
+        .into_iter()
+        .filter(|action| matches!(action, RedfishSimAction::Power(_)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        power_actions,
+        vec![RedfishSimAction::Power(
+            libredfish::SystemPowerControl::ForceRestart,
+        )],
+    );
 }
 
 #[crate::sqlx_test]
@@ -1326,6 +1742,7 @@ async fn test_instance_deletion_is_idempotent(_: PgPoolOptions, options: PgConne
                 id: Some(tinstance.id),
                 issue: None,
                 is_repair_tenant: None,
+                delete_attribution: None,
             }))
             .await
             .unwrap_or_else(|_| panic!("Delete instance failed failed on attempt {i}."));
@@ -1343,6 +1760,7 @@ async fn test_instance_deletion_is_idempotent(_: PgPoolOptions, options: PgConne
             id: Some(tinstance.id),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .expect_err("Expect deletion to fail");
@@ -1424,7 +1842,7 @@ async fn test_instance_cloud_init_metadata(
     let machine = mh.host().db_machine(&mut txn).await;
 
     let request = tonic::Request::new(rpc::forge::CloudInitInstructionsRequest {
-        ip: machine.interfaces[0].addresses[0].to_string(),
+        ip: machine.status.interfaces[0].addresses[0].to_string(),
     });
 
     let response = env.api.get_cloud_init_instructions(request).await?;
@@ -1460,308 +1878,8 @@ async fn test_instance_cloud_init_metadata(
 }
 
 #[crate::sqlx_test]
-async fn test_instance_network_status_sync(_: PgPoolOptions, options: PgConnectOptions) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let mh = create_managed_host(&env).await;
-
-    // TODO: The test is broken from here. This method already moves the instance
-    // into READY state, which means most assertions that follow this won't test
-    // anything new anymmore.
-    let tinstance = mh
-        .instance_builer(&env)
-        .single_interface_network_config(segment_id)
-        .build()
-        .await;
-
-    let mut txn = env.db_txn().await;
-    // When no network status has been observed, we report an interface
-    // list with no IPs and MACs to the user
-    let snapshot = mh.snapshot(&mut txn).await;
-
-    let snapshot = snapshot.instance.unwrap();
-
-    let (pf_segment, pf_addr) = snapshot.config.network.interfaces[0]
-        .ip_addrs
-        .iter()
-        .next()
-        .unwrap();
-
-    let pf_instance_prefix = snapshot.config.network.interfaces[0]
-        .interface_prefixes
-        .get(pf_segment)
-        .expect("Could not find matching interface_prefixes entry for pf_segment from ip_addrs.");
-
-    let pf_gw = db::network_prefix::find(&mut txn, *pf_segment)
-        .await
-        .ok()
-        .and_then(|pfx| pfx.gateway_cidr())
-        .expect("Could not find gateway in network segment");
-
-    let mut updated_network_status = InstanceNetworkStatusObservation {
-        instance_config_version: Some(snapshot.config_version),
-        config_version: snapshot.network_config_version,
-        interfaces: vec![InstanceInterfaceStatusObservation {
-            function_id: InterfaceFunctionId::Physical {},
-            mac_address: None,
-            addresses: vec![*pf_addr],
-            prefixes: vec![*pf_instance_prefix],
-            gateways: vec![IpNetwork::try_from(pf_gw.as_str()).expect("Invalid gateway")],
-            network_security_group: Some(NetworkSecurityGroupStatusObservation {
-                id: "c7c056c8-daa5-11ef-b221-c76a97b6c2ec".parse().unwrap(),
-                source: rpc::forge::NetworkSecurityGroupSource::NsgSourceInstance
-                    .try_into()
-                    .unwrap(),
-                version: "V1-T1".parse().unwrap(),
-            }),
-            internal_uuid: None,
-        }],
-        observed_at: Utc::now(),
-    };
-
-    update_instance_network_status_observation(&mh.dpu().id, &updated_network_status, &mut txn)
-        .await;
-
-    let snapshot = mh.snapshot(&mut txn).await;
-
-    let snapshot = snapshot.instance.unwrap();
-
-    assert_eq!(
-        snapshot.observations.network.values().next(),
-        Some(&updated_network_status)
-    );
-    txn.commit().await.unwrap();
-
-    let instance = tinstance.rpc_instance().await;
-    let status = instance.status();
-    assert_eq!(status.configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.network().configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.infiniband().configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.tenant(), rpc::TenantState::Ready);
-    assert_eq!(
-        status.network().interfaces,
-        vec![rpc::InstanceInterfaceStatus {
-            virtual_function_id: None,
-            mac_address: None,
-            addresses: vec![pf_addr.to_string()],
-            prefixes: vec![pf_instance_prefix.to_string()],
-            gateways: vec![pf_gw.clone()],
-            device: None,
-            device_instance: 0u32,
-        }]
-    );
-
-    let mut txn = env.db_txn().await;
-    updated_network_status.interfaces[0].mac_address =
-        Some(MacAddress::new([0x11, 0x12, 0x13, 0x14, 0x15, 0x16]).into());
-    update_instance_network_status_observation(&mh.dpu().id, &updated_network_status, &mut txn)
-        .await;
-
-    let snapshot = mh.snapshot(&mut txn).await;
-
-    let snapshot = snapshot.instance.unwrap();
-
-    assert_eq!(
-        snapshot.observations.network.values().next(),
-        Some(&updated_network_status)
-    );
-    txn.commit().await.unwrap();
-
-    let instance = tinstance.rpc_instance().await;
-    let status = instance.status();
-    assert_eq!(status.configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.network().configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.infiniband().configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.tenant(), rpc::TenantState::Ready);
-    assert_eq!(
-        status.network().interfaces,
-        vec![rpc::InstanceInterfaceStatus {
-            virtual_function_id: None,
-            mac_address: Some("11:12:13:14:15:16".to_string()),
-            addresses: vec![pf_addr.to_string()],
-            prefixes: vec![pf_instance_prefix.to_string()],
-            gateways: vec![pf_gw.clone()],
-            device: None,
-            device_instance: 0u32,
-        }]
-    );
-
-    // Assuming the config would change, the status should become unsynced again
-    let mut txn = env.db_txn().await;
-    let next_config_version = snapshot.network_config_version.increment();
-    let (_,): (uuid::Uuid,) = sqlx::query_as(
-        "UPDATE instances SET network_config_version=$1 WHERE id = $2::uuid returning id",
-    )
-    .bind(next_config_version.version_string())
-    .bind(tinstance.id)
-    .fetch_one(&mut *txn)
-    .await
-    .unwrap();
-    let snapshot = mh.snapshot(&mut txn).await;
-
-    let snapshot = snapshot.instance.unwrap();
-
-    assert_eq!(
-        snapshot.observations.network.values().next(),
-        Some(&updated_network_status)
-    );
-    txn.commit().await.unwrap();
-
-    let instance = tinstance.rpc_instance().await;
-    let status = instance.status();
-    assert_eq!(status.configs_synced(), rpc::SyncState::Pending);
-    assert_eq!(status.network().configs_synced(), rpc::SyncState::Pending);
-    assert_eq!(status.infiniband().configs_synced(), rpc::SyncState::Synced);
-
-    assert_eq!(status.tenant(), rpc::TenantState::Configuring);
-    assert_eq!(
-        status.network().interfaces,
-        vec![rpc::InstanceInterfaceStatus {
-            virtual_function_id: None,
-            mac_address: None,
-            addresses: vec![],
-            prefixes: vec![],
-            gateways: vec![],
-            device: None,
-            device_instance: 0u32,
-        }]
-    );
-
-    // When the observation catches up, we are good again
-    // The extra VF is ignored
-    let mut txn = env.db_txn().await;
-    updated_network_status.config_version = next_config_version;
-    updated_network_status
-        .interfaces
-        .push(InstanceInterfaceStatusObservation {
-            function_id: InterfaceFunctionId::Virtual { id: 0 },
-            mac_address: Some(MacAddress::new([1, 2, 3, 4, 5, 6]).into()),
-            addresses: vec!["127.1.2.3".parse().unwrap()],
-            prefixes: vec!["127.1.2.3/32".parse().unwrap()],
-            gateways: vec!["127.1.2.1".parse().unwrap()],
-            network_security_group: Some(NetworkSecurityGroupStatusObservation {
-                id: "c7c056c8-daa5-11ef-b221-c76a97b6c2ec".parse().unwrap(),
-                source: rpc::forge::NetworkSecurityGroupSource::NsgSourceInstance
-                    .try_into()
-                    .unwrap(),
-                version: "V1-T1".parse().unwrap(),
-            }),
-            internal_uuid: None,
-        });
-
-    update_instance_network_status_observation(&mh.dpu().id, &updated_network_status, &mut txn)
-        .await;
-    let snapshot = mh.snapshot(&mut txn).await;
-
-    let snapshot = snapshot.instance.unwrap();
-    assert_eq!(
-        snapshot.observations.network.values().next(),
-        Some(&updated_network_status)
-    );
-    txn.commit().await.unwrap();
-
-    let instance = tinstance.rpc_instance().await;
-    let status = instance.status();
-    assert_eq!(status.configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.network().configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.infiniband().configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(status.tenant(), rpc::TenantState::Ready);
-    assert_eq!(
-        status.network().interfaces,
-        vec![rpc::InstanceInterfaceStatus {
-            virtual_function_id: None,
-            mac_address: Some("11:12:13:14:15:16".to_string()),
-            addresses: vec![pf_addr.to_string()],
-            prefixes: vec![pf_instance_prefix.to_string()],
-            gateways: vec![pf_gw.clone()],
-            device: None,
-            device_instance: 0u32,
-        }]
-    );
-
-    // Drop the gateways and prefixes fields from the JSONB and ensure the rest of the
-    // object is OK (to emulate older agents not sending gateways and prefixes in the status
-    // observations).
-    let mut txn = env.db_txn().await;
-    let gateways_query = "UPDATE machines SET network_status_observation=jsonb_strip_nulls(jsonb_set(network_status_observation, '{instance_network_observation,interfaces,0,gateways}', 'null', false)) where id = $1 returning id";
-    let prefixes_query = "UPDATE machines SET network_status_observation=jsonb_strip_nulls(jsonb_set(network_status_observation, '{instance_network_observation,interfaces,0,prefixes}', 'null', false)) where id = $1 returning id";
-
-    let (_,): (MachineId,) = sqlx::query_as(gateways_query)
-        .bind(mh.dpu().id)
-        .fetch_one(txn.deref_mut())
-        .await
-        .expect("Database error rewriting JSON");
-
-    let (_,): (MachineId,) = sqlx::query_as(prefixes_query)
-        .bind(mh.dpu().id)
-        .fetch_one(txn.deref_mut())
-        .await
-        .expect("Database error rewriting JSON");
-
-    txn.commit().await.unwrap();
-
-    let instance = tinstance.rpc_instance().await;
-    let status = instance.status();
-    assert_eq!(
-        status.network().interfaces,
-        vec![rpc::InstanceInterfaceStatus {
-            virtual_function_id: None,
-            mac_address: Some("11:12:13:14:15:16".to_string()),
-            addresses: vec![pf_addr.to_string()],
-            // prefixes and gateways should have been turned into empty arrays.
-            prefixes: vec![],
-            gateways: vec![],
-            device: None,
-            device_instance: 0u32,
-        }]
-    );
-
-    tinstance.delete().await;
-}
-
-#[crate::sqlx_test]
-async fn test_can_not_create_instance_for_dpu(_: PgPoolOptions, options: PgConnectOptions) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let host_config = env.managed_host_config();
-    let dpu_machine_id = dpu::create_dpu_machine(&env, &host_config).await;
-    let request = crate::instance::InstanceAllocationRequest {
-        instance_id: InstanceId::new(),
-        machine_id: dpu_machine_id,
-        instance_type_id: None,
-        config: model::instance::config::InstanceConfig {
-            os: default_os_config().try_into().unwrap(),
-            tenant: default_tenant_config().try_into().unwrap(),
-            network: InstanceNetworkConfig::for_segment_ids(&[segment_id], &Vec::default()),
-            infiniband: InstanceInfinibandConfig::default(),
-            nvlink: InstanceNvLinkConfig::default(),
-            spxconfig: InstanceSpxConfig::default(),
-            network_security_group_id: None,
-            extension_services: InstanceExtensionServicesConfig::default(),
-        },
-        metadata: Metadata {
-            name: "test_instance".to_string(),
-            description: "tests/instance".to_string(),
-            labels: HashMap::new(),
-        },
-        allow_unhealthy_machine: false,
-    };
-
-    // Note: This also requests a background task in the DB for creating managed
-    // resources. That's however ok - we will just ignore it and not execute
-    // that task. Later we might also verify that the creation of those resources
-    // is requested
-    let result = allocate_instance(&env.api, request, env.config.host_health).await;
-    let error = result.expect_err("expected allocation to fail").to_string();
-    assert!(
-        error.contains("is of type DPU and can not be converted into an instance"),
-        "Error message should contain 'is of type Dpu and can not be converted into an instance', but is {error}"
-    );
-}
-
-#[crate::sqlx_test]
+// This test verifies parity between `addresses` and the compatibility fields.
+#[allow(deprecated)]
 async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
     let env = create_test_env(pool).await;
@@ -1808,10 +1926,12 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
                 routing_profile: None,
             },
         ],
+        #[allow(deprecated)]
         auto: false,
+        auto_config: None,
     };
 
-    let tinstance = mh.instance_builer(&env).network(network).build().await;
+    mh.instance_builer(&env).network(network).build().await;
 
     let mut txn = env.db_txn().await;
     assert_eq!(
@@ -1859,15 +1979,6 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
     assert_eq!("192.1.4.3", used_ips[0].to_string());
     assert_eq!("192.1.4.3/32", used_prefixes[0].to_string());
 
-    // And make sure find_by_prefix works -- just leverage
-    // the last used_prefixes prefix and make sure it matches
-    // the allocated instance ID.
-    let address_by_prefix = db::instance_address::find_by_prefix(&mut txn, used_prefixes[0])
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(tinstance.id, address_by_prefix.instance_id);
-
     txn.commit().await.unwrap();
 
     // The addresses should show up in the internal config - which is sent to the DPU
@@ -1875,7 +1986,7 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.dpu().id.into(),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1883,8 +1994,28 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         .into_inner();
     assert!(!network_config.use_admin_network);
     assert_eq!(network_config.tenant_interfaces.len(), 2);
-    assert_eq!(network_config.tenant_interfaces[0].ip, "192.0.4.3");
-    assert_eq!(network_config.tenant_interfaces[1].ip, "192.1.4.3");
+    assert_eq!(
+        network_config.tenant_interfaces[0].ip.as_deref(),
+        Some("192.0.4.3")
+    );
+    assert_eq!(
+        network_config.tenant_interfaces[1].ip.as_deref(),
+        Some("192.1.4.3")
+    );
+    for interface in &network_config.tenant_interfaces {
+        assert_eq!(
+            interface.addresses,
+            vec![rpc::forge::InterfaceAddressConfig {
+                address_family: rpc::forge::AddressFamily::V4.into(),
+                ip: interface.ip.clone().unwrap(),
+                interface_prefix: interface.interface_prefix.clone().unwrap(),
+                prefix: interface.prefix.clone().unwrap(),
+                gateway: interface.gateway.clone(),
+                svi_ip: interface.svi_ip.clone(),
+                tenant_vrf_loopback_ip: None,
+            }]
+        );
+    }
     assert_eq!(network_config.dpu_network_pinger_type, None);
     // Ensure the VPC prefixes (which in this case are the two network segment
     // IDs referenced above) are both associated with both interfaces.
@@ -1959,7 +2090,7 @@ async fn test_cannot_create_instance_on_unhealthy_dpu(
     }
     assert_eq!(
         err.message(),
-        "Host is not available for allocation due to health probe alert"
+        "host is not available for allocation due to health probe alert"
     );
     Ok(())
 }
@@ -2046,6 +2177,7 @@ async fn test_instance_phone_home(_: PgPoolOptions, options: PgConnectOptions) {
         spxconfig: None,
         network_security_group_id: None,
         dpu_extension_services: None,
+        power_profile: None,
     };
 
     let tinstance = mh
@@ -2060,12 +2192,16 @@ async fn test_instance_phone_home(_: PgPoolOptions, options: PgConnectOptions) {
     assert_eq!(instance.status().tenant(), rpc::TenantState::Provisioning);
 
     // Phone home to transition to the ready state
+    let mut phone_home_req = tonic::Request::new(rpc::forge::InstancePhoneHomeLastContactRequest {
+        instance_id: Some(tinstance.id),
+    });
+    let mut auth_context = crate::auth::AuthContext::default();
+    auth_context
+        .principals
+        .push(carbide_authn::middleware::Principal::SpiffeMachineIdentifier(mh.id.to_string()));
+    phone_home_req.extensions_mut().insert(auth_context);
     env.api
-        .update_instance_phone_home_last_contact(tonic::Request::new(
-            rpc::forge::InstancePhoneHomeLastContactRequest {
-                instance_id: Some(tinstance.id),
-            },
-        ))
+        .update_instance_phone_home_last_contact(phone_home_req)
         .await
         .unwrap();
 
@@ -2092,13 +2228,14 @@ async fn test_bootingwithdiscoveryimage_delay(_: PgPoolOptions, options: PgConne
             id: Some(tinstance.id),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .expect("Delete instance failed.");
 
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
-        7,
+        8,
         ManagedHostState::Assigned {
             instance_state: model::machine::InstanceState::HostPlatformConfiguration {
                 platform_config_state:
@@ -2204,6 +2341,7 @@ async fn test_create_instance_duplicate_keyset_ids(_: PgPoolOptions, options: Pg
         spxconfig: None,
         network_security_group_id: None,
         dpu_extension_services: None,
+        power_profile: None,
     };
 
     let instance_id: InstanceId = uuid::Uuid::new_v4().into();
@@ -2226,7 +2364,7 @@ async fn test_create_instance_duplicate_keyset_ids(_: PgPoolOptions, options: Pg
         .expect_err("Duplicate TenantKeyset IDs should not be accepted");
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert_eq!(err.message(), "Duplicate Tenant KeySet ID found: bad_id");
+    assert_eq!(err.message(), "duplicate tenant KeySet ID found: bad_id");
 }
 
 #[crate::sqlx_test]
@@ -2261,6 +2399,7 @@ async fn test_create_instance_keyset_ids_max(_: PgPoolOptions, options: PgConnec
         spxconfig: None,
         network_security_group_id: None,
         dpu_extension_services: None,
+        power_profile: None,
     };
 
     let instance_id: InstanceId = uuid::Uuid::new_v4().into();
@@ -2285,7 +2424,7 @@ async fn test_create_instance_keyset_ids_max(_: PgPoolOptions, options: PgConnec
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         err.message(),
-        "More than 10 Tenant KeySet IDs are not allowed"
+        "more than 10 tenant KeySet IDs are not allowed"
     );
 }
 
@@ -2297,6 +2436,11 @@ async fn test_allocate_instance_with_old_network_segemnt(
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
+    let vpc_id = db::vpc::find_by_segment(&env.pool, segment_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
     let mh = create_managed_host(&env).await;
 
     let txn = env
@@ -2346,7 +2490,7 @@ async fn test_allocate_instance_with_old_network_segemnt(
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.id);
+    assert_eq!(fetched_instance.machine_id, mh.id.into());
 
     let network_config = fetched_instance.config.network;
     assert_eq!(fetched_instance.network_config_version.version_nr(), 1);
@@ -2362,7 +2506,7 @@ async fn test_allocate_instance_with_old_network_segemnt(
 
     assert_eq!(
         network_config_no_addresses,
-        InstanceNetworkConfig::for_segment_ids(&[segment_id], &[device_locator],)
+        InstanceNetworkConfig::for_segment_ids(&[segment_id], &[device_locator], &[vpc_id])
     );
 }
 
@@ -2394,12 +2538,14 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
             ipv6_interface_config: None,
             routing_profile: None,
         }],
+        #[allow(deprecated)]
         auto: false,
+        auto_config: None,
     };
 
     let config = rpc::InstanceConfig {
         tenant: Some(rpc::TenantConfig {
-            tenant_organization_id: "abc".to_string(),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
             hostname: Some("xyz".to_string()),
             tenant_keyset_ids: vec![],
         }),
@@ -2410,6 +2556,7 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
         spxconfig: None,
         network_security_group_id: None,
         dpu_extension_services: None,
+        power_profile: None,
     };
 
     let mut config: model::instance::config::InstanceConfig = config.try_into().unwrap();
@@ -2417,7 +2564,8 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
     assert!(config.network.interfaces[0].network_segment_id.is_none());
 
     let mut txn = env.db_txn().await;
-    allocate_network(&mut config.network, &mut txn)
+    let tenant_organization_id = config.tenant.tenant_organization_id.clone();
+    allocate_network(&mut config.network, &tenant_organization_id, &mut txn)
         .await
         .unwrap();
 
@@ -2443,6 +2591,280 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
             ipv4_network.network()
         ),
         IpNetwork::V6(_) => panic!("Can not be ipv6."),
+    }
+}
+
+#[crate::sqlx_test]
+async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = get_config();
+    config.dpu_config.restart_ovs_on_use_admin_network_change = true;
+    let env = Box::pin(create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    ))
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let prefix_id = create_tenant_overlay_prefix(&env, vpc_id).await;
+
+    struct Case {
+        scenario: &'static str,
+        predecessor_selected_tenant: bool,
+    }
+    for Case {
+        scenario,
+        predecessor_selected_tenant,
+    } in [
+        Case {
+            scenario: "new allocation",
+            predecessor_selected_tenant: false,
+        },
+        Case {
+            scenario: "predecessor selected tenant before network readiness",
+            predecessor_selected_tenant: true,
+        },
+    ] {
+        let mh = create_managed_host_multi_dpu(&env, 2).await;
+        env.api
+            .allocate_instance(
+                InstanceAllocationRequest::builder(false)
+                    .machine_id(mh.id)
+                    .config(
+                        InstanceConfig::default_tenant_and_os()
+                            .tenant(fixture_tenant_config())
+                            .network(single_interface_network_config_with_vpc_prefix(prefix_id)),
+                    )
+                    .tonic_request(),
+            )
+            .await
+            .unwrap();
+        let waiting = ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+        };
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &mh.id.into(),
+            10,
+            waiting.clone(),
+        )
+        .await;
+
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(
+            snapshot.host_snapshot.network_config.use_admin_network,
+            Some(true),
+            "{scenario}"
+        );
+        assert_eq!(snapshot.managed_state, waiting, "{scenario}");
+        assert!(
+            snapshot
+                .dpu_snapshots
+                .iter()
+                .all(|dpu| dpu.network_config.use_admin_network_changed != Some(true)),
+            "{scenario}"
+        );
+        let primary_dpu_id = snapshot
+            .host_snapshot
+            .status
+            .interfaces
+            .iter()
+            .find(|interface| interface.primary_interface)
+            .and_then(|interface| interface.attached_dpu_machine_id)
+            .unwrap();
+        txn.commit().await.unwrap();
+        if predecessor_selected_tenant {
+            // The predecessor persisted tenant mode and its restart before entering this wait.
+            let mut txn = env.db_txn().await;
+            let snapshot = mh.snapshot(&mut txn).await;
+            let mut network = snapshot.host_snapshot.network_config.value.clone();
+            network.use_admin_network = Some(false);
+            assert_eq!(
+                db::machine::try_update_network_config(
+                    &mut txn,
+                    &mh.id.into(),
+                    snapshot.host_snapshot.network_config.version,
+                    &network,
+                )
+                .await
+                .unwrap(),
+                db::ConditionalWrite::Applied(()),
+                "{scenario}"
+            );
+            db::machine::set_use_admin_network_changed(&mut txn, &primary_dpu_id, true)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        let mut admin_responses = Vec::new();
+        for dpu_id in &mh.dpu_ids {
+            let response = env
+                .api
+                .get_managed_host_network_config(Request::new(
+                    rpc::forge::ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(*dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(response.use_admin_network, "{scenario}");
+            assert!(response.admin_interface.is_some(), "{scenario}");
+            assert!(response.tenant_interfaces.is_empty(), "{scenario}");
+            assert!(
+                response.instance_network_config_version.is_empty(),
+                "{scenario}"
+            );
+            assert!(response.vni_device.is_empty(), "{scenario}");
+            admin_responses.push((*dpu_id, response));
+        }
+        // This also consumes the predecessor's early restart acknowledgement.
+        mh.network_configured(&env).await;
+
+        env.run_machine_state_controller_iteration().await;
+        let tenant_wait = ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkConfig,
+        };
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, tenant_wait, "{scenario}");
+        assert_eq!(
+            snapshot.host_snapshot.network_config.use_admin_network,
+            Some(false),
+            "{scenario}"
+        );
+        let tenant_version = snapshot.host_snapshot.network_config.version;
+        let (_, previous_admin_response) = &admin_responses[0];
+        assert_ne!(
+            tenant_version.version_string(),
+            previous_admin_response.managed_host_config_version,
+            "{scenario}"
+        );
+        for dpu in &snapshot.dpu_snapshots {
+            assert_eq!(dpu.network_config.version, tenant_version, "{scenario}");
+            assert_eq!(
+                dpu.network_config.use_admin_network_changed == Some(true),
+                dpu.id == primary_dpu_id,
+                "{scenario}"
+            );
+        }
+        txn.commit().await.unwrap();
+
+        for (dpu_id, admin_response) in admin_responses {
+            let response = env
+                .api
+                .get_managed_host_network_config(Request::new(
+                    rpc::forge::ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(
+                response.use_admin_network,
+                dpu_id != primary_dpu_id,
+                "{scenario}"
+            );
+            assert_eq!(
+                response.tenant_interfaces.len(),
+                usize::from(dpu_id == primary_dpu_id),
+                "{scenario}"
+            );
+            assert_eq!(
+                response.instance_network_config_version.is_empty(),
+                dpu_id != primary_dpu_id,
+                "{scenario}"
+            );
+            env.api
+                .record_dpu_network_status(Request::new(rpc::forge::DpuNetworkStatus {
+                    dpu_machine_id: Some(dpu_id),
+                    network_config_version: Some(admin_response.managed_host_config_version),
+                    dpu_health: Some(
+                        health_report::HealthReport::empty("forge-dpu-agent".to_string()).into(),
+                    ),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+        }
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, tenant_wait, "{scenario}");
+        assert!(
+            matches!(
+                &snapshot.host_snapshot.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                    if reason.contains("Waiting for DPU agent(s) to apply network config")
+            ),
+            "{scenario}"
+        );
+        assert!(
+            snapshot
+                .instance
+                .as_ref()
+                .unwrap()
+                .observations
+                .network
+                .is_empty(),
+            "{scenario}"
+        );
+        assert_eq!(
+            snapshot
+                .dpu_snapshots
+                .iter()
+                .find(|dpu| dpu.id == primary_dpu_id)
+                .unwrap()
+                .network_config
+                .use_admin_network_changed,
+            Some(true),
+            "{scenario}"
+        );
+        txn.commit().await.unwrap();
+
+        mh.network_configured(&env).await;
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert!(
+            snapshot.managed_host_network_config_version_synced(),
+            "{scenario}"
+        );
+        let instance = snapshot.instance.as_ref().unwrap();
+        assert_eq!(
+            instance.observations.network[&primary_dpu_id].config_version,
+            instance.network_config_version,
+            "{scenario}"
+        );
+        txn.commit().await.unwrap();
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(
+            snapshot.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForRebootToReady,
+            },
+            "{scenario}"
+        );
+        txn.commit().await.unwrap();
     }
 }
 
@@ -2548,7 +2970,7 @@ async fn test_allocate_and_release_instance_vpc_prefix_id(
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.id);
+    assert_eq!(fetched_instance.machine_id, mh.id.into());
     assert_eq!(
         db::instance_address::count_by_segment_id(
             &mut txn,
@@ -2591,7 +3013,7 @@ async fn test_allocate_and_release_instance_vpc_prefix_id(
     }
     assert_eq!(
         network_config_no_addresses,
-        InstanceNetworkConfig::for_vpc_prefix_id(vpc_prefix_id, Some(mh.dpu().id))
+        InstanceNetworkConfig::for_vpc_prefix_id(vpc_prefix_id, Some(vpc.id))
     );
 
     assert!(!fetched_instance.observations.network.is_empty());
@@ -2621,14 +3043,16 @@ async fn test_allocate_and_release_instance_vpc_prefix_id(
 
     let ns = ns.remove(0);
 
-    let record = db::instance_address::find_by_instance_id_and_segment_id(
+    let records = db::instance_address::find_all_by_instance_id_and_segment_id(
         &mut txn,
         &fetched_instance.id,
         &ns.id,
     )
     .await
-    .unwrap()
     .unwrap();
+    let [record] = records.as_slice() else {
+        panic!("expected one address on the allocated segment")
+    };
 
     // This should the first IP. Algo does not look into machine_interface_addresses
     // table for used addresses for instance.
@@ -2644,7 +3068,7 @@ async fn test_allocate_and_release_instance_vpc_prefix_id(
     );
 
     assert_eq!(
-        format!("{}/32", &record.address),
+        format!("{}/32", record.address),
         network_config.interfaces[0]
             .interface_prefixes
             .iter()
@@ -2719,184 +3143,1900 @@ async fn test_allocate_and_release_instance_vpc_prefix_id(
     txn.commit().await.unwrap();
 }
 
+/// Selects or validates a linknet before creating its generated segment,
+/// mirroring production allocation order in focused allocator tests.
+async fn allocate_test_network_segment(
+    allocator: &PrefixAllocator,
+    txn: &mut sqlx::PgConnection,
+    vpc_id: VpcId,
+    requested_prefix: Option<IpNetwork>,
+) -> crate::CarbideResult<(NetworkSegmentId, IpNetwork)> {
+    // Validate an explicit request against the parent or select its next free linknet.
+    let prefix = if let Some(requested_prefix) = requested_prefix {
+        allocator
+            .validate_desired_prefix(&mut *txn, requested_prefix)
+            .await?;
+        requested_prefix
+    } else {
+        allocator.next_free_prefix(&mut *txn).await?
+    };
+
+    // Create the generated segment only after selection or validation succeeds.
+    allocator
+        .allocate_network_segment_for_prefix(&mut *txn, vpc_id, prefix)
+        .await
+}
+
+/// Verifies automatic selection remains deterministic and tenant-scoped across
+/// every supported address-family mode.
 #[crate::sqlx_test]
-async fn test_vpc_prefix_handling(pool: PgPool) {
-    // This test requires there to be no default network segments created
-    let env = create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides {
-            create_network_segments: Some(false),
-            ..Default::default()
-        },
+async fn test_auto_vpc_prefix_selection_uses_static_first_fit(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+
+    // Consume the original IPv4 capacity while checking first-fit, ownership,
+    // persisted RPC projection, and final exhaustion.
+    assert_static_ipv4_first_fit(&fixture).await;
+    assert_explicit_prefix_tenant_ownership(&fixture).await;
+    allocate_and_assert_auto_vpc_instance(&fixture).await;
+    assert_ipv4_candidates_exhausted(&fixture).await;
+
+    // Add fresh family capacity and exercise IPv6-only and dual-stack through
+    // the public allocation boundary.
+    let dual_stack_prefixes = add_dual_stack_prefix_capacity(&fixture).await;
+    assert_ipv6_only_resolution(&fixture, dual_stack_prefixes.ipv6_prefix_id).await;
+    assert_dual_stack_resolution(&fixture, &dual_stack_prefixes).await;
+}
+
+/// SLAAC retains the selected IPv6 linknet without materializing a host address.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture_with_slaac(pool, true).await;
+    let ineligible_ipv6_prefix =
+        IpNetwork::V6(Ipv6Network::new("fd42:2403:0:2::".parse().unwrap(), 126).unwrap());
+    let ineligible_ipv6_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &fixture.env,
+        fixture.vpc_id,
+        "ineligible SLAAC IPv6 candidate",
+        ineligible_ipv6_prefix,
+    )
+    .await;
+    let ipv6_parent_prefix =
+        IpNetwork::V6(Ipv6Network::new("fd42:2403::".parse().unwrap(), 63).unwrap());
+    let ipv6_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &fixture.env,
+        fixture.vpc_id,
+        "SLAAC IPv6 candidate",
+        ipv6_parent_prefix,
     )
     .await;
 
-    // Make a VPC and prefix
-    let vpc = env
+    let historical_prefix = "fd42:2403:0:2::/127".parse::<IpNetwork>().unwrap();
+    let historical_allocator =
+        PrefixAllocator::new(ineligible_ipv6_prefix_id, ineligible_ipv6_prefix, None, 127).unwrap();
+    let mut txn = fixture.env.db_txn().await;
+    let (historical_segment_id, allocated_prefix) = allocate_test_network_segment(
+        &historical_allocator,
+        txn.as_mut(),
+        fixture.vpc_id,
+        Some(historical_prefix),
+    )
+    .await
+    .unwrap();
+    assert_eq!(allocated_prefix, historical_prefix);
+    let mut persisted_prefixes = db::network_prefix::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_prefix::SegmentIdColumn, &historical_segment_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(persisted_prefixes.len(), 1);
+    let persisted_prefix = persisted_prefixes.pop().unwrap();
+    txn.commit().await.unwrap();
+
+    // Keep an existing interface prefix as is. Check whether the VPC prefix can
+    // contain a /64 only when allocating a new interface prefix.
+    let mut historical_config =
+        InstanceNetworkConfig::for_vpc_prefix_id(ineligible_ipv6_prefix_id, Some(fixture.vpc_id));
+    historical_config.interfaces[0].network_segment_id = Some(historical_segment_id);
+    historical_config.interfaces[0]
+        .interface_prefixes
+        .insert(persisted_prefix.id, historical_prefix);
+    let expected_historical_config = historical_config.clone();
+    let mut txn = fixture.env.db_txn().await;
+    allocate_network(
+        &mut historical_config,
+        &fixture.tenant_organization_id,
+        txn.as_mut(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(historical_config, expected_historical_config);
+    let replayed_prefixes = db::network_prefix::find_allocation_occupancy(
+        txn.as_mut(),
+        ineligible_ipv6_prefix_id,
+        ineligible_ipv6_prefix,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed_prefixes.len(), 1);
+    let replayed_prefix = &replayed_prefixes[0];
+    assert_eq!(replayed_prefix.id, persisted_prefix.id);
+    assert_eq!(replayed_prefix.segment_id, historical_segment_id);
+    assert_eq!(replayed_prefix.prefix, historical_prefix);
+    assert_eq!(
+        replayed_prefix.vpc_prefix_id,
+        Some(ineligible_ipv6_prefix_id)
+    );
+    assert_eq!(replayed_prefix.vpc_prefix, Some(ineligible_ipv6_prefix));
+    txn.rollback().await.unwrap();
+
+    // Explicit address checks must distinguish the SLAAC policy from a prefix
+    // family mismatch. Keep these cases in one table so primary and dual-stack
+    // sidecar validation cannot drift.
+    let mut ipv6_only =
+        InstanceNetworkConfig::for_vpc_prefix_id(ipv6_prefix_id, Some(fixture.vpc_id));
+    ipv6_only.interfaces[0].requested_ip_addr = Some("fd42:2403::1".parse().unwrap());
+    let mut dual_stack = InstanceNetworkConfig::for_vpc_prefix_id(
+        fixture.lower_ipv4_prefix_id,
+        Some(fixture.vpc_id),
+    );
+    dual_stack.interfaces[0].ipv6_interface_config = Some(Ipv6InterfaceConfig {
+        vpc_prefix_id: ipv6_prefix_id,
+        requested_ip_addr: Some("fd42:2403::3".parse().unwrap()),
+    });
+    let mut mismatched_primary =
+        InstanceNetworkConfig::for_vpc_prefix_id(ipv6_prefix_id, Some(fixture.vpc_id));
+    mismatched_primary.interfaces[0].requested_ip_addr = Some("192.0.2.1".parse().unwrap());
+    let ineligible_parent =
+        InstanceNetworkConfig::for_vpc_prefix_id(ineligible_ipv6_prefix_id, Some(fixture.vpc_id));
+    for (scenario, mut config, expected_error_fragments) in [
+        (
+            "IPv6-only primary request",
+            ipv6_only,
+            ["requested IPv6 address", "has SLAAC enabled"],
+        ),
+        (
+            "dual-stack IPv6 sidecar request",
+            dual_stack,
+            ["requested IPv6 address", "has SLAAC enabled"],
+        ),
+        (
+            "IPv4 address with an IPv6 primary prefix",
+            mismatched_primary,
+            ["requested IP address", "does not match VPC prefix"],
+        ),
+        (
+            "SLAAC parent narrower than one interface prefix",
+            ineligible_parent,
+            [
+                "fd42:2403:0:2::/126",
+                "cannot contain a /64 interface prefix",
+            ],
+        ),
+    ] {
+        let mut txn = fixture.env.db_txn().await;
+        let error = allocate_network(&mut config, &fixture.tenant_organization_id, &mut txn)
+            .await
+            .expect_err(scenario);
+        assert!(
+            matches!(
+                &error,
+                crate::CarbideError::InvalidArgument(message)
+                    if expected_error_fragments
+                        .iter()
+                        .all(|fragment| message.contains(fragment))
+            ),
+            "unexpected {scenario} error: {error}",
+        );
+        txn.rollback().await.unwrap();
+    }
+
+    // An explicit VPC-prefix selection uses the same SLAAC carve policy as
+    // automatic selection. Roll it back so the lifecycle below can still
+    // exercise deterministic first-fit allocation from the same parent.
+    let mut explicit_config =
+        InstanceNetworkConfig::for_vpc_prefix_id(ipv6_prefix_id, Some(fixture.vpc_id));
+    let mut txn = fixture.env.db_txn().await;
+    allocate_network(
+        &mut explicit_config,
+        &fixture.tenant_organization_id,
+        txn.as_mut(),
+    )
+    .await
+    .unwrap();
+    let explicit_interface = &explicit_config.interfaces[0];
+    assert!(explicit_interface.ip_addrs.is_empty());
+    assert!(explicit_interface.interface_prefixes.is_empty());
+    let explicit_segment_id = explicit_interface.network_segment_id.unwrap();
+    let explicit_prefixes = db::network_prefix::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_prefix::SegmentIdColumn, &explicit_segment_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(explicit_prefixes.len(), 1);
+    assert_eq!(
+        explicit_prefixes[0].prefix,
+        "fd42:2403::/64".parse::<IpNetwork>().unwrap(),
+    );
+    assert_eq!(explicit_prefixes[0].vpc_prefix_id, Some(ipv6_prefix_id));
+    txn.rollback().await.unwrap();
+
+    let (managed_host, instance) = allocate_auto_vpc_instance(
+        &fixture,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv6Only,
+        "automatic-SLAAC-ipv6-selection",
+    )
+    .await;
+    let segment_id = assert_auto_rpc_resolution(
+        &instance,
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv6Only,
+        None,
+        Some(ipv6_prefix_id),
+    );
+    let status_interface = &instance
+        .status
+        .as_ref()
+        .unwrap()
+        .network
+        .as_ref()
+        .unwrap()
+        .interfaces[0];
+    assert!(status_interface.addresses.is_empty());
+    assert_eq!(status_interface.prefixes, ["fd42:2403::/64"]);
+
+    // Re-read through the public API: the selected parent prefix remains
+    // visible even though SLAAC deliberately has no concrete host address.
+    let instance_id = instance.id.unwrap();
+    let persisted_rpc = fixture.env.one_instance(instance_id).await;
+    assert_auto_rpc_resolution(
+        persisted_rpc.inner(),
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv6Only,
+        None,
+        Some(ipv6_prefix_id),
+    );
+    let persisted_status_interface = &persisted_rpc.status().network().interfaces[0];
+    assert!(persisted_status_interface.addresses.is_empty());
+    assert_eq!(persisted_status_interface.prefixes, ["fd42:2403::/64"]);
+
+    let vpc_instance_ids = fixture
+        .env
+        .api
+        .find_instance_ids(Request::new(rpc::forge::InstanceSearchFilter {
+            label: None,
+            tenant_org_id: None,
+            vpc_id: Some(fixture.vpc_id.to_string()),
+            instance_type_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .instance_ids;
+    assert!(
+        vpc_instance_ids.contains(&instance_id),
+        "searching by VPC must retain an addressless SLAAC instance",
+    );
+
+    let mut txn = fixture.env.db_txn().await;
+    let snapshot = db::instance::find_by_id(txn.as_mut(), instance_id)
+        .await
+        .unwrap()
+        .expect("persisted SLAAC instance");
+    let interface = &snapshot.config.network.interfaces[0];
+    assert!(interface.ip_addrs.is_empty());
+
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    let [segment] = segments.as_slice() else {
+        panic!("expected one generated SLAAC segment");
+    };
+    let [network_prefix] = segment.prefixes.as_slice() else {
+        panic!("expected one generated SLAAC IPv6 prefix");
+    };
+    assert_eq!(
+        network_prefix.prefix,
+        "fd42:2403::/64".parse::<IpNetwork>().unwrap(),
+    );
+    assert_eq!(
+        interface.interface_prefixes.get(&network_prefix.id),
+        Some(&network_prefix.prefix),
+    );
+    assert!(
+        db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db::instance::count_network_segment_references(txn.as_mut(), &segment_id)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        db::instance::count_vpc_references(txn.as_mut(), &fixture.vpc_id)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert!(
+        db::instance_address::segment_has_allocations(txn.as_mut(), &segment_id)
+            .await
+            .unwrap()
+    );
+    let segment_delete_error = db::network_segment::mark_as_deleted(segment, txn.as_mut())
+        .await
+        .expect_err("SLAAC config must keep its segment with no host address in use");
+    assert!(matches!(
+        segment_delete_error,
+        db::DatabaseError::NetworkSegmentDelete(message)
+            if message.contains("referencing instance count: 1")
+    ));
+    txn.commit().await.unwrap();
+
+    // New agents prefer the address list shared by both address families,
+    // while older agents read the nested IPv6 config. Both receive the prefix
+    // and an intentionally empty host IP for SLAAC.
+    let managed_config = fixture
+        .env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu().id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let [tenant_interface] = managed_config.tenant_interfaces.as_slice() else {
+        panic!("expected one SLAAC tenant interface");
+    };
+    let expected_fqdn_label = instance_id.to_string();
+    assert_eq!(
+        tenant_interface
+            .fqdn
+            .split_once('.')
+            .map(|(label, _)| label),
+        Some(expected_fqdn_label.as_str()),
+    );
+    let ipv6 = tenant_interface
+        .ipv6_interface_config
+        .as_ref()
+        .expect("SLAAC IPv6 interface config");
+    assert!(ipv6.ip.is_empty());
+    assert_eq!(ipv6.interface_prefix, network_prefix.prefix.to_string());
+    let [address] = tenant_interface.addresses.as_slice() else {
+        panic!("expected one SLAAC IPv6 family entry");
+    };
+    assert_eq!(address.address_family(), rpc::forge::AddressFamily::V6);
+    assert!(address.ip.is_empty());
+    assert_eq!(address.interface_prefix, network_prefix.prefix.to_string());
+    assert_eq!(address.prefix, network_prefix.prefix.to_string());
+    assert!(address.gateway.is_none());
+
+    // A retry sees the retained interface prefix as the durable allocation
+    // result and does not consume another linknet.
+    let mut retried_network = snapshot.config.network.clone();
+    let expected_network = retried_network.clone();
+    let mut txn = fixture.env.db_txn().await;
+    allocate_network(
+        &mut retried_network,
+        &fixture.tenant_organization_id,
+        txn.as_mut(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retried_network, expected_network);
+    txn.rollback().await.unwrap();
+
+    // During a network update, both the old and new configurations can still
+    // own resources. Allocations that retain only a prefix in either half must
+    // retain their segment and VPC even though they have no normalized row in
+    // `instance_addresses`.
+    let mut pending_old = snapshot.config.network.clone();
+    let pending_old_segment_id = NetworkSegmentId::new();
+    let pending_old_vpc_id = VpcId::new();
+    pending_old.interfaces[0].network_segment_id = Some(pending_old_segment_id);
+    pending_old.interfaces[0].vpc_id = Some(pending_old_vpc_id);
+    let mut pending_new = snapshot.config.network.clone();
+    let pending_new_segment_id = NetworkSegmentId::new();
+    let pending_new_vpc_id = VpcId::new();
+    pending_new.interfaces[0].network_segment_id = Some(pending_new_segment_id);
+    pending_new.interfaces[0].vpc_id = Some(pending_new_vpc_id);
+
+    let mut txn = fixture.env.db_txn().await;
+    db::instance::trigger_update_network_config_request(
+        &instance_id,
+        &pending_old,
+        &pending_new,
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    for (scenario, pending_segment_id, pending_vpc_id) in [
+        (
+            "pending old config",
+            pending_old_segment_id,
+            pending_old_vpc_id,
+        ),
+        (
+            "pending new config",
+            pending_new_segment_id,
+            pending_new_vpc_id,
+        ),
+    ] {
+        assert_eq!(
+            db::instance::count_network_segment_references(txn.as_mut(), &pending_segment_id,)
+                .await
+                .unwrap(),
+            1,
+            "{scenario} segment reference",
+        );
+        assert!(
+            db::instance_address::segment_has_allocations(txn.as_mut(), &pending_segment_id)
+                .await
+                .unwrap(),
+            "{scenario} segment must remain in use",
+        );
+        assert_eq!(
+            db::instance::count_vpc_references(txn.as_mut(), &pending_vpc_id)
+                .await
+                .unwrap(),
+            1,
+            "{scenario} VPC reference",
+        );
+    }
+
+    // This transaction will be rolled back. Remove the prefix rows so that
+    // only the reference from the instance config guards VPC deletion in this
+    // test.
+    db::network_prefix::delete_for_segment(segment_id, txn.as_mut())
+        .await
+        .unwrap();
+    db::network_prefix::delete_for_segment(historical_segment_id, txn.as_mut())
+        .await
+        .unwrap();
+    for vpc_prefix_id in [
+        fixture.lower_ipv4_prefix_id,
+        fixture.higher_ipv4_prefix_id,
+        ineligible_ipv6_prefix_id,
+        ipv6_prefix_id,
+    ] {
+        db::vpc_prefix::final_delete(vpc_prefix_id, txn.as_mut())
+            .await
+            .unwrap();
+    }
+    let locked_vpcs = db::vpc::find_by_with_lock(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::vpc::IdColumn, &fixture.vpc_id),
+        db::vpc::VpcRowLock::Mutation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(locked_vpcs.len(), 1);
+    let vpc_delete_error = db::vpc::try_delete(txn.as_mut(), fixture.vpc_id)
+        .await
+        .expect_err("SLAAC config must keep its VPC in use");
+    assert!(matches!(
+        vpc_delete_error,
+        db::DatabaseError::FailedPrecondition(message)
+            if message.contains("instance network configurations still reference it")
+    ));
+    txn.rollback().await.unwrap();
+
+    // The remaining IPv6 linknet can still back a dual-stack interface. Only
+    // IPv4 is materialized; IPv6 retains its selected prefix for SLAAC.
+    let (dual_stack_host, dual_stack_instance) = allocate_auto_vpc_instance(
+        &fixture,
+        rpc::forge::InstanceInterfaceIpFamilyMode::DualStack,
+        "automatic-SLAAC-dual-stack-selection",
+    )
+    .await;
+    let dual_stack_segment_id = assert_auto_rpc_resolution(
+        &dual_stack_instance,
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::DualStack,
+        Some(fixture.lower_ipv4_prefix_id),
+        Some(ipv6_prefix_id),
+    );
+    let dual_status_interface = &dual_stack_instance
+        .status
+        .as_ref()
+        .unwrap()
+        .network
+        .as_ref()
+        .unwrap()
+        .interfaces[0];
+    assert_eq!(dual_status_interface.addresses.len(), 1);
+    assert!(
+        dual_status_interface.addresses[0]
+            .parse::<IpAddr>()
+            .unwrap()
+            .is_ipv4()
+    );
+    assert_eq!(dual_status_interface.prefixes.len(), 2);
+    assert_eq!(
+        dual_status_interface.prefixes[0],
+        format!("{}/32", dual_status_interface.addresses[0])
+    );
+    assert_eq!(dual_status_interface.prefixes[1], "fd42:2403:0:1::/64");
+
+    let dual_stack_instance_id = dual_stack_instance.id.unwrap();
+    let mut txn = fixture.env.db_txn().await;
+    let dual_snapshot = db::instance::find_by_id(txn.as_mut(), dual_stack_instance_id)
+        .await
+        .unwrap()
+        .expect("persisted dual-stack SLAAC instance");
+    let dual_interface = &dual_snapshot.config.network.interfaces[0];
+    assert_eq!(dual_interface.ip_addrs.len(), 1);
+    assert!(
+        dual_interface
+            .ip_addrs
+            .values()
+            .all(|address| address.is_ipv4())
+    );
+    assert_eq!(dual_interface.interface_prefixes.len(), 2);
+    let expected_dual_ipv6_prefix = "fd42:2403:0:1::/64".parse::<IpNetwork>().unwrap();
+    assert_eq!(
+        dual_interface
+            .interface_prefixes
+            .values()
+            .find(|prefix| prefix.is_ipv6()),
+        Some(&expected_dual_ipv6_prefix),
+    );
+    let dual_addresses =
+        db::instance_address::find_by_segment_id(txn.as_mut(), &dual_stack_segment_id)
+            .await
+            .unwrap();
+    assert_eq!(dual_addresses.len(), 1);
+    assert!(dual_addresses[0].address.is_ipv4());
+    txn.commit().await.unwrap();
+
+    let dual_managed_config = fixture
+        .env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(dual_stack_host.dpu().id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let [dual_tenant_interface] = dual_managed_config.tenant_interfaces.as_slice() else {
+        panic!("expected one dual-stack SLAAC tenant interface");
+    };
+    let dual_ipv6 = dual_tenant_interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family() == rpc::forge::AddressFamily::V6)
+        .expect("dual-stack SLAAC IPv6 family entry");
+    assert!(dual_ipv6.ip.is_empty());
+    assert!(!dual_ipv6.interface_prefix.is_empty());
+    let dual_ipv4 = dual_tenant_interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family() == rpc::forge::AddressFamily::V4)
+        .expect("dual-stack IPv4 family entry");
+    assert!(!dual_ipv4.ip.is_empty());
+
+    // The /63 provides exactly two /64 allocations. The ineligible /126 is
+    // ignored rather than surfacing an allocator validation error.
+    let mut exhausted_config =
+        automatic_network_config(fixture.vpc_id, InstanceInterfaceIpFamilyMode::Ipv6Only);
+    let mut txn = fixture.env.db_txn().await;
+    let error = allocate_network(
+        &mut exhausted_config,
+        &fixture.tenant_organization_id,
+        txn.as_mut(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::CarbideError::ResourceExhausted(message)
+            if message
+                == format!(
+                    "no eligible IPv6 VPC prefix in VPC `{}` could allocate an interface linknet",
+                    fixture.vpc_id,
+                )
+    ));
+    txn.rollback().await.unwrap();
+}
+
+struct ManualSlaacSegmentFixture {
+    env: TestEnv,
+    vpc_id: VpcId,
+    segment_id: NetworkSegmentId,
+}
+
+/// Creates a tenant-owned FNN VPC with SLAAC enabled and one manually managed
+/// segment. Keeping the segment independent of a `VpcPrefix` row lets the
+/// lifecycle tests isolate VPC and segment deletion from the VPC prefix
+/// controller.
+async fn create_manual_slaac_segment_fixture(
+    pool: PgPool,
+    segment_name: &str,
+    prefix: IpNetwork,
+) -> ManualSlaacSegmentFixture {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+
+    let vpc_id = env
         .api
         .create_vpc(
-            VpcCreationRequest::builder("2829bbe3-c169-4cd9-8b2a-19a8b1618a93")
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
                 .metadata(Metadata {
-                    name: "test vpc 1".to_string(),
+                    name: format!("{segment_name}-vpc"),
                     ..Default::default()
                 })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .slaac_enabled(true)
                 .tonic_request(),
         )
         .await
         .unwrap()
-        .into_inner();
-    let vpc_id = vpc.id.unwrap();
-    let vpc_prefix_id = create_tenant_overlay_prefix(&env, vpc_id).await;
-
-    let mut txn = env.db_txn().await;
-    let allocator = PrefixAllocator::new(
-        // 15 IPs
-        vpc_prefix_id,
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 217, 5, 224), 27).unwrap()),
-        None,
-        31,
-    )
-    .unwrap();
-
-    let (ns_id, _prefix) = allocator
-        .allocate_network_segment(&mut txn, vpc_id, None)
-        .await
+        .into_inner()
+        .id
         .unwrap();
 
-    let ns1 = db::network_segment::find_by(
+    let segment_id = NetworkSegmentId::new();
+    let mut txn = env.db_txn().await;
+    db::network_segment::persist(
+        NewNetworkSegment {
+            id: segment_id,
+            name: segment_name.to_string(),
+            subdomain_id: None,
+            vpc_id: Some(vpc_id),
+            mtu: 9000,
+            prefixes: vec![NewNetworkPrefix {
+                prefix,
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 0,
+            }],
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Tenant,
+            can_stretch: Some(false),
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+        },
         txn.as_mut(),
-        ObjectColumnFilter::One(IdColumn, &ns_id),
-        NetworkSegmentSearchConfig::default(),
+        NetworkSegmentControllerState::Ready,
     )
     .await
     .unwrap();
-
-    let address1 = ns1[0].prefixes[0].prefix.network();
-
     txn.commit().await.unwrap();
 
+    ManualSlaacSegmentFixture {
+        env,
+        vpc_id,
+        segment_id,
+    }
+}
+
+/// Seeds the parent row needed by address allocation and returns its machine
+/// snapshot. The empty network config makes later lifecycle ownership writes
+/// explicit in each test.
+async fn seed_empty_instance_for_network_allocation(
+    env: &TestEnv,
+) -> (InstanceId, HostMachine, ConfigVersion) {
+    let managed_host = create_managed_host(env).await;
+    let instance_id = InstanceId::new();
+    let network_config_version = ConfigVersion::initial();
     let mut txn = env.db_txn().await;
-
-    let allocator = PrefixAllocator::new(
-        vpc_prefix_id,
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 217, 5, 224), 27).unwrap()),
-        None,
-        31,
+    let machine = managed_host.host_as_any().db_machine(&mut txn).await;
+    sqlx::query(
+        "INSERT INTO instances (id, machine_id, network_config, network_config_version, \
+                                nvlink_config) \
+         VALUES ($1, $2, '{\"interfaces\": []}'::jsonb, $3, \
+                 '{\"gpu_configs\": []}'::jsonb)",
     )
-    .unwrap();
-
-    let (ns_id, _prefix) = allocator
-        .allocate_network_segment(&mut txn, vpc_id, None)
-        .await
-        .unwrap();
-
-    let ns2 = db::network_segment::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(IdColumn, &ns_id),
-        NetworkSegmentSearchConfig::default(),
-    )
+    .bind(instance_id)
+    .bind(managed_host.id)
+    .bind(network_config_version)
+    .execute(txn.as_mut())
     .await
     .unwrap();
-
-    let address2 = ns2[0].prefixes[0].prefix.network();
-
     txn.commit().await.unwrap();
+    (instance_id, machine, network_config_version)
+}
 
-    let mut txn = env.db_txn().await;
-    let allocator = PrefixAllocator::new(
-        vpc_prefix_id,
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 217, 5, 224), 27).unwrap()),
-        None,
-        31,
+/// A segment cannot keep a soft-deleted VPC usable or silently lose its SLAAC policy.
+#[crate::sqlx_test]
+async fn test_deleted_slaac_vpc_rejects_manual_segment_address_allocation(pool: PgPool) {
+    let fixture = create_manual_slaac_segment_fixture(
+        pool,
+        "deletion-first-SLAAC-segment",
+        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 240, 3, 0), 30).unwrap()),
     )
-    .unwrap();
+    .await;
+    let (instance_id, machine, _) = seed_empty_instance_for_network_allocation(&fixture.env).await;
 
-    let (ns_id, _prefix) = allocator
-        .allocate_network_segment(&mut txn, vpc_id, None)
+    // Let deletion acquire its read lock on instance_addresses and retain it
+    // until the competing allocator is proven to be waiting on that transaction.
+    let mut deletion_txn = fixture.env.db_txn().await;
+    let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(deletion_txn.as_mut())
         .await
         .unwrap();
+    let locked_vpcs = db::vpc::find_by_with_lock(
+        deletion_txn.as_mut(),
+        ObjectColumnFilter::One(db::vpc::IdColumn, &fixture.vpc_id),
+        db::vpc::VpcRowLock::Mutation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(locked_vpcs.len(), 1);
+    assert!(
+        db::vpc::try_delete(deletion_txn.as_mut(), fixture.vpc_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
-    let ns3 = db::network_segment::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(IdColumn, &ns_id),
-        NetworkSegmentSearchConfig::default(),
+    let allocation_pool = fixture.env.pool.clone();
+    let network_config =
+        InstanceNetworkConfig::for_segment_ids(&[fixture.segment_id], &[], &[fixture.vpc_id]);
+    let allocation_task = tokio::spawn(async move {
+        let mut txn = allocation_pool.begin().await.unwrap();
+        let result =
+            db::instance_address::allocate(txn.as_mut(), instance_id, network_config, &machine)
+                .await;
+        txn.rollback().await.unwrap();
+        result
+    });
+    wait_until_query_blocked_by(
+        &fixture.env.pool,
+        deletion_pid,
+        "LOCK TABLE instance_addresses IN ACCESS EXCLUSIVE MODE",
+    )
+    .await;
+    deletion_txn.commit().await.unwrap();
+
+    let allocation_error = allocation_task
+        .await
+        .unwrap()
+        .expect_err("allocator must observe the deletion that won serialization");
+    assert!(matches!(
+        allocation_error,
+        db::DatabaseError::FailedPrecondition(message)
+            if message.contains("only 0 active VPCs were found")
+    ));
+
+    let mut txn = fixture.env.db_txn().await;
+    assert_eq!(
+        db::instance_address::count_by_segment_id(txn.as_mut(), &fixture.segment_id)
+            .await
+            .unwrap(),
+        0,
+        "the losing allocation must not materialize an address",
+    );
+    txn.rollback().await.unwrap();
+}
+
+/// If allocation wins serialization, final deletion must wait for its commit
+/// and then retain a segment referenced only by SLAAC prefix configuration.
+#[crate::sqlx_test]
+async fn test_slaac_allocation_blocks_and_defeats_segment_final_delete(pool: PgPool) {
+    let fixture = create_manual_slaac_segment_fixture(
+        pool,
+        "allocation-first-SLAAC-segment",
+        IpNetwork::V6(Ipv6Network::new("fd42:2403:feed::".parse().unwrap(), 64).unwrap()),
+    )
+    .await;
+    let (instance_id, machine, network_config_version) =
+        seed_empty_instance_for_network_allocation(&fixture.env).await;
+
+    let mut allocation_txn = fixture.env.db_txn().await;
+    let allocation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(allocation_txn.as_mut())
+        .await
+        .unwrap();
+    let network_config =
+        InstanceNetworkConfig::for_segment_ids(&[fixture.segment_id], &[], &[fixture.vpc_id]);
+    let allocated = db::instance_address::allocate(
+        allocation_txn.as_mut(),
+        instance_id,
+        network_config,
+        &machine,
+    )
+    .await
+    .unwrap();
+    assert!(allocated.interfaces[0].ip_addrs.is_empty());
+    assert_eq!(allocated.interfaces[0].interface_prefixes.len(), 1);
+    db::instance::update_network_config(
+        allocation_txn.as_mut(),
+        instance_id,
+        network_config_version,
+        &allocated,
+        false,
     )
     .await
     .unwrap();
 
-    let address3 = ns3[0].prefixes[0].prefix.network();
-
-    txn.commit().await.unwrap();
-    // The allocation should take care of already assigned prefixes and should not allocate twice.
-    assert_eq!(IpAddr::from(Ipv4Addr::new(10, 217, 5, 224)), address1);
-    assert_eq!(IpAddr::from(Ipv4Addr::new(10, 217, 5, 226)), address2);
-    assert_eq!(IpAddr::from(Ipv4Addr::new(10, 217, 5, 228)), address3);
-    assert_ne!(address1, address2);
-    assert_ne!(address1, address3);
-    assert_ne!(address2, address3);
-
-    let mut txn = env.db_txn().await;
-    let allocator = PrefixAllocator::new(
-        vpc_prefix_id,
-        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 217, 5, 224), 27).unwrap()),
-        Some(IpNetwork::V4(
-            Ipv4Network::new(Ipv4Addr::new(10, 217, 5, 234), 31).unwrap(),
-        )),
-        31,
+    let deletion_pool = fixture.env.pool.clone();
+    let segment_id = fixture.segment_id;
+    let deletion_task = tokio::spawn(async move {
+        let mut txn = deletion_pool.begin().await.unwrap();
+        let result = db::network_segment::final_delete(segment_id, &mut txn).await;
+        txn.rollback().await.unwrap();
+        result
+    });
+    wait_until_query_blocked_by(
+        &fixture.env.pool,
+        allocation_pid,
+        "FROM machine_interfaces WHERE segment_id = $1",
     )
-    .unwrap();
+    .await;
+    allocation_txn.commit().await.unwrap();
 
-    let (ns_id, _prefix) = allocator
-        .allocate_network_segment(&mut txn, vpc_id, None)
+    let deletion_error = deletion_task
         .await
-        .unwrap();
+        .unwrap()
+        .expect_err("an instance config that retains only a prefix must retain the segment");
+    assert!(matches!(
+        deletion_error,
+        db::DatabaseError::NetworkSegmentDelete(message)
+            if message.contains("allocations still reference it")
+    ));
 
-    let ns4 = db::network_segment::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(IdColumn, &ns_id),
-        NetworkSegmentSearchConfig::default(),
-    )
-    .await
-    .unwrap();
-
-    let address4 = ns4[0].prefixes[0].prefix.network();
-
-    assert_eq!(IpAddr::from(Ipv4Addr::new(10, 217, 5, 236)), address4);
-
-    // Try getting a segment with an explicit request for a good prefix
-    let (ns_id, _prefix) = allocator
-        .allocate_network_segment(
-            &mut txn,
-            vpc_id,
-            Some(IpNetwork::new("10.217.5.251".parse().unwrap(), 31).unwrap()),
+    let mut txn = fixture.env.db_txn().await;
+    assert!(
+        !db::network_segment::find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &fixture.segment_id),
+            NetworkSegmentSearchConfig::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .is_empty(),
+        "failed final deletion must retain the segment",
+    );
+    assert!(
+        db::instance_address::find_by_segment_id(txn.as_mut(), &fixture.segment_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "SLAAC allocation must retain only its prefix",
+    );
+    assert_eq!(
+        db::instance::count_network_segment_references(txn.as_mut(), &fixture.segment_id)
+            .await
+            .unwrap(),
+        1,
+    );
+    txn.rollback().await.unwrap();
+}
 
-    let ns4 = db::network_segment::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(IdColumn, &ns_id),
-        NetworkSegmentSearchConfig::default(),
+/// Verifies a rare overlap from outside parent-prefix serialization retries
+/// instead of surfacing exclusion-constraint contention as allocation failure.
+#[crate::sqlx_test]
+async fn test_auto_vpc_prefix_selection_retries_concurrent_network_prefix_insert(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+    let conflicting_prefix = IpNetwork::new(fixture.lower_ipv4_prefix.network(), 31).unwrap();
+
+    // Keep a conflicting child prefix uncommitted so allocation cannot observe
+    // it before choosing the same linknet and waiting on the exclusion constraint.
+    let mut blocker = fixture.env.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await
+        .unwrap();
+    db::network_segment::persist(
+        NewNetworkSegment {
+            id: NetworkSegmentId::new(),
+            name: "overlap-race-blocker".to_string(),
+            subdomain_id: None,
+            vpc_id: Some(fixture.vpc_id),
+            mtu: 9000,
+            prefixes: vec![NewNetworkPrefix {
+                prefix: conflicting_prefix,
+                gateway: Some(conflicting_prefix.network()),
+                dhcpv6_link_address: None,
+                num_reserved: 0,
+            }],
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Tenant,
+            can_stretch: Some(false),
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+        },
+        blocker.as_mut(),
+        NetworkSegmentControllerState::Ready,
     )
     .await
     .unwrap();
 
-    let address4 = ns4[0].prefixes[0].prefix.network();
-    assert_eq!(IpAddr::from(Ipv4Addr::new(10, 217, 5, 250)), address4);
+    // Start allocation on another connection and prove its prefix insert is
+    // blocked by this exact transaction before allowing the conflict to resolve.
+    let allocation_task = tokio::spawn(allocate_automatic_ipv4_network(
+        fixture.env.pool.clone(),
+        fixture.vpc_id,
+        fixture.tenant_organization_id.clone(),
+    ));
+    wait_until_query_blocked_by(
+        &fixture.env.pool,
+        blocker_pid,
+        "INSERT INTO network_prefixes",
+    )
+    .await;
+    blocker.commit().await.unwrap();
 
+    // The single retry must stay on the same parent but choose the other free /31.
+    let allocated = allocation_task.await.unwrap().unwrap();
+    let interface = &allocated.interfaces[0];
+    assert_eq!(
+        interface.network_details,
+        Some(NetworkDetails::VpcPrefixId(fixture.lower_ipv4_prefix_id)),
+    );
+    let mut txn = fixture.env.db_txn().await;
+    let generated_segment = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &interface.network_segment_id.unwrap()),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(generated_segment.len(), 1);
+    assert_ne!(generated_segment[0].prefixes[0].prefix, conflicting_prefix);
+    assert!(
+        fixture
+            .lower_ipv4_prefix
+            .contains(generated_segment[0].prefixes[0].prefix.network())
+    );
     txn.commit().await.unwrap();
+}
 
-    let mut txn = env.db_txn().await;
+/// Verifies a deleted candidate is rejected by its locking re-read so allocation
+/// cannot proceed from stale discovery state.
+#[crate::sqlx_test]
+async fn test_auto_vpc_prefix_selection_rechecks_concurrent_candidate_deletion(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
 
-    // Try getting a segment with an explicit request for a bad prefix
-    allocator
-        .allocate_network_segment(
-            &mut txn,
-            vpc_id,
-            Some(IpNetwork::new("100.217.5.250".parse().unwrap(), 31).unwrap()),
+    // Hold the lower candidate's soft-delete uncommitted. Candidate discovery
+    // still sees the prior active row, while its selected-row lock must wait.
+    let mut blocker = fixture.env.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await
+        .unwrap();
+    let _: VpcPrefixId = sqlx::query_scalar(
+        r#"
+            UPDATE network_vpc_prefixes
+            SET deleted = NOW()
+            WHERE id = $1
+              AND deleted IS NULL
+            -- Hold the candidate row until allocation reaches its locking re-read.
+            RETURNING id
+        "#,
+    )
+    .bind(fixture.lower_ipv4_prefix_id)
+    .fetch_one(blocker.as_mut())
+    .await
+    .unwrap();
+
+    // Commit only after the allocator is waiting on the deleted candidate.
+    let allocation_task = tokio::spawn(allocate_automatic_ipv4_network(
+        fixture.env.pool.clone(),
+        fixture.vpc_id,
+        fixture.tenant_organization_id.clone(),
+    ));
+    wait_until_query_blocked_by(&fixture.env.pool, blocker_pid, "FOR NO KEY UPDATE").await;
+    blocker.commit().await.unwrap();
+
+    // The locking re-read must reject the deleted row and fall through.
+    let allocated = allocation_task.await.unwrap().unwrap();
+    assert_eq!(
+        allocated.interfaces[0].network_details,
+        Some(NetworkDetails::VpcPrefixId(fixture.higher_ipv4_prefix_id)),
+    );
+}
+
+/// Verifies a request retains its discovery-time candidate set so concurrent
+/// capacity changes cannot disturb canonical allocation ordering.
+#[crate::sqlx_test]
+async fn test_auto_vpc_prefix_selection_freezes_concurrent_candidate_insert(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+
+    // Exhaust both existing candidates before arranging the discovery boundary.
+    assert_static_ipv4_first_fit(&fixture).await;
+    let final_original_allocation = allocate_automatic_ipv4_network(
+        fixture.env.pool.clone(),
+        fixture.vpc_id,
+        fixture.tenant_organization_id.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        final_original_allocation.interfaces[0].network_details,
+        Some(NetworkDetails::VpcPrefixId(fixture.higher_ipv4_prefix_id)),
+    );
+
+    // Hold the first candidate so a blocked selected-row lock proves the
+    // allocation transaction already froze its candidate query result.
+    let mut blocker = fixture.env.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await
+        .unwrap();
+    let _: VpcPrefixId = sqlx::query_scalar(
+        r#"
+            SELECT id
+            FROM network_vpc_prefixes
+            WHERE id = $1
+            -- Keep discovery unlocked but block the selected candidate re-read.
+            FOR UPDATE
+        "#,
+    )
+    .bind(fixture.lower_ipv4_prefix_id)
+    .fetch_one(blocker.as_mut())
+    .await
+    .unwrap();
+    let allocation_task = tokio::spawn(allocate_automatic_ipv4_network(
+        fixture.env.pool.clone(),
+        fixture.vpc_id,
+        fixture.tenant_organization_id.clone(),
+    ));
+    wait_until_query_blocked_by(&fixture.env.pool, blocker_pid, "FOR NO KEY UPDATE").await;
+
+    // Add usable capacity only after discovery, then let the frozen request continue.
+    let inserted_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &fixture.env,
+        fixture.vpc_id,
+        "concurrently-inserted-candidate",
+        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 218, 0, 8), 30).unwrap()),
+    )
+    .await;
+    blocker.rollback().await.unwrap();
+
+    // The in-flight request proves only its original candidates exhausted; a
+    // fresh request discovers and allocates from the newly committed candidate.
+    let error = allocation_task.await.unwrap().unwrap_err();
+    assert!(matches!(error, crate::CarbideError::ResourceExhausted(_)));
+    let retried = allocate_automatic_ipv4_network(
+        fixture.env.pool.clone(),
+        fixture.vpc_id,
+        fixture.tenant_organization_id.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        retried.interfaces[0].network_details,
+        Some(NetworkDetails::VpcPrefixId(inserted_prefix_id)),
+    );
+}
+
+/// Verifies a VPC-only selector cannot bypass tenant ownership checks at the
+/// public RPC boundary.
+#[crate::sqlx_test]
+async fn test_auto_vpc_prefix_selection_rejects_cross_tenant_rpc_request(pool: PgPool) {
+    const OTHER_TENANT: &str = "auto-prefix-selection-other-tenant";
+
+    // Create a valid second tenant and an allocatable host so only VPC ownership fails.
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+    create_fixture_tenant(&fixture.env, OTHER_TENANT)
+        .await
+        .unwrap();
+    let managed_host = create_managed_host(&fixture.env).await;
+
+    // Request the owning tenant's VPC from a different valid tenant through AllocateInstance.
+    let error = fixture
+        .env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(managed_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .tenant(rpc::TenantConfig {
+                            tenant_organization_id: OTHER_TENANT.to_string(),
+                            ..default_tenant_config()
+                        })
+                        .network(automatic_ipv4_rpc_network_config(fixture.vpc_id)),
+                )
+                .tonic_request(),
         )
         .await
         .unwrap_err();
+
+    // Ownership failure must retain its precise public status and diagnostic.
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        format!(
+            "VPC `{}` is not owned by tenant `{OTHER_TENANT}`",
+            fixture.vpc_id
+        ),
+    );
+}
+
+/// Verifies force deletion recognizes automatic-selector resources so generated
+/// segments and addresses cannot leak.
+#[crate::sqlx_test]
+async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_deleted(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+    let managed_host = create_managed_host(&fixture.env).await;
+
+    // Allocate through the public selector and synchronize networking so the
+    // address being released is known to have become active.
+    let tinstance = managed_host
+        .instance_builer(&fixture.env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(automatic_ipv4_rpc_network_config(fixture.vpc_id))
+        .build()
+        .await;
+    let instance_id = tinstance.id;
+    let persisted = tinstance.rpc_instance().await;
+    assert_ipv4_auto_rpc_resolution(
+        persisted.inner(),
+        fixture.vpc_id,
+        fixture.lower_ipv4_prefix_id,
+    );
+    assert!(
+        !persisted.status().network().interfaces[0]
+            .addresses
+            .is_empty()
+    );
+    let generated_segment_id = persisted.config().network().interfaces[0]
+        .network_segment_id
+        .unwrap();
+
+    let request = AdminForceDeleteMachineRequest {
+        host_query: managed_host.id.to_string(),
+        delete_interfaces: false,
+        delete_bmc_interfaces: false,
+        delete_bmc_credentials: false,
+        allow_delete_with_orphaned_dpf_crds: false,
+        delete_bmc_suppressions: false,
+        delete_retained_boot_interfaces: false,
+        release_preserved_addresses: false,
+        wait_for_instance_dpu: false,
+    };
+    // Force delete must route automatic intent through generated-resource cleanup.
+    let response = fixture
+        .env
+        .api
+        .admin_force_delete_machine(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.all_done);
+    assert_eq!(response.instance_id, instance_id.to_string());
+    assert!(
+        fixture
+            .env
+            .find_instances(vec![instance_id])
+            .await
+            .instances
+            .is_empty()
+    );
+
+    // The generated segment is queued for lifecycle deletion and its instance address is freed.
+    let mut txn = fixture.env.db_txn().await;
+    let generated_segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &generated_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    let [generated_segment] = generated_segments.as_slice() else {
+        panic!("expected one force-deleted generated segment");
+    };
+    assert!(generated_segment.is_marked_as_deleted());
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &generated_segment_id)
+            .await
+            .unwrap(),
+        0,
+    );
+    txn.commit().await.unwrap();
+}
+
+/// Holds one tenant-owned FNN VPC and ordered candidates so every scenario
+/// shares the same deterministic first-fit baseline.
+struct AutoVpcSelectionFixture {
+    env: TestEnv,
+    vpc_id: VpcId,
+    // Candidate labels follow VPC prefix ID order, which drives static first-fit.
+    lower_ipv4_prefix_id: VpcPrefixId,
+    lower_ipv4_prefix: IpNetwork,
+    higher_ipv4_prefix_id: VpcPrefixId,
+    tenant_organization_id: TenantOrganizationId,
+}
+
+/// Holds fresh per-family candidates added after IPv4 exhaustion so future
+/// family-mode checks cannot perturb the initial first-fit coverage.
+struct AutoVpcDualStackPrefixes {
+    ipv4_prefix_id: VpcPrefixId,
+    ipv6_prefix_id: VpcPrefixId,
+}
+
+/// Creates an FNN VPC and derives candidate roles from prefix ID order so
+/// static first-fit assertions remain deterministic.
+async fn create_auto_vpc_selection_fixture(pool: PgPool) -> AutoVpcSelectionFixture {
+    create_auto_vpc_selection_fixture_with_slaac(pool, false).await
+}
+
+/// Creates the fixture for automatic selection with an explicit VPC SLAAC policy.
+async fn create_auto_vpc_selection_fixture_with_slaac(
+    pool: PgPool,
+    slaac_enabled: bool,
+) -> AutoVpcSelectionFixture {
+    // Build the shared environment without site-level FNN configuration and
+    // register the tenant used by every scenario.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+
+    // Automatic prefix selection is restricted to FNN VPCs.
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "auto-prefix-selection-vpc".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .slaac_enabled(slaac_enabled)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+
+    // Two non-overlapping /30 candidates provide two /31 linknets each. Their
+    // CIDRs also avoid the default fixture networks used by the real instance.
+    let first_prefix = IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 218, 0, 0), 30).unwrap());
+    let first_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &env,
+        vpc_id,
+        "auto-prefix-candidate-one",
+        first_prefix,
+    )
+    .await;
+    let second_prefix = IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 218, 0, 4), 30).unwrap());
+    let second_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &env,
+        vpc_id,
+        "auto-prefix-candidate-two",
+        second_prefix,
+    )
+    .await;
+
+    // First-fit order is based on prefix ID rather than creation order, so
+    // derive stable lower/higher roles from the generated IDs.
+    let (lower_prefix_id, lower_prefix, higher_prefix_id) = if first_prefix_id < second_prefix_id {
+        (first_prefix_id, first_prefix, second_prefix_id)
+    } else {
+        (second_prefix_id, second_prefix, first_prefix_id)
+    };
+
+    AutoVpcSelectionFixture {
+        env,
+        vpc_id,
+        lower_ipv4_prefix_id: lower_prefix_id,
+        lower_ipv4_prefix: lower_prefix,
+        higher_ipv4_prefix_id: higher_prefix_id,
+        tenant_organization_id: FIXTURE_TENANT_ORG_ID.parse().unwrap(),
+    }
+}
+
+/// Verifies prefix ID order determines first fit and each candidate is
+/// exhausted before allocation falls through to the next one.
+async fn assert_static_ipv4_first_fit(fixture: &AutoVpcSelectionFixture) {
+    // Two /31 allocations fill the lower-ID /30; the third must fall through.
+    for expected_prefix_id in [
+        fixture.lower_ipv4_prefix_id,
+        fixture.lower_ipv4_prefix_id,
+        fixture.higher_ipv4_prefix_id,
+    ] {
+        let mut network_config =
+            automatic_network_config(fixture.vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
+        let mut txn = fixture.env.db_txn().await;
+        allocate_network(
+            &mut network_config,
+            &fixture.tenant_organization_id,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+
+        // Resolution uses the rolling-compatible explicit fields internally.
+        let interface = &network_config.interfaces[0];
+        assert_eq!(
+            interface.network_details,
+            Some(NetworkDetails::VpcPrefixId(expected_prefix_id)),
+        );
+        assert!(interface.network_segment_id.is_some());
+        txn.commit().await.unwrap();
+    }
+}
+
+/// Verifies shared allocation logic does not weaken tenant ownership when a
+/// request selects a prefix explicitly.
+async fn assert_explicit_prefix_tenant_ownership(fixture: &AutoVpcSelectionFixture) {
+    // Request an existing explicit prefix under a different tenant identity.
+    let mut explicit_config = InstanceNetworkConfig::for_vpc_prefix_id(
+        fixture.higher_ipv4_prefix_id,
+        Some(fixture.vpc_id),
+    );
+    let wrong_tenant_organization_id = "another-tenant".parse().unwrap();
+    let mut txn = fixture.env.db_txn().await;
+    let error = allocate_network(
+        &mut explicit_config,
+        &wrong_tenant_organization_id,
+        &mut txn,
+    )
+    .await
+    .unwrap_err();
+
+    // The failure must identify ownership rather than allocation capacity.
+    assert!(matches!(
+        error,
+        crate::CarbideError::FailedPrecondition(message)
+            if message.contains("is not owned by tenant")
+    ));
+    txn.rollback().await.unwrap();
+}
+
+/// Allocates one instance through the public automatic VPC selector.
+async fn allocate_auto_vpc_instance(
+    fixture: &AutoVpcSelectionFixture,
+    family_mode: rpc::forge::InstanceInterfaceIpFamilyMode,
+    name: &str,
+) -> (TestManagedHost, rpc::Instance) {
+    let managed_host = create_managed_host(&fixture.env).await;
+    let (_, instance) = managed_host
+        .instance_builer(&fixture.env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(automatic_rpc_network_config(fixture.vpc_id, family_mode))
+        .metadata(rpc::Metadata {
+            name: name.to_string(),
+            description: "tests/instance".to_string(),
+            labels: Vec::new(),
+        })
+        .build_and_return()
+        .await;
+
+    (managed_host, instance.into_inner())
+}
+
+/// Allocates and re-reads through the public boundary so intent and resolution
+/// are proven to persist beyond the allocation response.
+async fn allocate_and_assert_auto_vpc_instance(fixture: &AutoVpcSelectionFixture) {
+    // Allocate the final original IPv4 linknet through the public selector and
+    // verify its immediate projection.
+    let (_, instance) = allocate_auto_vpc_instance(
+        fixture,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv4Only,
+        "automatic-vpc-prefix-selection",
+    )
+    .await;
+    assert_ipv4_auto_rpc_resolution(&instance, fixture.vpc_id, fixture.higher_ipv4_prefix_id);
+
+    // Re-read through FindInstancesByIds to verify persisted intent and resolution.
+    let instance_id = instance.id.unwrap();
+    let persisted = fixture.env.one_instance(instance_id).await;
+    assert_ipv4_auto_rpc_resolution(
+        persisted.inner(),
+        fixture.vpc_id,
+        fixture.higher_ipv4_prefix_id,
+    );
+}
+
+/// Confirms original IPv4 capacity is exhausted so later family-mode checks
+/// can resolve only from freshly added prefixes.
+async fn assert_ipv4_candidates_exhausted(fixture: &AutoVpcSelectionFixture) {
+    // Four earlier allocations consumed both /31 linknets in both original /30 candidates.
+    let mut exhausted_config =
+        automatic_network_config(fixture.vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
+    let mut txn = fixture.env.db_txn().await;
+    let error = allocate_network(
+        &mut exhausted_config,
+        &fixture.tenant_organization_id,
+        &mut txn,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, crate::CarbideError::ResourceExhausted(_)));
+    txn.rollback().await.unwrap();
+}
+
+/// Adds per-family capacity after first-fit checks so it cannot affect their
+/// candidate ordering or exhaustion assertions.
+async fn add_dual_stack_prefix_capacity(
+    fixture: &AutoVpcSelectionFixture,
+) -> AutoVpcDualStackPrefixes {
+    // Add capacity only after exhaustion so it cannot affect earlier first-fit checks.
+    // The IPv6 /126 supplies one /127 to IPv6-only and another to dual stack.
+    let dual_ipv4_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &fixture.env,
+        fixture.vpc_id,
+        "dual-stack-ipv4-candidate",
+        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 218, 0, 8), 30).unwrap()),
+    )
+    .await;
+    let ipv6_prefix =
+        IpNetwork::V6(Ipv6Network::new("fd42:218::".parse::<Ipv6Addr>().unwrap(), 126).unwrap());
+    let ipv6_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &fixture.env,
+        fixture.vpc_id,
+        "automatic-ipv6-candidate",
+        ipv6_prefix,
+    )
+    .await;
+
+    AutoVpcDualStackPrefixes {
+        ipv4_prefix_id: dual_ipv4_prefix_id,
+        ipv6_prefix_id,
+    }
+}
+
+/// Exercises IPv6-only resolution, persistence, and DPU config rendering
+/// through the public allocation boundary.
+#[allow(deprecated)]
+async fn assert_ipv6_only_resolution(
+    fixture: &AutoVpcSelectionFixture,
+    ipv6_prefix_id: VpcPrefixId,
+) {
+    let (managed_host, instance) = allocate_auto_vpc_instance(
+        fixture,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv6Only,
+        "automatic-ipv6-only-selection",
+    )
+    .await;
+    let ipv6_only_segment_id = assert_auto_rpc_resolution(
+        &instance,
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv6Only,
+        None,
+        Some(ipv6_prefix_id),
+    );
+
+    // Re-read through the public API to prove the family intent and selected
+    // prefix persisted beyond the allocation response.
+    let instance_id = instance.id.unwrap();
+    let persisted = fixture.env.one_instance(instance_id).await;
+    assert_auto_rpc_resolution(
+        persisted.inner(),
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv6Only,
+        None,
+        Some(ipv6_prefix_id),
+    );
+    let status = persisted.status();
+    let status_interface = &status.network().interfaces[0];
+    assert_eq!(status_interface.addresses.len(), 1);
+    assert!(
+        status_interface.addresses[0]
+            .parse::<IpAddr>()
+            .unwrap()
+            .is_ipv6()
+    );
+    assert_eq!(status_interface.prefixes.len(), 1);
+    assert!(
+        status_interface.prefixes[0]
+            .parse::<IpNetwork>()
+            .unwrap()
+            .is_ipv6()
+    );
+
+    let mut txn = fixture.env.db_txn().await;
+    let ipv6_only_segment = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &ipv6_only_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ipv6_only_segment[0].prefixes.len(), 1);
+    let ipv6_segment_prefix = ipv6_only_segment[0].prefixes[0].prefix;
+    assert_eq!(
+        ipv6_segment_prefix,
+        "fd42:218::/127".parse::<IpNetwork>().unwrap(),
+    );
+
+    let ipv6_only_addresses =
+        db::instance_address::find_by_segment_id(txn.as_mut(), &ipv6_only_segment_id)
+            .await
+            .unwrap();
+
+    // Persistence contains one odd IPv6 host address from the selected /127.
+    assert_eq!(ipv6_only_addresses.len(), 1);
+    let tenant_address = ipv6_only_addresses[0].address;
+    assert!(matches!(
+        tenant_address,
+        IpAddr::V6(address) if address.to_bits() & 1 == 1
+    ));
+    let tenant_interface_prefix = IpNetwork::new(tenant_address, 128).unwrap();
+    assert_eq!(ipv6_only_addresses[0].prefix, tenant_interface_prefix);
+    txn.commit().await.unwrap();
+
+    // Core publishes only the real V6 family and leaves deprecated V4 fields
+    // empty rather than fabricating an unusable V4 address configuration.
+    let managed_config = fixture
+        .env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu().id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let [tenant_interface] = managed_config.tenant_interfaces.as_slice() else {
+        panic!("expected one IPv6-only tenant interface");
+    };
+    assert!(tenant_interface.gateway.is_none());
+    assert!(tenant_interface.ip.is_none());
+    assert!(tenant_interface.interface_prefix.is_none());
+    assert!(tenant_interface.prefix.is_none());
+    assert!(tenant_interface.svi_ip.is_none());
+    let [address] = tenant_interface.addresses.as_slice() else {
+        panic!("expected one IPv6 tenant address configuration");
+    };
+    assert_eq!(
+        rpc::forge::AddressFamily::try_from(address.address_family).unwrap(),
+        rpc::forge::AddressFamily::V6,
+    );
+    assert_eq!(address.ip, tenant_address.to_string());
+    assert_eq!(
+        address.interface_prefix,
+        tenant_interface_prefix.to_string()
+    );
+    assert_eq!(address.prefix, ipv6_segment_prefix.to_string());
+    assert!(address.gateway.is_none());
+    let legacy_ipv6 = tenant_interface
+        .ipv6_interface_config
+        .as_ref()
+        .expect("IPv6-only config has a compatibility sidecar");
+    assert_eq!(legacy_ipv6.ip, address.ip);
+    assert_eq!(legacy_ipv6.interface_prefix, address.interface_prefix);
+}
+
+/// Exercises dual-stack resolution and per-family address assignment through
+/// the public allocation boundary.
+// This test deliberately verifies the deprecated V4 compatibility projection.
+#[allow(deprecated)]
+async fn assert_dual_stack_resolution(
+    fixture: &AutoVpcSelectionFixture,
+    prefixes: &AutoVpcDualStackPrefixes,
+) {
+    // IPv6-only consumed the first /127. Dual stack uses IPv4 as primary and
+    // attaches the remaining IPv6 /127 to the same generated segment.
+    let (managed_host, instance) = allocate_auto_vpc_instance(
+        fixture,
+        rpc::forge::InstanceInterfaceIpFamilyMode::DualStack,
+        "automatic-dual-stack-selection",
+    )
+    .await;
+    let dual_stack_segment_id = assert_auto_rpc_resolution(
+        &instance,
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::DualStack,
+        Some(prefixes.ipv4_prefix_id),
+        Some(prefixes.ipv6_prefix_id),
+    );
+
+    let instance_id = instance.id.unwrap();
+    let persisted = fixture.env.one_instance(instance_id).await;
+    assert_auto_rpc_resolution(
+        persisted.inner(),
+        fixture.vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::DualStack,
+        Some(prefixes.ipv4_prefix_id),
+        Some(prefixes.ipv6_prefix_id),
+    );
+    let status = persisted.status();
+    let status_interface = &status.network().interfaces[0];
+    assert_eq!(status_interface.addresses.len(), 2);
+    assert_eq!(
+        status_interface
+            .addresses
+            .iter()
+            .filter(|address| address.parse::<IpAddr>().unwrap().is_ipv4())
+            .count(),
+        1,
+    );
+    assert_eq!(status_interface.prefixes.len(), 2);
+    assert_eq!(
+        status_interface
+            .prefixes
+            .iter()
+            .filter(|prefix| prefix.parse::<IpNetwork>().unwrap().is_ipv4())
+            .count(),
+        1,
+    );
+
+    // Both selected family linknets must share one generated segment.
+    let mut txn = fixture.env.db_txn().await;
+    let dual_stack_segment = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &dual_stack_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dual_stack_segment[0].prefixes.len(), 2);
+    assert_eq!(
+        dual_stack_segment[0]
+            .prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv4())
+            .count(),
+        1,
+    );
+    assert_eq!(
+        dual_stack_segment[0]
+            .prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv6())
+            .count(),
+        1,
+    );
+
+    let dual_stack_addresses =
+        db::instance_address::find_by_segment_id(txn.as_mut(), &dual_stack_segment_id)
+            .await
+            .unwrap();
+
+    // Persistence contains one address per family.
+    assert_eq!(dual_stack_addresses.len(), 2);
+    assert_eq!(
+        dual_stack_addresses
+            .iter()
+            .filter(|address| address.address.is_ipv4())
+            .count(),
+        1,
+    );
+    assert!(dual_stack_addresses.iter().any(|address| matches!(
+        address.address,
+        IpAddr::V6(address) if address.to_bits() & 1 == 1
+    )));
+    let ipv6_segment_prefix = dual_stack_segment[0]
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv6())
+        .expect("dual-stack segment has an IPv6 prefix")
+        .prefix
+        .to_string();
+    txn.commit().await.unwrap();
+
+    let managed_config = fixture
+        .env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu().id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let [tenant_interface] = managed_config.tenant_interfaces.as_slice() else {
+        panic!("expected one dual-stack tenant interface");
+    };
+    let [ipv4_address, ipv6_address] = tenant_interface.addresses.as_slice() else {
+        panic!("expected IPv4 and IPv6 tenant address configurations");
+    };
+    assert_eq!(
+        [ipv4_address.address_family(), ipv6_address.address_family()],
+        [rpc::forge::AddressFamily::V4, rpc::forge::AddressFamily::V6],
+    );
+    assert!(tenant_interface.gateway.is_some());
+    assert!(tenant_interface.ip.is_some());
+    assert!(tenant_interface.interface_prefix.is_some());
+    assert!(tenant_interface.prefix.is_some());
+    assert_eq!(tenant_interface.gateway, ipv4_address.gateway);
+    assert_eq!(
+        tenant_interface.ip.as_deref(),
+        Some(ipv4_address.ip.as_str())
+    );
+    assert_eq!(
+        tenant_interface.interface_prefix.as_deref(),
+        Some(ipv4_address.interface_prefix.as_str()),
+    );
+    assert_eq!(
+        tenant_interface.prefix.as_deref(),
+        Some(ipv4_address.prefix.as_str())
+    );
+    assert_eq!(tenant_interface.svi_ip, ipv4_address.svi_ip);
+    let legacy_ipv6 = tenant_interface
+        .ipv6_interface_config
+        .as_ref()
+        .expect("dual-stack config has an IPv6 sidecar");
+    assert_eq!(ipv6_address.ip, legacy_ipv6.ip);
+    assert_eq!(ipv6_address.interface_prefix, legacy_ipv6.interface_prefix);
+    assert_eq!(ipv6_address.prefix, ipv6_segment_prefix);
+    assert_eq!(ipv6_address.svi_ip, legacy_ipv6.svi_ip);
+    assert!(ipv6_address.gateway.is_none());
+    assert!(ipv6_address.tenant_vrf_loopback_ip.is_none());
+}
+
+/// Builds unresolved selector intent so allocator internals can be exercised
+/// without RPC orchestration.
+fn automatic_network_config(
+    vpc_id: VpcId,
+    family_mode: InstanceInterfaceIpFamilyMode,
+) -> InstanceNetworkConfig {
+    // Seed the interface shape with the constructor for an explicitly selected
+    // prefix, then replace its dummy prefix with unresolved automatic intent.
+    let mut config = InstanceNetworkConfig::for_vpc_prefix_id(VpcPrefixId::new(), Some(vpc_id));
+    let interface = &mut config.interfaces[0];
+    interface.network_details = None;
+    interface.vpc_selection = Some(InstanceInterfaceVpcSelection {
+        vpc_id,
+        family_mode,
+    });
+    config
+}
+
+/// Allocates one automatic IPv4 config in its own transaction for concurrency tests.
+async fn allocate_automatic_ipv4_network(
+    pool: PgPool,
+    vpc_id: VpcId,
+    tenant_organization_id: TenantOrganizationId,
+) -> Result<InstanceNetworkConfig, crate::CarbideError> {
+    let mut config = automatic_network_config(vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
+    let mut txn = pool.begin().await.unwrap();
+    let result = allocate_network(&mut config, &tenant_organization_id, txn.as_mut()).await;
+
+    // Commit successful generated resources; failed attempts must leave no outer effects.
+    match result {
+        Ok(()) => {
+            txn.commit().await.unwrap();
+            Ok(config)
+        }
+        Err(error) => {
+            txn.rollback().await.unwrap();
+            Err(error)
+        }
+    }
+}
+
+/// Waits for a query to reach the expected lock boundary so concurrency tests
+/// release blockers deterministically rather than by timing.
+async fn wait_until_query_blocked_by(pool: &PgPool, blocker_pid: i32, query_fragment: &str) {
+    // Poll for up to 30 seconds to let the spawned query reach the held lock.
+    for _ in 0..300 {
+        let blocked: bool = sqlx::query_scalar(
+            r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND activity.wait_event_type = 'Lock'
+                      -- Match only work blocked by this test's transaction.
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
+                      AND activity.query ILIKE '%' || $2 || '%'
+                )
+            "#,
+        )
+        .bind(blocker_pid)
+        .bind(query_fragment)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("query never blocked on {query_fragment}");
+}
+
+/// Builds unresolved external selector intent so public-boundary tests do not
+/// pre-resolve a prefix themselves.
+fn automatic_ipv4_rpc_network_config(vpc_id: VpcId) -> rpc::InstanceNetworkConfig {
+    automatic_rpc_network_config(vpc_id, rpc::forge::InstanceInterfaceIpFamilyMode::Ipv4Only)
+}
+
+fn automatic_rpc_network_config(
+    vpc_id: VpcId,
+    family_mode: rpc::forge::InstanceInterfaceIpFamilyMode,
+) -> rpc::InstanceNetworkConfig {
+    rpc::InstanceNetworkConfig {
+        interfaces: vec![rpc::InstanceInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical as i32,
+            network_segment_id: None,
+            network_details: Some(rpc::forge::instance_interface_config::NetworkDetails::Vpc(
+                rpc::forge::InstanceInterfaceVpcSelection {
+                    vpc_id: Some(vpc_id),
+                    family_mode: family_mode as i32,
+                },
+            )),
+            device: None,
+            device_instance: 0,
+            virtual_function_id: None,
+            ip_address: None,
+            ipv6_interface_config: None,
+            routing_profile: None,
+        }],
+        #[allow(deprecated)]
+        auto: false,
+        auto_config: None,
+    }
+}
+
+/// Verifies config retains caller VPC intent while status exposes its resolved
+/// prefix, protecting the distinction between intent and active allocation.
+fn assert_auto_rpc_resolution(
+    instance: &rpc::Instance,
+    vpc_id: VpcId,
+    family_mode: rpc::forge::InstanceInterfaceIpFamilyMode,
+    ipv4_vpc_prefix_id: Option<VpcPrefixId>,
+    ipv6_vpc_prefix_id: Option<VpcPrefixId>,
+) -> NetworkSegmentId {
+    // Config retains VPC-level caller intent while carrying the generated segment.
+    let interface = &instance
+        .config
+        .as_ref()
+        .unwrap()
+        .network
+        .as_ref()
+        .unwrap()
+        .interfaces[0];
+    let selection = match interface.network_details.as_ref() {
+        Some(rpc::forge::instance_interface_config::NetworkDetails::Vpc(selection)) => selection,
+        other => panic!("expected automatic VPC selection, got {other:?}"),
+    };
+    assert_eq!(selection.vpc_id, Some(vpc_id));
+    assert_eq!(selection.family_mode, family_mode as i32);
+    let network_segment_id = interface.network_segment_id.unwrap();
+
+    // Status publishes the active family-keyed prefix separately.
+    let status_interface = &instance
+        .status
+        .as_ref()
+        .unwrap()
+        .network
+        .as_ref()
+        .unwrap()
+        .interfaces[0];
+    assert_eq!(status_interface.vpc_id, Some(vpc_id));
+    let resolved = status_interface.resolved_vpc_prefixes.as_ref().unwrap();
+    assert_eq!(resolved.ipv4_vpc_prefix_id, ipv4_vpc_prefix_id);
+    assert_eq!(resolved.ipv6_vpc_prefix_id, ipv6_vpc_prefix_id);
+
+    network_segment_id
+}
+
+fn assert_ipv4_auto_rpc_resolution(
+    instance: &rpc::Instance,
+    vpc_id: VpcId,
+    vpc_prefix_id: VpcPrefixId,
+) {
+    assert_auto_rpc_resolution(
+        instance,
+        vpc_id,
+        rpc::forge::InstanceInterfaceIpFamilyMode::Ipv4Only,
+        Some(vpc_prefix_id),
+        None,
+    );
 }
 
 async fn create_tenant_overlay_prefix(env: &TestEnv, vpc_id: VpcId) -> VpcPrefixId {
@@ -2931,7 +5071,9 @@ async fn create_tenant_overlay_prefix_with_prefix(
     let vpc_prefix_id = db::vpc_prefix::persist(
         model::vpc_prefix::NewVpcPrefix {
             id: uuid::Uuid::new_v4().into(),
+            site_prefix_id: None,
             vpc_id,
+            overlap_vpc_id: None,
             config: VpcPrefixConfig { prefix },
             metadata: Metadata {
                 name: name.to_string(),
@@ -2980,179 +5122,10 @@ fn dual_physical_network_config_with_vpc_prefixes(
 
     rpc::InstanceNetworkConfig {
         interfaces,
+        #[allow(deprecated)]
         auto: false,
+        auto_config: None,
     }
-}
-
-#[crate::sqlx_test]
-async fn test_allocate_with_instance_type_id(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
-
-    // Create two new managed hosts in the DB and get the snapshot.
-    let mh = site_explorer::new_host(&env, ManagedHostConfig::default())
-        .await
-        .unwrap();
-
-    let mh2 = site_explorer::new_host(&env, ManagedHostConfig::default())
-        .await
-        .unwrap();
-
-    // Find the existing instance types in the test env
-    let existing_instance_type_ids = env
-        .api
-        .find_instance_type_ids(tonic::Request::new(
-            rpc::forge::FindInstanceTypeIdsRequest {},
-        ))
-        .await
-        .unwrap()
-        .into_inner()
-        .instance_type_ids;
-
-    let existing_instance_types = env
-        .api
-        .find_instance_types_by_ids(tonic::Request::new(
-            rpc::forge::FindInstanceTypesByIdsRequest {
-                instance_type_ids: existing_instance_type_ids,
-                include_allocation_stats: false,
-                tenant_organization_id: None,
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner()
-        .instance_types;
-
-    let good_id = existing_instance_types[0].id.clone();
-    let bad_id = existing_instance_types[1].id.clone();
-
-    // Associate the machine with an instance type
-    let _ = env
-        .api
-        .associate_machines_with_instance_type(tonic::Request::new(
-            rpc::forge::AssociateMachinesWithInstanceTypeRequest {
-                instance_type_id: good_id.clone(),
-                machine_ids: vec![
-                    mh.host_snapshot.id.to_string(),
-                    mh2.host_snapshot.id.to_string(),
-                ],
-            },
-        ))
-        .await
-        .unwrap();
-
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-
-    // Try to create an instance type, but pretend like the
-    // instance type of the machine changed by the time we
-    // requested the allocation, and call with the wrong ID.
-    // This should fail.
-    let _ = env
-        .api
-        .allocate_instance(
-            InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .network(single_interface_network_config(segment_id)),
-                )
-                .instance_type_id(bad_id.clone())
-                .metadata(rpc::forge::Metadata {
-                    name: "newinstance".to_string(),
-                    description: "desc".to_string(),
-                    labels: vec![],
-                })
-                .tonic_request(),
-        )
-        .await
-        .unwrap_err();
-
-    // Try that again, but this time with the right ID
-    // This should pass.
-    let instance = env
-        .api
-        .allocate_instance(
-            InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .network(single_interface_network_config(segment_id))
-                        .rpc(),
-                )
-                .instance_type_id(good_id.clone())
-                .metadata(rpc::forge::Metadata {
-                    name: "newinstance".to_string(),
-                    description: "desc".to_string(),
-                    labels: vec![],
-                })
-                .tonic_request(),
-        )
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert_eq!(good_id, instance.instance_type_id.unwrap());
-
-    // Look-up the instance and make sure we really
-    // stored the instance type.
-    let instance = env
-        .api
-        .find_instances_by_ids(tonic::Request::new(rpc::forge::InstancesByIdsRequest {
-            instance_ids: vec![instance.id.unwrap()],
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .instances
-        .pop()
-        .unwrap();
-
-    assert_eq!(good_id, instance.instance_type_id.unwrap());
-
-    // Try that one more time, but this time with no type id.
-    // The request should succeed, but we should not persist an explicit instance type.
-    let instance = env
-        .api
-        .allocate_instance(
-            InstanceAllocationRequest::builder(false)
-                .machine_id(mh2.host_snapshot.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .network(single_interface_network_config(segment_id)),
-                )
-                .metadata(rpc::forge::Metadata {
-                    name: "newinstance".to_string(),
-                    description: "desc".to_string(),
-                    labels: vec![],
-                })
-                .tonic_request(),
-        )
-        .await
-        .unwrap()
-        .into_inner();
-
-    // Verify the immediate response.
-    // Expect no explicit instance type on the created instance.
-    assert!(instance.instance_type_id.is_none());
-
-    // Read the instance back from the API.
-    // Expect no explicit instance type to have been persisted.
-    let persisted = env
-        .api
-        .find_instances_by_ids(tonic::Request::new(rpc::forge::InstancesByIdsRequest {
-            instance_ids: vec![instance.id.unwrap()],
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .instances
-        .pop()
-        .unwrap();
-
-    assert!(persisted.instance_type_id.is_none());
-
-    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -3173,6 +5146,11 @@ async fn test_allocate_and_update_with_network_security_group(
     let mh = site_explorer::new_host(&env, ManagedHostConfig::default())
         .await
         .unwrap();
+    let host_machine_id: StableHostMachineId = mh
+        .host_snapshot
+        .id
+        .try_into()
+        .expect("newly ingested host should have a stable ID");
 
     let segment_id = env.create_vpc_and_tenant_segment().await;
 
@@ -3184,7 +5162,7 @@ async fn test_allocate_and_update_with_network_security_group(
         .api
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
+                .machine_id(host_machine_id)
                 .config(
                     InstanceConfig::default_tenant_and_os()
                         .network(single_interface_network_config(segment_id))
@@ -3207,7 +5185,7 @@ async fn test_allocate_and_update_with_network_security_group(
         .api
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
+                .machine_id(host_machine_id)
                 .config(
                     InstanceConfig::default_tenant_and_os()
                         .network(single_interface_network_config(segment_id))
@@ -3317,322 +5295,6 @@ async fn test_allocate_and_update_with_network_security_group(
 }
 
 #[crate::sqlx_test]
-async fn test_network_details_migration(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
-
-    // We'll try three cases here:
-    // Instance with interfaces that have only network_segment_id, which should end up with a new network_details k/v.
-    // Instance with interfaces that have both network_segment_id and network_details, which should be left unchanged.
-    // Instance with vpc prefix, which should be left unchanged.
-
-    // There won't be any cases of only network_details because sending in network_details ends up setting network_segment_id.
-
-    // Create a new managed host in the DB and get the snapshot.
-    let mh_without_network_details = site_explorer::new_host(&env, ManagedHostConfig::default())
-        .await
-        .unwrap();
-
-    let mh_without_segment_id = site_explorer::new_host(&env, ManagedHostConfig::default())
-        .await
-        .unwrap();
-
-    let mh_with_vpc_prefix = site_explorer::new_host(&env, ManagedHostConfig::default())
-        .await
-        .unwrap();
-
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-
-    // Create an instance with only network_segment_id
-    let i = env
-        .api
-        .allocate_instance(
-            InstanceAllocationRequest::builder(false)
-                .machine_id(mh_without_network_details.host_snapshot.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .network(rpc::InstanceNetworkConfig {
-                            interfaces: vec![rpc::InstanceInterfaceConfig {
-                                function_type: rpc::InterfaceFunctionType::Physical as i32,
-                                network_segment_id: Some(segment_id),
-                                network_details: None,
-                                device: None,
-                                device_instance: 0,
-                                virtual_function_id: None,
-                                ip_address: None,
-                                ipv6_interface_config: None,
-                                routing_profile: None,
-                            }],
-                            auto: false,
-                        })
-                        .rpc(),
-                )
-                .metadata(rpc::forge::Metadata {
-                    name: "newinstance".to_string(),
-                    description: "desc".to_string(),
-                    labels: vec![],
-                })
-                .tonic_request(),
-        )
-        .await
-        .unwrap()
-        .into_inner();
-
-    let i1_id = i.id.unwrap();
-
-    // Remove the network_details that we auto-populate now.
-    let mut conn = env.pool.acquire().await.unwrap();
-    sqlx::query(
-        "UPDATE instances i
-    SET network_config=jsonb_set(
-        network_config,
-        '{interfaces}',
-        (
-            select jsonb_agg(ba.value) from (
-                SELECT
-                    ifc_ttable.value - 'network_details' as value
-                FROM jsonb_array_elements(i.network_config #>'{interfaces}') as ifc_ttable
-           ) as ba
-        )
-    );",
-    )
-    .execute(conn.as_mut())
-    .await
-    .unwrap();
-
-    // Find the instance to confirm the state we expect.
-    let i = env
-        .api
-        .find_instances_by_ids(tonic::Request::new(rpc::forge::InstancesByIdsRequest {
-            instance_ids: vec![i1_id],
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .instances
-        .pop()
-        .unwrap();
-
-    // Check that the instance actually has the ID we expect
-    assert_eq!(
-        i.config.clone().unwrap().network.unwrap().interfaces[0].network_segment_id,
-        Some(segment_id)
-    );
-
-    // We expect that we've cleared the value with our raw query.
-    assert!(
-        i.config.unwrap().network.unwrap().interfaces[0]
-            .network_details
-            .is_none(),
-    );
-
-    // Create an instance with network_details
-    let i = env
-        .api
-        .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh_without_segment_id.host_snapshot.id.into(),
-            config: Some(rpc::InstanceConfig {
-                tenant: Some(default_tenant_config()),
-                os: Some(default_os_config()),
-                network: Some(rpc::InstanceNetworkConfig {
-                    interfaces: vec![rpc::InstanceInterfaceConfig {
-                        ip_address: None,
-                        ipv6_interface_config: None,
-                        routing_profile: None,
-
-                        function_type: rpc::InterfaceFunctionType::Physical as i32,
-                        network_segment_id: None,
-                        network_details: Some(
-                            rpc::forge::instance_interface_config::NetworkDetails::SegmentId(
-                                segment_id,
-                            ),
-                        ),
-                        device: None,
-                        device_instance: 0,
-                        virtual_function_id: None,
-                    }],
-                    auto: false,
-                }),
-                infiniband: None,
-                nvlink: None,
-                spxconfig: None,
-                network_security_group_id: None,
-                dpu_extension_services: None,
-            }),
-            instance_id: None,
-            instance_type_id: None,
-            metadata: Some(rpc::forge::Metadata {
-                name: "newinstance".to_string(),
-                description: "desc".to_string(),
-                labels: vec![],
-            }),
-            allow_unhealthy_machine: false,
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-
-    let i2_id = i.id.unwrap();
-
-    // Check that the instance actually has the ID we expect
-    assert_eq!(
-        i.config.clone().unwrap().network.unwrap().interfaces[0].network_details,
-        Some(rpc::forge::instance_interface_config::NetworkDetails::SegmentId(segment_id))
-    );
-
-    assert_eq!(
-        i.config.unwrap().network.unwrap().interfaces[0].network_segment_id,
-        Some(segment_id)
-    );
-
-    // Create an instance with vpc-prefix
-    let ip_prefix = "192.1.4.0/24";
-    let vpc_id = get_vpc_fixture_id(&env).await;
-    let vpc_prefix = env
-        .api
-        .create_vpc_prefix(tonic::Request::new(rpc::forge::VpcPrefixCreationRequest {
-            id: None,
-            prefix: String::new(),
-            vpc_id: Some(vpc_id),
-            config: Some(rpc::forge::VpcPrefixConfig {
-                prefix: ip_prefix.into(),
-            }),
-            metadata: Some(rpc::forge::Metadata {
-                name: "Test VPC prefix".into(),
-                description: String::from("some description"),
-                labels: vec![rpc::forge::Label {
-                    key: "example_key".into(),
-                    value: Some("example_value".into()),
-                }],
-            }),
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-
-    let vpc_prefix_id = vpc_prefix.id.unwrap();
-
-    let i = env
-        .api
-        .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh_with_vpc_prefix.host_snapshot.id.into(),
-            config: Some(rpc::InstanceConfig {
-                tenant: Some(default_tenant_config()),
-                os: Some(default_os_config()),
-                network: Some(rpc::InstanceNetworkConfig {
-                    interfaces: vec![rpc::InstanceInterfaceConfig {
-                        ip_address: None,
-                        ipv6_interface_config: None,
-                        routing_profile: None,
-
-                        function_type: rpc::InterfaceFunctionType::Physical as i32,
-                        network_segment_id: None,
-                        network_details: Some(
-                            rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(
-                                vpc_prefix_id,
-                            ),
-                        ),
-                        device: None,
-                        device_instance: 0,
-                        virtual_function_id: None,
-                    }],
-                    auto: false,
-                }),
-                infiniband: None,
-                nvlink: None,
-                spxconfig: None,
-                network_security_group_id: None,
-                dpu_extension_services: None,
-            }),
-            instance_id: None,
-            instance_type_id: None,
-            metadata: Some(rpc::forge::Metadata {
-                name: "newinstance".to_string(),
-                description: "desc".to_string(),
-                labels: vec![],
-            }),
-            allow_unhealthy_machine: false,
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-
-    let i3_id = i.id.unwrap();
-
-    assert_eq!(
-        i.config.clone().unwrap().network.unwrap().interfaces[0].network_details,
-        Some(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(vpc_prefix_id))
-    );
-
-    // Run the migration
-    let mut conn = env.pool.acquire().await.unwrap();
-    sqlx::query(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../api-db/migrations/20250505194055_network_segment_id_to_network_details.sql"
-    )))
-    .execute(conn.as_mut())
-    .await
-    .unwrap();
-
-    // Now go see if the instances are all still in an expected state.
-
-    validate_post_migration_instance_network_config(&env, i1_id, Some(segment_id)).await;
-    validate_post_migration_instance_network_config(&env, i2_id, Some(segment_id)).await;
-    validate_post_migration_instance_network_config(&env, i3_id, None).await;
-
-    Ok(())
-}
-
-pub async fn validate_post_migration_instance_network_config(
-    env: &TestEnv,
-    instance_id: InstanceId,
-    segment_id: Option<NetworkSegmentId>,
-) {
-    let i = env
-        .api
-        .find_instances_by_ids(tonic::Request::new(rpc::forge::InstancesByIdsRequest {
-            instance_ids: vec![instance_id],
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .instances
-        .pop()
-        .unwrap();
-
-    match segment_id {
-        // If we originated from network_segment_id or NetworkDetails::SegmentId
-        // check that everything matches.
-        Some(id) => {
-            assert_eq!(
-                i.config.clone().unwrap().network.unwrap().interfaces[0].network_details,
-                Some(rpc::forge::instance_interface_config::NetworkDetails::SegmentId(id))
-            );
-
-            assert_eq!(
-                i.config.unwrap().network.unwrap().interfaces[0].network_segment_id,
-                Some(id)
-            );
-        }
-        // If we originated from NetworkDetails::VpcPrefixId
-        // we just need to confirm that it's still in that state.
-        // The migration doesn't touch network_segment_id in the DB.
-        None => {
-            assert!(matches!(
-                i.config.clone().unwrap().network.unwrap().interfaces[0].network_details,
-                Some(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(_))
-            ));
-            assert!(
-                i.config.unwrap().network.unwrap().interfaces[0]
-                    .network_segment_id
-                    .is_some(),
-            );
-        }
-    }
-}
-
-#[crate::sqlx_test]
 async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
     _: PgPoolOptions,
     options: PgConnectOptions,
@@ -3691,13 +5353,16 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
                             device_instance: 0,
                             virtual_function_id: None,
                         }],
+                        #[allow(deprecated)]
                         auto: false,
+                        auto_config: None,
                     }),
                     infiniband: None,
                     network_security_group_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
+                    power_profile: None,
                 })
                 .metadata(rpc::Metadata {
                     name: "test_instance".to_string(),
@@ -3715,6 +5380,8 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
     );
 }
 
+/// Verifies a tenant-network replacement is persisted as pending work without
+/// dropping service-interface records that only Core can see or submit.
 #[crate::sqlx_test]
 async fn test_allocate_and_update_network_config_instance(
     _: PgPoolOptions,
@@ -3753,6 +5420,63 @@ async fn test_allocate_and_update_network_config_instance(
         rpc::SyncState::Synced
     );
 
+    // Public service-interface allocation is planned in issue #6125, so seed a
+    // terminating attachment and a well-formed record that refers to it.
+    let attachment_id = uuid::Uuid::new_v4();
+    let service_interface = InstanceServiceInterfaceConfig {
+        attachment_id,
+        interface_ordinal: 0,
+        dpu_id: mh.dpu_ids[0],
+        slot_index: 0,
+        vpc_id: VpcId::new(),
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_segment_id: segment_id,
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    };
+    let mut txn = env.db_txn().await;
+    let stored_instance = tinstance.db_instance(&mut txn).await;
+    let current_extension_services = stored_instance.config.extension_services.clone();
+    let mut seeded_extension_services = current_extension_services.clone();
+    seeded_extension_services
+        .service_configs
+        .push(InstanceExtensionServiceConfig {
+            id: Some(attachment_id),
+            dpu_target: None,
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            removed: Some(chrono::Utc::now()),
+        });
+    let mut seeded_network_config = stored_instance.config.network.clone();
+    seeded_network_config.service_interfaces = vec![service_interface.clone()];
+    assert_eq!(
+        db::instance::update_extension_services_config(
+            txn.as_mut(),
+            stored_instance.id,
+            stored_instance.extension_services_config_version,
+            &current_extension_services,
+            &seeded_extension_services,
+            false,
+        )
+        .await
+        .expect("seed terminating service attachment"),
+        db::ConditionalWrite::Applied(())
+    );
+    db::instance::update_network_config(
+        txn.as_mut(),
+        stored_instance.id,
+        stored_instance.network_config_version,
+        &seeded_network_config,
+        false,
+    )
+    .await
+    .expect("seed service-interface record");
+    txn.commit().await.expect("commit service-interface record");
+
+    // Build a caller-visible replacement with only tenant networking because
+    // hidden service-interface records cannot be submitted through the public API.
     let new_network_config = rpc::InstanceNetworkConfig {
         interfaces: vec![rpc::InstanceInterfaceConfig {
             ip_address: None,
@@ -3767,10 +5491,12 @@ async fn test_allocate_and_update_network_config_instance(
             device_instance: 0,
             virtual_function_id: None,
         }],
+        #[allow(deprecated)]
         auto: false,
+        auto_config: None,
     };
 
-    // Now update to change network config.
+    // Submit the replacement through the public API to exercise that ownership boundary.
     let _ = env
         .api
         .update_instance_config(tonic::Request::new(
@@ -3785,6 +5511,7 @@ async fn test_allocate_and_update_network_config_instance(
                     network_security_group_id: None,
                     dpu_extension_services: None,
                     spxconfig: None,
+                    power_profile: None,
                 }),
                 instance_id: instance.rpc_id(),
                 metadata: Some(rpc::forge::Metadata {
@@ -3804,11 +5531,16 @@ async fn test_allocate_and_update_network_config_instance(
         rpc::SyncState::Pending
     );
 
+    // Reload the database row to prove both live and pending network state keep the record.
     let mut txn = env.db_txn().await;
     let instance = tinstance.db_instance(&mut txn).await;
     txn.rollback().await.unwrap();
 
     assert!(instance.update_network_config_request.is_some());
+    assert_eq!(
+        instance.config.network.service_interfaces,
+        vec![service_interface.clone()]
+    );
     let update_req = instance.update_network_config_request.unwrap();
     let expected = NetworkDetails::NetworkSegment(segment_id2);
 
@@ -3819,449 +5551,96 @@ async fn test_allocate_and_update_network_config_instance(
             .clone()
             .unwrap(),
     );
+    assert_eq!(
+        update_req.new_config.service_interfaces,
+        vec![service_interface]
+    );
 }
 
+/// Verifies a corrupt service-interface record is reported as an internal error,
+/// so a valid public read is not blamed for a response conversion failure.
 #[crate::sqlx_test]
-async fn test_allocate_and_update_network_config_instance_add_vf(
-    _: PgPoolOptions,
-    options: PgConnectOptions,
-) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+async fn test_find_instances_reports_corrupt_service_interface_as_internal(pool: sqlx::PgPool) {
+    // Create an ordinary instance so only the seeded service-interface record is invalid.
     let env = create_test_env(pool).await;
-    let (segment_id, segment_id2) = env.create_vpc_and_dual_tenant_segment().await;
-    let mh = create_managed_host(&env).await;
-
-    let mut txn = env.db_txn().await;
-    assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id)
-            .await
-            .unwrap(),
-        0
-    );
-    assert!(matches!(
-        mh.host().db_machine(&mut txn).await.current_state(),
-        ManagedHostState::Ready
-    ));
-    txn.commit().await.unwrap();
-
-    let tinstance = mh
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let instance = managed_host
         .instance_builer(&env)
         .single_interface_network_config(segment_id)
         .build()
         .await;
 
-    let instance = tinstance.rpc_instance().await;
-
-    assert_eq!(instance.status().tenant(), rpc::forge::TenantState::Ready);
-
-    assert_eq!(
-        instance.status().network().configs_synced(),
-        rpc::SyncState::Synced
-    );
-
-    let instance_id_rpc = instance.rpc_id();
-
+    // Seed an active attachment whose service-interface record uses an unsupported ordinal.
+    let attachment_id = uuid::Uuid::new_v4();
     let mut txn = env.db_txn().await;
-    let instance = tinstance.db_instance(&mut txn).await;
-
-    let current_ip = instance.config.network.interfaces[0]
-        .ip_addrs
-        .values()
-        .collect_vec()
-        .first()
-        .copied()
-        .unwrap();
-
-    txn.rollback().await.unwrap();
-
-    let new_network_config = rpc::InstanceNetworkConfig {
-        interfaces: vec![
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Physical as i32,
-                network_segment_id: None,
-                network_details: Some(
-                    rpc::forge::instance_interface_config::NetworkDetails::SegmentId(segment_id),
-                ),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: Some(
-                    rpc::forge::instance_interface_config::NetworkDetails::SegmentId(segment_id2),
-                ),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-        ],
-        auto: false,
-    };
-
-    // Now update to change network config.
-    let _ = env
-        .api
-        .update_instance_config(tonic::Request::new(
-            rpc::forge::InstanceConfigUpdateRequest {
-                if_version_match: None,
-                config: Some(rpc::InstanceConfig {
-                    tenant: Some(default_tenant_config()),
-                    os: Some(default_os_config()),
-                    network: Some(new_network_config),
-                    infiniband: None,
-                    nvlink: None,
-                    spxconfig: None,
-                    network_security_group_id: None,
-                    dpu_extension_services: None,
-                }),
-                instance_id: instance_id_rpc,
-                metadata: Some(rpc::forge::Metadata {
-                    name: "newinstance".to_string(),
-                    description: "desc".to_string(),
-                    labels: vec![],
-                }),
-            },
-        ))
+    let stored_instance = instance.db_instance(&mut txn).await;
+    let current_extension_services = stored_instance.config.extension_services.clone();
+    let mut seeded_extension_services = current_extension_services.clone();
+    seeded_extension_services
+        .service_configs
+        .push(InstanceExtensionServiceConfig {
+            id: Some(attachment_id),
+            dpu_target: None,
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            removed: None,
+        });
+    let mut seeded_network_config = stored_instance.config.network.clone();
+    seeded_network_config.service_interfaces = vec![InstanceServiceInterfaceConfig {
+        attachment_id,
+        interface_ordinal: 1,
+        dpu_id: managed_host.dpu_ids[0],
+        slot_index: 0,
+        vpc_id: VpcId::new(),
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_segment_id: segment_id,
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    }];
+    assert_eq!(
+        db::instance::update_extension_services_config(
+            txn.as_mut(),
+            stored_instance.id,
+            stored_instance.extension_services_config_version,
+            &current_extension_services,
+            &seeded_extension_services,
+            false,
+        )
         .await
-        .unwrap();
-
-    let instance = tinstance.rpc_instance().await;
-
-    assert_eq!(
-        instance.status().network().configs_synced(),
-        rpc::SyncState::Pending
+        .expect("seed active service attachment"),
+        db::ConditionalWrite::Applied(())
     );
-
-    let mut txn = env.db_txn().await;
-    let instance = tinstance.db_instance(&mut txn).await;
-
-    txn.rollback().await.unwrap();
-
-    assert!(instance.update_network_config_request.is_some());
-    let update_req = instance.update_network_config_request.unwrap();
-
-    assert_eq!(
-        NetworkDetails::NetworkSegment(segment_id),
-        update_req.new_config.interfaces[0]
-            .network_details
-            .clone()
-            .unwrap(),
-    );
-
-    assert_eq!(
-        NetworkDetails::NetworkSegment(segment_id2),
-        update_req.new_config.interfaces[1]
-            .network_details
-            .clone()
-            .unwrap(),
-    );
-
-    // The first physical interface IP must not be changed.
-    let updated_config_ip = instance.config.network.interfaces[0]
-        .ip_addrs
-        .values()
-        .collect_vec()
-        .first()
-        .copied()
-        .unwrap();
-
-    assert_eq!(current_ip, updated_config_ip);
-}
-
-// IP should not be changed.
-// deleted vf id must not be present.
-#[crate::sqlx_test]
-async fn test_update_instance_config_vpc_prefix_network_update_delete_vf(
-    _: PgPoolOptions,
-    options: PgConnectOptions,
-) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    let _segment_id = env.create_vpc_and_tenant_segment().await;
-    let mh = create_managed_host(&env).await;
-
-    let initial_os = rpc::forge::InstanceOperatingSystemConfig {
-        phone_home_enabled: false,
-        run_provisioning_instructions_on_every_boot: false,
-        user_data: Some("SomeRandomData1".to_string()),
-        variant: Some(rpc::forge::instance_operating_system_config::Variant::Ipxe(
-            rpc::forge::InlineIpxe {
-                ipxe_script: "SomeRandomiPxe1".to_string(),
-            },
-        )),
-    };
-    let ip_prefix = "192.0.5.0/25";
-    let vpc_id = get_vpc_fixture_id(&env).await;
-    let new_vpc_prefix = rpc::forge::VpcPrefixCreationRequest {
-        id: None,
-        prefix: String::new(),
-        vpc_id: Some(vpc_id),
-        config: Some(rpc::forge::VpcPrefixConfig {
-            prefix: ip_prefix.into(),
-        }),
-        metadata: Some(rpc::forge::Metadata {
-            name: "Test VPC prefix".into(),
-            description: String::from("some description"),
-            labels: vec![rpc::forge::Label {
-                key: "example_key".into(),
-                value: Some("example_value".into()),
-            }],
-        }),
-    };
-    let request = Request::new(new_vpc_prefix);
-    let response = env
-        .api
-        .create_vpc_prefix(request)
+    db::instance::update_network_config(
+        txn.as_mut(),
+        stored_instance.id,
+        stored_instance.network_config_version,
+        &seeded_network_config,
+        false,
+    )
+    .await
+    .expect("seed corrupt service-interface record");
+    txn.commit()
         .await
-        .unwrap()
-        .into_inner();
+        .expect("commit corrupt service-interface record");
 
-    let network = rpc::InstanceNetworkConfig {
-        interfaces: vec![
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Physical as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: Some(0),
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: Some(1),
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: Some(2),
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-        ],
-        auto: false,
-    };
-
-    let initial_config = rpc::InstanceConfig {
-        tenant: Some(default_tenant_config()),
-        os: Some(initial_os.clone()),
-        network: Some(network.clone()),
-        infiniband: None,
-        nvlink: None,
-        spxconfig: None,
-        network_security_group_id: None,
-        dpu_extension_services: None,
-    };
-
-    let initial_metadata = rpc::Metadata {
-        name: "Name1".to_string(),
-        description: "Desc1".to_string(),
-        labels: vec![],
-    };
-
-    let tinstance = mh
-        .instance_builer(&env)
-        .config(initial_config.clone())
-        .metadata(initial_metadata.clone())
-        .build()
-        .await;
-
-    let instance = tinstance.rpc_instance().await;
-
-    assert_eq!(
-        instance.status().configs_synced(),
-        rpc::forge::SyncState::Synced
-    );
-
-    let interfaces_status = instance.status().network().interfaces.clone();
-    let old_addresses = interfaces_status
-        .iter()
-        .filter_map(|x| {
-            if let Some(vf_id) = x.virtual_function_id {
-                if vf_id != 1 {
-                    Some(x.addresses.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .sorted()
-        .collect_vec();
-
-    assert_eq!(instance.status().tenant(), rpc::forge::TenantState::Ready);
-
-    let network = rpc::InstanceNetworkConfig {
-        interfaces: vec![
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Physical as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: Some(0),
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            // VF 1 is deleted.
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: Some(2),
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-        ],
-        auto: false,
-    };
-    let mut updated_config_1 = initial_config.clone();
-    updated_config_1.network = Some(network);
-    let updated_metadata_1 = rpc::Metadata {
-        name: "Name2".to_string(),
-        description: "Desc2".to_string(),
-        labels: vec![rpc::forge::Label {
-            key: "Key1".to_string(),
-            value: None,
-        }],
-    };
-
-    let instance = env
+    // A valid request must attribute the response failure to server-owned state.
+    let error = env
         .api
-        .update_instance_config(tonic::Request::new(
-            rpc::forge::InstanceConfigUpdateRequest {
-                instance_id: Some(tinstance.id),
-                if_version_match: None,
-                config: Some(updated_config_1.clone()),
-                metadata: Some(updated_metadata_1.clone()),
-            },
-        ))
+        .find_instances_by_ids(Request::new(rpc::forge::InstancesByIdsRequest {
+            instance_ids: vec![instance.id],
+        }))
         .await
-        .unwrap()
-        .into_inner();
-
-    assert_eq!(
-        instance.status.as_ref().unwrap().configs_synced(),
-        rpc::forge::SyncState::Pending
+        .expect_err("corrupt service-interface record must fail response conversion");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(
+        error
+            .message()
+            .starts_with("internal error: failed to convert managed-host snapshot for machine ")
     );
-
-    // SyncState::Synced means network config update is not applicable.
-    let instance = tinstance.rpc_instance().await;
-
-    assert_eq!(
-        instance.status().network().configs_synced(),
-        rpc::forge::SyncState::Pending
-    );
-
-    env.run_machine_state_controller_iteration().await;
-    // Run network state machine handler here.
-    env.run_network_segment_controller_iteration().await;
-
-    env.run_machine_state_controller_iteration().await;
-    mh.network_configured(&env).await;
-    env.run_machine_state_controller_iteration().await;
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let state = mh.host().db_machine(&mut txn).await;
-    let state = state.current_state();
-    println!("{state:?}");
-    assert!(matches!(
-        state,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::Ready
-        }
-    ));
-
-    let instance = tinstance.rpc_instance().await;
-
-    let interfaces = &instance.config().network().interfaces;
-    let mut vf_ids = interfaces
-        .iter()
-        .filter_map(|x| {
-            if x.function_type == InterfaceFunctionType::Virtual as i32 {
-                x.virtual_function_id
-            } else {
-                None
-            }
-        })
-        .collect_vec();
-
-    let interfaces_status = &instance.status().network().interfaces;
-    let addresses = interfaces_status
-        .iter()
-        .filter_map(|x| x.virtual_function_id.map(|_vf_id| x.addresses.clone()))
-        .flatten()
-        .sorted()
-        .collect_vec();
-
-    vf_ids.sort();
-    let expected = vec![0, 2];
-
-    assert_eq!(expected, vf_ids);
-    assert_eq!(old_addresses, addresses);
+    assert!(error.message().contains("unsupported interface ordinals"));
 }
 
 #[crate::sqlx_test]
@@ -4316,7 +5695,9 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
             ipv6_interface_config: None,
             routing_profile: None,
         }],
+        #[allow(deprecated)]
         auto: false,
+        auto_config: None,
     };
 
     // Now update to change network config.
@@ -4334,6 +5715,7 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
                     spxconfig: None,
                     network_security_group_id: None,
                     dpu_extension_services: None,
+                    power_profile: None,
                 }),
                 instance_id: instance.rpc_id(),
                 metadata: Some(rpc::forge::Metadata {
@@ -4393,350 +5775,426 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
 }
 
 #[crate::sqlx_test]
-async fn test_update_instance_config_vpc_prefix_network_update_state_machine(
-    _: PgPoolOptions,
-    options: PgConnectOptions,
-) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    let _segment_id = env.create_vpc_and_tenant_segment().await;
-    let mh = create_managed_host(&env).await;
-
-    let initial_os = rpc::forge::InstanceOperatingSystemConfig {
-        phone_home_enabled: false,
-        run_provisioning_instructions_on_every_boot: false,
-        user_data: Some("SomeRandomData1".to_string()),
-        variant: Some(rpc::forge::instance_operating_system_config::Variant::Ipxe(
-            rpc::forge::InlineIpxe {
-                ipxe_script: "SomeRandomiPxe1".to_string(),
-            },
-        )),
-    };
-    let ip_prefix = "192.1.4.0/25";
-    let vpc_id = common::api_fixtures::get_vpc_fixture_id(&env).await;
-    let new_vpc_prefix = rpc::forge::VpcPrefixCreationRequest {
-        id: None,
-        prefix: String::new(),
-        vpc_id: Some(vpc_id),
-        config: Some(rpc::forge::VpcPrefixConfig {
-            prefix: ip_prefix.into(),
-        }),
-        metadata: Some(rpc::forge::Metadata {
-            name: "Test VPC prefix".into(),
-            description: String::from("some description"),
-            labels: vec![rpc::forge::Label {
-                key: "example_key".into(),
-                value: Some("example_value".into()),
-            }],
-        }),
-    };
-    let request = Request::new(new_vpc_prefix);
-    let response = env
-        .api
-        .create_vpc_prefix(request)
-        .await
-        .unwrap()
-        .into_inner();
-
-    let network = rpc::InstanceNetworkConfig {
-        interfaces: vec![rpc::InstanceInterfaceConfig {
-            function_type: rpc::InterfaceFunctionType::Physical as i32,
-            network_segment_id: None,
-            network_details: response
-                .id
-                .map(::rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-            device: None,
-            device_instance: 0,
-            virtual_function_id: None,
-            ip_address: None,
-            ipv6_interface_config: None,
-            routing_profile: None,
-        }],
-        auto: false,
-    };
-
-    let initial_config = rpc::InstanceConfig {
-        tenant: Some(default_tenant_config()),
-        os: Some(initial_os.clone()),
-        network: Some(network.clone()),
-        infiniband: None,
-        nvlink: None,
-        spxconfig: None,
-        network_security_group_id: None,
-        dpu_extension_services: None,
-    };
-
-    let initial_metadata = rpc::Metadata {
-        name: "Name1".to_string(),
-        description: "Desc1".to_string(),
-        labels: vec![],
-    };
-
+async fn test_slaac_network_update_locks_instance_before_releasing_segment(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture_with_slaac(pool, true).await;
+    let env = &fixture.env;
+    let old_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        env,
+        fixture.vpc_id,
+        "old SLAAC prefix",
+        "fd42:6455:1::/63".parse().unwrap(),
+    )
+    .await;
+    let new_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        env,
+        fixture.vpc_id,
+        "new SLAAC prefix",
+        "fd42:6455:2::/63".parse().unwrap(),
+    )
+    .await;
+    let mh = create_managed_host(env).await;
     let tinstance = mh
-        .instance_builer(&env)
-        .config(initial_config.clone())
-        .metadata(initial_metadata.clone())
+        .instance_builer(env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(single_interface_network_config_with_vpc_prefix(
+            old_prefix_id,
+        ))
         .build()
         .await;
-
     let instance = tinstance.rpc_instance().await;
+    let old_segment_id = instance.config().network().interfaces[0]
+        .network_segment_id
+        .unwrap();
+    let mut config = instance.config().inner().clone();
+    config.network = Some(single_interface_network_config_with_vpc_prefix(
+        new_prefix_id,
+    ));
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
+            config: Some(config),
+            metadata: Some(instance.metadata().clone()),
+            if_version_match: None,
+        }))
+        .await
+        .unwrap();
 
-    assert_eq!(
-        instance.status().configs_synced(),
-        rpc::forge::SyncState::Synced
-    );
-
-    assert_eq!(instance.status().tenant(), rpc::forge::TenantState::Ready);
-
-    let network = rpc::InstanceNetworkConfig {
-        interfaces: vec![
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Physical as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(::rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
+    env.run_network_segment_controller_iteration().await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced,
             },
-            rpc::InstanceInterfaceConfig {
-                function_type: rpc::InterfaceFunctionType::Virtual as i32,
-                network_segment_id: None,
-                network_details: response
-                    .id
-                    .map(::rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId),
-                device: None,
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
+        },
+    )
+    .await;
+    mh.network_configured(env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::ReleaseOldResources,
             },
-        ],
-        auto: false,
-    };
-    let mut updated_config_1 = initial_config.clone();
-    updated_config_1.network = Some(network);
-    let updated_metadata_1 = rpc::Metadata {
-        name: "Name2".to_string(),
-        description: "Desc2".to_string(),
-        labels: vec![rpc::forge::Label {
-            key: "Key1".to_string(),
-            value: None,
-        }],
-    };
+        },
+    )
+    .await;
 
+    // SLAAC keeps its generated segment without creating address rows that
+    // could serialize cleanup with force deletion.
     let mut txn = env.db_txn().await;
-    let segments =
-        db::network_segment::find_ids(txn.as_mut(), NetworkSegmentSearchFilter::default())
+    let pending = tinstance.db_instance(&mut txn).await;
+    let request = pending.update_network_config_request.as_ref().unwrap();
+    assert!(request.old_config.interfaces[0].ip_addrs.is_empty());
+    assert!(
+        !request.old_config.interfaces[0]
+            .interface_prefixes
+            .is_empty()
+    );
+    let address_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM instance_addresses WHERE instance_id = $1")
+            .bind(tinstance.id)
+            .fetch_one(txn.as_mut())
             .await
             .unwrap();
-
-    let old_length = segments.len();
+    assert_eq!(address_count, 0);
     txn.rollback().await.unwrap();
 
-    let _instance = env
-        .api
-        .update_instance_config(tonic::Request::new(
-            rpc::forge::InstanceConfigUpdateRequest {
-                instance_id: Some(tinstance.id),
-                if_version_match: None,
-                config: Some(updated_config_1.clone()),
-                metadata: Some(updated_metadata_1.clone()),
-            },
-        ))
+    // Force deletion locks the Instance before its generated segments. While
+    // cleanup waits for that Instance, it must leave the old segment unlocked.
+    let mut instance_lock = env.db_txn().await;
+    db::instance::find_by_id_for_update(instance_lock.as_mut(), tinstance.id)
         .await
         .unwrap()
-        .into_inner();
-
-    let mut txn = env
-        .pool
-        .begin()
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(instance_lock.as_mut())
         .await
-        .expect("Unable to create transaction on database pool");
-
-    let segments =
-        db::network_segment::find_ids(txn.as_mut(), NetworkSegmentSearchFilter::default())
-            .await
-            .unwrap();
-
-    let new_length = segments.len();
-    txn.rollback().await.unwrap();
-
-    // A new network segment must be created.
-    assert_eq!(old_length + 1, new_length);
-
-    // Instance should move to NetworkConfigUpdateState::WaitingForNetworkSegmentToBeReady
-    env.run_machine_state_controller_iteration().await;
-    // and stay there only.
-    env.run_machine_state_controller_iteration().await;
-    env.run_network_segment_controller_iteration().await;
-    // Instance should move to NetworkConfigUpdateState::WaitingForConfigSynced
-    env.run_machine_state_controller_iteration().await;
-    // and stay there only.
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    let current_state = mh.host().db_machine(&mut txn).await;
-    let current_state = current_state.current_state();
-    println!("Current State: {current_state}");
-    assert!(matches!(
-        current_state,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::NetworkConfigUpdate {
-                network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced
-            }
-        }
-    ));
-    txn.rollback().await.unwrap();
-
-    // - forge-dpu-agent gets an instance network to configure, reports it configured
-    mh.network_configured(&env).await;
-    // Move to ReleaseOldResources state.
-    env.run_machine_state_controller_iteration().await;
+        .unwrap();
+    let probe_segment_lock = async move {
+        wait_until_query_blocked_by(
+            &env.pool,
+            blocker_pid,
+            "UPDATE instances SET update_network_config_request=NULL",
+        )
+        .await;
+        let result = sqlx::query_scalar::<_, NetworkSegmentId>(
+            "SELECT id FROM network_segments WHERE id = $1 FOR UPDATE NOWAIT",
+        )
+        .bind(old_segment_id)
+        .fetch_one(instance_lock.as_mut())
+        .await;
+        // Release the Instance even when the probe fails so the controller
+        // can finish before we report the assertion.
+        instance_lock.rollback().await.unwrap();
+        result
+    };
+    let ((), segment_lock) = tokio::join!(
+        env.run_machine_state_controller_iteration(),
+        probe_segment_lock,
+    );
+    segment_lock.expect("cleanup must lock the Instance before its generated segment");
 
     let mut txn = env.db_txn().await;
+    let persisted = tinstance.db_instance(&mut txn).await;
+    assert!(persisted.update_network_config_request.is_none());
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &old_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    let [old_segment] = segments.as_slice() else {
+        panic!("expected the released SLAAC segment");
+    };
+    assert!(old_segment.is_marked_as_deleted());
     assert!(matches!(
         mh.host().db_machine(&mut txn).await.current_state(),
         ManagedHostState::Assigned {
-            instance_state: InstanceState::NetworkConfigUpdate {
-                network_config_update_state: NetworkConfigUpdateState::ReleaseOldResources
-            }
-        }
-    ));
-    txn.rollback().await.unwrap();
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    assert!(matches!(
-        mh.host().db_machine(&mut txn).await.current_state(),
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::Ready
+            instance_state: InstanceState::Ready,
         }
     ));
     txn.rollback().await.unwrap();
 }
 
+/// A removed DPU's failed Admin apply must retain its old network resources,
+/// including after `ReleaseOldResources` is persisted.
 #[crate::sqlx_test]
-async fn test_allocate_network_multi_dpu_vpc_prefix_id(
-    _: PgPoolOptions,
-    options: PgConnectOptions,
-) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    env.create_vpc_and_tenant_segment().await;
-    let vpc = db::vpc::find_by_name(&env.pool, "test vpc 1")
+async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+    let env = &fixture.env;
+    let mh = create_managed_host_multi_dpu(env, 2).await;
+    let mut network = dual_physical_network_config_with_vpc_prefixes(
+        fixture.lower_ipv4_prefix_id,
+        fixture.higher_ipv4_prefix_id,
+    );
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    for (interface, dpu_id) in network.interfaces.iter_mut().zip(&mh.dpu_ids) {
+        let locator = host.get_device_locator_for_dpu_id(dpu_id).unwrap();
+        interface.device = Some(locator.device);
+        interface.device_instance = locator.device_instance as u32;
+    }
+    txn.commit().await.unwrap();
+    let tinstance = mh
+        .instance_builer(env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(network)
+        .build()
+        .await;
+    let instance = tinstance.rpc_instance().await;
+    let mut config = instance.config().inner().clone();
+    let interfaces = &mut config.network.as_mut().unwrap().interfaces;
+    let removed_segment_id = interfaces.pop().unwrap().network_segment_id.unwrap();
+    let retained_segment_id = interfaces[0].network_segment_id.unwrap();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
+            config: Some(config),
+            metadata: Some(instance.metadata().clone()),
+            if_version_match: None,
+        }))
+        .await
+        .unwrap();
+    let waiting = ManagedHostState::Assigned {
+        instance_state: InstanceState::NetworkConfigUpdate {
+            network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced,
+        },
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(&mh.host().id, 10, waiting)
+        .await;
+
+    // Find the removed DPU through the config the API actually serves it.
+    let mut removed_dpu_id = None;
+    for dpu_id in &mh.dpu_ids {
+        let response = env
+            .api
+            .get_managed_host_network_config(Request::new(
+                rpc::forge::ManagedHostNetworkConfigRequest {
+                    dpu_machine_id: Some(*dpu_id),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        if response.use_admin_network {
+            assert!(
+                removed_dpu_id.is_none(),
+                "only one DPU should lose its interfaces"
+            );
+            removed_dpu_id = Some(*dpu_id);
+            assert!(response.tenant_interfaces.is_empty());
+            assert!(response.instance_network_config_version.is_empty());
+        } else {
+            assert_eq!(response.tenant_interfaces.len(), 1);
+            network_configured_with_health(env, dpu_id, None).await;
+        }
+    }
+    let removed_dpu_id = removed_dpu_id.expect("removed DPU must receive Admin config");
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let pending = snapshot.instance.as_ref().unwrap();
+    assert_eq!(pending.observations.network.len(), 2);
+    let update_request = pending.update_network_config_request.clone().unwrap();
+    let old_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &tinstance.id,
+        &removed_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|allocation| allocation.address)
+    .collect_vec();
+    assert_eq!(old_addresses.len(), 1);
+    txn.commit().await.unwrap();
+
+    for phase in [
+        NetworkConfigUpdateState::WaitingForConfigSynced,
+        NetworkConfigUpdateState::ReleaseOldResources,
+    ] {
+        if phase == NetworkConfigUpdateState::ReleaseOldResources {
+            // Establish the normal transition, then lose the acknowledgement
+            // before the next iteration handles the persisted release phase.
+            network_configured_with_health(env, &removed_dpu_id, None).await;
+            env.run_machine_state_controller_iteration().await;
+        }
+        let expected_state = ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: phase,
+            },
+        };
+        let mut txn = env.db_txn().await;
+        assert_eq!(mh.snapshot(&mut txn).await.managed_state, expected_state);
+        txn.commit().await.unwrap();
+
+        // Inject the report emitted after a failed Admin apply: both version
+        // stamps are absent, although NVUE/uplink health can still be clear.
+        env.api
+            .record_dpu_network_status(Request::new(rpc::forge::DpuNetworkStatus {
+                dpu_machine_id: Some(removed_dpu_id),
+                network_config_version: None,
+                instance_network_config_version: None,
+                network_config_error: Some(
+                    "network update failed: injected Admin apply failure".to_string(),
+                ),
+                dpu_health: Some(
+                    health_report::HealthReport::empty("forge-dpu-agent".to_string()).into(),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, expected_state);
+        assert!(
+            matches!(
+                &snapshot.host_snapshot.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                    if reason == "Waiting for DPU agent(s) to apply network config and report healthy network"
+            ),
+            "expected the managed-host version wait, got {:?}",
+            snapshot.host_snapshot.controller_state_outcome
+        );
+        assert!(!snapshot.managed_host_network_config_version_synced());
+        let pending = snapshot.instance.as_ref().unwrap();
+        // The remaining Instance receipts are current; the missing Admin
+        // receipt, not Instance-version mismatch or health, must block cleanup.
+        assert_eq!(pending.observations.network.len(), 1);
+        assert!(!pending.observations.network.contains_key(&removed_dpu_id));
+        assert!(
+            pending.observations.network.values().all(|observation| {
+                observation.config_version == pending.network_config_version
+            })
+        );
+        assert_eq!(pending.config.network, update_request.new_config);
+        assert_eq!(
+            pending.update_network_config_request.as_ref(),
+            Some(&update_request)
+        );
+        let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &tinstance.id,
+            &removed_segment_id,
+        )
         .await
         .unwrap()
         .into_iter()
-        .next()
-        .unwrap();
-
-    let vpc_prefix_id = create_tenant_overlay_prefix(&env, vpc.id).await;
-
-    let network_config = rpc::InstanceNetworkConfig {
-        interfaces: vec![
-            rpc::InstanceInterfaceConfig {
-                function_type: 0,
-                network_segment_id: None,
-                network_details: Some(
-                    rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(
-                        vpc_prefix_id,
-                    ),
-                ),
-                device: Some("BlueField SoC".to_string()),
-                device_instance: 0,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-            rpc::InstanceInterfaceConfig {
-                function_type: 0,
-                network_segment_id: None,
-                network_details: Some(
-                    rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(
-                        vpc_prefix_id,
-                    ),
-                ),
-                device: Some("BlueField SoC".to_string()),
-                device_instance: 1,
-                virtual_function_id: None,
-                ip_address: None,
-                ipv6_interface_config: None,
-                routing_profile: None,
-            },
-        ],
-        auto: false,
-    };
-
-    let config = rpc::InstanceConfig {
-        tenant: Some(rpc::TenantConfig {
-            tenant_organization_id: "abc".to_string(),
-            hostname: Some("xyz".to_string()),
-            tenant_keyset_ids: vec![],
-        }),
-        os: Some(default_os_config()),
-        network: Some(network_config),
-        infiniband: None,
-        nvlink: None,
-        spxconfig: None,
-        network_security_group_id: None,
-        dpu_extension_services: None,
-    };
-
-    let mut config: model::instance::config::InstanceConfig = config.try_into().unwrap();
-
-    assert!(
-        config
-            .network
-            .interfaces
-            .iter()
-            .all(|i| i.network_segment_id.is_none())
-    );
-
-    let mut txn = env.db_txn().await;
-    allocate_network(&mut config.network, &mut txn)
-        .await
-        .unwrap();
-
-    txn.commit().await.unwrap();
-    assert!(
-        config
-            .network
-            .interfaces
-            .iter()
-            .all(|i| i.network_segment_id.is_some())
-    );
-
-    let mut txn = env.db_txn().await;
-    let expected_ips = [
-        Ipv4Addr::from_str("10.217.5.224").unwrap(),
-        Ipv4Addr::from_str("10.217.5.226").unwrap(),
-    ];
-    let mut expected_ips_iter = expected_ips.iter();
-
-    for iface in config.network.interfaces {
-        let network_segment = db::network_segment::find_by(
+        .map(|allocation| allocation.address)
+        .collect_vec();
+        assert_eq!(addresses, old_addresses);
+        let segments = db::network_segment::find_by(
             txn.as_mut(),
-            ObjectColumnFilter::One(IdColumn, &iface.network_segment_id.unwrap()),
+            ObjectColumnFilter::One(IdColumn, &removed_segment_id),
             NetworkSegmentSearchConfig::default(),
         )
         .await
         .unwrap();
-
-        let np = network_segment[0].prefixes[0].prefix;
-        match np {
-            IpNetwork::V4(ipv4_network) => {
-                assert_eq!(expected_ips_iter.next().unwrap(), &ipv4_network.network())
-            }
-            IpNetwork::V6(_) => panic!("Can not be ipv6."),
-        }
+        assert_eq!(segments.len(), 1);
+        assert!(!segments[0].is_marked_as_deleted());
+        txn.commit().await.unwrap();
     }
+
+    // A lifecycle-blocking alert can arrive after the healthy transition to
+    // `ReleaseOldResources`. Current receipts alone must not bypass that alert.
+    let mut blocking_health = health_report::HealthReport::empty("forge-dpu-agent".to_string());
+    blocking_health
+        .alerts
+        .push(health_report::HealthProbeAlert {
+            id: health_report::HealthProbeId::post_config_check_wait(),
+            target: None,
+            in_alert_since: None,
+            message: "injected health change before resource release".to_string(),
+            tenant_message: None,
+            classifications: vec![
+                health_report::HealthAlertClassification::prevent_host_state_changes(),
+            ],
+        });
+    network_configured_with_health(env, &removed_dpu_id, Some(blocking_health.into())).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::ReleaseOldResources,
+            },
+        }
+    );
+    assert!(
+        matches!(
+            &snapshot.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Error { err, .. })
+                if err.contains("health")
+        ),
+        "expected the existing health error, got {:?}",
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    assert!(
+        snapshot
+            .instance
+            .as_ref()
+            .unwrap()
+            .update_network_config_request
+            .is_some()
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &removed_segment_id)
+            .await
+            .unwrap(),
+        1
+    );
+    txn.commit().await.unwrap();
+
+    network_configured_with_health(env, &removed_dpu_id, None).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready
+        }
+    );
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert!(
+        snapshot
+            .instance
+            .as_ref()
+            .unwrap()
+            .update_network_config_request
+            .is_none()
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &removed_segment_id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &retained_segment_id)
+            .await
+            .unwrap(),
+        1
+    );
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &removed_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(segments.len(), 1);
+    assert!(segments[0].is_marked_as_deleted());
+    txn.commit().await.unwrap();
 }
 
 #[crate::sqlx_test]
@@ -4745,14 +6203,21 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
+
+    // Register the tenant required by both FNN VPCs used in this allocation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs and prefixes to exercise cross-VPC allocation.
     let first_vpc = env
         .api
         .create_vpc(
-            VpcCreationRequest::builder("2829bbe3-c169-4cd9-8b2a-19a8b1618a93")
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
                 .metadata(Metadata {
                     name: "fnn vpc 1".to_string(),
                     ..Default::default()
@@ -4768,7 +6233,7 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     let second_vpc = env
         .api
         .create_vpc(
-            VpcCreationRequest::builder("2829bbe3-c169-4cd9-8b2a-19a8b1618a93")
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
                 .metadata(Metadata {
                     name: "fnn vpc 2".to_string(),
                     ..Default::default()
@@ -4802,12 +6267,14 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
                 .machine_id(mh.id)
-                .config(InstanceConfig::default_tenant_and_os().network(
-                    dual_physical_network_config_with_vpc_prefixes(
-                        first_prefix_id,
-                        second_prefix_id,
-                    ),
-                ))
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .tenant(fixture_tenant_config())
+                        .network(dual_physical_network_config_with_vpc_prefixes(
+                            first_prefix_id,
+                            second_prefix_id,
+                        )),
+                )
                 .metadata(rpc::Metadata {
                     name: "multi-fnn-vpc".to_string(),
                     description: "tests/instance".to_string(),
@@ -4819,7 +6286,7 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
         .expect("FNN instance allocation across multiple VPCs should succeed")
         .into_inner();
 
-    // Verify the response resolved both prefix-backed interfaces.
+    // Verify the response resolved both interfaces that selected prefixes.
     let interfaces = &instance
         .config
         .as_ref()
@@ -4863,147 +6330,7 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
 }
 
 #[crate::sqlx_test]
-async fn test_fnn_vrf_loopbacks_are_per_vpc_and_removed_on_network_update(pool: sqlx::PgPool) {
-    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
-    overrides.fnn_config.as_mut().unwrap().use_vpc_vrf_loopback = true;
-    let env = create_test_env_with_overrides(pool, overrides).await;
-
-    // Create FNN tenants matching the existing peer-VPC fixture organizations.
-    for (organization_id, name) in [
-        (
-            "2829bbe3-c169-4cd9-8b2a-19a8b1618a93",
-            "fnn loopback tenant 1",
-        ),
-        (
-            "e65a9d69-39d2-4872-a53e-e5cb87c84e75",
-            "fnn loopback tenant 2",
-        ),
-    ] {
-        env.api
-            .create_tenant(Request::new(rpc::forge::CreateTenantRequest {
-                organization_id: organization_id.to_string(),
-                routing_profile_type: Some("INTERNAL".to_string()),
-                metadata: Some(rpc::forge::Metadata {
-                    name: name.to_string(),
-                    ..Default::default()
-                }),
-            }))
-            .await
-            .unwrap();
-    }
-
-    // Create two FNN VPCs and allocate one interface on each VPC.
-    let (first_vpc, _, first_segment_id, second_vpc, _, second_segment_id) = env
-        .create_vpc_and_peer_vpc_with_tenant_segments(
-            rpc::forge::VpcVirtualizationType::Fnn,
-            rpc::forge::VpcVirtualizationType::Fnn,
-        )
-        .await;
-    let first_vpc = first_vpc.expect("first VPC should be present");
-    let second_vpc = second_vpc.expect("second VPC should be present");
-    let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let first_dpu_id = mh.dpu_n(0).id;
-    let second_dpu_id = mh.dpu_n(1).id;
-
-    let mut txn = env.db_txn().await;
-    let host_machine = mh.host().db_machine(&mut txn).await;
-    let device_locators = [first_dpu_id, second_dpu_id]
-        .iter()
-        .map(|dpu_id| host_machine.get_device_locator_for_dpu_id(dpu_id).unwrap())
-        .collect_vec();
-    txn.commit().await.unwrap();
-
-    let instance = mh
-        .instance_builer(&env)
-        .network(interface_network_config_with_devices(
-            &[first_segment_id, second_segment_id],
-            &device_locators,
-        ))
-        .build()
-        .await;
-
-    // Fetch each DPU config so each interface resolves its own VPC loopback.
-    let first_config = env
-        .api
-        .get_managed_host_network_config(Request::new(
-            rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(first_dpu_id),
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    let second_config = env
-        .api
-        .get_managed_host_network_config(Request::new(
-            rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(second_dpu_id),
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-
-    // Verify each DPU received a loopback for its interface's VPC.
-    assert_eq!(first_config.tenant_interfaces.len(), 1);
-    assert_eq!(second_config.tenant_interfaces.len(), 1);
-    let first_loopback = first_config.tenant_interfaces[0]
-        .tenant_vrf_loopback_ip
-        .clone()
-        .expect("first VPC loopback should be present");
-    let second_loopback = second_config.tenant_interfaces[0]
-        .tenant_vrf_loopback_ip
-        .clone()
-        .expect("second VPC loopback should be present");
-    assert_ne!(first_loopback, second_loopback);
-
-    // Update the instance to keep only the first VPC interface.
-    env.api
-        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
-            if_version_match: None,
-            config: Some(rpc::InstanceConfig {
-                tenant: Some(default_tenant_config()),
-                os: Some(default_os_config()),
-                network: Some(interface_network_config_with_devices(
-                    &[first_segment_id],
-                    std::slice::from_ref(&device_locators[0]),
-                )),
-                infiniband: None,
-                nvlink: None,
-                spxconfig: None,
-                network_security_group_id: None,
-                dpu_extension_services: None,
-            }),
-            instance_id: Some(instance.id),
-            metadata: Some(rpc::Metadata {
-                name: "single-fnn-vpc".to_string(),
-                description: "tests/instance".to_string(),
-                labels: vec![],
-            }),
-        }))
-        .await
-        .unwrap();
-
-    // Move the instance to ready state after the network config update.
-    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, false)
-        .await;
-
-    // Verify only the removed VPC loopback was released.
-    let mut txn = env.db_txn().await;
-    let retained_loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &first_dpu_id, &first_vpc)
-        .await
-        .unwrap()
-        .expect("retained VPC loopback should remain");
-    assert_eq!(retained_loopback.loopback_ip.to_string(), first_loopback);
-    assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &second_dpu_id, &second_vpc)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[crate::sqlx_test]
+#[allow(deprecated)]
 async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx::PgPool) {
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().use_vpc_vrf_loopback = true;
@@ -5011,10 +6338,7 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
 
     // Create FNN tenants matching the existing peer-VPC fixture organizations.
     for (organization_id, name) in [
-        (
-            "2829bbe3-c169-4cd9-8b2a-19a8b1618a93",
-            "fnn vf loopback tenant 1",
-        ),
+        (FIXTURE_TENANT_ORG_ID, "fnn vf loopback tenant 1"),
         (
             "e65a9d69-39d2-4872-a53e-e5cb87c84e75",
             "fnn vf loopback tenant 2",
@@ -5043,7 +6367,7 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
     let first_vpc = first_vpc.expect("first VPC should be present");
     let second_vpc = second_vpc.expect("second VPC should be present");
     let mh = create_managed_host(&env).await;
-    let dpu_id = mh.dpu().id;
+    let dpu_id = mh.dpu_ids[0];
     let instance = mh
         .instance_builer(&env)
         .network(single_interface_network_config_with_vfs(vec![
@@ -5096,6 +6420,7 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
                 spxconfig: None,
                 network_security_group_id: None,
                 dpu_extension_services: None,
+                power_profile: None,
             }),
             instance_id: Some(instance.id),
             metadata: Some(rpc::Metadata {
@@ -5118,6 +6443,26 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
         .unwrap()
         .expect("retained PF VPC loopback should remain");
     assert_eq!(retained_loopback.loopback_ip.to_string(), first_loopback);
+    let retained_entry = db::resource_pool::find_value(&mut *txn, &first_loopback)
+        .await
+        .expect("find retained PF loopback allocation")
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name())
+        .expect("retained PF loopback pool entry");
+    assert_eq!(
+        retained_entry.state.0,
+        ResourcePoolEntryState::Allocated {
+            owner: dpu_id.to_string(),
+            owner_type: OwnerType::Machine.to_string(),
+        }
+    );
+    let removed_entry = db::resource_pool::find_value(&mut *txn, &second_loopback)
+        .await
+        .expect("find removed VF loopback allocation")
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name())
+        .expect("removed VF loopback must remain in its pool");
+    assert_eq!(removed_entry.state.0, ResourcePoolEntryState::Free);
     assert!(
         db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &second_vpc)
             .await
@@ -5173,7 +6518,7 @@ async fn test_allocate_instance_rejects_multiple_non_fnn_network_segments(
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert!(
         err.message()
-            .contains("Found segments attached to multiple VPCs")
+            .contains("found segments attached to multiple VPCs")
     );
 }
 
@@ -5184,14 +6529,21 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host(&env).await;
+
+    // Register the tenant required by both FNN VPCs used in this validation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs so the global multi-FNN check passes.
     let first_vpc = env
         .api
         .create_vpc(
-            VpcCreationRequest::builder("2829bbe3-c169-4cd9-8b2a-19a8b1618a93")
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
                 .metadata(Metadata {
                     name: "dual-stack fnn vpc 1".to_string(),
                     ..Default::default()
@@ -5207,7 +6559,7 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
     let second_vpc = env
         .api
         .create_vpc(
-            VpcCreationRequest::builder("2829bbe3-c169-4cd9-8b2a-19a8b1618a93")
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
                 .metadata(Metadata {
                     name: "dual-stack fnn vpc 2".to_string(),
                     ..Default::default()
@@ -5243,9 +6595,11 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
                 .machine_id(mh.id)
-                .config(InstanceConfig::default_tenant_and_os().network(
-                    rpc::InstanceNetworkConfig {
-                        interfaces: vec![rpc::InstanceInterfaceConfig {
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .tenant(fixture_tenant_config())
+                        .network(rpc::InstanceNetworkConfig {
+                            interfaces: vec![rpc::InstanceInterfaceConfig {
                             function_type: rpc::InterfaceFunctionType::Physical as i32,
                             network_segment_id: None,
                             network_details: Some(
@@ -5263,9 +6617,11 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
                             }),
                             routing_profile: None,
                         }],
-                        auto: false,
-                    },
-                ))
+                            #[allow(deprecated)]
+                            auto: false,
+                            auto_config: None,
+                        }),
+                )
                 .tonic_request(),
         )
         .await
@@ -5339,6 +6695,7 @@ async fn test_instance_release_backward_compatibility(_: PgPoolOptions, options:
             id: Some(instance_id),
             issue: None,            // Exactly what older clients produce
             is_repair_tenant: None, // Exactly what older clients produce
+            delete_attribution: None,
         }))
         .await
         .expect("Basic instance release should succeed");
@@ -5456,6 +6813,7 @@ async fn test_instance_release_repair_tenant(_: PgPoolOptions, options: PgConnec
                 id: Some(instance_id),
                 issue: None, // No issue reported
                 is_repair_tenant: Some(is_repair_tenant),
+                delete_attribution: None,
             }))
             .await
             .expect("Instance release with repair tenant flag should succeed");
@@ -5554,6 +6912,7 @@ async fn test_instance_release_combined_enhancements(_: PgPoolOptions, options: 
             id: Some(instance_id),
             issue: Some(issue),
             is_repair_tenant: Some(true), // This is a repair tenant reporting an issue
+            delete_attribution: None,
         }))
         .await
         .expect("Instance release with combined enhancements should succeed");
@@ -5660,6 +7019,7 @@ async fn test_instance_release_rejected_when_aggregate_health_has_prevent_instan
             id: Some(instance_id),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .expect_err(
@@ -5685,6 +7045,7 @@ async fn test_instance_release_rejected_when_aggregate_health_has_prevent_instan
             id: Some(instance_id),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .expect("release should succeed after removing PreventInstanceDeletion source");
@@ -5737,6 +7098,7 @@ async fn test_instance_release_auto_repair_enabled(_: PgPoolOptions, options: Pg
                 details: "ECC errors increasing, DIMM slot 3 needs replacement".to_string(),
             }),
             is_repair_tenant: None, // Regular tenant (not repair tenant)
+            delete_attribution: None,
         }))
         .await
         .unwrap();
@@ -5804,126 +7166,6 @@ async fn test_instance_release_auto_repair_enabled(_: PgPoolOptions, options: Pg
     txn.commit().await.unwrap();
 }
 
-#[crate::sqlx_test]
-async fn test_instance_release_repair_tenant_successful_completion(
-    _: PgPoolOptions,
-    options: PgConnectOptions,
-) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-
-    // Create custom config with auto-repair ENABLED to test the full scenario
-    let mut config = get_config();
-    config.auto_machine_repair_plugin.enabled = true;
-
-    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
-
-    let mh = create_managed_host(&env).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-
-    let config = InstanceConfig::default_tenant_and_os()
-        .network(single_interface_network_config(segment_id));
-
-    // Step 1: Regular tenant allocates and releases with issue (creates both overrides)
-    let allocation_response = env
-        .api
-        .allocate_instance(
-            InstanceAllocationRequest::builder(false)
-                .machine_id(mh.id)
-                .config(config)
-                .tonic_request(),
-        )
-        .await
-        .unwrap();
-
-    let allocation_inner = allocation_response.into_inner();
-    let instance_id = allocation_inner.id.unwrap();
-
-    // Regular tenant releases with issue (this creates both TenantReportedIssue and RequestRepair)
-    let _release_response = env
-        .api
-        .release_instance(tonic::Request::new(rpc::InstanceReleaseRequest {
-            id: Some(instance_id),
-            issue: Some(Issue {
-                category: IssueCategory::Hardware as i32,
-                summary: "Hardware failure detected".to_string(),
-                details: "CPU overheating and memory errors".to_string(),
-            }),
-            is_repair_tenant: None, // Regular tenant
-        }))
-        .await
-        .unwrap();
-
-    // Verify both overrides are applied after regular tenant release
-    let mut txn = env.db_txn().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let host_machine = mh.host().db_machine(&mut txn).await;
-
-    assert_eq!(
-        host_machine.health_reports.merges.len(),
-        3,
-        "Should have both TenantReportedIssue and RequestRepair after regular tenant release"
-    );
-
-    txn.commit().await.unwrap();
-
-    // Step 2: Set repair status to "Completed" in machine metadata
-    let mut update_txn = env.pool.begin().await.unwrap();
-
-    // Get current machine to get its metadata
-    let current_machine = mh.host().db_machine(&mut update_txn).await;
-
-    let mut labels = current_machine.metadata.labels.clone();
-    labels.insert("repair_status".to_string(), "Completed".to_string());
-
-    let new_metadata = Metadata {
-        labels,
-        ..current_machine.metadata.clone()
-    };
-
-    // Use the current machine version to avoid concurrent modification errors
-    db::machine::update_metadata(
-        &mut update_txn,
-        &mh.id,
-        current_machine.version,
-        new_metadata,
-    )
-    .await
-    .unwrap();
-
-    update_txn.commit().await.unwrap();
-
-    // Step 3: Simulate repair tenant completion by directly calling the release API
-    // Use the same instance_id from Step 1 but mark it as repair tenant release
-    let _repair_release_response = env
-        .api
-        .release_instance(tonic::Request::new(rpc::InstanceReleaseRequest {
-            id: Some(instance_id),
-            issue: None,                  // No new issues - repair was successful
-            is_repair_tenant: Some(true), // Repair tenant
-        }))
-        .await
-        .unwrap();
-
-    // Step 4: SUCCESS! The test logs above show both operations completed successfully:
-    // - "Successfully removed health override operation=RequestRepair removed - repair completed successfully"
-    // - "Successfully removed health override operation=TenantReportedIssue removed - repair completed successfully"
-    //
-    // This verifies our fix works - both health overrides are removed when repair completes!
-
-    println!(" Repair completion test passed:");
-    println!("   - TenantReportedIssue override removed: (verified via logs)");
-    println!("   - RequestRepair override removed: (verified via logs)");
-    println!("   - Both removal operations logged successfully");
-    println!("   - Machine ready for new allocations after repair:");
-    println!("   - Repair cycle completed successfully:");
-
-    // NOTE: We verify success via the logged removal operations rather than DB state
-    // because the test environment uses separate transaction contexts that can have
-    // isolation issues. The fact that both "Successfully removed health override"
-    // messages appear in the logs confirms the fix is working correctly.
-}
-
 // Test that if due to race condition instance creation and reprovision is started together,
 // carbide must continue with instance creation, not reprovision.
 #[crate::sqlx_test]
@@ -5956,9 +7198,10 @@ async fn test_instance_creation_when_reprovision_is_triggered_parallel(
     // Step 2: Trigger DPU reprovision.
     let mut txn = env.db_txn().await;
     let machine_update = DpuMachineUpdate {
-        host_machine_id: mh.host().id,
+        host_machine_id: mh.id.into(),
         dpu_machine_id: mh.dpu_ids[0],
         firmware_version: "test".to_string(),
+        dpf_managed: false,
     };
 
     db::dpu_machine_update::trigger_reprovisioning_for_managed_host(&mut txn, &[machine_update])
@@ -6042,6 +7285,7 @@ async fn test_can_not_update_instance_config_after_deletion(
             id: tinstance.id.into(),
             issue: None,
             is_repair_tenant: None,
+            delete_attribution: None,
         }))
         .await
         .unwrap();
@@ -6065,7 +7309,7 @@ async fn test_can_not_update_instance_config_after_deletion(
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         err.message(),
-        "Configuration for a terminating instance can not be changed"
+        "configuration for a terminating instance can not be changed"
     );
 
     // Perform an update using update_instance_config
@@ -6086,7 +7330,7 @@ async fn test_can_not_update_instance_config_after_deletion(
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         err.message(),
-        "Configuration for a terminating instance can not be changed"
+        "configuration for a terminating instance can not be changed"
     );
 }
 
@@ -6109,11 +7353,7 @@ async fn test_instance_with_vf_when_vf_disabled(_: PgPoolOptions, options: PgCon
     config.vmaas_config = Some(VmaasConfig {
         allow_instance_vf: false,
         hbn_reps: None,
-        hbn_sfs: None,
         bridging: None,
-        public_prefixes: vec![],
-        secondary_vtep_aggregate_prefixes: vec![],
-        secondary_overlay_support: false,
     });
 
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
@@ -6150,11 +7390,7 @@ async fn test_instance_without_vf_when_vf_disabled(_: PgPoolOptions, options: Pg
     config.vmaas_config = Some(VmaasConfig {
         allow_instance_vf: false,
         hbn_reps: None,
-        hbn_sfs: None,
         bridging: None,
-        public_prefixes: vec![],
-        secondary_vtep_aggregate_prefixes: vec![],
-        secondary_overlay_support: false,
     });
 
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
@@ -6184,6 +7420,693 @@ async fn test_instance_without_vf_when_vf_disabled(_: PgPoolOptions, options: Pg
     assert!(instance_result.is_ok());
 }
 
+/// Verifies sparse DPF topology membership gates both allocation and network replacement.
+#[crate::sqlx_test]
+async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let config = crate::test_support::default_config::with_dpf_intercept_topology(&[7]);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let managed_host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &managed_host.id)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
+
+    // VF0 is structurally valid and globally enabled, but the replacement topology selects VF7.
+    let mut network_with_unselected_vf =
+        single_interface_network_config_with_vfs(segment_ids.clone());
+    network_with_unselected_vf.interfaces[1].virtual_function_id = Some(0);
+    let create_error = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(managed_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(network_with_unselected_vf.clone()),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect_err("an unselected topology VF must not be allocated");
+    assert!(create_error.message().contains(
+        "virtual function VF0 is not selected by the configured DPF intercept-bridging topology"
+    ));
+
+    // A PF-only instance remains valid; once ready, adding the same unselected VF must fail at
+    // the network-update gate and leave no staged replacement request.
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    let update_error = env
+        .api
+        .update_instance_config(tonic::Request::new(
+            rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: instance.rpc_instance().await.rpc_id(),
+                if_version_match: None,
+                config: Some(rpc::InstanceConfig {
+                    tenant: Some(default_tenant_config()),
+                    os: Some(default_os_config()),
+                    network: Some(network_with_unselected_vf),
+                    infiniband: None,
+                    network_security_group_id: None,
+                    dpu_extension_services: None,
+                    nvlink: None,
+                    spxconfig: None,
+                    power_profile: None,
+                }),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "topology-update".to_string(),
+                    description: String::new(),
+                    labels: vec![],
+                }),
+            },
+        ))
+        .await
+        .expect_err("an unselected topology VF must not be staged");
+    assert!(update_error.message().contains(
+        "virtual function VF0 is not selected by the configured DPF intercept-bridging topology"
+    ));
+
+    let mut txn = env.db_txn().await;
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .update_network_config_request
+            .is_none()
+    );
+    txn.rollback().await.unwrap();
+}
+
+/// Verifies a non-DPF host uses its configured instance VF inventory even at a DPF-enabled site.
+#[crate::sqlx_test]
+async fn test_instance_vf_inventory_rejects_unavailable_vf_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    // The site topology selects VF14, while the non-DPF HBN inventory exposes only VF0-VF13.
+    // Per-host DPF state must choose the HBN inventory for this host.
+    let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+    config.dpu_config.num_of_vfs = 16;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("the DPF topology config includes VMaaS")
+        .hbn_reps = Some("pf0hpf,pf0vf0-pf0vf13,pf1hpf".to_string());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let managed_host = create_managed_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
+
+    // VF14 is supported by the hardware population but absent from the configured inventory.
+    let mut network_with_unavailable_vf =
+        single_interface_network_config_with_vfs(segment_ids.clone());
+    network_with_unavailable_vf.interfaces[1].virtual_function_id = Some(14);
+    let create_error = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(managed_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(network_with_unavailable_vf.clone()),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect_err("an unavailable VF must not be allocated");
+    assert!(create_error.message().contains(
+        "virtual function VF14 is not available in the configured instance VF inventory"
+    ));
+
+    // A PF-only instance remains valid; adding VF14 must fail without staging the replacement.
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    let update_error = env
+        .api
+        .update_instance_config(tonic::Request::new(
+            rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: instance.rpc_instance().await.rpc_id(),
+                if_version_match: None,
+                config: Some(rpc::InstanceConfig {
+                    tenant: Some(default_tenant_config()),
+                    os: Some(default_os_config()),
+                    network: Some(network_with_unavailable_vf),
+                    infiniband: None,
+                    network_security_group_id: None,
+                    dpu_extension_services: None,
+                    nvlink: None,
+                    spxconfig: None,
+                    power_profile: None,
+                }),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "unavailable-vf-update".to_string(),
+                    description: String::new(),
+                    labels: vec![],
+                }),
+            },
+        ))
+        .await
+        .expect_err("an unavailable VF must not be staged");
+    assert!(update_error.message().contains(
+        "virtual function VF14 is not available in the configured instance VF inventory"
+    ));
+
+    let mut txn = env.db_txn().await;
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .update_network_config_request
+            .is_none()
+    );
+    txn.rollback().await.unwrap();
+}
+
+/// Verifies older callers that omit VF IDs use sparse HBN inventory on create and update.
+#[crate::sqlx_test]
+async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = get_config();
+    config.dpu_config.num_of_vfs = 16;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("the default test configuration includes VMaaS")
+        .hbn_reps = Some("pf0hpf,pf0vf2,pf0vf5,pf1hpf".to_string());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let create_host = create_managed_host(&env).await;
+    let update_host = create_managed_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(3).await;
+
+    let implicit_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        for interface in &mut network.interfaces {
+            if interface.function_type() == rpc::InterfaceFunctionType::Virtual {
+                interface.virtual_function_id = None;
+            }
+        }
+        network
+    };
+
+    let created_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(create_host.id)
+                .config(InstanceConfig::default_tenant_and_os().network(implicit_network()))
+                .tonic_request(),
+        )
+        .await
+        .expect("implicit VFs from a sparse inventory must be allocated")
+        .into_inner();
+    let created_vfs = created_instance
+        .config
+        .expect("the allocated instance includes its config")
+        .network
+        .expect("the allocated instance includes its network config")
+        .interfaces
+        .into_iter()
+        .filter(|interface| interface.function_type() == rpc::InterfaceFunctionType::Virtual)
+        .map(|interface| {
+            interface
+                .virtual_function_id
+                .expect("NICo resolves every implicit VF ID")
+        })
+        .collect_vec();
+    assert_eq!(created_vfs, vec![2, 5]);
+
+    let update_instance = update_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: update_instance.rpc_instance().await.rpc_id(),
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(implicit_network()),
+                infiniband: None,
+                network_security_group_id: None,
+                dpu_extension_services: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+            }),
+            metadata: Some(rpc::forge::Metadata {
+                name: "implicit-vf-update".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect("an update with implicit VFs must use the sparse inventory");
+
+    let mut txn = env.db_txn().await;
+    let staged_update = update_instance
+        .db_instance(&mut txn)
+        .await
+        .update_network_config_request
+        .expect("the replacement network config must be staged");
+    let staged_vfs = staged_update
+        .new_config
+        .interfaces
+        .iter()
+        .filter_map(|interface| match &interface.function_id {
+            InterfaceFunctionId::Physical {} => None,
+            InterfaceFunctionId::Virtual { id } => Some(*id),
+        })
+        .collect_vec();
+    assert_eq!(staged_vfs, vec![2, 5]);
+    txn.rollback().await.unwrap();
+}
+
+/// Verifies an unchanged sparse-VF network with omitted wire IDs remains a network no-op,
+/// because legacy callers must not acquire expansion-only locks for metadata updates.
+#[crate::sqlx_test]
+async fn test_implicit_sparse_vf_noop_update_bypasses_overlap_lock(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    // Configure a sparse inventory so converter placeholders differ from the assigned VF IDs.
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = get_config();
+    config.dpu_config.num_of_vfs = 16;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("the default test configuration includes VMaaS")
+        .hbn_reps = Some("pf0hpf,pf0vf2,pf0vf5,pf1hpf".to_string());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let host = create_managed_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(3).await;
+    let implicit_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        for interface in &mut network.interfaces {
+            if interface.function_type() == rpc::InterfaceFunctionType::Virtual {
+                interface.virtual_function_id = None;
+            }
+        }
+        network
+    };
+
+    // Allocate the active instance through the legacy wire shape so it stores sparse VFs 2 and 5.
+    let instance = host
+        .instance_builer(&env)
+        .config(
+            InstanceConfig::default_tenant_and_os()
+                .network(implicit_network())
+                .into(),
+        )
+        .build()
+        .await;
+
+    // Re-submit the full network without VF IDs while changing only metadata.
+    let before = instance.rpc_instance().await.into_inner();
+    let mut update_config = before
+        .config
+        .clone()
+        .expect("the instance includes its config");
+    for interface in &mut update_config
+        .network
+        .as_mut()
+        .expect("the instance includes its network config")
+        .interfaces
+    {
+        if interface.function_type() == rpc::InterfaceFunctionType::Virtual {
+            interface.virtual_function_id = None;
+        }
+    }
+    let mut updated_metadata = before
+        .metadata
+        .clone()
+        .expect("the instance includes its metadata");
+    updated_metadata.description = "metadata-only sparse VF update".to_string();
+
+    // Hold the expansion lock; the unchanged resolved network must complete without waiting on it.
+    let mut blocker = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut blocker)
+        .await
+        .unwrap();
+    let updated = tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: before.id,
+                if_version_match: None,
+                config: Some(update_config),
+                metadata: Some(updated_metadata.clone()),
+            })),
+    )
+    .await
+    .expect("an unchanged sparse-VF update must bypass the overlap lock")
+    .expect("an unchanged sparse-VF update must succeed")
+    .into_inner();
+    blocker.rollback().await.unwrap();
+
+    // Confirm only metadata changed and no network replacement was staged.
+    assert_eq!(updated.metadata.as_ref(), Some(&updated_metadata));
+    let persisted = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .expect("the instance remains persisted");
+    assert_eq!(
+        persisted.network_config_version.to_string(),
+        before.network_config_version
+    );
+    assert!(persisted.update_network_config_request.is_none());
+    assert_eq!(
+        persisted
+            .config
+            .network
+            .interfaces
+            .iter()
+            .filter_map(|interface| match &interface.function_id {
+                InterfaceFunctionId::Physical {} => None,
+                InterfaceFunctionId::Virtual { id } => Some(*id),
+            })
+            .collect_vec(),
+        vec![2, 5]
+    );
+}
+
+/// Verifies BF4 with a declared CX9 ignores a site intercept topology and uses Astra's static VFs.
+/// This protects deployments whose disabled Astra site flag leaves no persisted Astra DPA rows.
+#[crate::sqlx_test]
+async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    /// Builds a BF4 DPF host whose persisted CX9 declaration selects Astra even without DPA rows.
+    /// This proves admission follows provisioning rather than site-gated Astra enablement state.
+    async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
+        let host = create_managed_host(env).await;
+        let mut txn = env.db_txn().await;
+
+        // Mark the attached DPU as BF4, which combines with the CX9 declaration to select Astra.
+        let dpu = host.dpu().db_machine(&mut txn).await;
+        let mut hardware_info = dpu
+            .status
+            .hardware_info
+            .expect("the fixture DPU includes hardware information");
+        hardware_info
+            .dmi_data
+            .as_mut()
+            .expect("the fixture DPU includes DMI information")
+            .product_name = "BlueField-4 SmartNIC Main Card".to_string();
+        db::machine_topology::set_topology_update_needed(txn.as_mut(), &dpu.id, true)
+            .await
+            .unwrap();
+        db::machine_topology::create_or_update(txn.as_mut(), &dpu.id, &hardware_info)
+            .await
+            .unwrap();
+        db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &host.id)
+            .await
+            .unwrap();
+
+        // Declare CX9 in expected-machine data without creating a site-gated Astra DPA row.
+        let host_machine = host.host().db_machine(&mut txn).await;
+        let bmc_mac = host_machine
+            .status
+            .bmc_info
+            .mac
+            .expect("the fixture host includes a BMC MAC");
+        let mut expected_machine =
+            db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+                .await
+                .unwrap()
+                .expect("the fixture host includes an expected-machine declaration");
+        expected_machine.data.interfaces.push(ExpectedInterface {
+            mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, cx9_mac_suffix]),
+            nic_type: Some("CX9".to_string()),
+            ..ExpectedInterface::default()
+        });
+        db::expected_machine::update(txn.as_mut(), &expected_machine)
+            .await
+            .unwrap();
+
+        // Keep the fixture on the failing boundary: the Astra site flag is disabled, so the
+        // expected-machine CX9 declaration remains the only Astra classification signal.
+        let astra_interfaces = db::dpa_interface::find_by_machine_id(
+            txn.as_mut(),
+            *host.id,
+            model::dpa_interface::DpaSearchConfig {
+                only_svpc: false,
+                only_astra: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(astra_interfaces.is_empty());
+        txn.commit().await.unwrap();
+
+        host
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+    config.dpu_config.num_of_vfs = 16;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let create_host = create_bf4_astra_host(&env, 1).await;
+    let update_host = create_bf4_astra_host(&env, 2).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
+
+    let implicit_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        network.interfaces[1].virtual_function_id = None;
+        network
+    };
+
+    let created_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(create_host.id)
+                .config(InstanceConfig::default_tenant_and_os().network(implicit_network()))
+                .tonic_request(),
+        )
+        .await
+        .expect("BF4 Astra must allocate an implicit VF from its static inventory")
+        .into_inner();
+    let created_vfs = created_instance
+        .config
+        .expect("the allocated instance includes its config")
+        .network
+        .expect("the allocated instance includes its network config")
+        .interfaces
+        .into_iter()
+        .filter(|interface| interface.function_type() == rpc::InterfaceFunctionType::Virtual)
+        .map(|interface| {
+            interface
+                .virtual_function_id
+                .expect("NICo resolves every implicit VF ID")
+        })
+        .collect_vec();
+    assert_eq!(created_vfs, vec![0]);
+
+    // Allocate directly because this test needs only an existing instance as the update baseline.
+    let update_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(update_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(single_interface_network_config(segment_ids[0])),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect("the update fixture instance must be allocated")
+        .into_inner();
+    let update_instance_id = update_instance
+        .id
+        .expect("the allocated update fixture includes its ID");
+    // Network updates require an assigned Ready host; DPF convergence is outside this contract.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        txn.as_mut(),
+        &update_host.id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(update_instance_id),
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(implicit_network()),
+                infiniband: None,
+                network_security_group_id: None,
+                dpu_extension_services: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+            }),
+            metadata: Some(rpc::forge::Metadata {
+                name: "bf4-astra-implicit-vf-update".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect("a BF4 Astra update must use the static VF inventory");
+
+    let mut txn = env.db_txn().await;
+    let staged_update = db::instance::find_by_id(txn.as_mut(), update_instance_id)
+        .await
+        .unwrap()
+        .expect("the update fixture instance remains persisted")
+        .update_network_config_request
+        .expect("the replacement network config must be staged");
+    let staged_vfs = staged_update
+        .new_config
+        .interfaces
+        .iter()
+        .filter_map(|interface| match &interface.function_id {
+            InterfaceFunctionId::Physical {} => None,
+            InterfaceFunctionId::Virtual { id } => Some(*id),
+        })
+        .collect_vec();
+    assert_eq!(staged_vfs, vec![0]);
+    txn.rollback().await.unwrap();
+}
+
+/// Verifies raw protobuf VF identities cannot alias selected topology VFs during conversion.
+#[crate::sqlx_test]
+async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    // Include the truncation targets for 256 (VF0) and 263 (VF7). Without wire-range validation,
+    // both malformed values would pass exact topology membership after a lossy u32-to-u8 cast.
+    let config = crate::test_support::default_config::with_dpf_intercept_topology(&[0, 7, 15]);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let create_host = create_managed_host(&env).await;
+    let update_host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    for managed_host in [&create_host, &update_host] {
+        db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &managed_host.id)
+            .await
+            .unwrap();
+    }
+    txn.commit().await.unwrap();
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
+    let update_instance = update_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    let update_instance_id = update_instance.rpc_instance().await.rpc_id();
+
+    // Build the protobuf directly so values wider than the model's u8 cannot be normalized by
+    // test helpers before they reach the public handlers.
+    let config_with_wire_vf = |wire_vf_id| {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        network.interfaces[1].virtual_function_id = Some(wire_vf_id);
+        rpc::InstanceConfig {
+            tenant: Some(default_tenant_config()),
+            os: Some(default_os_config()),
+            network: Some(network),
+            infiniband: None,
+            network_security_group_id: None,
+            dpu_extension_services: None,
+            nvlink: None,
+            spxconfig: None,
+            power_profile: None,
+        }
+    };
+    let metadata = |operation: &str, wire_vf_id| rpc::forge::Metadata {
+        name: format!("{operation}-vf{wire_vf_id}"),
+        description: String::new(),
+        labels: vec![],
+    };
+
+    for wire_vf_id in [16, 256, 263] {
+        let create_error = env
+            .api
+            .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
+                machine_id: Some(create_host.id),
+                config: Some(config_with_wire_vf(wire_vf_id)),
+                instance_id: None,
+                instance_type_id: None,
+                metadata: Some(metadata("create", wire_vf_id)),
+                allow_unhealthy_machine: false,
+            }))
+            .await
+            .expect_err("out-of-range wire VF must be rejected during instance creation");
+        assert_eq!(create_error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            create_error
+                .message()
+                .contains(&format!("virtual function ID of value {wire_vf_id}"))
+        );
+
+        let update_error = env
+            .api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: update_instance_id,
+                if_version_match: None,
+                config: Some(config_with_wire_vf(wire_vf_id)),
+                metadata: Some(metadata("update", wire_vf_id)),
+            }))
+            .await
+            .expect_err("out-of-range wire VF must be rejected during instance update");
+        assert_eq!(update_error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            update_error
+                .message()
+                .contains(&format!("virtual function ID of value {wire_vf_id}"))
+        );
+    }
+
+    // VF15 is the inclusive boundary and must pass the same public create and update paths.
+    env.api
+        .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
+            machine_id: Some(create_host.id),
+            config: Some(config_with_wire_vf(15)),
+            instance_id: None,
+            instance_type_id: None,
+            metadata: Some(metadata("create", 15)),
+            allow_unhealthy_machine: false,
+        }))
+        .await
+        .expect("VF15 must remain valid during instance creation");
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: update_instance_id,
+            if_version_match: None,
+            config: Some(config_with_wire_vf(15)),
+            metadata: Some(metadata("update", 15)),
+        }))
+        .await
+        .expect("VF15 must remain valid during instance update");
+}
+
 fn create_dpu_extension_service_data(name: &str) -> String {
     format!(
         "apiVersion: v1\nkind: Pod\nmetadata:\n  name: {}\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27",
@@ -6191,6 +8114,125 @@ fn create_dpu_extension_service_data(name: &str) -> String {
     )
 }
 
+const TEST_DPF_HELM_SERVICE_DATA: &str = r#"{
+    "repoURL": "oci://registry.example.com/charts",
+    "chartName": "tenant-service",
+    "chartVersion": "1.2.3",
+    "serviceID": "tenant-service-v1",
+    "deployInCluster": false,
+    "security": {"privileged": false}
+}"#;
+
+/// Registers the one-interface DPF service used by service-VPC instance tests.
+///
+/// Keeping this request outside individual tests makes their bodies describe
+/// instance behavior rather than repeat registration plumbing.
+async fn create_networked_dpf_service(
+    env: &TestEnv,
+    service_name: &str,
+) -> Result<DpuExtensionService, tonic::Status> {
+    Ok(env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::forge::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::forge::DpuExtensionServiceDpuTarget::All as i32),
+            service_vpc_interfaces: vec![rpc::forge::ServiceVpcInterfaceRequirement {
+                address_family: rpc::forge::ServiceVpcAddressFamily::Ipv4 as i32,
+            }],
+            service_id: None,
+            service_name: service_name.to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::forge::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner())
+}
+
+/// Seeds the active attachment state that issue #6125 will create publicly.
+///
+/// The attachment and service-interface record must use the same attachment
+/// ID. Snapshot validation rejects a service interface whose attachment no
+/// longer exists, so both records are written in one transaction.
+async fn seed_networked_attachment(
+    env: &TestEnv,
+    instance_id: InstanceId,
+    dpu_id: DpuMachineId,
+    service: &DpuExtensionService,
+    vpc_id: VpcId,
+    network_segment_id: NetworkSegmentId,
+) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+    let attachment_id = uuid::Uuid::new_v4();
+    let service_id = service.service_id.parse()?;
+    let service_version = service
+        .latest_version_info
+        .as_ref()
+        .expect("created service has a version")
+        .version
+        .parse()?;
+
+    let mut txn = env.db_txn().await;
+    let stored_instance = db::instance::find_by_id(txn.as_mut(), instance_id)
+        .await?
+        .expect("instance remains stored");
+
+    let current_extension_services = stored_instance.config.extension_services.clone();
+    let mut seeded_extension_services = current_extension_services.clone();
+    seeded_extension_services
+        .service_configs
+        .push(InstanceExtensionServiceConfig {
+            id: Some(attachment_id),
+            dpu_target: Some(model::extension_service::DpuTarget::All),
+            service_id,
+            version: service_version,
+            removed: None,
+        });
+
+    let mut seeded_network_config = stored_instance.config.network.clone();
+    seeded_network_config.service_interfaces = vec![InstanceServiceInterfaceConfig {
+        attachment_id,
+        interface_ordinal: 0,
+        dpu_id,
+        slot_index: 0,
+        vpc_id,
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_segment_id,
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    }];
+
+    assert_eq!(
+        db::instance::update_extension_services_config(
+            txn.as_mut(),
+            stored_instance.id,
+            stored_instance.extension_services_config_version,
+            &current_extension_services,
+            &seeded_extension_services,
+            false,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::instance::update_network_config(
+        txn.as_mut(),
+        stored_instance.id,
+        stored_instance.network_config_version,
+        &seeded_network_config,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(attachment_id)
+}
+
+/// Verifies allocation assigns and persists a non-nil UUIDv4 attachment ID so
+/// later service-interface records can reference it without inventing identity
+/// during reads or retries.
 #[crate::sqlx_test]
 async fn test_allocate_instance_with_extension_services(
     _: PgPoolOptions,
@@ -6215,11 +8257,14 @@ async fn test_allocate_instance_with_extension_services(
         .await
         .unwrap();
 
-    // Create an extension service
+    // Keep the service nonnetworked so allocation-time attachment identity is
+    // the only new persisted behavior under test.
     let service = env
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6250,17 +8295,19 @@ async fn test_allocate_instance_with_extension_services(
                     .unwrap()
                     .version
                     .clone(),
+                service_vpc_ids: vec![],
             }],
         }),
+        power_profile: None,
     };
 
-    let _tinstance = mh
+    let tinstance = mh
         .instance_builer(&env)
         .config(config.clone())
         .build()
         .await;
 
-    // Verify the extension service config is correctly stored in database
+    // Reload persisted state to prove allocation assigned a durable, non-nil UUIDv4.
     let mut txn = env.db_txn().await;
     let snapshot = mh.snapshot(&mut txn).await;
     let instance_snapshot = snapshot.instance.unwrap();
@@ -6273,9 +8320,589 @@ async fn test_allocate_instance_with_extension_services(
             .len(),
         1
     );
+    let attachment = &instance_snapshot.config.extension_services.service_configs[0];
+    assert_eq!(attachment.service_id, service.service_id.parse().unwrap());
+    let attachment_id = attachment.id.expect("new attachment has an ID");
+    assert_ne!(attachment_id, uuid::Uuid::nil());
+    assert_eq!(attachment_id.get_version(), Some(uuid::Version::Random));
+    txn.rollback().await?;
+
+    // A fresh public read proves the same durable identity reaches attachment status.
+    let instance = tinstance.rpc_instance().await.into_inner();
+    let status = instance
+        .status
+        .expect("allocated instance has status")
+        .dpu_extension_services
+        .expect("allocated instance has extension-service status");
+    assert_eq!(status.dpu_extension_services.len(), 1);
     assert_eq!(
-        instance_snapshot.config.extension_services.service_configs[0].service_id,
-        service.service_id.parse().unwrap()
+        status.dpu_extension_services[0].attachment_id,
+        Some(attachment_id.into())
+    );
+
+    Ok(())
+}
+
+/// Verifies an older client's empty VPC selection cannot attach a networked
+/// service, because the resulting attachment could not satisfy its registered
+/// interface requirement.
+#[crate::sqlx_test]
+async fn test_allocate_instance_rejects_networked_service_without_vpc_selection(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Enable DPF registration and prepare a host that must remain unassigned.
+    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let requested_instance_id = InstanceId::new();
+
+    // Register a service whose one declared interface requires a VPC selection.
+    env.api
+        .create_tenant(Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "best_org".to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::Metadata {
+                name: "best_org".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await?;
+    let service = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::forge::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::forge::DpuExtensionServiceDpuTarget::All as i32),
+            service_vpc_interfaces: vec![rpc::forge::ServiceVpcInterfaceRequirement {
+                address_family: rpc::forge::ServiceVpcAddressFamily::Ipv4 as i32,
+            }],
+            service_id: None,
+            service_name: "networked-allocation-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::forge::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+
+    // The empty repeated field must not bypass the registered-service guard.
+    let error = env
+        .api
+        .allocate_instance(Request::new(rpc::InstanceAllocationRequest {
+            machine_id: Some(managed_host.id),
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                        service_id: service.service_id,
+                        version: service
+                            .latest_version_info
+                            .expect("created service has a version")
+                            .version,
+                        service_vpc_ids: vec![],
+                    }],
+                }),
+                ..Default::default()
+            }),
+            instance_id: Some(requested_instance_id),
+            instance_type_id: None,
+            metadata: Some(rpc::Metadata {
+                name: "networked-allocation".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+            allow_unhealthy_machine: false,
+        }))
+        .await
+        .expect_err("networked attachment without a VPC must be rejected");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "service VPC attachment is unavailable until network resource reconciliation is implemented"
+    );
+
+    // Re-read through the public API to prove rejection happened before persistence.
+    let persisted = env
+        .api
+        .find_instances_by_ids(Request::new(rpc::forge::InstancesByIdsRequest {
+            instance_ids: vec![requested_instance_id],
+        }))
+        .await?
+        .into_inner();
+    assert!(persisted.instances.is_empty());
+
+    Ok(())
+}
+
+/// Verifies updates reject a new networked attachment whether the caller
+/// selects a VPC or omits the selection, because neither request can be safely
+/// persisted before issue #6125 adds service-interface reconciliation.
+#[crate::sqlx_test]
+async fn test_update_instance_rejects_new_networked_attachment_before_reconciliation(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Satisfy the DPF deployment and registration requirements so only the
+    // unavailable service-interface reconciliation prevents the attachment.
+    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let selected_vpc = db::vpc::find_by_segment(&env.pool, segment_id)
+        .await?
+        .expect("created segment belongs to a VPC")
+        .id;
+    let managed_host = create_managed_host(&env).await;
+    let mut txn = env.db_txn().await;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &managed_host.id).await?;
+    txn.commit().await?;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    env.api
+        .create_tenant(Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "best_org".to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::Metadata {
+                name: "best_org".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await?;
+    let service = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::forge::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::forge::DpuExtensionServiceDpuTarget::All as i32),
+            service_vpc_interfaces: vec![rpc::forge::ServiceVpcInterfaceRequirement {
+                address_family: rpc::forge::ServiceVpcAddressFamily::Ipv4 as i32,
+            }],
+            service_id: None,
+            service_name: "new-networked-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::forge::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    let service_id: ExtensionServiceId = service.service_id.parse()?;
+    let service_version = service
+        .latest_version_info
+        .as_ref()
+        .expect("created service has a version")
+        .version
+        .clone();
+
+    // Registration reconciliation is planned in issue #6123. Advance the
+    // fixture to the state a successfully reconciled registration would have.
+    let mut txn = env.pool.begin().await?;
+    let stored_service = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("created DPF registration exists");
+    let state_change = stored_service
+        .status
+        .controller_state
+        .version
+        .incremental_change();
+    assert_eq!(
+        db::extension_service::try_update_controller_state(
+            &mut txn,
+            service_id,
+            state_change.current,
+            state_change.new,
+            &ExtensionServiceLifecycleState::Ready,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::state_history::persist(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+        &ExtensionServiceLifecycleState::Ready,
+        state_change.new,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let cases = [
+        // A selected VPC is rejected by the update preflight because no attachment owns it yet.
+        ("selected VPC", vec![selected_vpc]),
+        // An omitted selection reaches registration validation and must not bypass the same guard.
+        ("omitted VPC", vec![]),
+    ];
+    for (scenario, service_vpc_ids) in cases {
+        // Start from a fresh complete definition so a failed row cannot influence the next one.
+        let current = instance.rpc_instance().await.into_inner();
+        let mut requested_config = current.config.expect("instance has a config");
+        requested_config.dpu_extension_services =
+            Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+                service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                    service_id: service.service_id.clone(),
+                    version: service_version.clone(),
+                    service_vpc_ids,
+                }],
+            });
+
+        // Both wire shapes must stop before a partial attachment can be stored.
+        let error = env
+            .api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(instance.id),
+                if_version_match: None,
+                config: Some(requested_config),
+                metadata: current.metadata,
+            }))
+            .await
+            .expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert_eq!(
+            error.message(),
+            "service VPC attachment is unavailable until network resource reconciliation is implemented",
+            "{scenario}"
+        );
+
+        // A fresh public read proves rejection left no durable attachment behind.
+        let persisted = instance.rpc_instance().await.into_inner();
+        assert!(
+            persisted
+                .config
+                .expect("instance retains its config")
+                .dpu_extension_services
+                .is_none(),
+            "{scenario}"
+        );
+    }
+
+    Ok(())
+}
+
+/// Verifies whole-config updates preserve server-owned service interfaces when
+/// older clients omit the VPC selection or retries repeat it, while rejecting
+/// moves and new selections that require issue #6125's resource reconciliation,
+/// so caller intent is never silently discarded and live allocations stay owned.
+#[crate::sqlx_test]
+async fn test_update_existing_networked_attachment_preserves_service_interfaces(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Use a DPF-deployed host so host admission cannot obscure the
+    // whole-definition update behavior under test.
+    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let selected_vpc = db::vpc::find_by_segment(&env.pool, segment_id)
+        .await?
+        .expect("created segment belongs to a VPC")
+        .id;
+    let managed_host = create_managed_host(&env).await;
+    let mut txn = env.db_txn().await;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &managed_host.id).await?;
+    txn.commit().await?;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    create_fixture_tenant(&env, "best_org").await?;
+    let service = create_networked_dpf_service(&env, "existing-networked-service").await?;
+
+    // Public allocation cannot create this state until issue #6125. Seed one
+    // valid attachment so the test can isolate later update behavior.
+    let attachment_id = seed_networked_attachment(
+        &env,
+        instance.id,
+        managed_host.dpu_ids[0],
+        &service,
+        selected_vpc,
+        segment_id,
+    )
+    .await?;
+
+    // Confirm that a caller can see the reconstructed VPC selection. Otherwise
+    // the read-modify-write cases below would not exercise the wire contract.
+    let seeded = instance.rpc_instance().await.into_inner();
+    let seeded_attachment = &seeded
+        .config
+        .as_ref()
+        .expect("instance has a config")
+        .dpu_extension_services
+        .as_ref()
+        .expect("instance has an extension service")
+        .service_configs[0];
+    assert_eq!(seeded_attachment.service_vpc_ids, vec![selected_vpc]);
+
+    // Capture both hidden records and their version counters. Successful
+    // compatibility updates and rejected moves must not rewrite either one.
+    let baseline = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("instance remains stored");
+    let baseline_service_interfaces = baseline.config.network.service_interfaces.clone();
+    let baseline_extension_services_version = baseline.extension_services_config_version;
+    let baseline_network_version = baseline.network_config_version;
+
+    let cases = [
+        // An older client sends no selections; the stored selection must survive.
+        ("empty selection", vec![], None),
+        // Repeating the stored selection is an idempotent update.
+        ("identical selection", vec![selected_vpc], None),
+        // Another VPC would require moving the stored records and their allocations.
+        (
+            "different selection",
+            vec![VpcId::new()],
+            Some("the VPC selection of an existing extension-service attachment cannot be changed"),
+        ),
+    ];
+
+    for (scenario, requested_vpc_ids, expected_error) in cases {
+        // Build each request from a fresh public read and change only its VPC selection.
+        let current = instance.rpc_instance().await.into_inner();
+        let mut requested_config = current.config.expect("instance has a config");
+        let requested_attachment = &mut requested_config
+            .dpu_extension_services
+            .as_mut()
+            .expect("instance has an extension service")
+            .service_configs[0];
+        assert_eq!(
+            requested_attachment.service_vpc_ids,
+            vec![selected_vpc],
+            "{scenario}"
+        );
+        requested_attachment.service_vpc_ids = requested_vpc_ids;
+        let result = env
+            .api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(instance.id),
+                if_version_match: None,
+                config: Some(requested_config),
+                metadata: current.metadata,
+            }))
+            .await;
+
+        // Each row reaches its distinct success or immutable-selection boundary.
+        match (expected_error, result) {
+            (None, Ok(response)) => {
+                let response = response.into_inner();
+                let response_attachment = &response
+                    .config
+                    .expect("updated instance has a config")
+                    .dpu_extension_services
+                    .expect("updated instance has an extension service")
+                    .service_configs[0];
+                assert_eq!(
+                    response_attachment.service_vpc_ids,
+                    vec![selected_vpc],
+                    "{scenario}"
+                );
+            }
+            (Some(expected_message), Err(error)) => {
+                assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+                assert_eq!(error.message(), expected_message, "{scenario}");
+            }
+            (None, Err(error)) => panic!("{scenario}: update failed: {error}"),
+            (Some(expected_message), Ok(_)) => {
+                panic!("{scenario}: expected update to fail with {expected_message}")
+            }
+        }
+
+        // The response proves the caller-visible selection; fresh database
+        // state proves the server-owned attachment identity and service
+        // interface were neither replaced nor deleted.
+        let persisted_public = instance.rpc_instance().await.into_inner();
+        let persisted_public_attachment = &persisted_public
+            .config
+            .expect("persisted instance has a config")
+            .dpu_extension_services
+            .expect("persisted instance has an extension service")
+            .service_configs[0];
+        assert_eq!(
+            persisted_public_attachment.service_vpc_ids,
+            vec![selected_vpc],
+            "{scenario}"
+        );
+        let persisted = db::instance::find_by_id(&env.pool, instance.id)
+            .await?
+            .expect("instance remains stored");
+        assert_eq!(
+            persisted.config.extension_services.service_configs[0].id,
+            Some(attachment_id),
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted.config.network.service_interfaces, baseline_service_interfaces,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted.extension_services_config_version, baseline_extension_services_version,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted.network_config_version, baseline_network_version,
+            "{scenario}"
+        );
+    }
+
+    // Model an attachment accepted before its service-interface records exist.
+    // This is the one meaningful difference from the equal-length move above.
+    let stored = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("instance remains stored");
+    let mut network_without_service_interfaces = stored.config.network.clone();
+    network_without_service_interfaces
+        .service_interfaces
+        .clear();
+    let mut txn = env.db_txn().await;
+    db::instance::update_network_config(
+        txn.as_mut(),
+        stored.id,
+        stored.network_config_version,
+        &network_without_service_interfaces,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // A fresh read establishes that the stored selection is genuinely absent.
+    let current = instance.rpc_instance().await.into_inner();
+    let mut requested_config = current.config.expect("instance has a config");
+    let requested_attachment = &mut requested_config
+        .dpu_extension_services
+        .as_mut()
+        .expect("instance has an extension service")
+        .service_configs[0];
+    assert!(requested_attachment.service_vpc_ids.is_empty());
+    requested_attachment.service_vpc_ids = vec![selected_vpc];
+    let no_interface_baseline = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("instance remains stored without service interfaces");
+    assert!(
+        no_interface_baseline
+            .config
+            .network
+            .service_interfaces
+            .is_empty()
+    );
+
+    // Adding a selection must fail instead of being accepted as a silent no-op.
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: None,
+            config: Some(requested_config),
+            metadata: current.metadata,
+        }))
+        .await
+        .expect_err("a new selection without service-interface records must be rejected");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "the VPC selection of an existing extension-service attachment cannot be changed"
+    );
+
+    // Fresh public and database reads prove rejection preserved the empty selection and identity.
+    let persisted_public = instance.rpc_instance().await.into_inner();
+    let persisted_public_attachment = &persisted_public
+        .config
+        .expect("persisted instance has a config")
+        .dpu_extension_services
+        .expect("persisted instance has an extension service")
+        .service_configs[0];
+    assert!(persisted_public_attachment.service_vpc_ids.is_empty());
+    let persisted = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("instance remains stored");
+    assert_eq!(
+        persisted.config.extension_services.service_configs[0].id,
+        Some(attachment_id)
+    );
+    assert!(persisted.config.network.service_interfaces.is_empty());
+    assert_eq!(
+        persisted.extension_services_config_version,
+        no_interface_baseline.extension_services_config_version
+    );
+    assert_eq!(
+        persisted.network_config_version,
+        no_interface_baseline.network_config_version
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let (service, _, _) = create_dpu_extension_services(&env).await?;
+
+    let mut txn = env.pool.begin().await?;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.id).await?;
+    txn.commit().await?;
+
+    let result = env
+        .api
+        .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
+            machine_id: Some(mh.id),
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                infiniband: None,
+                network_security_group_id: None,
+                nvlink: None,
+                spxconfig: None,
+                dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                        service_id: service.service_id,
+                        version: service.latest_version_info.unwrap().version,
+                        service_vpc_ids: vec![],
+                    }],
+                }),
+                power_profile: None,
+            }),
+            instance_id: None,
+            instance_type_id: None,
+            metadata: Some(rpc::Metadata {
+                name: "dpf-extension-service".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+            allow_unhealthy_machine: false,
+        }))
+        .await
+        .expect_err("extension services must be rejected on a DPF-managed host");
+
+    assert_eq!(result.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        result.message(),
+        format!(
+            "DPU extension services are not supported on DPF-managed host {}",
+            mh.id
+        )
     );
 
     Ok(())
@@ -6309,6 +8936,8 @@ async fn create_dpu_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service1".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6327,6 +8956,7 @@ async fn create_dpu_extension_services(
         .api
         .update_dpu_extension_service(tonic::Request::new(
             rpc::forge::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: None,
                 service_id: service1.service_id.clone(),
                 service_name: None,
                 description: Some("Test service for instance".to_string()),
@@ -6343,6 +8973,8 @@ async fn create_dpu_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service2".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6360,6 +8992,8 @@ async fn create_dpu_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service3".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6392,7 +9026,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
     let instance = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -6411,6 +9045,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                                 .unwrap()
                                 .version
                                 .clone(),
+                            service_vpc_ids: vec![],
                         },
                         rpc::forge::InstanceDpuExtensionServiceConfig {
                             service_id: service1.service_id.clone(),
@@ -6420,9 +9055,11 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                                 .unwrap()
                                 .version
                                 .clone(),
+                            service_vpc_ids: vec![],
                         },
                     ],
                 }),
+                power_profile: None,
             }),
             instance_id: None,
             instance_type_id: None,
@@ -6437,10 +9074,9 @@ async fn test_allocate_instance_with_duplicate_extension_services(
     println!("instance: {:?}", instance);
     assert!(instance.is_err());
     let err = instance.unwrap_err();
-    assert!(
-        err.message()
-            .starts_with("Duplicate extension services in configuration. Only one version of each service is allowed.")
-    );
+    assert!(err.message().starts_with(
+        "duplicate extension services in configuration. only one version of each service is allowed"
+    ));
 
     Ok(())
 }
@@ -6485,8 +9121,10 @@ async fn test_update_instance_with_extension_services(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: service1_version1.clone(),
+                service_vpc_ids: vec![],
             }],
         }),
+        power_profile: None,
     };
 
     let tinstance = mh
@@ -6524,17 +9162,21 @@ async fn test_update_instance_with_extension_services(
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version2.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service2.service_id.clone(),
                     version: service2_version.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service3.service_id.clone(),
                     version: service3_version.clone(),
+                    service_vpc_ids: vec![],
                 },
             ],
         }),
+        power_profile: None,
     };
     let instance = env
         .api
@@ -6630,6 +9272,7 @@ async fn test_update_instance_with_extension_services(
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
             service_configs: vec![],
         }),
+        power_profile: None,
     };
     let instance = env
         .api
@@ -6710,8 +9353,10 @@ async fn test_update_instance_with_extension_services(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: service3_version.clone(),
+                service_vpc_ids: vec![],
             }],
         }),
+        power_profile: None,
     };
     let instance = env
         .api
@@ -6746,13 +9391,16 @@ async fn test_update_instance_with_extension_services(
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version1.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version2.clone(),
+                    service_vpc_ids: vec![],
                 },
             ],
         }),
+        power_profile: None,
     };
     let instance = env
         .api
@@ -6771,16 +9419,15 @@ async fn test_update_instance_with_extension_services(
         .await;
     assert!(instance.is_err());
     let err = instance.unwrap_err();
-    assert!(
-        err.message()
-            .starts_with("Duplicate extension services in configuration. Only one version of each service is allowed.")
-    );
+    assert!(err.message().starts_with(
+        "duplicate extension services in configuration. only one version of each service is allowed"
+    ));
 
     Ok(())
 }
 
 #[crate::sqlx_test]
-async fn test_extension_service_removed_after_all_dpus_report_terminated(
+async fn test_attach_extension_service_rejected_on_dpf_host(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6788,40 +9435,21 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
+    let (service, _, _) = create_dpu_extension_services(&env).await?;
+    let tinstance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
 
-    let (_, service2, _) = create_dpu_extension_services(&env).await?;
-    let service2_version = service2
-        .latest_version_info
-        .as_ref()
-        .unwrap()
-        .version
-        .clone();
+    let mut txn = env.pool.begin().await?;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.id).await?;
+    txn.commit().await?;
 
-    let config = rpc::InstanceConfig {
-        tenant: Some(default_tenant_config()),
-        os: Some(default_os_config()),
-        network: Some(single_interface_network_config(segment_id)),
-        infiniband: None,
-        network_security_group_id: None,
-        nvlink: None,
-        spxconfig: None,
-        dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
-            service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
-                service_id: service2.service_id.clone(),
-                version: service2_version,
-            }],
-        }),
-    };
-
-    let tinstance = mh.instance_builer(&env).config(config).build().await;
-    let instance_id = tinstance.id;
-
-    // Explicitly mock healthy/running extension-service status from the DPU.
-    network_configured_with_health_and_ext_services(&env, &mh.dpu().id, None, None).await;
-
-    // Remove all extension services from desired config.
-    env.api
+    let result = env
+        .api
         .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
             if_version_match: None,
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
@@ -6832,10 +9460,108 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
                 nvlink: None,
                 spxconfig: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
-                    service_configs: vec![],
+                    service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                        service_id: service.service_id,
+                        version: service.latest_version_info.unwrap().version,
+                        service_vpc_ids: vec![],
+                    }],
                 }),
+                power_profile: None,
             }),
-            instance_id: Some(instance_id),
+            metadata: Some(rpc::Metadata {
+                name: "dpf-extension-service".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect_err("attaching an extension service must fail on a DPF-managed host");
+
+    assert_eq!(result.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        result.message(),
+        format!(
+            "DPU extension services are not supported on DPF-managed host {}",
+            mh.id
+        )
+    );
+
+    Ok(())
+}
+
+/// Verifies terminated-attachment cleanup removes only its owned service
+/// interfaces, because a dangling record makes snapshots unreadable while
+/// deleting a retained attachment's record loses live network state.
+#[crate::sqlx_test]
+async fn test_extension_service_removed_after_all_dpus_report_terminated(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create two attachments so cleanup must distinguish removed from retained ownership.
+    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let selected_vpc = db::vpc::find_by_segment(&env.pool, segment_id)
+        .await?
+        .expect("created segment belongs to a VPC")
+        .id;
+    let mh = create_managed_host(&env).await;
+    let (retained_service, removed_service, _) = create_dpu_extension_services(&env).await?;
+    let retained_service_id: ExtensionServiceId = retained_service.service_id.parse()?;
+    let removed_service_id: ExtensionServiceId = removed_service.service_id.parse()?;
+    let retained_version = retained_service
+        .latest_version_info
+        .as_ref()
+        .expect("retained service has a version")
+        .version
+        .clone();
+    let removed_version = removed_service
+        .latest_version_info
+        .as_ref()
+        .expect("removed service has a version")
+        .version
+        .clone();
+    let config = rpc::InstanceConfig {
+        tenant: Some(default_tenant_config()),
+        os: Some(default_os_config()),
+        network: Some(single_interface_network_config(segment_id)),
+        dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![
+                rpc::forge::InstanceDpuExtensionServiceConfig {
+                    service_id: retained_service.service_id.clone(),
+                    version: retained_version.clone(),
+                    service_vpc_ids: vec![],
+                },
+                rpc::forge::InstanceDpuExtensionServiceConfig {
+                    service_id: removed_service.service_id.clone(),
+                    version: removed_version,
+                    service_vpc_ids: vec![],
+                },
+            ],
+        }),
+        ..Default::default()
+    };
+    let tinstance = mh.instance_builer(&env).config(config).build().await;
+
+    // Establish a synchronized running observation before requesting one detach.
+    network_configured_with_health_and_ext_services(&env, &mh.dpu_ids[0], None, None).await;
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                        service_id: retained_service.service_id.clone(),
+                        version: retained_version,
+                        service_vpc_ids: vec![],
+                    }],
+                }),
+                ..Default::default()
+            }),
+            instance_id: Some(tinstance.id),
             metadata: Some(rpc::forge::Metadata {
                 name: "newinstance".to_string(),
                 description: "desc".to_string(),
@@ -6843,8 +9569,6 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
             }),
         }))
         .await?;
-
-    // Update instance config should not change the instance state from Ready
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
         10,
@@ -6854,96 +9578,302 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
     )
     .await;
 
+    // A fresh read proves callers see only the retained service while status keeps both entries.
     let rpc_instance = tinstance.rpc_instance().await.into_inner();
-
-    // Since the extension services are removed from the instance config, the config should be empty.
-    assert!(
-        rpc_instance
-            .config
-            .unwrap()
-            .dpu_extension_services
-            .is_none()
-    );
-
-    // At this point, since DPUs have not reported any extension services, the tenant state should
-    // be in Configuring state.
-    let rpc_status = rpc_instance.status.unwrap();
+    let active_services = &rpc_instance
+        .config
+        .as_ref()
+        .expect("instance has a config")
+        .dpu_extension_services
+        .as_ref()
+        .expect("retained service remains active")
+        .service_configs;
+    assert_eq!(active_services.len(), 1);
+    assert_eq!(active_services[0].service_id, retained_service.service_id);
+    let rpc_status = rpc_instance.status.expect("instance has status");
     assert_eq!(
-        rpc_status.tenant.unwrap().state,
+        rpc_status.tenant.expect("instance has tenant status").state,
         rpc::TenantState::Configuring as i32
     );
-
-    // The extension services status should still be tracked until fully terminated.
-    let dpu_extension_services_status = rpc_status.dpu_extension_services.unwrap();
+    let extension_services_status = rpc_status
+        .dpu_extension_services
+        .expect("instance has extension-service status");
+    assert_eq!(extension_services_status.dpu_extension_services.len(), 2);
     assert_eq!(
-        dpu_extension_services_status.dpu_extension_services.len(),
-        1
-    );
-    assert_eq!(
-        dpu_extension_services_status.configs_synced,
+        extension_services_status.configs_synced,
         rpc::forge::SyncState::Pending as i32
     );
-    // The status should be Unknown until the DPU reports the status.
+    let removed_status = extension_services_status
+        .dpu_extension_services
+        .iter()
+        .find(|status| status.service_id == removed_service.service_id)
+        .expect("removed service remains tracked during termination");
     assert_eq!(
-        dpu_extension_services_status.dpu_extension_services[0].deployment_status,
+        removed_status.deployment_status,
         rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceUnknown as i32
     );
 
-    // Mock DPU reporting removed services as fully terminated.
-    // Instance should be in Ready state after this.
-    // Tenant state should be Ready.
-    // Instance config and status should no long have the extension services.
+    // Seed the endpoint state that issue #6125 will create, with one record per owner.
+    let stored = db::instance::find_by_id(&env.pool, tinstance.id)
+        .await?
+        .expect("instance remains stored");
+    let retained_attachment_id = stored
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| attachment.service_id == retained_service_id)
+        .and_then(|attachment| attachment.id)
+        .expect("retained attachment has an ID");
+    let removed_attachment_id = stored
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| attachment.service_id == removed_service_id)
+        .and_then(|attachment| attachment.id)
+        .expect("removed attachment has an ID");
+    let retained_service_interface = InstanceServiceInterfaceConfig {
+        attachment_id: retained_attachment_id, // This owner must survive cleanup.
+        interface_ordinal: 0,
+        dpu_id: mh.dpu_ids[0],
+        slot_index: 0,
+        vpc_id: selected_vpc,
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_segment_id: segment_id,
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    };
+    let removed_service_interface = InstanceServiceInterfaceConfig {
+        attachment_id: removed_attachment_id, // This owner must be removed during cleanup.
+        slot_index: 1,
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.2/31".parse().expect("valid service prefix"),
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+        internal_uuid: uuid::Uuid::new_v4(),
+        ..retained_service_interface.clone()
+    };
+    let mut seeded_network = stored.config.network.clone();
+    seeded_network.service_interfaces = vec![
+        retained_service_interface.clone(),
+        removed_service_interface.clone(),
+    ];
+    let mut txn = env.db_txn().await;
+    db::instance::update_network_config(
+        txn.as_mut(),
+        stored.id,
+        stored.network_config_version,
+        &seeded_network,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Reload the fixture so the cleanup proof cannot pass with an ineffective seed.
+    let seeded = db::instance::find_by_id(&env.pool, tinstance.id)
+        .await?
+        .expect("instance remains stored");
+    assert_eq!(
+        seeded.config.network.service_interfaces,
+        vec![
+            retained_service_interface.clone(),
+            removed_service_interface
+        ]
+    );
+
+    // Report termination and let the controller remove the detached owner and its endpoint.
     network_configured_with_health_and_ext_services(
         &env,
-        &mh.dpu().id,
+        &mh.dpu_ids[0],
+        None,
+        Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
+    )
+    .await;
+    env.run_machine_state_controller_iteration().await;
+
+    // A fresh snapshot proves no dangling record remains and live ownership was preserved.
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let persisted = snapshot.instance.expect("instance remains assigned");
+    assert_eq!(persisted.config.extension_services.service_configs.len(), 1);
+    let retained_attachment = &persisted.config.extension_services.service_configs[0];
+    assert_eq!(retained_attachment.service_id, retained_service_id);
+    assert_eq!(retained_attachment.id, Some(retained_attachment_id));
+    assert_eq!(
+        persisted.config.network.service_interfaces,
+        vec![retained_service_interface]
+    );
+    assert!(!persisted.observations.extension_services.is_empty());
+    txn.commit().await?;
+
+    // The scalar status fixture marked both services terminated, so refresh the retained one.
+    network_configured_with_health_and_ext_services(&env, &mh.dpu_ids[0], None, None).await;
+    env.run_machine_state_controller_iteration().await;
+
+    // Final public state must expose only the retained, running attachment and its VPC.
+    let rpc_instance = tinstance.rpc_instance().await.into_inner();
+    let active_services = &rpc_instance
+        .config
+        .as_ref()
+        .expect("instance has a config")
+        .dpu_extension_services
+        .as_ref()
+        .expect("retained service remains active")
+        .service_configs;
+    assert_eq!(active_services.len(), 1);
+    assert_eq!(active_services[0].service_id, retained_service.service_id);
+    assert_eq!(active_services[0].service_vpc_ids, vec![selected_vpc]);
+    let rpc_status = rpc_instance.status.expect("instance has status");
+    assert_eq!(
+        rpc_status.tenant.expect("instance has tenant status").state,
+        rpc::TenantState::Ready as i32
+    );
+    let extension_services_status = rpc_status
+        .dpu_extension_services
+        .expect("instance has extension-service status");
+    assert_eq!(extension_services_status.dpu_extension_services.len(), 1);
+    assert_eq!(
+        extension_services_status.dpu_extension_services[0].service_id,
+        retained_service.service_id
+    );
+    assert_eq!(
+        extension_services_status.dpu_extension_services[0].deployment_status,
+        rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceRunning as i32
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let (removed_service, new_service, _) = create_dpu_extension_services(&env).await?;
+    let config = rpc::InstanceConfig {
+        tenant: Some(default_tenant_config()),
+        os: Some(default_os_config()),
+        network: Some(single_interface_network_config(segment_id)),
+        dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                service_id: removed_service.service_id,
+                version: removed_service.latest_version_info.unwrap().version,
+                service_vpc_ids: vec![],
+            }],
+        }),
+        ..Default::default()
+    };
+    let tinstance = mh.instance_builer(&env).config(config).build().await;
+    let instance = tinstance.rpc_instance().await.into_inner();
+    let mut detached_config = instance.config.unwrap();
+    detached_config.dpu_extension_services = None;
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
+            config: Some(detached_config.clone()),
+            metadata: instance.metadata,
+            if_version_match: None,
+        }))
+        .await?;
+    network_configured_with_health_and_ext_services(
+        &env,
+        &mh.dpu_ids[0],
         None,
         Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
     )
     .await;
 
-    // Let state handler process cleanup and persist instance extension-services config.
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
-    let instance_snapshot = snapshot.instance.unwrap();
-
-    // The extension services should be removed from the instance config.
-    assert!(
-        instance_snapshot
+    let before_cleanup = db::instance::find_by_id(&env.pool, tinstance.id)
+        .await?
+        .unwrap();
+    assert_eq!(
+        before_cleanup
             .config
             .extension_services
             .service_configs
-            .is_empty(),
-        "Instance config should not have extension services"
+            .len(),
+        1
+    );
+    assert!(
+        before_cleanup.config.extension_services.service_configs[0]
+            .removed
+            .is_some()
     );
 
-    // However, the observations should still be in record.
-    assert!(!instance_snapshot.observations.extension_services.is_empty(),);
+    // The API locks service definitions after reading and merging attachments.
+    // Blocking on the new service lets the controller clean up the old one.
+    let mut service_lock = env.db_txn().await;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(service_lock.as_mut())
+        .await?;
+    db::extension_service::find_by_ids(
+        service_lock.as_mut(),
+        &[new_service.service_id.parse()?],
+        false,
+        true,
+    )
+    .await?;
+    detached_config.dpu_extension_services = Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+        service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+            service_id: new_service.service_id,
+            version: new_service.latest_version_info.unwrap().version,
+            service_vpc_ids: vec![],
+        }],
+    });
+    let update =
+        env.api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(tinstance.id),
+                config: Some(detached_config),
+                metadata: Some(rpc::Metadata {
+                    name: "must-not-be-saved".to_string(),
+                    ..Default::default()
+                }),
+                if_version_match: None,
+            }));
+    let cleanup = async {
+        common::postgres::wait_for_blocked_query(&env.pool, blocker_pid, "extension_services")
+            .await;
+        env.run_machine_state_controller_iteration().await;
+        let cleaned = db::instance::find_by_id(&env.pool, tinstance.id)
+            .await?
+            .unwrap();
+        assert!(cleaned.config.extension_services.service_configs.is_empty());
+        assert_eq!(
+            cleaned.extension_services_config_version,
+            before_cleanup.extension_services_config_version,
+            "cleanup must not request another DPU configuration generation",
+        );
+        service_lock.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (update_result, cleanup_result) = tokio::join!(update, cleanup);
+    cleanup_result?;
+    let error = update_result.expect_err("the API must reject the attachments read before cleanup");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("extension-service attachments"));
 
-    let rpc_instance = tinstance.rpc_instance().await.into_inner();
+    let persisted = db::instance::find_by_id(&env.pool, tinstance.id)
+        .await?
+        .unwrap();
     assert!(
-        rpc_instance
+        persisted
             .config
-            .unwrap()
-            .dpu_extension_services
-            .is_none()
-    );
-
-    // The tenant status should now be Ready.
-    let rpc_status = rpc_instance.status.unwrap();
-    assert_eq!(
-        rpc_status.tenant.unwrap().state,
-        rpc::TenantState::Ready as i32
-    );
-    assert!(
-        rpc_status
-            .dpu_extension_services
-            .unwrap()
-            .dpu_extension_services
+            .extension_services
+            .service_configs
             .is_empty()
     );
-
+    assert_eq!(persisted.config_version, before_cleanup.config_version);
+    assert_eq!(persisted.metadata, before_cleanup.metadata);
+    assert_eq!(
+        persisted.extension_services_config_version,
+        before_cleanup.extension_services_config_version,
+    );
     Ok(())
 }
 
@@ -6977,8 +9907,10 @@ async fn test_extension_services_status_observation(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: versions[0].version_string(),
+                service_vpc_ids: vec![],
             }],
         }),
+        power_profile: None,
     };
 
     let tinstance = mh
@@ -6998,7 +9930,11 @@ async fn test_extension_services_status_observation(
     let dpu_observation = instance_snapshot
         .observations
         .extension_services
-        .get(&mh.dpu().id)
+        .get(&mh.dpu_ids[0])
+        .and_then(|observations| {
+            observations
+                .for_service_type(model::extension_service::ExtensionServiceType::KubernetesPod)
+        })
         .unwrap();
 
     assert_eq!(
@@ -7088,7 +10024,7 @@ async fn test_allocate_instance_with_invalid_os_image(
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7098,6 +10034,7 @@ async fn test_allocate_instance_with_invalid_os_image(
                 nvlink: None,
                 spxconfig: None,
                 dpu_extension_services: None,
+                power_profile: None,
             }),
             instance_id: None,
             instance_type_id: None,
@@ -7150,7 +10087,7 @@ async fn test_allocate_instance_with_invalid_ib_partition(
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7160,6 +10097,7 @@ async fn test_allocate_instance_with_invalid_ib_partition(
                 nvlink: None,
                 spxconfig: None,
                 dpu_extension_services: None,
+                power_profile: None,
             }),
             instance_id: None,
             instance_type_id: None,
@@ -7202,7 +10140,7 @@ async fn test_can_not_create_instances_with_machine_in_quarantine(
     env.api
         .set_managed_host_quarantine_state(tonic::Request::new(
             rpc::forge::SetManagedHostQuarantineStateRequest {
-                machine_id: Some(host_machine_id),
+                machine_id: Some(host_machine_id.into()),
                 quarantine_state: Some(rpc::forge::ManagedHostQuarantineState {
                     mode: ManagedHostQuarantineMode::BlockAllTraffic as i32,
                     reason: Some("test".to_string()),
@@ -7232,6 +10170,250 @@ async fn test_can_not_create_instances_with_machine_in_quarantine(
     let err = result.expect_err("Expect instance creation to fail");
     assert!(
         err.message()
-            .contains("Host is not available for allocation due to health probe alert")
+            .contains("host is not available for allocation due to health probe alert")
+    );
+}
+
+/// With the site flag on, tenant release drives the host through the full
+/// `FactoryResetBmc` sub-flow before the existing power-cycle path: it suppresses
+/// site-explorer, waits for the acknowledgement, factory-resets and re-probes the
+/// BMC, verifies the factory credentials, restores the device to its previous
+/// per-device Vault credential (read-only), removes the suppression, and hands
+/// off to `PowerCycle`. Asserts the suppression is cleaned up, the per-device
+/// Vault secret is preserved (never written), and the BMC ends on the restored
+/// per-device password.
+#[crate::sqlx_test]
+async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    use carbide_secrets::credentials::{
+        BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
+    };
+    use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
+    use model::machine::HostPlatformConfigurationState;
+
+    const FACTORY_USER: &str = "root";
+    const FACTORY_PW: &str = "factory-default";
+    const PER_DEVICE_PW: &str = "prev-per-device";
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+
+    // Opt the site in to the deletion-only BMC factory-reset sub-flow.
+    let mut config = get_config();
+    config.bmc_factory_reset_on_instance_termination_enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+
+    let segment_ids = env.create_vpc_and_tenant_segments(1).await;
+    let mh = create_managed_host_multi_dpu(&env, 1).await;
+
+    let mut txn = env.db_txn().await;
+    let host_machine = mh.host().db_machine(&mut txn).await;
+    let device_locators: Vec<DeviceLocator> = mh
+        .dpu_ids
+        .iter()
+        .map(|dpu_id| {
+            host_machine
+                .get_device_locator_for_dpu_id(dpu_id)
+                .expect("device locator for DPU")
+        })
+        .collect();
+    let host_bmc_mac = host_machine
+        .status
+        .bmc_info
+        .mac
+        .expect("fixture host should have a BMC MAC");
+    txn.commit().await.unwrap();
+
+    // Allocate and drive the instance to Assigned/Ready.
+    let tinstance = mh
+        .instance_builer(&env)
+        .network(interface_network_config_with_devices(
+            &segment_ids,
+            &device_locators,
+        ))
+        .build()
+        .await;
+
+    // Seed the state the sub-flow depends on, after provisioning so nothing
+    // overwrites it: non-empty factory credentials in expected_machines (the
+    // recovery path for the factory password), the sim's factory `root` account,
+    // and the device's previous per-device Vault credential (the restore target).
+    let per_device_key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::BmcRoot {
+            bmc_mac_address: host_bmc_mac,
+        },
+    };
+    let per_device_creds = Credentials::UsernamePassword {
+        username: FACTORY_USER.to_string(),
+        password: PER_DEVICE_PW.to_string(),
+    };
+    {
+        let mut expected = db::expected_machine::find_by_bmc_mac_address(&env.pool, host_bmc_mac)
+            .await
+            .unwrap()
+            .expect("expected_machines row for the fixture host");
+        let mut txn = env.pool.begin().await.unwrap();
+        db::expected_machine::update_bmc_credentials(
+            &mut expected,
+            txn.as_mut(),
+            FACTORY_USER.to_string(),
+            FACTORY_PW.to_string(),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+    }
+    env.redfish_sim.seed_user(FACTORY_USER, FACTORY_PW);
+    env.test_credential_manager
+        .set_credentials(&per_device_key, &per_device_creds)
+        .await
+        .expect("staging the per-device Vault credential should succeed");
+
+    // Tenant release: mark the instance deleted.
+    env.api
+        .release_instance(tonic::Request::new(InstanceReleaseRequest {
+            id: Some(tinstance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect("release_instance failed");
+
+    // Drive the sub-flow one iteration at a time, acknowledging the suppression
+    // once it appears (site-explorer does not run in this env), and stop as soon
+    // as the machine advances past FactoryResetBmc.
+    let mut acknowledged = false;
+    let mut entered_factory_reset = false;
+    let mut state_after_factory_reset = None;
+    for _ in 0..60 {
+        env.run_machine_state_controller_iteration().await;
+
+        if !acknowledged
+            && let Some(suppression) = db::bmc_suppression::find(
+                &env.pool,
+                host_bmc_mac,
+                BmcSuppressionSubsystem::SiteExplorer,
+                BmcSuppressionSource::FactoryResetBmc,
+            )
+            .await
+            .unwrap()
+            && suppression.acknowledged_at.is_none()
+        {
+            let mut txn = env.pool.begin().await.unwrap();
+            db::bmc_suppression::acknowledge(
+                txn.as_mut(),
+                host_bmc_mac,
+                BmcSuppressionSubsystem::SiteExplorer,
+            )
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+            acknowledged = true;
+        }
+
+        let mut txn = env.pool.begin().await.unwrap();
+        let machine = mh.host().db_machine(&mut txn).await;
+        let state = machine.current_state().clone();
+        txn.commit().await.unwrap();
+
+        // WaitForBmc holds a fixed 30s wall-clock settle window before its first
+        // readiness probe. Backdate the state version timestamp (preserving the
+        // version number so the next transition's optimistic check still passes)
+        // so the settle elapses and the always-up sim BMC is probed without a
+        // real 30s wait.
+        if matches!(
+            state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::HostPlatformConfiguration {
+                    platform_config_state: HostPlatformConfigurationState::FactoryResetBmc {
+                        reset_state: model::machine::FactoryResetBmcState::WaitForBmc,
+                    },
+                },
+            }
+        ) {
+            let aged_version = format!(
+                "V{}-T{}",
+                machine.current_version().version_nr(),
+                (chrono::Utc::now() - chrono::Duration::seconds(120)).timestamp_micros()
+            );
+            let mut txn = env.pool.begin().await.unwrap();
+            sqlx::query("UPDATE machines SET controller_state_version=$1 WHERE id=$2")
+                .bind(aged_version)
+                .bind(machine.id.to_string())
+                .execute(txn.as_mut())
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        if matches!(
+            state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::HostPlatformConfiguration {
+                    platform_config_state: HostPlatformConfigurationState::FactoryResetBmc { .. },
+                },
+            }
+        ) {
+            entered_factory_reset = true;
+        } else if entered_factory_reset {
+            state_after_factory_reset = Some(state);
+            break;
+        }
+    }
+
+    assert!(
+        entered_factory_reset,
+        "tenant release with the flag on must enter FactoryResetBmc"
+    );
+    assert!(
+        acknowledged,
+        "the sub-flow must upsert a site-explorer suppression to acknowledge"
+    );
+    let state_after_factory_reset =
+        state_after_factory_reset.expect("machine must advance past FactoryResetBmc");
+    assert!(
+        matches!(
+            state_after_factory_reset,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::HostPlatformConfiguration {
+                    platform_config_state: HostPlatformConfigurationState::PowerCycle { .. },
+                },
+            }
+        ),
+        "FactoryResetBmc must hand off to PowerCycle, got {state_after_factory_reset:?}"
+    );
+
+    // RemoveSuppression deletes the row it created.
+    assert!(
+        !db::bmc_suppression::is_suppressed(
+            &env.pool,
+            host_bmc_mac,
+            BmcSuppressionSubsystem::SiteExplorer,
+        )
+        .await
+        .unwrap(),
+        "RemoveSuppression must delete the site-explorer suppression"
+    );
+
+    // The per-device Vault secret is preserved verbatim: this flow only reads it.
+    let persisted = env
+        .test_credential_manager
+        .get_credentials(&per_device_key)
+        .await
+        .expect("reading the per-device Vault credential should succeed")
+        .expect("the per-device Vault credential must still be present");
+    assert_eq!(
+        persisted, per_device_creds,
+        "the per-device Vault credential must be preserved (read-only restore target)"
+    );
+
+    // RestoreCredentials changed the BMC root password from the factory default
+    // back to the device's previous per-device password.
+    assert_eq!(
+        env.redfish_sim.user_password(FACTORY_USER).as_deref(),
+        Some(PER_DEVICE_PW),
+        "the BMC root account must end on the restored per-device password"
     );
 }

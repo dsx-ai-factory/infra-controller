@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 
 mod errors;
 mod machine_validation;
+mod plugin_contract;
+mod plugin_runner;
 
 pub const MACHINE_VALIDATION_SERVER: &str = "carbide-pxe.forge";
 pub const SCHME: &str = "http";
@@ -36,6 +38,8 @@ pub const MACHINE_VALIDATION_IMAGE_FILE: &str = "/tmp/machine_validation.tar";
 pub const MACHINE_VALIDATION_RUNNER_BASE_PATH: &str = "nvcr.io/nvidian/nvforge/";
 pub const MACHINE_VALIDATION_RUNNER_TAG: &str = "latest";
 pub const IMAGE_LIST_FILE: &str = "/tmp/list.json";
+/// Default container-visible base directory for Machine Validation plugin files.
+pub const DEFAULT_PLUGIN_CONTRACT_DIR: &str = "/opt/forge/mv";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MachineValidationOptions {
@@ -43,6 +47,8 @@ pub struct MachineValidationOptions {
     pub root_ca: String,
     pub client_cert: String,
     pub client_key: String,
+    /// Container-visible base directory for plugin input and output files.
+    pub plugin_contract_dir: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MachineValidation {
@@ -83,13 +89,13 @@ impl MachineValidationManager {
             .await
             .or(Err(MachineValidationError::Generic(format!(
                 "Failed to GET from '{}'",
-                &url
+                url
             ))))?;
         let total_size = res
             .content_length()
             .ok_or(MachineValidationError::Generic(format!(
                 "Failed to get content length from '{}'",
-                &url
+                url
             )))?;
         let _ = std::fs::remove_file(output_file).or(Err(MachineValidationError::Generic(
             format!("Failed to delete file '{output_file}'"),
@@ -160,7 +166,8 @@ impl MachineValidationManager {
             ..rpc::forge::MachineValidationRunRequest::default()
         };
         let mut expected_time_duration = 0;
-        for test in tests.clone() {
+        let mut selected_tests = Vec::new();
+        for test in &tests {
             if !machine_validation_filter.allowed_tests.is_empty()
                 && !machine_validation_filter
                     .allowed_tests
@@ -171,7 +178,9 @@ impl MachineValidationManager {
             }
             run_request.total += 1;
             expected_time_duration += test.timeout.unwrap_or(7200);
+            selected_tests.push(test.clone());
         }
+        run_request.selected_tests = selected_tests.clone();
         run_request.duration_to_complete = Some(rpc::Duration::from(
             std::time::Duration::from_secs(expected_time_duration as u64),
         ));
@@ -181,7 +190,7 @@ impl MachineValidationManager {
             .await?;
         mc.run(
             machine_id,
-            tests,
+            selected_tests,
             context,
             validation_id,
             true,

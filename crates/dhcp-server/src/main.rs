@@ -14,47 +14,79 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
-mod cache;
 mod command_line;
-mod errors;
 mod grpc_server;
-mod modes;
-mod packet_handler;
-mod rpc;
-mod util;
-mod vendor_class;
-
 use std::error::Error;
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 
-use ::rpc::forge::{DhcpDiscovery, DhcpRecord};
-use cache::CacheEntry;
-use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath, HostConfig};
+use ::rpc::forge_tls_client::ForgeClientConfig;
+use carbide_dhcp_server::cache::{self, CacheEntry};
+use carbide_dhcp_server::errors::DhcpError;
+use carbide_dhcp_server::metrics::{
+    DhcpPacketDropped, DhcpTimestampFileFailed, DhcpV6ListenerUnavailable, DhcpV6ReplySent,
+    DhcpV6RequestDropped, DropReason, V6DropReason, record_v6_request_received,
+};
+use carbide_dhcp_server::modes::DhcpMode;
+use carbide_dhcp_server::modes::controller::Controller;
+use carbide_dhcp_server::modes::dpu::{Dpu, get_host_config};
+use carbide_dhcp_server::{Config, packet_handler, packet_handler_v6, util};
+use carbide_instrument::emit;
+use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath};
 use chrono::Utc;
 use command_line::{Args, ServerMode};
-use errors::DhcpError;
+use forge_tls::client_config::ClientCert;
+use forge_tls::default::{default_client_cert, default_client_key, default_root_ca};
 use grpc_server::{ControlRequest, run_grpc_server};
 use lru::LruCache;
-use modes::DhcpMode;
-use modes::controller::Controller;
-use modes::dpu::{Dpu, get_host_config};
+use metrics_endpoint::{MetricsEndpointConfig, new_metrics_setup, run_metrics_endpoint};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tonic::async_trait;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+use util::{get_socket, get_socket_v6};
 
-use crate::util::get_socket;
-
-pub struct Server {
+struct Server {
     socket: Arc<UdpSocket>,
 }
 
+/// Values shared by packets received on one DHCPv6 listener.
+#[derive(Clone)]
+struct V6ListenerContext {
+    socket: Arc<UdpSocket>,
+    config: Arc<Config>,
+    handler: Arc<Box<dyn DhcpMode>>,
+    interface: String,
+    machine_cache: Arc<Mutex<LruCache<String, CacheEntry>>>,
+    dhcp_timestamps: Arc<Mutex<DhcpTimestamps>>,
+}
+
 const MAX_PARALLEL_PACKET_HANDLING_ALLOWED: usize = 128;
+
+/// Records why a DHCPv4 listener violated the generation-lifetime invariant.
+#[derive(Debug)]
+enum V4ListenerFailure {
+    /// The listener returned before its generation was cancelled.
+    Returned,
+    /// The listener task panicked or was otherwise cancelled unexpectedly.
+    Join(tokio::task::JoinError),
+}
+
+impl std::fmt::Display for V4ListenerFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Returned => {
+                formatter.write_str("listener returned before generation cancellation")
+            }
+            Self::Join(error) => write!(formatter, "listener task failed: {error}"),
+        }
+    }
+}
 
 /// Run one generation of the DHCP server (all interfaces) until `cancel_token` is cancelled.
 ///
@@ -65,17 +97,19 @@ async fn run_dhcp_server(args: Args, cancel_token: CancellationToken) {
     let config__ = match init(args.clone()).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to initialise DHCP server config: {}", e);
+            tracing::error!(error = %e, "Failed to initialise DHCP server config");
             return;
         }
     };
 
     let dhcp_timestamps = Arc::new(Mutex::new({
-        let d = DhcpTimestamps::new(if let ServerMode::Dpu = args.mode {
+        let dhcp_timestamps_path = if let ServerMode::Dpu = args.mode {
             DhcpTimestampsFilePath::HbnTmp
         } else {
             DhcpTimestampsFilePath::NotSet
-        });
+        };
+        let dhcp_timestamps_path_context = dhcp_timestamps_path.path_str().to_string();
+        let d = DhcpTimestamps::new(dhcp_timestamps_path);
 
         // It looks like we can only expect the file to be present
         // if something has successfully DHCP'ed, after write() has been
@@ -84,38 +118,51 @@ async fn run_dhcp_server(args: Args, cancel_token: CancellationToken) {
         // and pollute the logs. We could have read() skip NotFound errors, but that
         // could be misleading in other scenarios.  Let's just "init" the file.
         if let Err(e) = d.write() {
-            tracing::error!("Failed to init DHCP timestamps file: {}", e);
+            emit(DhcpTimestampFileFailed::Initialization {
+                dhcp_timestamps_path: dhcp_timestamps_path_context,
+                error: e.to_string(),
+            });
             return;
         }
         d
     }));
 
-    // Rate limiter limits the packet processing from all interfaces.
+    // Each family has an independent packet-processing limit across all interfaces.
     let rate_limiter_ = Arc::new(tokio::sync::Semaphore::new(
         MAX_PARALLEL_PACKET_HANDLING_ALLOWED,
     ));
+    let v6_rate_limiter_ = Arc::new(tokio::sync::Semaphore::new(
+        MAX_PARALLEL_PACKET_HANDLING_ALLOWED,
+    ));
 
-    let mut join_handles = vec![];
+    let mut v4_tasks = JoinSet::new();
+    let mut v6_tasks = JoinSet::new();
 
     // Create a new socket for each interface.
     // In case of Controller, there will be only 1 interface.
     for interface in args.interfaces {
+        let v6_interface = interface.clone();
+        let v6_config = config__.clone();
+        let v6_mode = args.mode.clone();
+        let v6_timestamps = dhcp_timestamps.clone();
+        let v6_rate_limiter = v6_rate_limiter_.clone();
+        let v6_cancel = cancel_token.clone();
         let config_ = config__.clone();
         let args_mode = args.mode.clone();
+        let listen_address = args.listen_addr;
         let dhcp_timestamps_ = dhcp_timestamps.clone();
         let rate_limiter = rate_limiter_.clone();
         let cancel = cancel_token.clone();
 
-        let handle = tokio::spawn(async move {
+        v4_tasks.spawn(async move {
             let handler: Arc<Box<dyn DhcpMode>> = Arc::new(get_mode(&args_mode));
-            let listen_address = SocketAddr::new(std::net::IpAddr::from([0, 0, 0, 0]), 67);
 
             let socket = get_socket(listen_address, interface.clone()).await;
             tracing::info!(
-                "Listening on {:?} on interface: {}, mode: {:?}",
-                listen_address,
-                interface,
-                handler
+                %listen_address,
+                interface_name = interface.as_str(),
+                mode = ?handler,
+                "DHCP server listening"
             );
 
             let mut server = Server {
@@ -136,8 +183,8 @@ async fn run_dhcp_server(args: Args, cancel_token: CancellationToken) {
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         tracing::info!(
-                            "DHCP server on interface {} received cancellation, shutting down",
-                            interface
+                            interface_name = interface.as_str(),
+                            "DHCP server received cancellation, shutting down"
                         );
                         break;
                     }
@@ -148,10 +195,19 @@ async fn run_dhcp_server(args: Args, cancel_token: CancellationToken) {
                                 // We don't know after this read is failed, will we be able to read again
                                 // from this socket? Mostly no. In this case, recreate the socket.
                                 // We observed this fluctuation during admin to tenant network switch.
-                                tracing::error!("Socket recv failed with error: {err}");
+                                tracing::error!(
+                                    %listen_address,
+                                    interface_name = interface.as_str(),
+                                    error = %err,
+                                    "Socket receive failed"
+                                );
                                 // Try to close the existing socket.
                                 drop(server.socket);
-                                tracing::info!("Recreating the socket on {listen_address}, {interface}");
+                                tracing::info!(
+                                    %listen_address,
+                                    interface_name = interface.as_str(),
+                                    "Recreating the socket"
+                                );
                                 server.socket =
                                     Arc::new(get_socket(listen_address, interface.clone()).await);
                                 continue;
@@ -162,13 +218,21 @@ async fn run_dhcp_server(args: Args, cancel_token: CancellationToken) {
                         // TryAcquireError::NoPermits; Not checking explicitly.
                         let Ok(permit) = rate_limiter.clone().try_acquire_owned() else {
                             // drop packet.
-                            tracing::error!("Dropping packet because of rate limiting.");
+                            emit(DhcpPacketDropped {
+                                reason: DropReason::RateLimited,
+                                error: "parallel packet handling limit reached".to_string(),
+                            });
                             continue;
                         };
 
                         // Not a valid packet.
                         if len < MINIMUM_DHCP_PKT_SIZE {
-                            tracing::error!("Dropping packet because it is smaller than min length.");
+                            emit(DhcpPacketDropped {
+                                reason: DropReason::TooShort,
+                                error: format!(
+                                    "{len} bytes is below the {MINIMUM_DHCP_PKT_SIZE}-byte minimum"
+                                ),
+                            });
                             continue;
                         }
 
@@ -198,11 +262,241 @@ async fn run_dhcp_server(args: Args, cancel_token: CancellationToken) {
             }
         });
 
-        join_handles.push(handle);
+        // Milestone 04 admits DHCPv6 in both modes; socket setup failure remains
+        // nonfatal so an unavailable v6 stack cannot take down DHCPv4.
+        v6_tasks.spawn(run_dhcp_v6_listener(
+            v6_interface,
+            v6_config,
+            v6_mode,
+            v6_cancel,
+            v6_rate_limiter,
+            v6_timestamps,
+        ));
     }
 
-    // Wait for all interface tasks to finish (they all exit on cancellation).
-    futures::future::join_all(join_handles).await;
+    // Preserve optional IPv6 availability without hiding a failed IPv4 listener.
+    if let Err(error) = supervise_listener_tasks(v4_tasks, v6_tasks, cancel_token).await {
+        tracing::error!(
+            error = %error,
+            "DHCPv4 listener exited unexpectedly"
+        );
+    }
+}
+
+/// Supervises a generation while preserving the listeners' family-specific semantics.
+///
+/// A v4 listener must run until generation cancellation, so every earlier completion
+/// is reported and losing the last v4 listener fails the generation. A normally
+/// returning v6 task represents expected optional listener unavailability and does
+/// not stop healthy v4 service.
+async fn supervise_listener_tasks(
+    mut v4_tasks: JoinSet<()>,
+    mut v6_tasks: JoinSet<()>,
+    cancel_token: CancellationToken,
+) -> Result<(), V4ListenerFailure> {
+    if v4_tasks.is_empty() {
+        return Ok(());
+    }
+
+    let failure = loop {
+        tokio::select! {
+            biased;
+
+            _ = cancel_token.cancelled() => break None,
+            Some(result) = v4_tasks.join_next(), if !v4_tasks.is_empty() => {
+                // Cancellation is intentionally clean even when a listener exits concurrently.
+                if cancel_token.is_cancelled() {
+                    break None;
+                }
+
+                let failure = match result {
+                    Ok(()) => V4ListenerFailure::Returned,
+                    Err(error) => V4ListenerFailure::Join(error),
+                };
+                if !v4_tasks.is_empty() {
+                    tracing::error!(
+                        error = %failure,
+                        remaining_v4_listener_count = v4_tasks.len(),
+                        "DHCPv4 listener exited unexpectedly"
+                    );
+                    continue;
+                }
+
+                cancel_token.cancel();
+                v4_tasks.abort_all();
+                v6_tasks.abort_all();
+                break Some(failure);
+            }
+            Some(result) = v6_tasks.join_next(), if !v6_tasks.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        error = %error,
+                        "DHCPv6 listener exited unexpectedly"
+                    );
+                }
+            }
+        }
+    };
+
+    // Join every listener task. TODO(dhcp-reload): DHCPv4 and DHCPv6 packet tasks
+    // remain detached, so they can retain old sockets and config and send stale
+    // replies after reload.
+    while v4_tasks.join_next().await.is_some() {}
+    while v6_tasks.join_next().await.is_some() {}
+
+    match failure {
+        Some(failure) => Err(failure),
+        None => Ok(()),
+    }
+}
+
+/// Count one DHCPv6 datagram at ingress and apply the handler admission limit.
+fn admit_v6_packet(
+    packet: &[u8],
+    source_address: SocketAddr,
+    rate_limiter: &Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    record_v6_request_received(packet, source_address);
+    match rate_limiter.clone().try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(_) => {
+            emit(DhcpV6RequestDropped {
+                reason: V6DropReason::RateLimited,
+                error: "parallel packet handling limit reached".to_string(),
+            });
+            None
+        }
+    }
+}
+
+/// Enforce the UDP source ports assigned to DHCPv6 clients and relay agents.
+fn validate_v6_source_port(packet: &[u8], source: &SocketAddrV6) -> Result<(), DhcpError> {
+    let (sender, expected_port) = if packet.first().copied() == Some(carbide_dhcpv6::RELAY_FORWARD)
+    {
+        ("relay", dhcproto::v6::SERVER_PORT)
+    } else {
+        ("client", dhcproto::v6::CLIENT_PORT)
+    };
+    if source.port() != expected_port {
+        return Err(DhcpError::UnexpectedDhcpV6SourcePort {
+            sender,
+            actual: source.port(),
+            expected: expected_port,
+        });
+    }
+    Ok(())
+}
+
+/// Run the independent DHCPv6 receive loop for one configured interface.
+async fn run_dhcp_v6_listener(
+    interface: String,
+    config: Config,
+    mode: ServerMode,
+    cancel: CancellationToken,
+    rate_limiter: Arc<tokio::sync::Semaphore>,
+    dhcp_timestamps: Arc<Mutex<DhcpTimestamps>>,
+) {
+    let handler: Arc<Box<dyn DhcpMode>> = Arc::new(get_mode(&mode));
+    // Controller mode accepts relay traffic; DPU mode retains its direct-only
+    // trust boundary and therefore does not subscribe to relay discovery.
+    let join_site_scoped_group = matches!(mode, ServerMode::Controller);
+    let listen_address = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, dhcproto::v6::SERVER_PORT, 0, 0);
+
+    // Socket retries remain interruptible when a server generation is cancelled.
+    let socket_result = tokio::select! {
+        _ = cancel.cancelled() => return,
+        result = get_socket_v6(listen_address, &interface, join_site_scoped_group) => result,
+    };
+    let socket = match socket_result {
+        Ok(socket) => Arc::new(socket),
+        Err(error) => {
+            // IPv4-only hosts are valid, so failure to establish the sibling
+            // IPv6 listener must not take down the existing DHCPv4 service.
+            emit(DhcpV6ListenerUnavailable::InitialSocketSetup {
+                interface_name: interface,
+                error: error.to_string(),
+            });
+            return;
+        }
+    };
+    tracing::info!(
+        %listen_address,
+        interface_name = interface,
+        mode = ?handler,
+        "DHCPv6 server listening"
+    );
+
+    let Some(cache_size) = std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE) else {
+        tracing::error!("DHCP machine cache size must be nonzero");
+        return;
+    };
+    let machine_cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
+    let mut context = V6ListenerContext {
+        socket,
+        config: Arc::new(config),
+        handler,
+        interface,
+        machine_cache,
+        dhcp_timestamps,
+    };
+
+    // DHCPv6 has a four-byte base header, so it intentionally does not use
+    // the DHCPv4 path's 236-byte BOOTP minimum. Keep one full-size UDP buffer
+    // per listener so relay options cannot be silently truncated at Ethernet MTU.
+    let mut buffer = vec![0; usize::from(u16::MAX)];
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(
+                    interface_name = context.interface,
+                    "DHCPv6 server received cancellation, shutting down"
+                );
+                break;
+            }
+            result = context.socket.recv_from(&mut buffer) => {
+                let (length, source) = match result {
+                    Ok(received) => received,
+                    Err(error) => {
+                        tracing::error!(
+                            interface_name = context.interface,
+                            error = %error,
+                            "DHCPv6 socket receive failed"
+                        );
+                        let recreated = tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            result = get_socket_v6(
+                                listen_address,
+                                &context.interface,
+                                join_site_scoped_group,
+                            ) => result,
+                        };
+                        match recreated {
+                            Ok(recreated) => context.socket = Arc::new(recreated),
+                            Err(error) => {
+                                emit(DhcpV6ListenerUnavailable::SocketRecreation {
+                                    interface_name: context.interface.clone(),
+                                    error: error.to_string(),
+                                });
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                };
+
+                let Some(permit) = admit_v6_packet(&buffer[..length], source, &rate_limiter) else {
+                    continue;
+                };
+
+                let packet = buffer[..length].to_vec();
+                let packet_context = context.clone();
+                tokio::spawn(async move {
+                    process_v6(source, &packet, packet_context).await;
+                    drop(permit);
+                });
+            }
+        }
+    }
 }
 
 /// Initialises the tracing subscriber with per-crate log-level overrides.
@@ -220,12 +514,18 @@ fn setup_tracing() -> Result<(), Box<dyn Error>> {
         .add_directive("hickory_resolver::name_server=info".parse().unwrap())
         .add_directive("hickory_proto=info".parse().unwrap());
 
+    // Counts every log line into carbide_log_events_total from startup; the
+    // counts are exposed once main() installs the meter provider. The env
+    // filter sits on the registry as a global filter so the counting layer
+    // and the logfmt output see exactly the same events.
+    let log_events = carbide_instrument::LogEventsMetric::new("nico-dhcp");
     tracing_subscriber::registry()
+        .with(log_events.layer())
         .with(
             logfmt::layer()
-                .with_event_fields([logfmt::EventField::with_default("component", "nico-dhcp")])
-                .with_filter(env_filter),
+                .with_event_fields([logfmt::EventField::with_default("component", "nico-dhcp")]),
         )
+        .with(env_filter)
         .try_init()?;
     Ok(())
 }
@@ -248,7 +548,7 @@ async fn handle_update_config(
         tokio::fs::write(&new_dhcp, &dhcp_yaml)
             .await
             .map_err(|e| -> Box<dyn Error> { format!("write {new_dhcp}: {e}").into() })?;
-        tracing::info!("dhcp_config changed – staged at {new_dhcp}");
+        tracing::info!(path = new_dhcp.as_str(), "dhcp_config changed – staged");
     }
 
     if let (Some(yaml), Some(path)) = (host_yaml, &args.host_config) {
@@ -258,7 +558,7 @@ async fn handle_update_config(
             tokio::fs::write(&new_host, &yaml)
                 .await
                 .map_err(|e| -> Box<dyn Error> { format!("write {new_host}: {e}").into() })?;
-            tracing::info!("host_config changed – staged at {new_host}");
+            tracing::info!(path = new_host.as_str(), "host_config changed – staged");
         }
     }
     Ok(())
@@ -364,7 +664,7 @@ async fn run_with_grpc_control(
             .map_err(|e| -> Box<dyn Error> {
                 format!("create_dir_all {}: {e}", dir.display()).into()
             })?;
-        tracing::info!("Created config directory {}", dir.display());
+        tracing::info!(path = %dir.display(), "Created config directory");
     }
 
     // Channel through which the gRPC handlers deliver control requests.
@@ -406,7 +706,13 @@ async fn run_with_grpc_control(
                     None => std::future::pending().await,
                 }
             } => {
-                tracing::error!("DHCP server exited unexpectedly: {:?}", result);
+                match result {
+                    Ok(()) => tracing::error!("DHCP server exited unexpectedly"),
+                    Err(error) => tracing::error!(
+                        error = ?error,
+                        "DHCP server exited unexpectedly"
+                    ),
+                }
                 return Ok(());
             }
 
@@ -466,6 +772,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    // Install the global meter provider before the first packet is processed
+    // so every emitted event exports, whether or not the scrape endpoint is
+    // served below.
+    let metrics_setup = new_metrics_setup("carbide-dhcp-server", "forge-system", true)
+        .map_err(|e| format!("Failed to set up metrics: {e}"))?;
+    carbide_instrument::log_events::register(&metrics_setup.meter);
+
+    // Must keep meter_provider alive for the lifetime of the server;
+    // dropping it shuts down the Prometheus exporter.
+    let _metrics_guard = metrics_setup.meter_provider;
+
+    if let Some(ref addr_str) = args.metrics_listen_addr {
+        let metrics_listen_addr: SocketAddr = addr_str
+            .parse()
+            .map_err(|e| format!("Invalid --metrics-listen-addr '{}': {}", addr_str, e))?;
+        let metrics_config = MetricsEndpointConfig {
+            address: metrics_listen_addr,
+            registry: metrics_setup.registry,
+            health_controller: Some(metrics_setup.health_controller),
+            additional_prefix: None,
+        };
+        // The endpoint's /health and /ready report process liveness (the
+        // default HealthController state), not packet-serving readiness --
+        // don't point a DHCP-serving probe at them.
+        tokio::spawn(async move {
+            tracing::info!(metrics_address = %metrics_config.address, "Spawning metrics endpoint");
+            if let Err(e) = run_metrics_endpoint(&metrics_config).await {
+                tracing::error!(error = %e, "Metrics endpoint error");
+            }
+        });
+    }
+
     if let Some(ref addr_str) = args.grpc_listen_addr {
         let grpc_listen_addr: SocketAddr = addr_str
             .parse()
@@ -488,13 +826,8 @@ fn get_mode(args_mode: &ServerMode) -> Box<dyn DhcpMode> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Config {
-    dhcp_config: DhcpConfig,
-    host_config: Option<HostConfig>, // Valid only for Dpu mode.
-}
-
 async fn init(args: Args) -> Result<Config, DhcpError> {
+    let forge_client_config = forge_client_config(&args)?;
     let f = tokio::fs::read_to_string(args.dhcp_config).await?;
     let dhcp_config: DhcpConfig = serde_yaml::from_str(&f)?;
 
@@ -505,72 +838,36 @@ async fn init(args: Args) -> Result<Config, DhcpError> {
         host_config = None;
     };
 
-    Ok(Config {
+    Ok(Config::new(
         dhcp_config,
         host_config,
-    })
+        args.relay_response_port,
+        forge_client_config,
+    ))
 }
 
-#[derive(Debug)]
-pub struct TestArm {}
+fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
+    let root_ca_path = args
+        .forge_root_ca_path
+        .clone()
+        .unwrap_or_else(|| default_root_ca().to_string());
+    let client_cert = match (&args.client_cert_path, &args.client_key_path) {
+        (Some(cert_path), Some(key_path)) => ClientCert {
+            cert_path: cert_path.clone(),
+            key_path: key_path.clone(),
+        },
+        (None, None) => ClientCert {
+            cert_path: default_client_cert().to_string(),
+            key_path: default_client_key().to_string(),
+        },
+        _ => {
+            return Err(DhcpError::MissingArgument(
+                "client_cert_path and client_key_path must be configured together".to_string(),
+            ));
+        }
+    };
 
-#[async_trait]
-impl DhcpMode for TestArm {
-    async fn discover_dhcp(
-        &self,
-        _discovery_request: DhcpDiscovery,
-        _config: &Config,
-        _machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
-    ) -> Result<DhcpRecord, DhcpError> {
-        Test::dhcp_record()
-    }
-
-    // Packets received from DPU to API must be relayed.
-    fn should_be_relayed(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug)]
-pub struct Test {}
-
-impl Test {
-    pub fn dhcp_record() -> Result<DhcpRecord, DhcpError> {
-        Ok(DhcpRecord {
-            machine_id: Some(
-                "fm100dsbiu5ckus880v8407u0mkcensa39cule26im5gnpvmuufckacguc0"
-                    .parse()
-                    .unwrap(),
-            ),
-            machine_interface_id: Some("0fd6e9a3-06fc-4a22-ad29-aca299677b00".parse().unwrap()),
-            segment_id: Some("55a2d74e-f9e1-49d5-bf99-be05171a5d75".parse().unwrap()),
-            subdomain_id: Some("56a2d74e-f9e1-49d5-bf99-be05171a5d75".parse().unwrap()),
-            fqdn: "seventeen-connecticut.dev3.frg.nvidia.com".to_string(),
-            mac_address: "b8:3f:d2:90:9a:12".to_string(),
-            address: "10.217.132.204".to_string(),
-            mtu: 6000,
-            prefix: "10.217.132.192/26".to_string(),
-            gateway: Some("10.217.132.193".to_string()),
-            booturl: None,
-            last_invalidation_time: None,
-        })
-    }
-}
-
-#[async_trait]
-impl DhcpMode for Test {
-    async fn discover_dhcp(
-        &self,
-        _discovery_request: DhcpDiscovery,
-        _config: &Config,
-        _machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
-    ) -> Result<DhcpRecord, DhcpError> {
-        Test::dhcp_record()
-    }
-
-    fn should_be_relayed(&self) -> bool {
-        false
-    }
+    Ok(ForgeClientConfig::new(root_ca_path, Some(client_cert)))
 }
 
 const MINIMUM_DHCP_PKT_SIZE: usize = 236;
@@ -588,14 +885,28 @@ async fn process(
     dhcp_timestamps: Arc<Mutex<DhcpTimestamps>>,
 ) {
     if !addr.is_ipv4() {
-        tracing::error!("Dropping ivp6 packet.");
+        emit(DhcpPacketDropped {
+            reason: DropReason::NotIpv4,
+            error: format!("source address {addr} is not IPv4"),
+        });
         return;
     }
 
-    tracing::info!("Received packet [{}] from {}", buf[0], addr);
+    let Some(&bootp_op) = buf.first() else {
+        emit(DhcpPacketDropped {
+            reason: DropReason::TooShort,
+            error: format!("0 bytes is below the {MINIMUM_DHCP_PKT_SIZE}-byte minimum"),
+        });
+        return;
+    };
+
+    // Keep raw source/opcode visibility when validation or decoding fails
+    // before the structured request Event can be emitted.
+    tracing::debug!(bootp_op, source_address = %addr, "Received DHCP packet");
 
     let packet = match packet_handler::process_packet(
         buf,
+        addr,
         &config,
         circuit_id,
         handler,
@@ -605,62 +916,527 @@ async fn process(
     {
         Ok(packet) => packet,
         Err(err) => {
-            tracing::error!("Dropping packet because of error: {}", err);
+            emit(DhcpPacketDropped {
+                reason: DropReason::from(&err),
+                error: err.to_string(),
+            });
             return;
         }
     };
 
     let dest_address = handler.get_destination_address(&packet);
-    match packet.send(dest_address, socket).await {
-        Ok(_) => {}
-        Err(err) => {
-            tracing::error!("Packet sending failed because of error: {}", err);
-        }
+    if let Err(err) = packet.send(dest_address, socket).await {
+        emit(DhcpPacketDropped {
+            reason: DropReason::SendFailed,
+            error: err,
+        });
     }
 
-    // Tell forge-dpu-agent that an IP has been requested for this interface.
-    if let Some(host_config) = config.host_config {
-        let mut dhcp_timestamps = dhcp_timestamps.lock().await;
-        dhcp_timestamps.add_timestamp(host_config.host_interface_id, Utc::now().to_rfc3339());
-        if let Err(e) = dhcp_timestamps.write() {
-            tracing::error!(
-                "Failed writing to {}: {e}",
-                DhcpTimestampsFilePath::HbnTmp.path_str()
-            );
+    record_dhcp_timestamp(&config, dhcp_timestamps).await;
+}
+
+/// Process one DHCPv6 datagram and send its response to the exact UDP source.
+#[tracing::instrument(skip_all)]
+async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerContext) {
+    let SocketAddr::V6(source) = source else {
+        let error = format!("source address {source} is not IPv6");
+        emit(DhcpV6RequestDropped {
+            reason: V6DropReason::InvalidPacket,
+            error,
+        });
+        return;
+    };
+    if let Err(error) = validate_v6_source_port(packet, &source) {
+        emit(DhcpV6RequestDropped {
+            reason: V6DropReason::from(&error),
+            error: error.to_string(),
+        });
+        return;
+    }
+
+    tracing::debug!(source_address = %source, "Received DHCPv6 packet");
+    let response = match packet_handler_v6::process_packet(
+        packet,
+        *source.ip(),
+        &context.config,
+        &context.interface,
+        &**context.handler,
+        &mut context.machine_cache,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            emit(DhcpV6RequestDropped {
+                reason: V6DropReason::from(&error),
+                error: error.to_string(),
+            });
+            return;
         }
+    };
+
+    // An indeterminate CONFIRM is intentionally discarded without counting
+    // it as an invalid or dropped request.
+    let Some(response) = response else {
+        return;
+    };
+
+    tracing::debug!(destination_address = %source, "Sending DHCPv6 packet");
+    match context
+        .socket
+        .send_to(response.encoded_packet(), source)
+        .await
+    {
+        Ok(_) => emit(DhcpV6ReplySent {
+            message_type: response.message_type,
+            destination_address: source,
+        }),
+        Err(error) => emit(DhcpV6RequestDropped {
+            reason: V6DropReason::SendFailed,
+            error: error.to_string(),
+        }),
+    }
+    record_dhcp_timestamp(&context.config, context.dhcp_timestamps.clone()).await;
+}
+
+/// Record that the DPU-side interface has served a DHCP request.
+async fn record_dhcp_timestamp(config: &Config, dhcp_timestamps: Arc<Mutex<DhcpTimestamps>>) {
+    let Some(host_config) = config.host_config() else {
+        return;
+    };
+
+    let mut dhcp_timestamps = dhcp_timestamps.lock().await;
+    dhcp_timestamps.add_timestamp(host_config.host_interface_id, Utc::now().to_rfc3339());
+    if let Err(error) = dhcp_timestamps.write() {
+        emit(DhcpTimestampFileFailed::Write {
+            dhcp_timestamps_path: DhcpTimestampsFilePath::HbnTmp.path_str().to_string(),
+            host_interface_id: host_config.host_interface_id.to_string(),
+            error: error.to_string(),
+        });
     }
 }
 
 #[cfg(test)]
 mod test {
     use std::env;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::Arc;
 
+    use carbide_dhcp_server::errors::DhcpError;
+    use carbide_dhcp_server::modes::V6Outcome;
+    use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
+    use carbide_test_support::value_scenarios;
     use chrono::{DateTime, Utc};
     use dhcproto::v4::{DhcpOption, Message, MessageType, OptionCode};
+    use dhcproto::v6::MessageType as MessageTypeV6;
     use dhcproto::{Decodable, Decoder, Encodable};
     use lru::LruCache;
+    use rpc::forge::{DhcpDiscovery, DhcpRecord};
     use tempfile::TempDir;
     use tokio::net::UdpSocket;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, oneshot};
+    use tokio::task::JoinSet;
+    use tokio::time::{Duration, timeout};
     use tokio_util::sync::CancellationToken;
+    use tonic::async_trait;
 
+    use crate::cache::CacheEntry;
     use crate::command_line::{Args, ServerMode};
-    use crate::errors::DhcpError;
-    use crate::{DhcpMode, Test, TestArm, cache, handle_reload, init, packet_handler, process};
+    use crate::{
+        Config, DhcpMode, V4ListenerFailure, admit_v6_packet, cache, forge_client_config,
+        handle_reload, init, packet_handler, process, supervise_listener_tasks,
+        validate_v6_source_port,
+    };
+
+    const TEST_SOURCE_ADDRESS: SocketAddr =
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 10), 68));
+    const TEST_CLIENT_MAC: &[u8] = &[0x00, 0x1b, 0x63, 0x84, 0x45, 0xe6];
+    const TEST_CLIENT_MAC_TEXT: &str = "00:1b:63:84:45:e6";
+
+    #[derive(Debug)]
+    struct TestArm {}
+
+    #[async_trait]
+    impl DhcpMode for TestArm {
+        async fn discover_dhcp(
+            &self,
+            _discovery_request: DhcpDiscovery,
+            _config: &Config,
+            _machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
+        ) -> Result<DhcpRecord, DhcpError> {
+            Test::dhcp_record()
+        }
+
+        /// Return a deterministic relayed DHCPv6 record for binary-level tests.
+        async fn discover_dhcp_v6(
+            &self,
+            _discovery_request: DhcpDiscovery,
+            _config: &Config,
+            _machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
+        ) -> Result<V6Outcome, DhcpError> {
+            Ok(V6Outcome::Stateful(Test::dhcp_record_v6()?))
+        }
+
+        // Packets received from DPU to API must be relayed.
+        fn should_be_relayed(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug)]
+    struct Test {}
+
+    impl Test {
+        /// Return the deterministic DHCPv4 record used by packet-processing tests.
+        fn dhcp_record() -> Result<DhcpRecord, DhcpError> {
+            Ok(DhcpRecord {
+                machine_id: Some(
+                    "fm100dsbiu5ckus880v8407u0mkcensa39cule26im5gnpvmuufckacguc0"
+                        .parse()
+                        .unwrap(),
+                ),
+                machine_interface_id: Some("0fd6e9a3-06fc-4a22-ad29-aca299677b00".parse().unwrap()),
+                segment_id: Some("55a2d74e-f9e1-49d5-bf99-be05171a5d75".parse().unwrap()),
+                subdomain_id: Some("56a2d74e-f9e1-49d5-bf99-be05171a5d75".parse().unwrap()),
+                fqdn: "seventeen-connecticut.dev3.frg.nvidia.com".to_string(),
+                mac_address: "b8:3f:d2:90:9a:12".to_string(),
+                address: "10.217.132.204".to_string(),
+                mtu: 6000,
+                prefix: "10.217.132.192/26".to_string(),
+                gateway: Some("10.217.132.193".to_string()),
+                booturl: None,
+                last_invalidation_time: None,
+                ntp_servers: vec!["1.2.3.4".to_string(), "5.6.7.8".to_string()],
+            })
+        }
+
+        /// Return the deterministic DHCPv6 record used by packet-processing tests.
+        fn dhcp_record_v6() -> Result<DhcpRecord, DhcpError> {
+            Ok(DhcpRecord {
+                address: "2001:db8::204".to_string(),
+                prefix: "2001:db8::/64".to_string(),
+                gateway: None,
+                ntp_servers: vec!["2001:db8::123".to_string()],
+                ..Self::dhcp_record()?
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DhcpMode for Test {
+        async fn discover_dhcp(
+            &self,
+            _discovery_request: DhcpDiscovery,
+            _config: &Config,
+            _machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
+        ) -> Result<DhcpRecord, DhcpError> {
+            Test::dhcp_record()
+        }
+
+        /// Return a deterministic direct DHCPv6 record for binary-level tests.
+        async fn discover_dhcp_v6(
+            &self,
+            _discovery_request: DhcpDiscovery,
+            _config: &Config,
+            _machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
+        ) -> Result<V6Outcome, DhcpError> {
+            Ok(V6Outcome::Stateful(Test::dhcp_record_v6()?))
+        }
+
+        fn should_be_relayed(&self) -> bool {
+            false
+        }
+    }
 
     fn make_reload_args(td: &TempDir, interfaces: Vec<String>) -> Args {
         Args {
             interfaces,
+            listen_addr: "0.0.0.0:67".parse().unwrap(),
+            relay_response_port: 67,
             dhcp_config: td.path().join("dhcp.yaml").display().to_string(),
             host_config: Some(td.path().join("host.yaml").display().to_string()),
+            forge_root_ca_path: None,
+            client_cert_path: None,
+            client_key_path: None,
             mode: ServerMode::Dpu,
             grpc_listen_addr: None,
+            metrics_listen_addr: None,
         }
+    }
+
+    /// Verifies direct clients and relay agents use their assigned DHCPv6 source ports.
+    #[test]
+    fn validates_dhcpv6_source_ports() {
+        value_scenarios!(run = |(packet_type, source_port): (u8, u16)| {
+                let source = SocketAddrV6::new(Ipv6Addr::LOCALHOST, source_port, 0, 0);
+                validate_v6_source_port(&[packet_type], &source).is_ok()
+            };
+            "assigned source ports" {
+                // A direct client sends from the DHCPv6 client port.
+                (u8::from(MessageTypeV6::Solicit), dhcproto::v6::CLIENT_PORT) => true,
+                // A relay agent sends Relay-Forward from the DHCPv6 server port.
+                (carbide_dhcpv6::RELAY_FORWARD, dhcproto::v6::SERVER_PORT) => true,
+            }
+            "crossed source ports" {
+                // Direct client traffic on the relay/server port is rejected.
+                (u8::from(MessageTypeV6::Solicit), dhcproto::v6::SERVER_PORT) => false,
+                // Relay traffic on the client port is rejected.
+                (carbide_dhcpv6::RELAY_FORWARD, dhcproto::v6::CLIENT_PORT) => false,
+            }
+        );
+    }
+
+    /// Verifies both forms of last-listener v4 completion fail the generation.
+    #[tokio::test]
+    async fn listener_supervision_fails_when_the_last_v4_listener_exits() {
+        // Exercise normal return and panic because Tokio reports them through different paths.
+        for should_panic in [false, true] {
+            let cancel_token = CancellationToken::new();
+            let mut v4_tasks = JoinSet::new();
+            let (completion_tx, completion_rx) = oneshot::channel();
+            v4_tasks.spawn(async move {
+                completion_tx
+                    .send(())
+                    .expect("supervision test waits for v4 completion");
+                if should_panic {
+                    panic!("synthetic v4 listener panic");
+                }
+            });
+            completion_rx
+                .await
+                .expect("synthetic v4 listener reached its exit");
+
+            // Keep a sibling pending so the test catches the former join_all masking behavior.
+            let mut v6_tasks = JoinSet::new();
+            v6_tasks.spawn(std::future::pending::<()>());
+
+            // Verify supervision reports the exact failure form and tears down the generation.
+            let result = timeout(
+                Duration::from_secs(1),
+                supervise_listener_tasks(v4_tasks, v6_tasks, cancel_token.clone()),
+            )
+            .await
+            .expect("unexpected v4 completion must surface promptly");
+
+            assert!(
+                cancel_token.is_cancelled(),
+                "unexpected v4 completion must cancel its generation"
+            );
+            match (should_panic, result) {
+                (false, Err(V4ListenerFailure::Returned)) => {}
+                (true, Err(V4ListenerFailure::Join(_))) => {}
+                (_, other) => panic!("unexpected v4 supervision result: {other:?}"),
+            }
+        }
+    }
+
+    /// Verifies one failed v4 interface preserves healthy siblings until the last one exits.
+    #[tokio::test]
+    async fn listener_supervision_preserves_siblings_until_the_last_v4_listener_exits() {
+        for (scenario, should_panic) in [
+            // A listener can return after exhausting its bounded socket retries.
+            ("normal return", false),
+            // A listener panic arrives as a Tokio JoinError but has the same cardinality policy.
+            ("panic", true),
+        ] {
+            let cancel_token = CancellationToken::new();
+            let mut v4_tasks = JoinSet::new();
+            let (first_exit_tx, first_exit_rx) = oneshot::channel();
+            v4_tasks.spawn(async move {
+                first_exit_tx
+                    .send(())
+                    .expect("supervision test waits for the first v4 listener");
+                if should_panic {
+                    panic!("synthetic v4 listener panic");
+                }
+            });
+            first_exit_rx
+                .await
+                .expect("first synthetic v4 listener reached its exit");
+
+            // Hold the healthy sibling until the partial failure has been observed.
+            let (last_exit_tx, last_exit_rx) = oneshot::channel();
+            v4_tasks.spawn(async move {
+                last_exit_rx
+                    .await
+                    .expect("supervision test releases the last v4 listener");
+            });
+
+            let mut v6_tasks = JoinSet::new();
+            v6_tasks.spawn(std::future::pending::<()>());
+
+            let ((result, was_cancelled), logs) = capture_logs_async(async {
+                let supervision =
+                    supervise_listener_tasks(v4_tasks, v6_tasks, cancel_token.clone());
+                tokio::pin!(supervision);
+
+                assert!(
+                    timeout(Duration::from_millis(100), &mut supervision)
+                        .await
+                        .is_err(),
+                    "{scenario} from one v4 listener must preserve its healthy sibling"
+                );
+                assert!(
+                    !cancel_token.is_cancelled(),
+                    "{scenario} from one v4 listener must not cancel the generation"
+                );
+
+                last_exit_tx
+                    .send(())
+                    .expect("last synthetic v4 listener is waiting for release");
+                let result = timeout(Duration::from_secs(1), supervision)
+                    .await
+                    .expect("last v4 completion must surface promptly");
+                (result, cancel_token.is_cancelled())
+            })
+            .await;
+
+            assert!(
+                matches!(result, Err(V4ListenerFailure::Returned)),
+                "last v4 listener should fail after first-listener {scenario}: {result:?}"
+            );
+            assert!(was_cancelled, "last v4 exit must cancel the generation");
+            assert!(
+                logs.iter().any(|entry| {
+                    entry.message == "DHCPv4 listener exited unexpectedly"
+                        && entry.field("remaining_v4_listener_count") == Some("1")
+                }),
+                "first-listener {scenario} must be logged as a partial failure"
+            );
+        }
+    }
+
+    /// Verifies explicit cancellation remains clean after partial v4 degradation.
+    #[tokio::test]
+    async fn listener_supervision_cancels_cleanly_after_partial_v4_failure() {
+        let cancel_token = CancellationToken::new();
+        let mut v4_tasks = JoinSet::new();
+        v4_tasks.spawn(async {});
+
+        // Keep both remaining families alive until the generation is intentionally cancelled.
+        let v4_cancel = cancel_token.clone();
+        v4_tasks.spawn(async move {
+            v4_cancel.cancelled().await;
+        });
+        let mut v6_tasks = JoinSet::new();
+        let v6_cancel = cancel_token.clone();
+        v6_tasks.spawn(async move {
+            v6_cancel.cancelled().await;
+        });
+
+        let mut supervision = tokio::spawn(supervise_listener_tasks(
+            v4_tasks,
+            v6_tasks,
+            cancel_token.clone(),
+        ));
+        assert!(
+            timeout(Duration::from_millis(100), &mut supervision)
+                .await
+                .is_err(),
+            "partial v4 failure must keep the generation alive"
+        );
+        assert!(!cancel_token.is_cancelled());
+
+        cancel_token.cancel();
+        let result = timeout(Duration::from_secs(1), supervision)
+            .await
+            .expect("explicit cancellation must drain listener supervision")
+            .expect("listener supervisor task must join");
+        assert!(result.is_ok());
+    }
+
+    /// Verifies v6 exit is non-fatal and intentional generation cancellation remains clean.
+    #[tokio::test]
+    async fn listener_supervision_keeps_v4_running_after_v6_exit() {
+        // Normal return models expected unavailability; panic models an unexpected v6 JoinError.
+        for should_panic in [false, true] {
+            let cancel_token = CancellationToken::new();
+
+            // Keep v4 healthy until the generation is intentionally cancelled.
+            let mut v4_tasks = JoinSet::new();
+            let listener_cancel = cancel_token.clone();
+            v4_tasks.spawn(async move {
+                listener_cancel.cancelled().await;
+            });
+
+            // Hold v6 at a deterministic boundary until supervision is actively running.
+            let mut v6_tasks = JoinSet::new();
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            v6_tasks.spawn(async move {
+                ready_tx
+                    .send(())
+                    .expect("supervision test waits for the v6 listener");
+                release_rx
+                    .await
+                    .expect("supervision test releases the v6 listener");
+                if should_panic {
+                    panic!("synthetic v6 listener panic");
+                }
+            });
+
+            let mut supervision = tokio::spawn(supervise_listener_tasks(
+                v4_tasks,
+                v6_tasks,
+                cancel_token.clone(),
+            ));
+            ready_rx
+                .await
+                .expect("synthetic v6 listener reached the release boundary");
+
+            // Release v6 while the supervisor is being polled; neither exit form may finish it.
+            release_tx
+                .send(())
+                .expect("synthetic v6 listener is waiting for release");
+            assert!(
+                timeout(Duration::from_millis(100), &mut supervision)
+                    .await
+                    .is_err(),
+                "v6 completion must not end the generation"
+            );
+            assert!(
+                !cancel_token.is_cancelled(),
+                "v6 completion must not cancel healthy v4 service"
+            );
+
+            // Explicit cancellation must drain the v4 task and return cleanly.
+            cancel_token.cancel();
+            let result = timeout(Duration::from_secs(1), supervision)
+                .await
+                .expect("intentional cancellation must finish promptly")
+                .expect("listener supervision task must join");
+            assert!(result.is_ok(), "intentional cancellation must be clean");
+        }
+    }
+
+    /// A packet rejected by the DHCPv6 handler admission limit is counted as
+    /// both received and dropped, preserving the metric subset relationship.
+    #[test]
+    fn rate_limited_v6_packet_is_counted_at_ingress() {
+        let metrics = MetricsCapture::start();
+        let packet = [u8::from(MessageTypeV6::Renew), 0, 0, 1];
+        let rate_limiter = Arc::new(tokio::sync::Semaphore::new(0));
+
+        assert!(
+            admit_v6_packet(&packet, "[fe80::1]:546".parse().unwrap(), &rate_limiter,).is_none()
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_requests_total",
+                &[("message_type", "renew")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_requests_dropped_total",
+                &[("reason", "rate_limited")]
+            ),
+            1.0
+        );
     }
 
     /// Reload with no staged `_new` files must not start the server.
@@ -820,6 +1596,8 @@ mod test {
 
         Args {
             interfaces: vec!["eth0".to_string()],
+            listen_addr: "0.0.0.0:67".parse().unwrap(),
+            relay_response_port: 67,
             dhcp_config: base_path.join("conf/conf.yaml").display().to_string(),
             host_config: Some(
                 base_path
@@ -827,8 +1605,12 @@ mod test {
                     .display()
                     .to_string(),
             ),
+            forge_root_ca_path: None,
+            client_cert_path: None,
+            client_key_path: None,
             mode: crate::command_line::ServerMode::Dpu,
             grpc_listen_addr: None,
+            metrics_listen_addr: None,
         }
     }
 
@@ -837,9 +1619,32 @@ mod test {
         init(get_test_args()).await.unwrap();
     }
 
+    #[test]
+    fn forge_client_tls_paths_are_configurable() {
+        let defaults = forge_client_config(&get_test_args()).unwrap();
+        assert_eq!(defaults.root_ca_path, forge_tls::default::ROOT_CA);
+        let default_identity = defaults.client_cert.unwrap();
+        assert_eq!(default_identity.cert_path, forge_tls::default::CLIENT_CERT);
+        assert_eq!(default_identity.key_path, forge_tls::default::CLIENT_KEY);
+
+        let mut explicit = get_test_args();
+        explicit.forge_root_ca_path = Some("/local/ca.crt".to_string());
+        explicit.client_cert_path = Some("/local/client.crt".to_string());
+        explicit.client_key_path = Some("/local/client.key".to_string());
+        let configured = forge_client_config(&explicit).unwrap();
+        assert_eq!(configured.root_ca_path, "/local/ca.crt");
+        let configured_identity = configured.client_cert.unwrap();
+        assert_eq!(configured_identity.cert_path, "/local/client.crt");
+        assert_eq!(configured_identity.key_path, "/local/client.key");
+
+        explicit.client_key_path = None;
+        assert!(forge_client_config(&explicit).is_err());
+    }
+
     #[tokio::test]
     async fn test_arm_non_relayed_packet() {
-        let byte_stream = get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request);
+        let byte_stream =
+            get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
         let handler: Box<dyn DhcpMode> = Box::new(TestArm {});
         let config = init(get_test_args()).await.unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
@@ -848,6 +1653,7 @@ mod test {
         assert!(matches!(
             packet_handler::process_packet(
                 &byte_stream,
+                TEST_SOURCE_ADDRESS,
                 &config,
                 "vlan200",
                 &*handler,
@@ -864,6 +1670,7 @@ mod test {
             Ipv4Addr::new(0, 0, 0, 0),
             Some(Ipv4Addr::from_str("10.217.5.41").unwrap()),
             MessageType::Request,
+            None,
         );
         let handler: Box<dyn DhcpMode> = Box::new(TestArm {});
         let config = init(get_test_args()).await.unwrap();
@@ -873,6 +1680,7 @@ mod test {
         assert!(
             packet_handler::process_packet(
                 &byte_stream,
+                TEST_SOURCE_ADDRESS,
                 &config,
                 "vlan200",
                 &*handler,
@@ -883,20 +1691,27 @@ mod test {
         );
     }
 
+    /// A raw HTTP-client option 60 reaches the shared vendor-class parser
+    /// before the standalone server builds its reply. The reply keeps the
+    /// canonical client ID and uses the parsed architecture for option 67.
     #[tokio::test]
-    async fn test_complete_flow() {
+    async fn test_complete_http_boot_flow() {
         let byte_stream = get_byte_stream(
             Ipv4Addr::new(0, 0, 0, 0),
             Some(Ipv4Addr::from_str("10.217.5.41").unwrap()),
             MessageType::Request,
+            Some(b"HTTPClient::7::"),
         );
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
-        let config = init(get_test_args()).await.unwrap();
+        let mut args = get_test_args();
+        args.relay_response_port = 6768;
+        let config = init(args).await.unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
             std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
         )));
         let packet = packet_handler::process_packet(
             &byte_stream,
+            TEST_SOURCE_ADDRESS,
             &config,
             "vlan200",
             &*handler,
@@ -906,12 +1721,244 @@ mod test {
         .unwrap();
 
         assert_eq!(
-            packet.dst_address(),
-            SocketAddrV4::new(Ipv4Addr::from([0x0a, 0xd9, 0x05, 0x29]), 67)
+            handler.get_destination_address(&packet),
+            SocketAddrV4::new(Ipv4Addr::from([0x0a, 0xd9, 0x05, 0x29]), 6768)
         );
         let packet = Message::decode(&mut dhcproto::Decoder::new(packet.encoded_packet())).unwrap();
 
         assert_eq!(packet.yiaddr(), Ipv4Addr::from([10, 217, 132, 204]));
+        assert_eq!(
+            packet.opts().get(OptionCode::ClassIdentifier),
+            Some(&DhcpOption::ClassIdentifier(b"HTTPClient".to_vec()))
+        );
+        assert_eq!(
+            packet.opts().get(OptionCode::BootfileName),
+            Some(&DhcpOption::BootfileName(
+                b"http://10.217.126.17:8080/public/blobs/internal/x86_64/ipxe.efi".to_vec()
+            ))
+        );
+    }
+
+    /// A decoded packet writes bounded request details at INFO, the complete
+    /// packet at DEBUG, and ticks the counter even when later processing fails.
+    #[tokio::test]
+    async fn process_packet_logs_and_counts_the_decoded_request() {
+        // No other test in this binary processes an Inform, so this label's
+        // delta is immune to tests running in parallel.
+        let byte_stream =
+            get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Inform, None);
+        let handler: Box<dyn DhcpMode> = Box::new(Test {});
+        let config = init(get_test_args()).await.unwrap();
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+        let expected_received_packet = Message::decode(&mut Decoder::new(&byte_stream)).unwrap();
+        let expected_received_packet_text = expected_received_packet.to_string();
+
+        let metrics = carbide_instrument::testing::MetricsCapture::start();
+        let (result, logs) = capture_logs_async(packet_handler::process_packet(
+            &byte_stream,
+            TEST_SOURCE_ADDRESS,
+            &config,
+            "vlan200",
+            &*handler,
+            &mut machine_cache,
+        ))
+        .await;
+
+        assert!(matches!(result, Err(DhcpError::UnhandledMessageType(..))));
+        let request_log_index = logs
+            .iter()
+            .position(|entry| entry.metadata_name == "dhcp_server_request_received")
+            .expect("the decoded request Event should write an INFO record");
+        let request_log = &logs[request_log_index];
+        assert_eq!(request_log.level, tracing::Level::INFO);
+        assert_eq!(request_log.field("bootp_op"), Some("1"));
+        assert_eq!(request_log.field("source_address"), Some("192.0.2.10:68"));
+        assert_eq!(
+            request_log.field("xid"),
+            Some(expected_received_packet.xid().to_string().as_str())
+        );
+        assert_eq!(
+            request_log.field("broadcast_flag"),
+            Some(
+                expected_received_packet
+                    .flags()
+                    .broadcast()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            request_log.field("ciaddr"),
+            Some(expected_received_packet.ciaddr().to_string().as_str())
+        );
+        assert_eq!(
+            request_log.field("yiaddr"),
+            Some(expected_received_packet.yiaddr().to_string().as_str())
+        );
+        assert_eq!(
+            request_log.field("siaddr"),
+            Some(expected_received_packet.siaddr().to_string().as_str())
+        );
+        assert_eq!(
+            request_log.field("giaddr"),
+            Some(expected_received_packet.giaddr().to_string().as_str())
+        );
+        assert_eq!(request_log.field("chaddr"), Some(TEST_CLIENT_MAC_TEXT));
+        assert_eq!(request_log.field("received_packet"), None);
+
+        let debug_log = logs
+            .get(request_log_index + 1)
+            .expect("the full-packet DEBUG record should immediately follow the Event");
+        assert_eq!(debug_log.level, tracing::Level::DEBUG);
+        assert_eq!(debug_log.message, "Received Packet");
+        assert_eq!(
+            debug_log.field("packet.received"),
+            Some(expected_received_packet_text.as_str())
+        );
+        assert_eq!(
+            metrics.counter_delta("carbide_dhcp_requests_total", &[("message_type", "inform")]),
+            1.0
+        );
+    }
+
+    /// A wire-provided hardware-address length cannot make the structured INFO
+    /// field or full-packet DEBUG formatter index beyond BOOTP's fixed field.
+    #[tokio::test]
+    async fn process_packet_rejects_oversized_hardware_address_length() {
+        let mut byte_stream =
+            get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
+        byte_stream[2] = 17;
+        let handler: Box<dyn DhcpMode> = Box::new(Test {});
+        let config = init(get_test_args()).await.unwrap();
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+
+        let result = packet_handler::process_packet(
+            &byte_stream,
+            TEST_SOURCE_ADDRESS,
+            &config,
+            "vlan200",
+            &*handler,
+            &mut machine_cache,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(DhcpError::InvalidInput(error))
+                if error == "DHCP hardware address length 17 exceeds the 16-byte BOOTP field"
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_packet_rejects_an_empty_buffer() {
+        let handler: Box<dyn DhcpMode> = Box::new(Test {});
+        let config = init(get_test_args()).await.unwrap();
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+
+        let result = packet_handler::process_packet(
+            &[],
+            TEST_SOURCE_ADDRESS,
+            &config,
+            "vlan200",
+            &*handler,
+            &mut machine_cache,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(DhcpError::PacketDecodeFailure(
+                dhcproto::error::DecodeError::NotEnoughBytes
+            ))
+        ));
+    }
+
+    /// A successful send writes bounded reply details at INFO and immediately
+    /// follows them with the complete packet at DEBUG.
+    #[tokio::test]
+    async fn send_logs_bounded_reply_details_before_the_full_packet() {
+        let byte_stream =
+            get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
+        let handler: Box<dyn DhcpMode> = Box::new(Test {});
+        let config = init(get_test_args()).await.unwrap();
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+        let packet = packet_handler::process_packet(
+            &byte_stream,
+            TEST_SOURCE_ADDRESS,
+            &config,
+            "vlan200",
+            &*handler,
+            &mut machine_cache,
+        )
+        .await
+        .unwrap();
+        let expected_reply = Message::decode(&mut Decoder::new(packet.encoded_packet())).unwrap();
+        let expected_reply_text = expected_reply.to_string();
+
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let SocketAddr::V4(destination_address) = receiver.local_addr().unwrap() else {
+            panic!("the IPv4 loopback receiver should have an IPv4 address");
+        };
+        let socket = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+
+        let (result, logs) = capture_logs_async(packet.send(destination_address, socket)).await;
+        result.unwrap();
+
+        let reply_log_index = logs
+            .iter()
+            .position(|entry| entry.metadata_name == "dhcp_server_reply_sent")
+            .expect("the successful send should write an INFO Event");
+        let reply_log = &logs[reply_log_index];
+        assert_eq!(reply_log.level, tracing::Level::INFO);
+        assert_eq!(reply_log.field("message_type"), Some("ack"));
+        assert_eq!(
+            reply_log.field("destination_address"),
+            Some(destination_address.to_string().as_str())
+        );
+        assert_eq!(
+            reply_log.field("xid"),
+            Some(expected_reply.xid().to_string().as_str())
+        );
+        assert_eq!(
+            reply_log.field("broadcast_flag"),
+            Some(expected_reply.flags().broadcast().to_string().as_str())
+        );
+        assert_eq!(
+            reply_log.field("ciaddr"),
+            Some(expected_reply.ciaddr().to_string().as_str())
+        );
+        assert_eq!(
+            reply_log.field("yiaddr"),
+            Some(expected_reply.yiaddr().to_string().as_str())
+        );
+        assert_eq!(
+            reply_log.field("siaddr"),
+            Some(expected_reply.siaddr().to_string().as_str())
+        );
+        assert_eq!(
+            reply_log.field("giaddr"),
+            Some(expected_reply.giaddr().to_string().as_str())
+        );
+        assert_eq!(reply_log.field("chaddr"), Some(TEST_CLIENT_MAC_TEXT));
+        assert_eq!(reply_log.field("sent_packet"), None);
+
+        let debug_log = logs
+            .get(reply_log_index + 1)
+            .expect("the full-packet DEBUG record should immediately follow the Event");
+        assert_eq!(debug_log.level, tracing::Level::DEBUG);
+        assert_eq!(debug_log.message, "Sent DHCP packet");
+        assert_eq!(
+            debug_log.field("packet.send"),
+            Some(expected_reply_text.as_str())
+        );
     }
 
     #[tokio::test]
@@ -920,6 +1967,7 @@ mod test {
             Ipv4Addr::new(10, 217, 132, 204),
             Some(Ipv4Addr::from_str("10.217.5.41").unwrap()),
             MessageType::Request,
+            None,
         );
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
         let config = init(get_test_args()).await.unwrap();
@@ -928,6 +1976,7 @@ mod test {
         )));
         let packet = packet_handler::process_packet(
             &byte_stream,
+            TEST_SOURCE_ADDRESS,
             &config,
             "vlan200",
             &*handler,
@@ -937,7 +1986,7 @@ mod test {
         .unwrap();
 
         assert_eq!(
-            packet.dst_address(),
+            handler.get_destination_address(&packet),
             SocketAddrV4::new(Ipv4Addr::from([10, 217, 5, 41]), 67)
         );
 
@@ -948,7 +1997,8 @@ mod test {
 
     #[tokio::test]
     async fn test_send_metadata_to_agent() {
-        let byte_stream = get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Discover);
+        let byte_stream =
+            get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Discover, None);
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
         let config = init(get_test_args()).await.unwrap();
         let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
@@ -996,7 +2046,7 @@ mod test {
         let dhcp_timestamps = dhcp_timestamps.lock().await;
 
         let timestamp = dhcp_timestamps
-            .get_timestamp(&config.host_config.as_ref().unwrap().host_interface_id)
+            .get_timestamp(&config.host_config().unwrap().host_interface_id)
             .unwrap();
 
         let dhcp_time: DateTime<Utc> = timestamp.parse().unwrap();
@@ -1005,7 +2055,7 @@ mod test {
         let mut dhcp_timestamps_new = DhcpTimestamps::new(DhcpTimestampsFilePath::Test);
         dhcp_timestamps_new.read().unwrap();
         let file_timestamp: DateTime<Utc> = dhcp_timestamps_new
-            .get_timestamp(&config.host_config.unwrap().host_interface_id)
+            .get_timestamp(&config.host_config().unwrap().host_interface_id)
             .unwrap()
             .parse()
             .unwrap();
@@ -1017,7 +2067,7 @@ mod test {
     async fn validate_test_host_config() {
         let config = init(get_test_args()).await.unwrap();
 
-        let host_config = config.host_config.unwrap();
+        let host_config = config.host_config().unwrap();
         assert_eq!(host_config.host_ip_addresses.len(), 2);
         assert!(host_config.host_ip_addresses["vlan200"].booturl.is_none());
     }
@@ -1026,13 +2076,14 @@ mod test {
         ciaddr: Ipv4Addr,
         giaddr: Option<Ipv4Addr>,
         message_type: MessageType,
+        class_identifier: Option<&[u8]>,
     ) -> Vec<u8> {
         let mut msg = Message::new(
             ciaddr,
             Ipv4Addr::new(0, 0, 0, 0),
             Ipv4Addr::new(0, 0, 0, 0),
             Ipv4Addr::new(0, 0, 0, 0),
-            &[00, 0x1b, 0x63, 0x84, 0x45, 0xe6],
+            TEST_CLIENT_MAC,
         );
 
         if let Some(giaddr) = giaddr {
@@ -1040,6 +2091,10 @@ mod test {
         }
 
         msg.opts_mut().insert(DhcpOption::MessageType(message_type));
+        if let Some(class_identifier) = class_identifier {
+            msg.opts_mut()
+                .insert(DhcpOption::ClassIdentifier(class_identifier.to_vec()));
+        }
 
         let mut encoded_packet = Vec::new();
         let mut e = dhcproto::Encoder::new(&mut encoded_packet);
@@ -1049,7 +2104,7 @@ mod test {
 
     #[tokio::test]
     async fn validate_basic_ack() {
-        let packet = get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request);
+        let packet = get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Request, None);
 
         let config = init(get_test_args()).await.unwrap();
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
@@ -1059,6 +2114,7 @@ mod test {
 
         let encoded_packet = packet_handler::process_packet(
             &packet,
+            TEST_SOURCE_ADDRESS,
             &config,
             "vlan200",
             &*handler,
@@ -1066,6 +2122,11 @@ mod test {
         )
         .await
         .unwrap();
+
+        assert_eq!(
+            handler.get_destination_address(&encoded_packet),
+            SocketAddrV4::new(Ipv4Addr::BROADCAST, 68)
+        );
 
         let packet = Message::decode(&mut Decoder::new(encoded_packet.encoded_packet())).unwrap();
         assert_eq!(
@@ -1076,7 +2137,7 @@ mod test {
 
     #[tokio::test]
     async fn validate_nak() {
-        let packet = get_byte_stream(Ipv4Addr::new(10, 0, 0, 1), None, MessageType::Request);
+        let packet = get_byte_stream(Ipv4Addr::new(10, 0, 0, 1), None, MessageType::Request, None);
 
         let config = init(get_test_args()).await.unwrap();
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
@@ -1086,6 +2147,7 @@ mod test {
 
         let encoded_packet = packet_handler::process_packet(
             &packet,
+            TEST_SOURCE_ADDRESS,
             &config,
             "vlan200",
             &*handler,

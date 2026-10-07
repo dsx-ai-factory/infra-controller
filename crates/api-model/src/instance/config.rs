@@ -66,6 +66,9 @@ pub struct InstanceConfig {
 
     /// Configures instance spx
     pub spxconfig: InstanceSpxConfig,
+
+    /// Power profile managed by the external power provisioning service.
+    pub power_profile: Option<String>,
 }
 
 impl InstanceConfig {

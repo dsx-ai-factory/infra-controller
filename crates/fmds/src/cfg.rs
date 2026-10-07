@@ -36,6 +36,11 @@ pub struct Options {
     #[clap(long, default_value = "0.0.0.0:80")]
     pub rest_address: SocketAddr,
 
+    /// Optional additional REST listen address for compatibility. When
+    /// omitted, FMDS listens only on `rest_address`.
+    #[clap(long)]
+    pub compatibility_rest_address: Option<SocketAddr>,
+
     /// Prometheus scrape address for `/metrics` (HTTP request stats for the REST metadata API).
     #[clap(long, default_value = "0.0.0.0:8888")]
     pub metrics_address: SocketAddr,
@@ -59,6 +64,13 @@ pub struct Options {
     #[clap(long)]
     pub client_key: Option<String>,
 
+    /// Path of the dpu-agent's local API socket. When set, fmds fetches
+    /// short-lived node-auth bearer JWTs from the agent and presents them to
+    /// carbide-api — instead of (or in addition to) the mTLS client cert —
+    /// so this pod no longer needs the machine private key mounted.
+    #[clap(long, env = "FMDS_NODE_TOKEN_SOCKET")]
+    pub node_token_socket: Option<String>,
+
     /// Name of the interface to assign the metadata-service address to.
     #[clap(long, env = "FMDS_INTERFACE_NAME", default_value = "f_pf0hpf_if")]
     pub interface_name: String,
@@ -75,5 +87,36 @@ pub struct Options {
 impl Options {
     pub fn load() -> Self {
         Self::parse()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatibility_rest_address_is_disabled_by_default() {
+        let options = Options::try_parse_from(["carbide-fmds"]).unwrap();
+
+        assert_eq!(options.rest_address, "0.0.0.0:80".parse().unwrap());
+        assert_eq!(options.compatibility_rest_address, None);
+    }
+
+    #[test]
+    fn rest_addresses_can_be_overridden_independently() {
+        let options = Options::try_parse_from([
+            "carbide-fmds",
+            "--rest-address",
+            "127.0.0.1:8080",
+            "--compatibility-rest-address",
+            "127.0.0.1:7778",
+        ])
+        .unwrap();
+
+        assert_eq!(options.rest_address, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(
+            options.compatibility_rest_address,
+            Some("127.0.0.1:7778".parse().unwrap())
+        );
     }
 }

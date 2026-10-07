@@ -6,11 +6,13 @@ package workflow
 import (
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 func DiscoverNVLinkLogicalPartitionInventory(ctx workflow.Context) error {
@@ -50,7 +52,7 @@ func DiscoverNVLinkLogicalPartitionInventory(ctx workflow.Context) error {
 }
 
 // CreateNVLinkLogicalPartition is a workflow to create new NVLinkLogical Partitions using the CreateNVLinkLogicalPartitionOnSite activity
-func CreateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkLogicalPartitionCreationRequest) (*cwssaws.NVLinkLogicalPartition, error) {
+func CreateNVLinkLogicalPartition(ctx workflow.Context, request *corev1.NVLinkLogicalPartitionCreationRequest) (*corev1.NVLinkLogicalPartition, error) {
 	var requestId string
 	if request != nil {
 		requestId = request.Id.Value
@@ -60,16 +62,15 @@ func CreateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkL
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -78,7 +79,7 @@ func CreateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkL
 
 	var nvLinkPartitionManager activity.ManageNVLinkLogicalPartition
 
-	var nvLinkLogicalPartition cwssaws.NVLinkLogicalPartition
+	var nvLinkLogicalPartition corev1.NVLinkLogicalPartition
 	err := workflow.ExecuteActivity(ctx, nvLinkPartitionManager.CreateNVLinkLogicalPartitionOnSite, request).Get(ctx, &nvLinkLogicalPartition)
 	if err != nil {
 		logger.Error().Err(err).Str("Activity", "CreateNVLinkLogicalPartitionOnSite").Msg("Failed to execute activity from workflow")
@@ -91,7 +92,7 @@ func CreateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkL
 }
 
 // UpdateNVLinkLogicalPartition is a workflow to update NVLinkLogical Partitions using the UpdateNVLinkLogicalPartitionOnSite activity
-func UpdateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkLogicalPartitionUpdateRequest) error {
+func UpdateNVLinkLogicalPartition(ctx workflow.Context, request *corev1.NVLinkLogicalPartitionUpdateRequest) error {
 	var requestId string
 	if request != nil {
 		requestId = request.Id.Value
@@ -101,16 +102,15 @@ func UpdateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkL
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -131,7 +131,7 @@ func UpdateNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkL
 }
 
 // DeleteNVLinkLogicalPartition is a workflow to Delete NVLinkLogical Partitions using the DeleteNVLinkLogicalPartitionOnSite activity
-func DeleteNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkLogicalPartitionDeletionRequest) error {
+func DeleteNVLinkLogicalPartition(ctx workflow.Context, request *corev1.NVLinkLogicalPartitionDeletionRequest) error {
 	var requestId string
 	if request != nil {
 		requestId = request.Id.Value
@@ -141,16 +141,15 @@ func DeleteNVLinkLogicalPartition(ctx workflow.Context, request *cwssaws.NVLinkL
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

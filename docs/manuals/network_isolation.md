@@ -8,9 +8,9 @@ configuration guides linked below.
 
 | Fabric | Operator-facing primitive | Isolation enforced by |
 |---|---|---|
-| Ethernet | VPC + VpcPrefix (+ optional Network Security Group) | DPU VRF per VPC (HBN / NVUE) over a pure type-5 EVPN overlay |
+| Ethernet | VPC + VpcPrefix (+ optional Network Security Group) | DPU VRF per VPC (HBN / NVUE) over a pure type-5 EVPN overlay with null-routes to isolated tenant VPCs |
 | InfiniBand | InfiniBand partition | UFM P_Key partition membership; `IbFabricMonitor` reconciler |
-| NVLink | NVLink logical partition | NMX-M / NMX-C partition lifecycle; `NvlPartitionMonitor` reconciler |
+| NVLink | NVLink logical partition | NMX-C partition lifecycle; `NvlPartitionMonitor` reconciler |
 
 ---
 
@@ -28,8 +28,7 @@ then use the operations matrix in each guide.
   wrapper).
 - Use **`nico-admin-cli`** (which speaks the gRPC API directly) only for
   operations the REST API does not expose — for example, NMX-C endpoint
-  registration, the NVLink GPU-mapping populate step, or break-glass fabric
-  cleanup.
+  registration or break-glass fabric cleanup.
 
 **Tenant**
 
@@ -119,12 +118,11 @@ UFM / OpenSM hardening.
 
 ## NVLink
 
-NVLink logical partitions group GPUs across hosts into a single isolated
-NVLink domain. NICo drives partition lifecycle against the NMX-M REST API and
-the NMX-C gRPC API and reconciles desired partitions periodically. Each tenant
-instance that requests NVLink connectivity is placed into the partition
-corresponding to its allocation; a host whose GPUs are not in a partition
-cannot reach any other host's GPUs over NVLink.
+NVLink logical partitions express how GPUs should be grouped across hosts.
+Within each physical NVLink domain, NICo places the requested GPUs into an
+NMX-C partition and reconciles that partition through the NMX-C gRPC API.
+Multiple tenants' partitions can coexist in one physical domain, while GPUs in
+different partitions remain isolated from each other.
 
 See [NVLink Partitioning](nvlink_partitioning.md) for the operator
 configuration guide.
@@ -155,7 +153,7 @@ The following invariants apply to every fabric.
   APIs the normal lifecycle uses, so external fabric managers do not retain
   stale tenant references.
 - **External fabric reachability is monitored.** Each external fabric service
-  (UFM, NMX-M, NMX-C) is monitored from NICo with request-success and latency
+  (UFM and NMX-C) is monitored from NICo with request-success and latency
   metrics so that fabric-side outages can be distinguished from NICo-side
   configuration errors.
 
@@ -165,4 +163,4 @@ fabrics, see
 
 For the Day 0 IP, DHCP, DNS, and admin-network configuration that every
 isolation guarantee on this page rests on, see
-[Day 0 IP and Network Configuration](../getting-started/installation-options/day0-ip-network-config.md).
+[IP and Network Configuration](../provisioning/ip-and-network-configuration.md).

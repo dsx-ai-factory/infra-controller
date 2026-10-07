@@ -1,0 +1,233 @@
+suite: bootstrap CA configuration
+templates:
+  - daemonset.yaml
+tests:
+  - it: preserves the historical bare init-container invocation by default
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+      - notContains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: bootstrap-ca-source
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: bootstrap-ca-source
+
+  - it: passes a custom URL only for legacy download mode
+    set:
+      image:
+        repository: test
+        tag: test
+      bootstrapCa:
+        source: legacy_download
+        url: http://pxe.example.test/custom/ca.pem
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+            - --bootstrap-ca-url=http://pxe.example.test/custom/ca.pem
+      - notContains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: bootstrap-ca-source
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: bootstrap-ca-source
+
+  - it: safely quotes a custom URL containing YAML-sensitive characters
+    set:
+      image:
+        repository: test
+        tag: test
+      bootstrapCa:
+        source: legacy_download
+        url: 'https://pxe.example.test/custom/ca.pem?site="east"&path=trust\anchors'
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+            - '--bootstrap-ca-url=https://pxe.example.test/custom/ca.pem?site="east"&path=trust\anchors'
+
+  - it: projects a Secret CA read-only at the fixed mounted-source path
+    set:
+      image:
+        repository: test
+        tag: test
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+          key: trust-anchor.pem
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+            - --bootstrap-ca-source=mounted
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: bootstrap-ca-source
+            mountPath: /var/run/secrets/nico-bootstrap-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: bootstrap-ca-source
+            secret:
+              secretName: site-bootstrap-ca
+              items:
+                - key: trust-anchor.pem
+                  path: ca.pem
+
+  - it: projects a ConfigMap CA using ca.crt by default
+    set:
+      image:
+        repository: test
+        tag: test
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: ConfigMap
+          name: site-bootstrap-ca
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+            - --bootstrap-ca-source=mounted
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: bootstrap-ca-source
+            mountPath: /var/run/secrets/nico-bootstrap-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: bootstrap-ca-source
+            configMap:
+              name: site-bootstrap-ca
+              items:
+                - key: ca.crt
+                  path: ca.pem
+
+  - it: uses the shared certificate directory in mounted mode when certsDir is empty
+    set:
+      certsDir: ""
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+            - --bootstrap-ca-source=mounted
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+
+  - it: rejects an unknown source
+    set:
+      bootstrapCa:
+        source: something_else
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.source must be one of legacy_download or mounted; got "something_else"
+
+  - it: rejects a mounted object in legacy download mode
+    set:
+      bootstrapCa:
+        source: legacy_download
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.object is only valid when bootstrapCa.source is mounted
+
+  - it: rejects a URL in mounted mode
+    set:
+      bootstrapCa:
+        source: mounted
+        url: http://pxe.example.test/custom/ca.pem
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.url is only valid when bootstrapCa.source is legacy_download
+
+  - it: rejects a non-default certificate directory in mounted mode
+    set:
+      certsDir: /custom/cert/dir
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.source mounted requires certsDir=/opt/forge because the init container installs /opt/forge/forge_root.pem there
+
+  - it: requires a Secret or ConfigMap kind in mounted mode
+    set:
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: PersistentVolumeClaim
+          name: site-bootstrap-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.object.kind must be Secret or ConfigMap when bootstrapCa.source is mounted
+
+  - it: requires an object name in mounted mode
+    set:
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: Secret
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.object.name is required when bootstrapCa.source is mounted
+
+  - it: rejects an explicitly empty object key in mounted mode
+    set:
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+          key: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapCa.object.key must not be empty when bootstrapCa.source is mounted

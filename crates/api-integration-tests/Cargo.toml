@@ -21,19 +21,30 @@ edition.workspace = true
 description = "Integration tests for carbide-api"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dev-dependencies]
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 carbide-machine-a-tron = { path = "../machine-a-tron" }
+carbide-rpc = { path = "../rpc" }
+carbide-uuid = { path = "../uuid" }
 carbide-utils = { path = "../utils", features = ["sqlx"] }
 carbide-api-test-helper = { path = "../api-test-helper" }
+carbide-kms-provider = { path = "../kms-provider" }
 carbide-secrets = { path = "../secrets" }
+carbide-api-core = { path = "../api-core", default-features = false }
+carbide-api-db = { path = "../api-db", default-features = false, features = [
+  "test-support",
+] }
+carbide-api-model = { path = "../api-model", default-features = false }
 bmc-mock = { path = "../bmc-mock" }
+bmc-vendor = { path = "../bmc-vendor" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 #these are alphabetized
 askama_escape = { workspace = true }
+base64 = { workspace = true }
 ctor = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }

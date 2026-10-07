@@ -22,9 +22,13 @@ ARG CONTAINER_RUNTIME_X86_64
 FROM $CONTAINER_BUILD_X86_64 as builder
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
+ARG CI_COMMIT_TIMESTAMP
+ENV CI_COMMIT_TIMESTAMP $CI_COMMIT_TIMESTAMP
 
 ARG VERSION
 ENV VERSION $VERSION
+ARG CARBIDE_BUILD_HELM_VERSION
+ENV CARBIDE_BUILD_HELM_VERSION $CARBIDE_BUILD_HELM_VERSION
 ENV CONTAINER_REPO_ROOT=/carbide
 
 RUN USER=root cargo new --bin carbide
@@ -34,17 +38,29 @@ COPY . ./
 # --mount=type=cache persists the sccache directory across docker build invocations.
 # Uses id=sccache-x86_64 so this build shares the cache with Dockerfile.release-container-sa-x86_64
 # (both compile the same targets on the same arch). Requires BuildKit (default in Docker 23+).
+#
+# The cache mount alone is only useful on a machine that keeps its BuildKit
+# state. CI runners get a fresh builder per job, so when the workflow supplies
+# Actions cache credentials we point sccache at that shared service instead and
+# the mount just becomes local scratch. dev/docker/sccache-cache.sh picks
+# between the two and reports on whether the choice worked.
 RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+    --mount=type=secret,id=actions_results_url \
+    --mount=type=secret,id=actions_runtime_token \
+    --mount=type=secret,id=sccache_gha_rw_mode \
   export CARGO_MAKE_SKIP_CODECOV="true" && \
   export DATABASE_URL="postgresql://root@%2Fvar%2Frun%2Fpostgresql/root" && \
   export SCCACHE_DIR=/sccache && \
   export RUSTC_WRAPPER=sccache && \
   export CARGO_PROFILE_RELEASE_DEBUG=true && \
+  . /carbide/dev/docker/sccache-cache.sh && \
+  sccache_setup && \
   /etc/init.d/postgresql start && \
   sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;" && \
   createdb root && \
   cargo make build-release-container-services && \
   echo "$(date): Finished cargo make build-release-container-services\n" && \
+  sccache_report && \
   mkdir -p /carbide/target/bin && \
   find /carbide/target/release -maxdepth 1 -type f -exec cp -t /carbide/target/bin {} + && \
   rm -rf /carbide/target/debug && \
@@ -55,12 +71,15 @@ RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
 FROM $CONTAINER_RUNTIME_X86_64
 RUN mkdir -p /opt/carbide/migrations && \
   mkdir -p /opt/carbide/pxe/templates && \
+  mkdir -p /opt/carbide/scout-firmware-scripts && \
   mkdir -p /opt/carbide/static
 
 RUN echo "$(date): Start runtime container build"
 
 COPY --from=builder ["/carbide/target/bin/carbide-api", "/carbide/target/bin/carbide", "/carbide/target/bin/carbide-dns", "/carbide/target/bin/nico-admin-cli", "/carbide/target/bin/carbide-dsx-exchange-consumer", "/carbide/target/bin/forge-dpu-agent", "/carbide/target/bin/forge-dhcp-server", "/carbide/target/bin/forge-hw-health", "/carbide/target/bin/forge-log-parser", "/carbide/target/bin/ssh-console", "/carbide/target/bin/carbide-bmc-proxy", "/opt/carbide/"]
 COPY --from=builder /carbide/target/bin/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks
+RUN mkdir -p /usr/lib/kea/hooks && \
+    ln -sf /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so /usr/lib/kea/hooks/libdhcp.so
 RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli && \
     ln -s /opt/carbide/nico-admin-cli /opt/carbide/forge-admin-cli
 
@@ -68,6 +87,7 @@ RUN echo "$(date): Finished copies"
 
 COPY crates/api-db/migrations/ /opt/carbide/migrations/
 COPY pxe/templates/*  /opt/carbide/pxe/templates/
+COPY pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
 COPY crates/api/casbin-policy.csv /opt/carbide/
 
 ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv

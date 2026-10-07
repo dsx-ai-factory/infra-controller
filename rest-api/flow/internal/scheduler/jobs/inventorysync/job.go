@@ -21,11 +21,11 @@ import (
 
 // envExpectedSyncEnabled gates the expected-inventory mirror that runs at
 // the start of each inventory cycle (see expected_mirror*.go). Default is
-// "off": Flow keeps using its existing ingestion path until an operator
-// opts in. Accepted truthy values are anything strconv.ParseBool accepts
-// (1, t, T, true, True, TRUE, ...). An unset, empty, or unparseable value
-// resolves to disabled — the conservative default given the mirror writes
-// directly to the rack / component tables.
+// "on": an unset or empty value enables the mirror. Accepted values are
+// anything strconv.ParseBool accepts (1, t, T, true, True, TRUE, 0, false,
+// ...). An unparseable value resolves to disabled with a warning so a
+// typo cannot silently leave the gate in an ambiguous state. Set the
+// variable to false/0/f to opt out.
 const envExpectedSyncEnabled = "FLOW_EXPECTED_INVENTORY_SYNC_ENABLED"
 
 // Job implements scheduler.Job for the inventory sync task.
@@ -39,7 +39,7 @@ type Job struct {
 func readExpectedSyncEnabled() bool {
 	raw := os.Getenv(envExpectedSyncEnabled)
 	if raw == "" {
-		return false
+		return true
 	}
 	enabled, err := strconv.ParseBool(raw)
 	if err != nil {

@@ -29,7 +29,7 @@ Show details for one DPA interface:
     $ nico-admin-cli dpa show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The DPA Interface ID to query, leave empty for all (default)")]
-    pub id: Option<DpaInterfaceId>,
+    pub(crate) id: Option<DpaInterfaceId>,
 }

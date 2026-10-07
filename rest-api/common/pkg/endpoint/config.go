@@ -5,7 +5,9 @@ package endpoint
 
 import (
 	"errors"
-	"fmt"
+	"net"
+	"strconv"
+	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
 )
@@ -36,6 +38,11 @@ func (c *Config) Validate() error {
 }
 
 // Target returns the host:port connection string.
+// IPv6 hosts may be supplied with or without brackets.
 func (c *Config) Target() string {
-	return fmt.Sprintf("%s:%v", c.Host, c.Port)
+	host := c.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, strconv.Itoa(c.Port))
 }

@@ -13,6 +13,9 @@ tests:
   # ---------------------------------------------------------------- nico default
   - it: "[nico] nico-api certificate uses nico names and nico.local"
     template: charts/nico-api/templates/certificate.yaml
+    set:
+      # Clear extraDnsNames to test pure generated behavior
+      nico-api.certificate.extraDnsNames: []
     asserts:
       - equal:
           path: metadata.name
@@ -59,6 +62,9 @@ tests:
           value:
             - carbide-api.forge-system.svc.cluster.local
             - carbide-api.forge-system
+            # carbide-api.forge is in extraDnsNames by default for backwards
+            # compatibility with forge-dpu-agent (see issue #2823)
+            - carbide-api.forge
       - equal:
           path: spec.uris
           value:

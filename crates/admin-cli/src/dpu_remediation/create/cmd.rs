@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
 
-pub async fn create_dpu_remediation(
+pub(super) async fn create_dpu_remediation(
     create_remediation: Args,
     api_client: &ApiClient,
 ) -> Result<(), CarbideCliError> {

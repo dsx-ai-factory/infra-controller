@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -25,21 +25,24 @@ use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 
 mod bmc_mock;
+mod metrics;
 mod test_support;
 mod tool;
+
+pub const DEFAULT_IPMI_PORT: u16 = 623;
 
 #[async_trait]
 pub trait IPMITool: Send + Sync + 'static {
     async fn bmc_cold_reset(
         &self,
-        bmc_ip: IpAddr,
+        bmc_address: SocketAddr,
         credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report>;
 
     async fn restart(
         &self,
         machine_id: &MachineId,
-        bmc_ip: IpAddr,
+        bmc_address: SocketAddr,
         legacy_boot: bool,
         credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report>;

@@ -7,9 +7,9 @@ import (
 	"context"
 	"errors"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -30,8 +30,8 @@ func NewManageTenantIdentity(carbideClient *client.CoreGrpcAtomicClient) ManageT
 // CreateOrUpdateTenantIdentityConfigurationOnSite is an activity to create or update Tenant Identity Config using Core gRPC API
 func (m *ManageTenantIdentity) CreateOrUpdateTenantIdentityConfigurationOnSite(
 	ctx context.Context,
-	request *cwssaws.SetTenantIdentityConfigRequest,
-) (*cwssaws.TenantIdentityConfigResponse, error) {
+	request *corev1.SetTenantIdentityConfigRequest,
+) (*corev1.TenantIdentityConfigResponse, error) {
 	logger := log.With().Str("Activity", "CreateOrUpdateTenantIdentityConfigurationOnSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -66,8 +66,8 @@ func (m *ManageTenantIdentity) CreateOrUpdateTenantIdentityConfigurationOnSite(
 // GetTenantIdentityConfigurationFromSite is an activity to get Tenant Identity Config using Core gRPC API
 func (m *ManageTenantIdentity) GetTenantIdentityConfigurationFromSite(
 	ctx context.Context,
-	request *cwssaws.GetTenantIdentityConfigRequest,
-) (*cwssaws.TenantIdentityConfigResponse, error) {
+	request *corev1.GetTenantIdentityConfigRequest,
+) (*corev1.TenantIdentityConfigResponse, error) {
 	logger := log.With().Str("Activity", "GetTenantIdentityConfigurationFromSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -98,7 +98,7 @@ func (m *ManageTenantIdentity) GetTenantIdentityConfigurationFromSite(
 // DeleteTenantIdentityConfigurationOnSite is an activity to delete Tenant Identity Config using Core gRPC API
 func (m *ManageTenantIdentity) DeleteTenantIdentityConfigurationOnSite(
 	ctx context.Context,
-	request *cwssaws.GetTenantIdentityConfigRequest,
+	request *corev1.GetTenantIdentityConfigRequest,
 ) (*emptypb.Empty, error) {
 	logger := log.With().Str("Activity", "DeleteTenantIdentityConfigurationOnSite").Logger()
 	logger.Info().Msg("Starting activity")
@@ -130,8 +130,8 @@ func (m *ManageTenantIdentity) DeleteTenantIdentityConfigurationOnSite(
 // CreateOrUpdateTenantIdentityTokenDelegationOnSite is an activity to create or update Token Delegation using Core gRPC API
 func (m *ManageTenantIdentity) CreateOrUpdateTenantIdentityTokenDelegationOnSite(
 	ctx context.Context,
-	request *cwssaws.TokenDelegationRequest,
-) (*cwssaws.TokenDelegationResponse, error) {
+	request *corev1.TokenDelegationRequest,
+) (*corev1.TokenDelegationResponse, error) {
 	logger := log.With().Str("Activity", "CreateOrUpdateTenantIdentityTokenDelegationOnSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -166,8 +166,8 @@ func (m *ManageTenantIdentity) CreateOrUpdateTenantIdentityTokenDelegationOnSite
 // GetTenantIdentityTokenDelegationFromSite is an activity to get Token Delegation using Core gRPC API
 func (m *ManageTenantIdentity) GetTenantIdentityTokenDelegationFromSite(
 	ctx context.Context,
-	request *cwssaws.GetTokenDelegationRequest,
-) (*cwssaws.TokenDelegationResponse, error) {
+	request *corev1.GetTokenDelegationRequest,
+) (*corev1.TokenDelegationResponse, error) {
 	logger := log.With().Str("Activity", "GetTenantIdentityTokenDelegationFromSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -198,7 +198,7 @@ func (m *ManageTenantIdentity) GetTenantIdentityTokenDelegationFromSite(
 // DeleteTenantIdentityTokenDelegationOnSite is an activity to delete Token Delegation using Core gRPC API
 func (m *ManageTenantIdentity) DeleteTenantIdentityTokenDelegationOnSite(
 	ctx context.Context,
-	request *cwssaws.GetTokenDelegationRequest,
+	request *corev1.GetTokenDelegationRequest,
 ) (*emptypb.Empty, error) {
 	logger := log.With().Str("Activity", "DeleteTenantIdentityTokenDelegationOnSite").Logger()
 	logger.Info().Msg("Starting activity")
@@ -230,8 +230,8 @@ func (m *ManageTenantIdentity) DeleteTenantIdentityTokenDelegationOnSite(
 // GetJWKSFromSite is an activity to get JWKS using Core gRPC API
 func (m *ManageTenantIdentity) GetJWKSFromSite(
 	ctx context.Context,
-	request *cwssaws.JwksRequest,
-) (*cwssaws.Jwks, error) {
+	request *corev1.JwksRequest,
+) (*corev1.Jwks, error) {
 	logger := log.With().Str("Activity", "GetJWKSFromSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -262,8 +262,8 @@ func (m *ManageTenantIdentity) GetJWKSFromSite(
 // GetOpenIDConfigurationFromSite is an activity to get OpenID Configuration using Core gRPC API
 func (m *ManageTenantIdentity) GetOpenIDConfigurationFromSite(
 	ctx context.Context,
-	request *cwssaws.OpenIdConfigRequest,
-) (*cwssaws.OpenIdConfiguration, error) {
+	request *corev1.OpenIdConfigRequest,
+) (*corev1.OpenIdConfiguration, error) {
 	logger := log.With().Str("Activity", "GetOpenIDConfigurationFromSite").Logger()
 	logger.Info().Msg("Starting activity")
 

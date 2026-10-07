@@ -15,6 +15,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -26,8 +27,23 @@ import (
 // server-owned defaults such as generated seeds and conflict retry durations.
 // The returned OperationRun stores each normalized policy/configuration value
 // as internal JSON for dispatcher use.
-func OperationRunFrom(
+func OperationRunFrom(req *pb.CreateOperationRunRequest) (*operationrun.OperationRun, error) {
+	return operationRunFrom(req, nil)
+}
+
+// OperationRunFromWithFirmwareAuthentication converts a request while adding
+// already-encrypted firmware authentication data to the persisted operation
+// template before its first serialization.
+func OperationRunFromWithFirmwareAuthentication(
 	req *pb.CreateOperationRunRequest,
+	authenticationData *secret.EncryptedData,
+) (*operationrun.OperationRun, error) {
+	return operationRunFrom(req, authenticationData)
+}
+
+func operationRunFrom(
+	req *pb.CreateOperationRunRequest,
+	firmwareAuthenticationData *secret.EncryptedData,
 ) (*operationrun.OperationRun, error) {
 	if req == nil {
 		return nil, fmt.Errorf("create operation run request is required")
@@ -46,6 +62,9 @@ func OperationRunFrom(
 	operation, err := operationFrom(configuration.GetOperation())
 	if err != nil {
 		return nil, err
+	}
+	if firmwareInfo, ok := operation.Payload.(*operations.FirmwareControlTaskInfo); ok {
+		firmwareInfo.AuthenticationData = firmwareAuthenticationData
 	}
 
 	selector, err := selectorFrom(configuration.GetSelector())
@@ -486,14 +505,11 @@ func operationFrom(
 		return nil, err
 	}
 
-	var (
-		runOperation  *operationrun.Operation
-		hasTargetSpec bool
-	)
+	var runOperation *operationrun.Operation
 
 	switch op := runOp.GetOperation().(type) {
 	case *pb.OperationRunOperation_UpgradeFirmware:
-		runOperation, hasTargetSpec, err = upgradeFirmwareOperationFrom(
+		runOperation, err = upgradeFirmwareOperationFrom(
 			op.UpgradeFirmware,
 		)
 	default:
@@ -503,26 +519,29 @@ func operationFrom(
 		return nil, err
 	}
 
-	if err := validateOperationTargetScope(targetScope, hasTargetSpec); err != nil {
-		return nil, err
-	}
-
 	runOperation.TargetScope = *targetScope
+	if err := runOperation.Validate(); err != nil {
+		return nil, fmt.Errorf("validate operation: %w", err)
+	}
 	return runOperation, nil
 }
 
 func upgradeFirmwareOperationFrom(
 	upgrade *pb.UpgradeFirmwareRequest,
-) (*operationrun.Operation, bool, error) {
+) (*operationrun.Operation, error) {
 	if upgrade == nil {
-		return nil, false, fmt.Errorf("upgrade_firmware operation is required")
+		return nil, fmt.Errorf("upgrade_firmware operation is required")
+	}
+	ruleID, err := OptionalUUIDFrom(upgrade.GetRuleId())
+	if err != nil {
+		return nil, fmt.Errorf("invalid upgrade_firmware.rule_id: %w", err)
 	}
 
 	var targetSpec *operation.TargetSpec
 	if upgrade.GetTargetSpec() != nil {
 		converted, err := TargetSpecFrom(upgrade.GetTargetSpec())
 		if err != nil {
-			return nil, false, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"invalid upgrade_firmware.target_spec: %w", err,
 			)
 		}
@@ -532,9 +551,12 @@ func upgradeFirmwareOperationFrom(
 	info := &operations.FirmwareControlTaskInfo{
 		Operation:              operations.FirmwareOperationUpgrade,
 		TargetVersion:          upgrade.GetTargetVersion(),
-		RuleID:                 UUIDStringFrom(upgrade.GetRuleId()),
 		SubTargets:             append([]string(nil), upgrade.GetSubTargets()...),
 		OverrideReadinessCheck: upgrade.GetOverrideReadinessCheck(),
+		OverrideVersionCheck:   upgrade.GetOverrideVersionCheck(),
+	}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	if upgrade.GetStartTime() != nil {
 		info.StartTime = upgrade.GetStartTime().AsTime().Unix()
@@ -550,58 +572,26 @@ func upgradeFirmwareOperationFrom(
 		Description:  upgrade.GetDescription(),
 		QueueOptions: queueOptionsFrom(upgrade.GetQueueOptions()),
 		Payload:      info,
-	}, targetSpec != nil, nil
+	}, nil
 }
 
-func validateOperationTargetScope(
-	scope *operationrun.OperationTargetScope,
-	hasTargetSpec bool,
-) error {
-	if scope == nil {
-		return fmt.Errorf("target_scope is required")
-	}
-
-	// An omitted target_spec already means "all qualified/applicable targets".
-	// Reject an explicit exclusion without a source scope so a malformed
-	// request cannot silently broaden into a full-scope run.
-	if scope.ExcludeTargetSpec && !hasTargetSpec {
-		return fmt.Errorf(
-			"target_scope.exclude_target_spec requires operation target_spec",
-		)
-	}
-	if scope.ExcludeOperationRunTargets && len(scope.OperationRunIDs) == 0 {
-		// Excluding prior-run targets needs an explicit prior-run source. Without
-		// IDs the exclusion would be a no-op, which likely hides a caller bug.
-		return fmt.Errorf(
-			"target_scope.exclude_operation_run_targets requires target_scope.operation_run_ids",
-		)
-	}
-
-	return nil
-}
-
-// operationTargetScopeFrom converts API target-scope controls into the
-// internal operation-run scope composition model. Operation-specific
-// validations, such as whether an excluded target_spec exists, belong to the
-// caller that has that context.
+// operationTargetScopeFrom converts prior-run exclusions into the internal
+// operation-run scope model. The embedded operation target_spec, when present,
+// is always the inclusive base scope.
 func operationTargetScopeFrom(
 	scope *pb.OperationRunTargetScope,
 ) (*operationrun.OperationTargetScope, error) {
 	if scope == nil {
-		// Persist the effective default instead of nil so dispatcher code can
-		// consume one concrete internal scope shape.
-		return &operationrun.OperationTargetScope{
-			InclusiveScopeComposition: operationrun.InclusiveScopeCompositionIntersect,
-		}, nil
+		return &operationrun.OperationTargetScope{}, nil
 	}
 
-	runIDs := scope.GetOperationRunIds()
+	runIDs := scope.GetExcludeOperationRunIds()
 	normalizedRunIDs := make([]uuid.UUID, 0, len(runIDs))
 	for i, id := range runIDs {
 		parsed, err := uuid.Parse(id.GetId())
 		if err != nil || parsed == uuid.Nil {
 			return nil, fmt.Errorf(
-				"target_scope.operation_run_ids[%d] must be a valid UUID",
+				"target_scope.exclude_operation_run_ids[%d] must be a valid UUID",
 				i,
 			)
 		}
@@ -609,14 +599,72 @@ func operationTargetScopeFrom(
 		normalizedRunIDs = append(normalizedRunIDs, parsed)
 	}
 
+	filter, err := defaultScopeComponentFilterFrom(scope)
+	if err != nil {
+		return nil, err
+	}
+
 	return &operationrun.OperationTargetScope{
-		ExcludeTargetSpec: scope.GetExcludeTargetSpec(),
-		InclusiveScopeComposition: inclusiveScopeCompositionFrom(
-			scope.GetInclusiveScopeComposition(),
-		),
-		OperationRunIDs:            normalizedRunIDs,
-		ExcludeOperationRunTargets: scope.GetExcludeOperationRunTargets(),
+		ExcludedOperationRunIDs:     normalizedRunIDs,
+		DefaultScopeComponentFilter: filter,
 	}, nil
+}
+
+func defaultScopeComponentFilterFrom(
+	scope *pb.OperationRunTargetScope,
+) (*operation.ComponentFilter, error) {
+	filter := scope.GetDefaultScopeComponentFilter()
+	if filter == nil {
+		return nil, nil
+	}
+
+	switch payload := filter.GetFilter().(type) {
+	case nil:
+		return nil, nil
+	case *pb.ComponentFilter_Types:
+		componentTypes := payload.Types.GetTypes()
+		types := make([]string, 0, len(componentTypes))
+		for idx, pbType := range componentTypes {
+			componentType := ComponentTypeFrom(pbType)
+			if componentType == devicetypes.ComponentTypeUnknown {
+				return nil, fmt.Errorf(
+					"target_scope.default_scope_component_filter.types[%d] is unknown",
+					idx,
+				)
+			}
+			types = append(types, devicetypes.ComponentTypeToString(componentType))
+		}
+		return &operation.ComponentFilter{
+			Kind:  operation.ComponentFilterKindTypes,
+			Types: types,
+		}, nil
+	case *pb.ComponentFilter_Components:
+		componentTargets := payload.Components.GetTargets()
+		components := make([]uuid.UUID, 0, len(componentTargets))
+		for idx, target := range componentTargets {
+			idTarget, ok := target.GetIdentifier().(*pb.ComponentTarget_Id)
+			if !ok {
+				return nil, fmt.Errorf(
+					"target_scope.default_scope_component_filter.components[%d] must use component UUID",
+					idx,
+				)
+			}
+			parsed, err := uuid.Parse(idTarget.Id.GetId())
+			if err != nil || parsed == uuid.Nil {
+				return nil, fmt.Errorf(
+					"target_scope.default_scope_component_filter.components[%d] must be a valid UUID",
+					idx,
+				)
+			}
+			components = append(components, parsed)
+		}
+		return &operation.ComponentFilter{
+			Kind:       operation.ComponentFilterKindComponents,
+			Components: components,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported target_scope default scope component filter")
+	}
 }
 
 func marshalConfig(value any) (json.RawMessage, error) {
@@ -919,6 +967,7 @@ func operationTo(
 			RuleId:                 optionalUUIDStringTo(info.RuleID),
 			SubTargets:             append([]string(nil), info.SubTargets...),
 			OverrideReadinessCheck: info.OverrideReadinessCheck,
+			OverrideVersionCheck:   info.OverrideVersionCheck,
 		}
 		if info.TargetVersion != "" {
 			targetVersion := info.TargetVersion
@@ -1025,40 +1074,45 @@ func targetScopeTo(scope *operationrun.OperationTargetScope) *pb.OperationRunTar
 		return nil
 	}
 
-	return &pb.OperationRunTargetScope{
-		ExcludeTargetSpec:          scope.ExcludeTargetSpec,
-		OperationRunIds:            UUIDsTo(scope.OperationRunIDs),
-		ExcludeOperationRunTargets: scope.ExcludeOperationRunTargets,
-		InclusiveScopeComposition: inclusiveScopeCompositionTo(
-			scope.InclusiveScopeComposition,
-		),
+	result := &pb.OperationRunTargetScope{
+		ExcludeOperationRunIds: UUIDsTo(scope.ExcludedOperationRunIDs),
 	}
-}
 
-func inclusiveScopeCompositionFrom(
-	composition pb.OperationRunInclusiveScopeComposition,
-) operationrun.InclusiveScopeComposition {
-	switch composition {
-	case pb.OperationRunInclusiveScopeComposition_OPERATION_RUN_INCLUSIVE_SCOPE_COMPOSITION_UNION:
-		return operationrun.InclusiveScopeCompositionUnion
-	default:
-		// UNKNOWN and unrecognized wire values both use the default
-		// composition. This field only matters when multiple inclusive sources
-		// are present, so being permissive avoids rejecting otherwise valid
-		// requests.
-		return operationrun.InclusiveScopeCompositionIntersect
+	if scope.DefaultScopeComponentFilter != nil {
+		switch scope.DefaultScopeComponentFilter.Kind {
+		case operation.ComponentFilterKindTypes:
+			types := make([]pb.ComponentType, 0, len(scope.DefaultScopeComponentFilter.Types))
+			for _, rawType := range scope.DefaultScopeComponentFilter.Types {
+				types = append(
+					types,
+					ComponentTypeTo(devicetypes.ComponentTypeFromString(rawType)),
+				)
+			}
+			result.DefaultScopeComponentFilter = &pb.ComponentFilter{
+				Filter: &pb.ComponentFilter_Types{
+					Types: &pb.ComponentTypes{Types: types},
+				},
+			}
+		case operation.ComponentFilterKindComponents:
+			components := make(
+				[]*pb.ComponentTarget,
+				0,
+				len(scope.DefaultScopeComponentFilter.Components),
+			)
+			for _, id := range scope.DefaultScopeComponentFilter.Components {
+				components = append(components, &pb.ComponentTarget{
+					Identifier: &pb.ComponentTarget_Id{Id: UUIDTo(id)},
+				})
+			}
+			result.DefaultScopeComponentFilter = &pb.ComponentFilter{
+				Filter: &pb.ComponentFilter_Components{
+					Components: &pb.ComponentTargets{Targets: components},
+				},
+			}
+		}
 	}
-}
 
-func inclusiveScopeCompositionTo(
-	composition operationrun.InclusiveScopeComposition,
-) pb.OperationRunInclusiveScopeComposition {
-	switch composition {
-	case operationrun.InclusiveScopeCompositionUnion:
-		return pb.OperationRunInclusiveScopeComposition_OPERATION_RUN_INCLUSIVE_SCOPE_COMPOSITION_UNION
-	default:
-		return pb.OperationRunInclusiveScopeComposition_OPERATION_RUN_INCLUSIVE_SCOPE_COMPOSITION_INTERSECT
-	}
+	return result
 }
 
 // OperationRunTo converts a domain operation run to its API shape.
@@ -1098,7 +1152,7 @@ func OperationRunTo(run *operationrun.OperationRun) (*pb.OperationRun, error) {
 	}
 
 	result := &pb.OperationRun{
-		Summary: operationRunSummaryTo(run, &options),
+		Summary: operationRunSummaryTo(run),
 		Configuration: &pb.OperationRunConfiguration{
 			Selector:  pbSelector,
 			Options:   pbOptions,
@@ -1113,8 +1167,7 @@ func OperationRunTo(run *operationrun.OperationRun) (*pb.OperationRun, error) {
 }
 
 // OperationRunSummaryTo converts a domain operation run to the lightweight
-// list shape. It intentionally avoids unmarshalling selector and operation
-// template JSON.
+// list shape without unmarshalling configuration JSON.
 func OperationRunSummaryTo(
 	run *operationrun.OperationRun,
 ) (*pb.OperationRunSummary, error) {
@@ -1122,17 +1175,11 @@ func OperationRunSummaryTo(
 		return nil, nil
 	}
 
-	var options operationrun.Options
-	if err := operationrun.UnmarshalConfig(run.Options, &options); err != nil {
-		return nil, fmt.Errorf("unmarshal options: %w", err)
-	}
-
-	return operationRunSummaryTo(run, &options), nil
+	return operationRunSummaryTo(run), nil
 }
 
 func operationRunSummaryTo(
 	run *operationrun.OperationRun,
-	options *operationrun.Options,
 ) *pb.OperationRunSummary {
 	summary := &pb.OperationRunSummary{
 		Id:            UUIDTo(run.ID),
@@ -1141,7 +1188,7 @@ func operationRunSummaryTo(
 		OperationKind: OperationKindTo(run.OperationType, run.OperationCode),
 		State:         OperationRunStateTo(run.Status, run.StatusReason),
 		StatusMessage: run.StatusMessage,
-		TotalPhases:   operationRunPhaseCount(&options.PhasePolicy),
+		TotalPhases:   run.TotalPhases,
 		CreatedAt:     timestamppb.New(run.CreatedAt),
 		UpdatedAt:     timestamppb.New(run.UpdatedAt),
 	}
@@ -1191,26 +1238,103 @@ func OperationRunTargetTo(
 	}
 
 	result := &pb.OperationRunTarget{
-		Id:             UUIDTo(target.ID),
-		OperationRunId: UUIDTo(target.OperationRunID),
-		RackId:         UUIDTo(target.RackID),
-		SequenceIndex:  target.SequenceIndex,
-		PhaseIndex:     target.PhaseIndex,
-		Status:         OperationRunTargetStatusTo(target.Status),
-		Message:        target.Message,
-		CreatedAt:      timestamppb.New(target.CreatedAt),
-		UpdatedAt:      timestamppb.New(target.UpdatedAt),
+		Id:               UUIDTo(target.ID),
+		OperationRunId:   UUIDTo(target.OperationRunID),
+		RackId:           UUIDTo(target.RackID),
+		SequenceIndex:    target.SequenceIndex,
+		PhaseIndex:       target.PhaseIndex,
+		Status:           OperationRunTargetStatusTo(target.Status),
+		Message:          target.Message,
+		ComponentsByType: componentsByTypeTo(target.ComponentsByType),
+		CreatedAt:        timestamppb.New(target.CreatedAt),
+		UpdatedAt:        timestamppb.New(target.UpdatedAt),
 	}
 
 	if target.TaskID != nil {
 		result.TaskId = UUIDTo(*target.TaskID)
 	}
 
-	if err := populateOperationRunTargetFilter(result, target.ComponentFilter); err != nil {
-		return nil, err
+	return result, nil
+}
+
+// ProgressStatsTo converts domain operation-run progress stats to protobuf.
+func ProgressStatsTo(
+	stats operationrun.ProgressStats,
+) *pb.OperationRunStats {
+	return &pb.OperationRunStats{
+		CurrentPhaseStats:    PhaseStatsTo(stats.CurrentPhase),
+		CumulativePhaseStats: PhaseStatsTo(stats.Cumulative),
+	}
+}
+
+// ProgressStatsFrom converts protobuf operation-run stats to the domain shape.
+func ProgressStatsFrom(
+	stats *pb.OperationRunStats,
+) operationrun.ProgressStats {
+	if stats == nil {
+		return operationrun.ProgressStats{}
 	}
 
-	return result, nil
+	return operationrun.ProgressStats{
+		CurrentPhase: PhaseStatsFrom(stats.GetCurrentPhaseStats()),
+		Cumulative:   PhaseStatsFrom(stats.GetCumulativePhaseStats()),
+	}
+}
+
+// PhaseStatsTo converts domain phase stats to protobuf.
+func PhaseStatsTo(
+	stats operationrun.PhaseStats,
+) *pb.OperationRunPhaseStats {
+	return &pb.OperationRunPhaseStats{
+		PhaseIndex:      stats.PhaseIndex,
+		SelectedTargets: int32(stats.SelectedTargets),
+		OutcomeCounts:   TargetStatusCountsTo(stats.StatusCounts),
+	}
+}
+
+// PhaseStatsFrom converts protobuf phase stats to the domain shape.
+func PhaseStatsFrom(
+	stats *pb.OperationRunPhaseStats,
+) operationrun.PhaseStats {
+	if stats == nil {
+		return operationrun.PhaseStats{}
+	}
+
+	return operationrun.PhaseStats{
+		PhaseIndex:      stats.GetPhaseIndex(),
+		SelectedTargets: int(stats.GetSelectedTargets()),
+		StatusCounts:    TargetStatusCountsFrom(stats.GetOutcomeCounts()),
+	}
+}
+
+// TargetStatusCountsTo converts domain target status counts to protobuf
+// outcome counts.
+func TargetStatusCountsTo(
+	stats operationrun.TargetStatusCounts,
+) *pb.OperationRunTargetOutcomeCounts {
+	return &pb.OperationRunTargetOutcomeCounts{
+		Completed:  int32(stats.Completed),
+		Failed:     int32(stats.Failed),
+		Terminated: int32(stats.Terminated),
+		Skipped:    int32(stats.Skipped),
+	}
+}
+
+// TargetStatusCountsFrom converts protobuf target outcome counts to the domain
+// status-count shape.
+func TargetStatusCountsFrom(
+	counts *pb.OperationRunTargetOutcomeCounts,
+) operationrun.TargetStatusCounts {
+	if counts == nil {
+		return operationrun.TargetStatusCounts{}
+	}
+
+	return operationrun.TargetStatusCounts{
+		Completed:  int(counts.GetCompleted()),
+		Failed:     int(counts.GetFailed()),
+		Terminated: int(counts.GetTerminated()),
+		Skipped:    int(counts.GetSkipped()),
+	}
 }
 
 // OperationRunListOptionsFrom converts a list-runs API request into domain
@@ -1324,38 +1448,6 @@ func OperationRunTargetListOptionsFrom(
 	return opts, nil
 }
 
-func operationRunPhaseCount(policy *operationrun.PhasePolicy) int32 {
-	if policy == nil {
-		return 0
-	}
-	if policy.Plan == nil {
-		return 0
-	}
-
-	switch policy.Plan.PhasePlanKind() {
-	case operationrun.PhasePlanKindEqual:
-		equal, ok := policy.Plan.(*operationrun.EqualPhases)
-		if !ok || equal == nil {
-			return 0
-		}
-		return equal.PhaseCount
-	case operationrun.PhasePlanKindPercentage:
-		percentage, ok := policy.Plan.(*operationrun.PercentagePhases)
-		if !ok || percentage == nil {
-			return 0
-		}
-		return int32(len(percentage.Phases))
-	case operationrun.PhasePlanKindCount:
-		count, ok := policy.Plan.(*operationrun.CountPhases)
-		if !ok || count == nil {
-			return 0
-		}
-		return int32(len(count.Phases) + 1)
-	default:
-		return 0
-	}
-}
-
 // OperationRunStatusTo converts a domain operation-run status to proto.
 func OperationRunStatusTo(
 	status operationrun.OperationRunStatus,
@@ -1369,6 +1461,8 @@ func OperationRunStatusTo(
 		return pb.OperationRunStatus_OPERATION_RUN_STATUS_PAUSED
 	case operationrun.OperationRunStatusCompleted:
 		return pb.OperationRunStatus_OPERATION_RUN_STATUS_COMPLETED
+	case operationrun.OperationRunStatusCompletedWithFailures:
+		return pb.OperationRunStatus_OPERATION_RUN_STATUS_COMPLETED_WITH_FAILURES
 	case operationrun.OperationRunStatusCancelled:
 		return pb.OperationRunStatus_OPERATION_RUN_STATUS_CANCELLED
 	case operationrun.OperationRunStatusFailed:
@@ -1393,6 +1487,8 @@ func OperationRunStatusFrom(
 		return operationrun.OperationRunStatusPaused
 	case pb.OperationRunStatus_OPERATION_RUN_STATUS_COMPLETED:
 		return operationrun.OperationRunStatusCompleted
+	case pb.OperationRunStatus_OPERATION_RUN_STATUS_COMPLETED_WITH_FAILURES:
+		return operationrun.OperationRunStatusCompletedWithFailures
 	case pb.OperationRunStatus_OPERATION_RUN_STATUS_CANCELLED:
 		return operationrun.OperationRunStatusCancelled
 	case pb.OperationRunStatus_OPERATION_RUN_STATUS_FAILED:
@@ -1451,6 +1547,8 @@ func OperationRunTargetStatusTo(
 	switch status {
 	case operationrun.OperationRunTargetStatusPending:
 		return pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_PENDING
+	case operationrun.OperationRunTargetStatusClaimed:
+		return pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_CLAIMED
 	case operationrun.OperationRunTargetStatusBlocked:
 		return pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_BLOCKED
 	case operationrun.OperationRunTargetStatusSubmitted:
@@ -1477,6 +1575,8 @@ func OperationRunTargetStatusFrom(
 	switch status {
 	case pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_PENDING:
 		return operationrun.OperationRunTargetStatusPending
+	case pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_CLAIMED:
+		return operationrun.OperationRunTargetStatusClaimed
 	case pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_BLOCKED:
 		return operationrun.OperationRunTargetStatusBlocked
 	case pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_SUBMITTED:
@@ -1494,43 +1594,28 @@ func OperationRunTargetStatusFrom(
 	}
 }
 
-func populateOperationRunTargetFilter(
-	target *pb.OperationRunTarget,
-	raw json.RawMessage,
-) error {
-	filter, err := operationrun.UnmarshalComponentFilter(raw)
-	if err != nil {
-		return fmt.Errorf("unmarshal component filter for target %s: %w", target.GetId().GetId(), err)
-	}
-	if filter == nil {
+func componentsByTypeTo(
+	componentsByType operation.ComponentsByType,
+) *pb.ComponentsByType {
+	if len(componentsByType) == 0 {
 		return nil
 	}
 
-	switch filter.Kind {
-	case operationrun.ComponentFilterKindTypes:
-		types := make([]pb.ComponentType, 0, len(filter.Types))
-		for _, t := range filter.Types {
-			types = append(
-				types,
-				ComponentTypeTo(devicetypes.ComponentTypeFromString(t)),
-			)
+	result := &pb.ComponentsByType{
+		Groups: make([]*pb.ComponentsForType, 0, len(componentsByType)),
+	}
+	for _, componentType := range componentsByType.SortedComponentTypes() {
+		ids := append([]uuid.UUID(nil), componentsByType[componentType]...)
+		operation.SortComponentUUIDs(ids)
+		group := &pb.ComponentsForType{
+			Type:         ComponentTypeTo(componentType),
+			ComponentIds: make([]*pb.UUID, 0, len(ids)),
 		}
-		target.ComponentFilter = &pb.OperationRunTarget_Types{
-			Types: &pb.ComponentTypes{Types: types},
+		for _, id := range ids {
+			group.ComponentIds = append(group.ComponentIds, UUIDTo(id))
 		}
-	case operationrun.ComponentFilterKindComponents:
-		components := make([]*pb.ComponentTarget, 0, len(filter.Components))
-		for _, id := range filter.Components {
-			components = append(components, &pb.ComponentTarget{
-				Identifier: &pb.ComponentTarget_Id{Id: UUIDTo(id)},
-			})
-		}
-		target.ComponentFilter = &pb.OperationRunTarget_Components{
-			Components: &pb.ComponentTargets{Targets: components},
-		}
-	default:
-		return fmt.Errorf("target %s has unrecognised component_filter kind %q", target.GetId().GetId(), filter.Kind)
+		result.Groups = append(result.Groups, group)
 	}
 
-	return nil
+	return result
 }

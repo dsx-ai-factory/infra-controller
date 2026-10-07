@@ -254,11 +254,16 @@ func TestGetComponentsByType(t *testing.T) {
 	pool, err := utils.UnitTestDB(ctx, t, dbConf)
 	assert.Nil(t, err)
 
+	domain := NVLDomain{Name: "test-domain"}
+	err = domain.Create(ctx, pool.DB)
+	assert.Nil(t, err)
+
 	// Create a rack (required for components)
 	rack := Rack{
 		Name:         "test-rack",
 		Manufacturer: "TestMfg",
 		SerialNumber: "rack-serial-001",
+		NVLDomainID:  domain.ID,
 	}
 	err = rack.Create(ctx, pool.DB)
 	assert.Nil(t, err)
@@ -311,6 +316,8 @@ func TestGetComponentsByType(t *testing.T) {
 	assert.Equal(t, 2, len(computes))
 	for _, c := range computes {
 		assert.Equal(t, devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), c.Type)
+		assert.NotNil(t, c.Rack)
+		assert.Equal(t, domain.ID, c.Rack.NVLDomainID)
 	}
 
 	// Test: Get PowerShelf components (should include BMCs via Relation)

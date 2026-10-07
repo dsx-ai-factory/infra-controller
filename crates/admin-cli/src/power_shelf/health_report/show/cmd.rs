@@ -22,7 +22,7 @@ use crate::errors::CarbideCliResult;
 use crate::health_utils;
 use crate::rpc::ApiClient;
 
-pub async fn show(
+pub(super) async fn show(
     api_client: &ApiClient,
     args: Args,
     format: OutputFormat,

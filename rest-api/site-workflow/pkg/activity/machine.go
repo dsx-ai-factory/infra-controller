@@ -6,19 +6,16 @@ package activity
 import (
 	"context"
 	"errors"
-	"fmt"
+	"slices"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"go.temporal.io/sdk/client"
-	tClient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
@@ -29,7 +26,7 @@ type ManageMachine struct {
 }
 
 // SetMachineMaintenanceOnSite is an activity to set Machine maintenance mode using Core gRPC API
-func (mm *ManageMachine) SetMachineMaintenanceOnSite(ctx context.Context, request *cwssaws.MaintenanceRequest) error {
+func (mm *ManageMachine) SetMachineMaintenanceOnSite(ctx context.Context, request *corev1.MaintenanceRequest) error {
 	logger := log.With().Str("Activity", "SetMachineMaintenanceActivity").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -54,19 +51,20 @@ func (mm *ManageMachine) SetMachineMaintenanceOnSite(ctx context.Context, reques
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.SetMaintenance(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to set Maintenance mode for Machine using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to set Maintenance mode for Machine using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return err
 }
 
 // UpdateMachineMetadataOnSite is an activity to update Machine metadata using Core gRPC API
-func (mm *ManageMachine) UpdateMachineMetadataOnSite(ctx context.Context, request *cwssaws.MachineMetadataUpdateRequest) error {
+func (mm *ManageMachine) UpdateMachineMetadataOnSite(ctx context.Context, request *corev1.MachineMetadataUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateMachineMetadataOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -91,19 +89,20 @@ func (mm *ManageMachine) UpdateMachineMetadataOnSite(ctx context.Context, reques
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateMachineMetadata(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update Machine metadata using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update Machine metadata using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return err
 }
 
 // CreateMachineHealthReportOnSite applies a health report on the Site controller.
-func (mm *ManageMachine) CreateMachineHealthReportOnSite(ctx context.Context, request *cwssaws.InsertMachineHealthReportRequest) error {
+func (mm *ManageMachine) CreateMachineHealthReportOnSite(ctx context.Context, request *corev1.InsertMachineHealthReportRequest) error {
 	logger := log.With().Str("Activity", "CreateMachineHealthReportOnSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -117,18 +116,20 @@ func (mm *ManageMachine) CreateMachineHealthReportOnSite(ctx context.Context, re
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err := grpcServiceClient.InsertMachineHealthReport(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to insert health report using Site Controller API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to insert Machine health report using Core gRPC API")
 		return swe.WrapErr(err)
 	}
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
-	logger.Info().Msg("Completed activity")
 	return nil
 }
 
 // DeleteMachineHealthReportOnSite removes a health report override on the Site controller.
-func (mm *ManageMachine) DeleteMachineHealthReportOnSite(ctx context.Context, request *cwssaws.RemoveMachineHealthReportRequest) error {
+func (mm *ManageMachine) DeleteMachineHealthReportOnSite(ctx context.Context, request *corev1.RemoveMachineHealthReportRequest) error {
 	logger := log.With().Str("Activity", "DeleteMachineHealthReportOnSite").Logger()
 	logger.Info().Msg("Starting activity")
 
@@ -142,18 +143,20 @@ func (mm *ManageMachine) DeleteMachineHealthReportOnSite(ctx context.Context, re
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err := grpcServiceClient.RemoveMachineHealthReport(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to remove health report using Site Controller API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to remove Machine health report using Core gRPC API")
 		return swe.WrapErr(err)
 	}
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
-	logger.Info().Msg("Completed activity")
 	return nil
 }
 
 // GetDpuMachinesByIDs is an activity to retrieve DPU Machines by IDs with network configuration
-func (mm *ManageMachine) GetDpuMachinesByIDs(ctx context.Context, dpuMachineIDs []string) ([]*cwssaws.DpuMachine, error) {
+func (mm *ManageMachine) GetDpuMachinesByIDs(ctx context.Context, dpuMachineIDs []string) (*corev1.DpuMachineList, error) {
 	logger := log.With().Str("Activity", "GetDpuMachinesByIDs").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -174,12 +177,12 @@ func (mm *ManageMachine) GetDpuMachinesByIDs(ctx context.Context, dpuMachineIDs 
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Convert string IDs to MachineId objects
-	machineIDs := make([]*cwssaws.MachineId, 0, len(dpuMachineIDs))
+	machineIDs := make([]*corev1.MachineId, 0, len(dpuMachineIDs))
 	for _, id := range dpuMachineIDs {
-		machineIDs = append(machineIDs, &cwssaws.MachineId{Id: id})
+		machineIDs = append(machineIDs, &corev1.MachineId{Id: id})
 	}
 
-	request := &cwssaws.MachinesByIdsRequest{
+	request := &corev1.MachinesByIdsRequest{
 		MachineIds: machineIDs,
 	}
 
@@ -190,10 +193,10 @@ func (mm *ManageMachine) GetDpuMachinesByIDs(ctx context.Context, dpuMachineIDs 
 	}
 
 	// For each DPU machine, fetch the network configuration
-	dpuMachines := make([]*cwssaws.DpuMachine, 0, len(machineList.Machines))
+	dpuMachines := make([]*corev1.DpuMachine, 0, len(machineList.Machines))
 	for _, machine := range machineList.Machines {
-		if machine.MachineType == cwssaws.MachineType_DPU {
-			networkConfigReq := &cwssaws.ManagedHostNetworkConfigRequest{
+		if machine.MachineType == corev1.MachineType_DPU {
+			networkConfigReq := &corev1.ManagedHostNetworkConfigRequest{
 				DpuMachineId: machine.Id,
 			}
 			networkConfig, nerr := grpcServiceClient.GetManagedHostNetworkConfig(ctx, networkConfigReq)
@@ -203,7 +206,7 @@ func (mm *ManageMachine) GetDpuMachinesByIDs(ctx context.Context, dpuMachineIDs 
 			}
 
 			logger.Debug().Str("DPU Machine ID", machine.Id.Id).Msg("Retrieved network config for DPU machine")
-			dpuMachines = append(dpuMachines, &cwssaws.DpuMachine{
+			dpuMachines = append(dpuMachines, &corev1.DpuMachine{
 				Machine:          machine,
 				DpuNetworkConfig: networkConfig,
 			})
@@ -212,7 +215,7 @@ func (mm *ManageMachine) GetDpuMachinesByIDs(ctx context.Context, dpuMachineIDs 
 
 	logger.Info().Int("DPU Machine Count", len(dpuMachines)).Msg("Completed activity")
 
-	return dpuMachines, nil
+	return &corev1.DpuMachineList{Machines: dpuMachines}, nil
 }
 
 // NewManageMachine returns a new ManageMachine activity
@@ -224,184 +227,126 @@ func NewManageMachine(coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient) Manage
 
 // ManageMachineInventory is an activity wrapper for Machine inventory collection and publishing
 type ManageMachineInventory struct {
-	siteID                uuid.UUID
-	coreGrpcAtomicClient  *cClient.CoreGrpcAtomicClient
-	temporalPublishClient tClient.Client
-	temporalPublishQueue  string
-	sitePageSize          int
-	cloudPageSize         int
+	config ManageInventoryConfig
 }
 
 // CollectAndPublishMachineInventory is an activity to collect Machine inventory and publish to Temporal queue
 func (mmi *ManageMachineInventory) CollectAndPublishMachineInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "CollectAndPublishMachineInventory").Logger()
-
 	logger.Info().Msg("Starting activity")
-
-	// Define workflow options
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:        "update-machine-inventory-" + mmi.siteID.String(),
-		TaskQueue: mmi.temporalPublishQueue,
+	inventoryImpl := manageInventoryImpl[*corev1.MachineId, *corev1.Machine, *corev1.MachineInventory]{
+		itemType:               "Machine",
+		config:                 mmi.config,
+		internalFindIDs:        machineFindIDs,
+		internalFindByIDs:      machineFindByIDs,
+		internalPagedInventory: machinePagedInventory,
 	}
+	return inventoryImpl.CollectAndPublishInventory(ctx, &logger)
+}
 
-	// Call Core gRPC endpoint to get available Machine IDs
-	grpcClient := mmi.coreGrpcAtomicClient.GetClient()
-	if grpcClient == nil {
-		return cClient.ErrCoreGrpcClientNotConnected
+// NewManageMachineInventory returns a ManageInventory implementation for Machine activity
+func NewManageMachineInventory(config ManageInventoryConfig) ManageMachineInventory {
+	return ManageMachineInventory{
+		config: config,
 	}
+}
+
+func machineFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.MachineId, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-
-	machineIDList, err := grpcServiceClient.FindMachineIds(ctx, &cwssaws.MachineSearchConfig{})
+	machineIDList, err := grpcServiceClient.FindMachineIds(ctx, &corev1.MachineSearchConfig{})
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to retrieve available Machine IDs using Core gRPC API")
-
-		// Error encountered before we've published anything, report inventory collection error to Cloud
-		inventory := &cwssaws.MachineInventory{
-			Timestamp: &timestamppb.Timestamp{
-				Seconds: time.Now().Unix(),
-			},
-			InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED,
-			StatusMsg:       err.Error(),
-		}
-
-		_, serr := mmi.temporalPublishClient.ExecuteWorkflow(context.Background(), workflowOptions, "UpdateMachineInventory", mmi.siteID, inventory)
-		if serr != nil {
-			logger.Error().Err(serr).Msg("Failed to publish Machine inventory error to Cloud")
-			return serr
-		}
-		return err
+		return nil, err
 	}
-
-	// Paginate IDs and collect Machine inventory
-	totalSiteCount := len(machineIDList.MachineIds)
-	totalSitePages := len(machineIDList.MachineIds) / mmi.sitePageSize
-	if totalSiteCount%mmi.sitePageSize > 0 {
-		totalSitePages++
-	}
-
-	allMachineIDs := []*cwssaws.MachineId{}
-	allMachineIDs = append(allMachineIDs, machineIDList.MachineIds...)
-
-	if totalSitePages == 0 {
-		inventoryPage := getPagedMachineInventory([]*cwssaws.Machine{}, allMachineIDs, totalSiteCount, 1, mmi.cloudPageSize, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, "No Machines reported by SIte Controller")
-
-		_, serr := mmi.temporalPublishClient.ExecuteWorkflow(context.Background(), workflowOptions, "UpdateMachineInventory", mmi.siteID, inventoryPage)
-		if serr != nil {
-			logger.Error().Err(serr).Msg("Failed to publish Machine inventory to Cloud")
-			return serr
-		}
-	}
-
-	// Iterate through all pages and publish Machine inventory
-	effectiveCloudPage := 1
-	for sitePage := 1; sitePage <= totalSitePages; sitePage++ {
-		pagedMachineIDs := getPagedMachineIDs(machineIDList.MachineIds, sitePage, mmi.sitePageSize)
-
-		// Call Core gRPC endpoint to get Machines for the paged IDs
-		pagedMachines, serr := grpcServiceClient.FindMachinesByIds(ctx, &cwssaws.MachinesByIdsRequest{
-			MachineIds: pagedMachineIDs,
-		})
-		if serr != nil {
-			logger.Warn().Err(serr).Int("Site Page", sitePage).Msg("Failed to retrieve Machines using Core gRPC API")
-			return serr
-		}
-
-		totalCloudCount := len(pagedMachines.Machines)
-		totalCloudPages := len(pagedMachines.Machines) / mmi.cloudPageSize
-		if totalCloudCount%mmi.cloudPageSize > 0 {
-			totalCloudPages++
-		}
-
-		// Publish machine inventory to Cloud in separate chunks
-		for cloudPage := 1; cloudPage <= totalCloudPages; cloudPage++ {
-			startIndex := (cloudPage - 1) * mmi.cloudPageSize
-			endIndex := startIndex + mmi.cloudPageSize
-			if endIndex > totalCloudCount {
-				endIndex = totalCloudCount
-			}
-
-			pagedWorkflowOptions := client.StartWorkflowOptions{
-				ID:        fmt.Sprintf("%v-%v", workflowOptions.ID, effectiveCloudPage),
-				TaskQueue: workflowOptions.TaskQueue,
-			}
-
-			// Create an inventory page with the subset of Machines
-			inventoryPage := getPagedMachineInventory(pagedMachines.Machines[startIndex:endIndex], allMachineIDs, totalSiteCount, effectiveCloudPage, mmi.cloudPageSize, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, "Successfully retrieved Machines from Site Controller")
-
-			logger.Info().Msgf("Publishing Machine inventory page %d to Cloud", effectiveCloudPage)
-
-			_, serr = mmi.temporalPublishClient.ExecuteWorkflow(context.Background(), pagedWorkflowOptions, "UpdateMachineInventory", mmi.siteID, inventoryPage)
-			if serr != nil {
-				logger.Error().Err(serr).Int("Cloud Page", effectiveCloudPage).Msg("Failed to publish Machine inventory to Cloud")
-				return serr
-			}
-
-			effectiveCloudPage++
-		}
-	}
-
-	return nil
+	return machineIDList.GetMachineIds(), nil
 }
 
-// getPagedMachineIDs returns a slice of Machine IDs for a given page
-func getPagedMachineIDs(machineIDs []*cwssaws.MachineId, page int, pageSize int) []*cwssaws.MachineId {
-	totalCount := len(machineIDs)
-	startIndex := (page - 1) * pageSize
-	endIndex := startIndex + pageSize
-	if endIndex > totalCount {
-		endIndex = totalCount
+func machineFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.MachineId) ([]*corev1.Machine, error) {
+	grpcServiceClient := grpcClient.GrpcServiceClient()
+	machineList, err := grpcServiceClient.FindMachinesByIds(ctx, &corev1.MachinesByIdsRequest{
+		MachineIds: ids,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return machineIDs[startIndex:endIndex]
+	machines := machineList.GetMachines()
+	for _, machine := range machines {
+		pruneMachineForPublish(machine)
+	}
+
+	return machines, nil
 }
 
-// getPagedMachineInventory returns a subset of MachineInventory for a given page
-func getPagedMachineInventory(pagedMachines []*cwssaws.Machine, machineIDs []*cwssaws.MachineId, totalCount int, page int, pageSize int, status cwssaws.InventoryStatus, statusMessage string) *cwssaws.MachineInventory {
-	totalPages := (totalCount / pageSize)
-	if totalCount%pageSize > 0 {
-		totalPages++
+// maxPublishedMachineEvents bounds the event history a published Machine carries. The REST layer
+// reads the events only to date the current state, but a Machine arrives with its whole history,
+// which is the largest thing in the message. Twenty keeps recent history worth reading without
+// carrying hundreds of entries per Machine.
+const maxPublishedMachineEvents = 20
+
+// pruneMachineForPublish drops what the REST layer does not read from a Machine before it is
+// published.
+//
+// Events are a large storage cost. A Machine arrives with its full state history, and the REST layer
+// uses it to date one lifecycle transition, so only the events around the current state_version
+// are worth sending.
+func pruneMachineForPublish(machine *corev1.Machine) {
+	if machine == nil {
+		return
 	}
 
-	pagedMachineInfo := []*cwssaws.MachineInfo{}
-	for _, machine := range pagedMachines {
-		pagedMachineInfo = append(pagedMachineInfo, &cwssaws.MachineInfo{
+	machine.Events = recentMachineEvents(machine.GetEvents(), machine.GetStateVersion())
+}
+
+// recentMachineEvents keeps the tail of a Machine's event history. Core reports events oldest
+// first, so the tail is the newest, and the event recording the current state version is normally
+// the last one. The REST layer needs that event to date the current state, so it is carried
+// explicitly when it falls outside the tail rather than relying on the reported order.
+func recentMachineEvents(events []*corev1.MachineEvent, stateVersion string) []*corev1.MachineEvent {
+	if len(events) <= maxPublishedMachineEvents {
+		return events
+	}
+
+	recent := events[len(events)-maxPublishedMachineEvents:]
+	if stateVersion == "" || slices.ContainsFunc(recent, func(event *corev1.MachineEvent) bool {
+		return event.GetVersion() == stateVersion
+	}) {
+		return recent
+	}
+
+	for _, event := range events[:len(events)-maxPublishedMachineEvents] {
+		if event.GetVersion() == stateVersion {
+			return append([]*corev1.MachineEvent{event}, recent...)
+		}
+	}
+
+	return recent
+}
+
+func machinePagedInventory(allItemIDs []*corev1.MachineId, pagedItems []*corev1.Machine, input *pagedInventoryInput) *corev1.MachineInventory {
+	itemIDs := []string{}
+	for _, id := range allItemIDs {
+		itemIDs = append(itemIDs, id.GetId())
+	}
+
+	pagedMachineInfo := []*corev1.MachineInfo{}
+	for _, machine := range pagedItems {
+		pagedMachineInfo = append(pagedMachineInfo, &corev1.MachineInfo{
 			Machine: machine,
 		})
 	}
 
-	itemIDs := []string{}
-	for _, machineID := range machineIDs {
-		itemIDs = append(itemIDs, machineID.Id)
-	}
-
-	// Create an inventory page with the subset of Machines
-	inventoryPage := &cwssaws.MachineInventory{
+	machineInventory := &corev1.MachineInventory{
 		Machines: pagedMachineInfo,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),
 		},
-		InventoryStatus: status,
-		StatusMsg:       statusMessage,
-		InventoryPage: &cwssaws.InventoryPage{
-			TotalPages:  int32(totalPages),
-			CurrentPage: int32(page),
-			PageSize:    int32(pageSize),
-			TotalItems:  int32(totalCount),
-			ItemIds:     itemIDs,
-		},
+		InventoryStatus: input.status,
+		StatusMsg:       input.statusMessage,
+		InventoryPage:   input.buildPage(),
+	}
+	if machineInventory.InventoryPage != nil {
+		machineInventory.InventoryPage.ItemIds = itemIDs
 	}
 
-	return inventoryPage
-}
-
-// NewManageMachineInventory returns a new ManageMachineInventory activity
-func NewManageMachineInventory(siteID uuid.UUID, coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient, temporalPublishClient tClient.Client, temporalPublishQueue string, sitePageSize int, cloudPageSize int) ManageMachineInventory {
-	return ManageMachineInventory{
-		siteID:                siteID,
-		coreGrpcAtomicClient:  coreGrpcAtomicClient,
-		temporalPublishClient: temporalPublishClient,
-		temporalPublishQueue:  temporalPublishQueue,
-		sitePageSize:          sitePageSize,
-		cloudPageSize:         cloudPageSize,
-	}
+	return machineInventory
 }

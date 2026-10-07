@@ -27,12 +27,12 @@ Trigger SPDM attestation for a machine with a 60-second Redfish timeout:
     --redfish-timeout-secs 60
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Machine ID")]
-    pub machine_id: MachineId,
+    pub(super) machine_id: MachineId,
     #[clap(
         long,
         help = "Timeout in seconds for Redfish operations while triggering attestation (passed to carbide-api)"
     )]
-    pub redfish_timeout_secs: u32,
+    pub(super) redfish_timeout_secs: u32,
 }

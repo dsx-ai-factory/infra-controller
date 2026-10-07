@@ -21,7 +21,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn resource(chassis_id: &str) -> redfish::Resource<'static> {
+pub(super) fn resource(chassis_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!(
         "{}/ThermalSubsystem",
         redfish::chassis::resource(chassis_id).odata_id
@@ -34,7 +34,7 @@ pub fn resource(chassis_id: &str) -> redfish::Resource<'static> {
     }
 }
 
-pub fn leak_detection_resource(chassis_id: &str) -> redfish::Resource<'static> {
+pub(super) fn leak_detection_resource(chassis_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!("{}/LeakDetection", resource(chassis_id).odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -44,19 +44,19 @@ pub fn leak_detection_resource(chassis_id: &str) -> redfish::Resource<'static> {
     }
 }
 
-pub fn builder(resource: &redfish::Resource) -> ThermalSubsystemBuilder {
+pub(super) fn builder(resource: &redfish::Resource) -> ThermalSubsystemBuilder {
     ThermalSubsystemBuilder {
         value: resource.json_patch(),
     }
 }
 
-pub fn leak_detection_builder(resource: &redfish::Resource) -> LeakDetectionBuilder {
+pub(super) fn leak_detection_builder(resource: &redfish::Resource) -> LeakDetectionBuilder {
     LeakDetectionBuilder {
         value: resource.json_patch(),
     }
 }
 
-pub struct ThermalSubsystemBuilder {
+pub(super) struct ThermalSubsystemBuilder {
     value: serde_json::Value,
 }
 
@@ -69,16 +69,16 @@ impl Builder for ThermalSubsystemBuilder {
 }
 
 impl ThermalSubsystemBuilder {
-    pub fn leak_detection(self, v: &redfish::Resource<'_>) -> Self {
+    pub(super) fn leak_detection(self, v: &redfish::Resource<'_>) -> Self {
         self.apply_patch(v.nav_property("LeakDetection"))
     }
 
-    pub fn build(self) -> serde_json::Value {
+    pub(super) fn build(self) -> serde_json::Value {
         self.value
     }
 }
 
-pub struct LeakDetectionBuilder {
+pub(super) struct LeakDetectionBuilder {
     value: serde_json::Value,
 }
 
@@ -91,11 +91,11 @@ impl Builder for LeakDetectionBuilder {
 }
 
 impl LeakDetectionBuilder {
-    pub fn leak_detectors(self, v: &redfish::Collection<'_>) -> Self {
+    pub(super) fn leak_detectors(self, v: &redfish::Collection<'_>) -> Self {
         self.apply_patch(v.nav_property("LeakDetectors"))
     }
 
-    pub fn build(self) -> serde_json::Value {
+    pub(super) fn build(self) -> serde_json::Value {
         self.value
     }
 }

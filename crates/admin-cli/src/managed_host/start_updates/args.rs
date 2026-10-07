@@ -30,19 +30,19 @@ Schedule the update window for a specific start time:
     --start 2026-01-02T03:04:05
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, required(true), help = "Machine IDs to update, space separated", num_args = 1.., value_delimiter = ' ')]
-    pub machines: Vec<MachineId>,
+    pub(crate) machines: Vec<MachineId>,
     #[clap(
         long,
         help = "Start of the maintenance window for doing the updates (default now) format 2025-01-02T03:04:05+0000 or 2025-01-02T03:04:05 for local time"
     )]
-    pub start: Option<String>,
+    pub(crate) start: Option<String>,
     #[clap(
         long,
         help = "End of starting new updates (default 24 hours from the start) format 2025-01-02T03:04:05+0000 or 2025-01-02T03:04:05 for local time"
     )]
-    pub end: Option<String>,
+    pub(crate) end: Option<String>,
     #[arg(long, help = "Cancel any new updates")]
-    pub cancel: bool,
+    pub(crate) cancel: bool,
 }

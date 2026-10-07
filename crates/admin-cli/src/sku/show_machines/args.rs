@@ -30,7 +30,7 @@ Show the machines assigned to a SKU:
     $ nico-admin-cli sku show-machines DGX-H100-640GB
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: ShowSkuOptions,
+    pub(super) inner: ShowSkuOptions,
 }

@@ -13,8 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
@@ -31,7 +31,7 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.NetworkSegmentCreationRequest
+		request *corev1.NetworkSegmentCreationRequest
 	}
 	tests := []struct {
 		name    string
@@ -46,11 +46,11 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentCreationRequest{
+				request: &corev1.NetworkSegmentCreationRequest{
 					Name:  subnetName,
-					VpcId: &cwssaws.VpcId{Value: vpcID},
-					Prefixes: []*cwssaws.NetworkPrefix{
-						&cwssaws.NetworkPrefix{
+					VpcId: &corev1.VpcId{Value: vpcID},
+					Prefixes: []*corev1.NetworkPrefix{
+						&corev1.NetworkPrefix{
 							Prefix: "10.0.0.1/8",
 						},
 					},
@@ -65,11 +65,11 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentCreationRequest{
+				request: &corev1.NetworkSegmentCreationRequest{
 					Name:  subnetName,
-					VpcId: &cwssaws.VpcId{Value: vpcID},
-					Prefixes: []*cwssaws.NetworkPrefix{
-						&cwssaws.NetworkPrefix{
+					VpcId: &corev1.VpcId{Value: vpcID},
+					Prefixes: []*corev1.NetworkPrefix{
+						&corev1.NetworkPrefix{
 							Prefix: "abc123",
 						},
 					},
@@ -84,9 +84,9 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentCreationRequest{
+				request: &corev1.NetworkSegmentCreationRequest{
 					Name:     subnetName,
-					VpcId:    &cwssaws.VpcId{Value: vpcID},
+					VpcId:    &corev1.VpcId{Value: vpcID},
 					Prefixes: nil,
 				},
 			},
@@ -99,12 +99,12 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentCreationRequest{
+				request: &corev1.NetworkSegmentCreationRequest{
 					Name:  subnetName,
-					VpcId: &cwssaws.VpcId{Value: vpcID},
-					Prefixes: []*cwssaws.NetworkPrefix{
+					VpcId: &corev1.VpcId{Value: vpcID},
+					Prefixes: []*corev1.NetworkPrefix{
 						nil,
-						&cwssaws.NetworkPrefix{
+						&corev1.NetworkPrefix{
 							Prefix: "10.0.0.1/8",
 						},
 					},
@@ -119,10 +119,10 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentCreationRequest{
-					VpcId: &cwssaws.VpcId{Value: vpcID},
-					Prefixes: []*cwssaws.NetworkPrefix{
-						&cwssaws.NetworkPrefix{
+				request: &corev1.NetworkSegmentCreationRequest{
+					VpcId: &corev1.VpcId{Value: vpcID},
+					Prefixes: []*corev1.NetworkPrefix{
+						&corev1.NetworkPrefix{
 							Prefix: "10.0.0.1/8",
 						},
 					},
@@ -137,10 +137,10 @@ func TestManageSubnet_CreateSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentCreationRequest{
+				request: &corev1.NetworkSegmentCreationRequest{
 					Name: subnetName,
-					Prefixes: []*cwssaws.NetworkPrefix{
-						&cwssaws.NetworkPrefix{
+					Prefixes: []*corev1.NetworkPrefix{
+						&corev1.NetworkPrefix{
 							Prefix: "10.0.0.1/8",
 						},
 					},
@@ -175,7 +175,7 @@ func TestManageSubnet_DeleteSubnetOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.NetworkSegmentDeletionRequest
+		request *corev1.NetworkSegmentDeletionRequest
 	}
 	tests := []struct {
 		name    string
@@ -190,8 +190,8 @@ func TestManageSubnet_DeleteSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentDeletionRequest{
-					Id: &cwssaws.NetworkSegmentId{Value: subnetID},
+				request: &corev1.NetworkSegmentDeletionRequest{
+					Id: &corev1.NetworkSegmentId{Value: subnetID},
 				},
 			},
 			wantErr: false,
@@ -203,7 +203,7 @@ func TestManageSubnet_DeleteSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentDeletionRequest{
+				request: &corev1.NetworkSegmentDeletionRequest{
 					Id: nil,
 				},
 			},
@@ -216,8 +216,8 @@ func TestManageSubnet_DeleteSubnetOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NetworkSegmentDeletionRequest{
-					Id: &cwssaws.NetworkSegmentId{Value: ""},
+				request: &corev1.NetworkSegmentDeletionRequest{
+					Id: &corev1.NetworkSegmentId{Value: ""},
 				},
 			},
 			wantErr: true,
@@ -322,7 +322,7 @@ func TestManageSubnetInventory_DiscoverSubnetInventory(t *testing.T) {
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.SubnetInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.SubnetInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -331,12 +331,12 @@ func TestManageSubnetInventory_DiscoverSubnetInventory(t *testing.T) {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.Segments))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

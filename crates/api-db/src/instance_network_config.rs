@@ -17,23 +17,24 @@
 use std::collections::HashMap;
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use model::instance::config::network::{
     InstanceInterfaceConfig, InstanceNetworkConfig, InterfaceFunctionId,
 };
-use model::machine::Machine;
+use model::machine::HostMachine;
 use model::network_segment::NetworkSegmentType;
 use sqlx::PgConnection;
 
 use crate::{DatabaseError, DatabaseResult};
+
 /// Allocate IP's for this network config, filling the InstanceInterfaceConfigs with the newly
 /// allocated IP's.
 pub async fn with_allocated_ips(
     value: InstanceNetworkConfig,
     txn: &mut PgConnection,
     instance_id: InstanceId,
-    machine: &Machine,
+    machine: &HostMachine,
 ) -> DatabaseResult<InstanceNetworkConfig> {
     crate::instance_address::allocate(txn, instance_id, value, machine).await
 }
@@ -42,8 +43,8 @@ pub async fn with_allocated_ips(
 /// This allows efficient batch processing in batch_allocate_instances.
 pub async fn batch_get_inband_segments_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> DatabaseResult<HashMap<MachineId, Vec<NetworkSegmentId>>> {
+    machine_ids: &[HostMachineId],
+) -> DatabaseResult<HashMap<HostMachineId, Vec<NetworkSegmentId>>> {
     crate::network_segment::batch_find_ids_by_machine_ids(
         txn,
         machine_ids,
@@ -55,7 +56,7 @@ pub async fn batch_get_inband_segments_by_machine_ids(
 /// Add inband interfaces to a network config based on segment IDs.
 /// This is a pure function that can be used after batch querying.
 ///
-/// This only injects when `auto` is true. If we get a non-auto
+/// This only injects when `auto_config` is set with a VpcId. If we get a non-auto
 /// config, just leave as-is and return it unchanged (as in, there
 /// are no inband interfaces to add).
 ///
@@ -67,9 +68,9 @@ pub fn add_inband_interfaces_to_config(
     mut network_config: InstanceNetworkConfig,
     host_inband_segment_ids: &[NetworkSegmentId],
 ) -> DatabaseResult<InstanceNetworkConfig> {
-    if !network_config.auto {
+    let Some(vpc_id) = network_config.auto_config.map(|c| c.vpc_id) else {
         return Ok(network_config);
-    }
+    };
 
     if !network_config.interfaces.is_empty() {
         return Err(DatabaseError::InvalidArgument(format!(
@@ -85,6 +86,7 @@ pub fn add_inband_interfaces_to_config(
             function_id: InterfaceFunctionId::Physical {},
             network_segment_id: Some(*host_inband_segment_id),
             network_details: None,
+            vpc_selection: None,
             ip_addrs: Default::default(),
             interface_prefixes: Default::default(),
             network_segment_gateways: Default::default(),
@@ -94,6 +96,7 @@ pub fn add_inband_interfaces_to_config(
             requested_ip_addr: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            vpc_id: Some(vpc_id),
         });
     }
 

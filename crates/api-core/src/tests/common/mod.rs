@@ -17,14 +17,15 @@
 
 //! Contains common functionality between integration tests
 
-pub mod api_fixtures;
+pub(in crate::tests) mod api_fixtures;
 // Only this crate's own `#[cfg(test)]` test cases use these attestation helpers (the `test-support`
 // consumers don't), so gate the module out of test-support-only builds to keep dead-code detection
 // honest and avoid pulling in unused imports.
 #[cfg(test)]
-pub mod attestation;
-pub mod endpoint;
-pub mod metadata;
-pub mod network_segment;
-pub mod rpc_builder;
-pub mod sqlx_fixtures;
+pub(in crate::tests) mod attestation;
+pub(in crate::tests) mod endpoint;
+pub(in crate::tests) mod network_segment;
+pub(in crate::tests) mod overlay_address;
+pub(in crate::tests) mod postgres;
+pub(in crate::tests) mod rpc_builder;
+pub(in crate::tests) mod sqlx_fixtures;

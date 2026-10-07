@@ -31,6 +31,7 @@ pub use parser::Parser;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub nras_url: String,
     pub nras_gpu_url_suffix: String,
@@ -51,24 +52,30 @@ impl Default for Config {
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NrasError {
-    #[error("Error talking to NRAS: {0}")]
+    #[error("error talking to NRAS: {0}")]
     Communication(String),
-    #[error("Error Serialising/Deserialising: {0}")]
+    #[error("error serialising/deserialising: {0}")]
     Serde(String),
-    #[error("Error parsing verifier response: {0}")]
+    #[error("error parsing verifier response: {0}")]
     ParsingVerifierResponse(String),
-    #[error("Error - NotImplemented")]
+    #[error("error - NotImplemented")]
     NotImplemented,
-    #[error("Error parsing JWT token: {0}")]
+    #[error("error parsing JWT token: {0}")]
     Jwt(String),
-    #[error("Error looking up a decoding key: {0}")]
+    #[error("error looking up a decoding key: {0}")]
     DecodingKeyNotFound(String),
-    #[error("Error forming JWK decoding key: {0}")]
+    #[error("error forming JWK decoding key: {0}")]
     Jwk(String),
 }
 
 impl From<reqwest::Error> for NrasError {
     fn from(value: reqwest::Error) -> NrasError {
+        NrasError::Communication(format!("Communication error: {}", value))
+    }
+}
+
+impl From<reqwest_middleware::Error> for NrasError {
+    fn from(value: reqwest_middleware::Error) -> NrasError {
         NrasError::Communication(format!("Communication error: {}", value))
     }
 }

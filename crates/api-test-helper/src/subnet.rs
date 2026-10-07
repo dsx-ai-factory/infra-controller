@@ -17,7 +17,13 @@
 
 use std::net::SocketAddr;
 
-use super::grpcurl::{grpcurl, grpcurl_id};
+use eyre::{ContextCompat, WrapErr};
+use rpc::forge::{
+    NetworkPrefix, NetworkSegmentCreationRequest, NetworkSegmentType, NetworkSegmentsByIdsRequest,
+    TenantState,
+};
+
+use crate::api_client;
 
 pub async fn create(
     carbide_api_addrs: &[SocketAddr],
@@ -28,20 +34,44 @@ pub async fn create(
 ) -> eyre::Result<String> {
     tracing::info!("Creating network segment");
 
-    let data = serde_json::json!({
-        "vpc_id": { "value": vpc_id },
-        "name": "tenant1",
-        "subdomain_id": { "value": domain_id },
-        "segment_type": if host_inband_network { "HOST_INBAND" } else { "TENANT" },
-        "prefixes": [{"prefix":format!("10.10.{prefix_octet}.0/24"), "gateway": format!("10.10.{prefix_octet}.1"), "reserve_first": 10}]
-    });
-    let segment_id =
-        grpcurl_id(carbide_api_addrs, "CreateNetworkSegment", &data.to_string()).await?;
-    tracing::info!("Network Segment created with ID {segment_id}");
+    let request = NetworkSegmentCreationRequest {
+        vpc_id: Some(vpc_id.parse()?),
+        name: "tenant1".to_string(),
+        subdomain_id: Some(domain_id.parse()?),
+        prefixes: vec![NetworkPrefix {
+            prefix: format!("10.10.{prefix_octet}.0/24"),
+            gateway: Some(format!("10.10.{prefix_octet}.1")),
+            reserve_first: 10,
+            ..Default::default()
+        }],
+        segment_type: if host_inband_network {
+            NetworkSegmentType::HostInband as i32
+        } else {
+            NetworkSegmentType::Tenant as i32
+        },
+        ..Default::default()
+    };
+    let segment = api_client::call(
+        carbide_api_addrs,
+        "CreateNetworkSegment",
+        |mut client| async move { client.create_network_segment(request).await },
+    )
+    .await?;
+    let segment_id = segment
+        .id
+        .context("CreateNetworkSegment response has no network segment ID")?
+        .to_string();
+    tracing::info!(
+        network_segment_id = %segment_id,
+        "Network segment created",
+    );
 
     wait_for_network_segment_state(carbide_api_addrs, &segment_id, "READY").await?;
 
-    tracing::info!("Network Segment with ID {segment_id} is ready");
+    tracing::info!(
+        network_segment_id = %segment_id,
+        "Network segment is ready",
+    );
     Ok(segment_id)
 }
 
@@ -54,27 +84,48 @@ pub async fn wait_for_network_segment_state(
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
     let start = std::time::Instant::now();
 
-    let data = serde_json::json!({
-        "network_segments_ids": [{"value": segment_id}]
-    });
-    let mut latest_state: String;
+    let mut latest_state = "not observed".to_string();
 
-    tracing::info!("Waiting for Network Segment {segment_id} state {target_state}");
+    tracing::info!(
+        network_segment_id = segment_id,
+        target_state,
+        "Waiting for Network Segment state",
+    );
     while start.elapsed() < MAX_WAIT {
-        let response = grpcurl(addrs, "FindNetworkSegmentsByIds", Some(&data)).await?;
-        let resp: serde_json::Value = serde_json::from_str(&response)?;
-        latest_state = resp["networkSegments"][0]["state"]
-            .as_str()
-            .unwrap()
+        let request = NetworkSegmentsByIdsRequest {
+            network_segments_ids: vec![segment_id.parse()?],
+            ..Default::default()
+        };
+        let response =
+            api_client::call(addrs, "FindNetworkSegmentsByIds", |mut client| async move {
+                client.find_network_segments_by_ids(request).await
+            })
+            .await?;
+        let segment = response
+            .network_segments
+            .first()
+            .context("FindNetworkSegmentsByIds returned no network segments")?;
+        let status = segment
+            .status
+            .as_ref()
+            .context("FindNetworkSegmentsByIds returned a network segment without status")?;
+        latest_state = TenantState::try_from(status.tenant_state)
+            .wrap_err("FindNetworkSegmentsByIds returned an unknown tenant state")?
+            .as_str_name()
             .to_string();
         if latest_state.contains(target_state) {
             return Ok(());
         }
-        tracing::info!("\tCurrent network segment state: {latest_state}");
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        tracing::info!(
+            network_segment_state = %latest_state,
+            "\tCurrent network segment state",
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    eyre::bail!("Even after {MAX_RETRY} retries, {segment_id} did not reach state {target_state}");
+    eyre::bail!(
+        "even after {MAX_WAIT:?}, {segment_id} did not reach state {target_state}; latest state: {latest_state}"
+    );
 }
 
 pub async fn create_dual_stack(
@@ -85,31 +136,46 @@ pub async fn create_dual_stack(
 ) -> eyre::Result<String> {
     tracing::info!("Creating dual-stack network segment");
 
-    let data = serde_json::json!({
-        "vpc_id": { "value": vpc_id },
-        "name": "tenant1_dual_stack",
-        "subdomain_id": { "value": domain_id },
-        "segment_type": "TENANT",
-        "prefixes": [
-            {
-                "prefix": format!("10.10.{prefix_octet}.0/24"),
-                "gateway": format!("10.10.{prefix_octet}.1"),
-                "reserve_first": 10,
+    let request = NetworkSegmentCreationRequest {
+        vpc_id: Some(vpc_id.parse()?),
+        name: "tenant1_dual_stack".to_string(),
+        subdomain_id: Some(domain_id.parse()?),
+        prefixes: vec![
+            NetworkPrefix {
+                prefix: format!("10.10.{prefix_octet}.0/24"),
+                gateway: Some(format!("10.10.{prefix_octet}.1")),
+                reserve_first: 10,
+                ..Default::default()
             },
-            {
-                "prefix": format!("2001:db8:{prefix_octet}::/112"),
-                "reserve_first": 1,
+            NetworkPrefix {
+                prefix: format!("2001:db8:{prefix_octet}::/112"),
+                reserve_first: 1,
+                ..Default::default()
             },
-        ]
-    });
-    let segment_id =
-        grpcurl_id(carbide_api_addrs, "CreateNetworkSegment", &data.to_string()).await?;
-    tracing::info!("Dual-stack network segment created with ID {segment_id}");
+        ],
+        segment_type: NetworkSegmentType::Tenant as i32,
+        ..Default::default()
+    };
+    let segment = api_client::call(
+        carbide_api_addrs,
+        "CreateNetworkSegment",
+        |mut client| async move { client.create_network_segment(request).await },
+    )
+    .await?;
+    let segment_id = segment
+        .id
+        .context("CreateNetworkSegment response has no network segment ID")?
+        .to_string();
+    tracing::info!(
+        network_segment_id = %segment_id,
+        "Dual-stack network segment created",
+    );
 
     wait_for_network_segment_state(carbide_api_addrs, &segment_id, "READY").await?;
 
-    tracing::info!("Dual-stack network segment with ID {segment_id} is ready");
+    tracing::info!(
+        network_segment_id = %segment_id,
+        "Dual-stack network segment is ready",
+    );
     Ok(segment_id)
 }
-
-const MAX_RETRY: usize = 30; // Equal to 30s wait time

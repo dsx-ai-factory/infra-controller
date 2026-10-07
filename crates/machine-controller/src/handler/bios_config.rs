@@ -17,6 +17,7 @@
 
 //! BIOS configuration: machine_setup, Dell job wait/recovery, and PollingBiosSetup escalation.
 
+use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use chrono::Utc;
 use eyre::eyre;
@@ -32,7 +33,6 @@ use super::{
     ReachabilityParams, RebootStatus, call_machine_setup_and_handle_no_dpu_error,
     handler_host_power_control, trigger_reboot_if_needed,
 };
-use crate::boot_interface::boot_interface_target;
 use crate::config::MachineStateControllerConfig;
 use crate::context::MachineStateHandlerContextObjects;
 
@@ -88,13 +88,12 @@ pub(super) async fn configure_host_bios(
     reachability_params: &ReachabilityParams,
     redfish_client: &dyn Redfish,
     mh_snapshot: &ManagedHostStateSnapshot,
+    boot_interface: Option<&BootInterfaceTarget>,
     retry_count: u32,
 ) -> Result<BiosConfigOutcome, StateHandlerError> {
-    let boot_interface = boot_interface_target(mh_snapshot);
-
     let bios_job_id = match call_machine_setup_and_handle_no_dpu_error(
         redfish_client,
-        boot_interface.as_ref(),
+        boot_interface,
         mh_snapshot.host_snapshot.associated_dpu_machine_ids().len(),
         &ctx.services.site_config,
     )
@@ -102,9 +101,9 @@ pub(super) async fn configure_host_bios(
     {
         Err(e) => {
             tracing::warn!(
-                "redfish machine_setup failed for {}, potentially due to known race condition between UEFI POST and BMC. triggering force-restart if needed. err: {}",
-                mh_snapshot.host_snapshot.id,
-                e
+                machine_id = %mh_snapshot.host_snapshot.id,
+                error = %e,
+                "redfish machine_setup failed, potentially due to known race condition between UEFI POST and BMC. triggering force-restart if needed"
             );
 
             // if machine_setup failed, reboot to potentially work around
@@ -115,7 +114,12 @@ pub(super) async fn configure_host_bios(
             //
             // As of July 2024, Josh Price said there's an NBU FR to fix
             // this, but it wasn't target to a release yet.
-            let reboot_status = if mh_snapshot.host_snapshot.last_reboot_requested.is_none() {
+            let reboot_status = if mh_snapshot
+                .host_snapshot
+                .status
+                .last_reboot_requested
+                .is_none()
+            {
                 handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
                     .await?;
 
@@ -176,7 +180,7 @@ pub(super) async fn advance_bios_config_job(
             if job_state.is_error_state() {
                 let failure = format!("BIOS job {} failed with state {job_state:#?}", job_id);
                 tracing::warn!(
-                    %failure,
+                    reason = %failure,
                     "transitioning to HandleBiosJobFailure (power cycle + BMC reset)"
                 );
                 return Ok(try_bios_recovery_attempt(
@@ -186,6 +190,14 @@ pub(super) async fn advance_bios_config_job(
                     failure,
                 )?
                 .into());
+            }
+            if matches!(job_state, libredfish::JobState::Completed) {
+                tracing::info!(
+                    %job_id,
+                    machine_id = %mh_snapshot.host_snapshot.id,
+                    "BIOS job completed before scheduling was observed; skipping reboot",
+                );
+                return Ok(BiosConfigJobAdvanceOutcome::Done);
             }
             if !matches!(job_state, libredfish::JobState::Scheduled) {
                 return Err(StateHandlerError::GenericError(eyre!(
@@ -232,7 +244,7 @@ pub(super) async fn advance_bios_config_job(
                         job_id, minutes_since_state_change, e
                     );
                     tracing::warn!(
-                        %failure,
+                        reason = %failure,
                         "transitioning to HandleBiosJobFailure (power cycle + BMC reset)"
                     );
                     return Ok(try_bios_recovery_attempt(
@@ -252,7 +264,7 @@ pub(super) async fn advance_bios_config_job(
                         job_id
                     );
                     tracing::warn!(
-                        %failure,
+                        reason = %failure,
                         "transitioning to HandleBiosJobFailure (power cycle + BMC reset)"
                     );
                     Ok(try_bios_recovery_attempt(
@@ -288,11 +300,11 @@ pub(super) async fn advance_bios_config_job(
                         )));
                     }
                     tracing::info!(
-                        %failure,
+                        reason = %failure,
                         "HandleBiosJobFailure: resetting BMC after BIOS job failure"
                     );
                     redfish_client
-                        .bmc_reset()
+                        .bmc_reset(None)
                         .await
                         .map_err(|e| redfish_error("bmc_reset", e))?;
                     Ok(BiosConfigJobAdvanceOutcome::Continue(BiosConfigInfo {
@@ -308,6 +320,7 @@ pub(super) async fn advance_bios_config_job(
                     if current_power_state != libredfish::PowerState::On {
                         let basetime = mh_snapshot
                             .host_snapshot
+                            .status
                             .last_reboot_requested
                             .as_ref()
                             .map(|x| x.time)
@@ -356,12 +369,12 @@ fn try_bios_recovery_attempt(
         tracing::warn!(
             retry_count,
             max_retries = machine_controller_config.max_bios_config_retries,
-            %failure,
+            reason = %failure,
             "BIOS recovery budget exhausted; moving host to Failed for manual remediation"
         );
         return Ok(BiosRecoveryAttemptOutcome::Failed {
             failure: format!(
-                "{failure} (automated BIOS recovery exhausted after {} attempts)",
+                "{failure} (automated BIOS recovery exhausted after {} retries)",
                 machine_controller_config.max_bios_config_retries
             ),
         });
@@ -381,11 +394,11 @@ pub(super) async fn advance_polling_bios_setup(
     mh_snapshot: &ManagedHostStateSnapshot,
     retry_count: u32,
     machine_controller_config: &MachineStateControllerConfig,
+    boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<PollingBiosSetupOutcome, StateHandlerError> {
-    let boot_interface = boot_interface_target(mh_snapshot);
     let stuck_for = mh_snapshot.host_snapshot.state.version.since_state_change();
 
-    let is_bios_setup_result = match &boot_interface {
+    let is_bios_setup_result = match boot_interface {
         Some(target) => {
             target
                 .run(|bi| redfish_client.is_bios_setup(Some(bi)))
@@ -457,9 +470,12 @@ fn escalate_stuck_polling_bios_setup(
 pub(super) async fn handle_bios_setup_failed_recovery(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     mh_snapshot: &ManagedHostStateSnapshot,
+    explicit_target: Option<&BootInterfaceTarget>,
     recovered_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let boot_interface = boot_interface_target(mh_snapshot);
+    let boot_interface =
+        super::resolve_boot_interface_for_step(ctx, mh_snapshot, explicit_target).await?;
+    let boot_interface = boot_interface.into_target();
     let redfish_client = ctx
         .services
         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)

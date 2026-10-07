@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	sshKeyGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
 )
@@ -40,16 +40,16 @@ func (s *UpdateSSHKeyGroupTestSuite) Test_UpdateSSHKeyGroupInventory_Success() {
 	siteID := uuid.New()
 	sshKeyGroupIDs := []string{uuid.New().String(), uuid.New().String()}
 
-	sshKeyGroupInventory := &cwssaws.SSHKeyGroupInventory{
-		TenantKeysets: []*cwssaws.TenantKeyset{
+	sshKeyGroupInventory := &corev1.SSHKeyGroupInventory{
+		TenantKeysets: []*corev1.TenantKeyset{
 			{
-				KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 					KeysetId: "1234",
 				},
 				Version: "1234",
 			},
 			{
-				KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 					KeysetId: "1235",
 				},
 				Version: "1235",
@@ -72,16 +72,16 @@ func (s *UpdateSSHKeyGroupTestSuite) Test_UpdateSSHKeyGroupInventory_ActivityFai
 	var sshKeyGroupManager sshKeyGroupActivity.ManageSSHKeyGroup
 
 	siteID := uuid.New()
-	sshKeyGroupInventory := &cwssaws.SSHKeyGroupInventory{
-		TenantKeysets: []*cwssaws.TenantKeyset{
+	sshKeyGroupInventory := &corev1.SSHKeyGroupInventory{
+		TenantKeysets: []*corev1.TenantKeyset{
 			{
-				KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 					KeysetId: "1234",
 				},
 				Version: "1234",
 			},
 			{
-				KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 					KeysetId: "1235",
 				},
 				Version: "1235",

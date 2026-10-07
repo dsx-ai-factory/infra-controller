@@ -19,6 +19,7 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
 use db::{ObjectColumnFilter, power_shelf as db_power_shelf};
 use health_report::HealthReportApplyMode;
+use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
 use tonic::{Request, Response, Status};
 
@@ -26,7 +27,7 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::auth::AuthContext;
 
-pub async fn find_power_shelf(
+pub(crate) async fn find_power_shelf(
     api: &Api,
     request: Request<rpc::PowerShelfQuery>,
 ) -> Result<Response<rpc::PowerShelfList>, Status> {
@@ -75,18 +76,76 @@ pub async fn find_power_shelf(
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    let power_shelves: Vec<rpc::PowerShelf> = power_shelf_list
+    let power_shelves = convert_power_shelves(power_shelf_list)?;
+
+    Ok(Response::new(rpc::PowerShelfList { power_shelves }))
+}
+
+/// Convert DB power shelves into their RPC representation. `bmc_info` is
+/// populated by the power-shelf load query and carried through the model->rpc
+/// conversion, so no extra resolution is needed here.
+fn convert_power_shelves(
+    power_shelf_list: Vec<model::power_shelf::PowerShelf>,
+) -> Result<Vec<rpc::PowerShelf>, CarbideError> {
+    power_shelf_list
         .into_iter()
         .map(rpc::PowerShelf::try_from)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| CarbideError::Internal {
             message: format!("Failed to convert power shelf: {}", e),
-        })?;
-
-    Ok(Response::new(rpc::PowerShelfList { power_shelves }))
+        })
 }
 
-pub async fn find_ids(
+pub(crate) async fn decommission_power_shelf(
+    api: &Api,
+    request: Request<rpc::DecommissionPowerShelfRequest>,
+) -> Result<Response<rpc::DecommissionPowerShelfResponse>, Status> {
+    log_request_data(&request);
+    let power_shelf_id = request
+        .into_inner()
+        .power_shelf_id
+        .ok_or_else(|| CarbideError::InvalidArgument("power_shelf_id is required".to_string()))?;
+    let mut txn = api.txn_begin().await?;
+    let power_shelf = db_power_shelf::find_by_id(&mut txn, &power_shelf_id)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "power_shelf",
+            id: power_shelf_id.to_string(),
+        })?;
+
+    if !matches!(
+        power_shelf.controller_state.value,
+        model::power_shelf::PowerShelfControllerState::Ready
+    ) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "power shelf {power_shelf_id} must be in the ready state to be decommissioned (current state: {:?})",
+            power_shelf.controller_state.value
+        ))
+        .into());
+    }
+
+    if let Some(rack_id) = power_shelf.rack_id.as_ref() {
+        let assigned_hosts =
+            db::managed_host::find_assigned_hosts_in_rack(&mut txn, rack_id).await?;
+        if !assigned_hosts.is_empty() {
+            let assignments = assigned_hosts
+                .iter()
+                .map(|(machine_id, instance_id)| format!("{machine_id} ({instance_id})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CarbideError::FailedPrecondition(format!(
+                "power shelf {power_shelf_id} cannot be decommissioned while managed hosts in rack {rack_id} are assigned to instances: {assignments}"
+            ))
+            .into());
+        }
+    }
+
+    db_power_shelf::set_decommission_requested(&mut txn, power_shelf_id).await?;
+    txn.commit().await?;
+    Ok(Response::new(rpc::DecommissionPowerShelfResponse {}))
+}
+
+pub(crate) async fn find_ids(
     api: &Api,
     request: Request<rpc::PowerShelfSearchFilter>,
 ) -> Result<Response<rpc::PowerShelfIdList>, Status> {
@@ -101,7 +160,7 @@ pub async fn find_ids(
     }))
 }
 
-pub async fn find_by_ids(
+pub(crate) async fn find_by_ids(
     api: &Api,
     request: Request<rpc::PowerShelvesByIdsRequest>,
 ) -> Result<Response<rpc::PowerShelfList>, Status> {
@@ -129,52 +188,15 @@ pub async fn find_by_ids(
     )
     .await?;
 
-    let bmc_info_map: std::collections::HashMap<_, _> = {
-        let rows = db_power_shelf::find_bmc_info_by_power_shelf_ids(&mut txn, &power_shelf_ids)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to get power shelf BMC info: {}", e),
-            })?;
+    txn.rollback_or_log("read-only load of power shelves by id")
+        .await;
 
-        rows.into_iter()
-            .map(|row| {
-                (
-                    row.power_shelf_id,
-                    rpc::BmcInfo {
-                        ip: Some(row.pmc_ip.to_string()),
-                        mac: Some(row.pmc_mac.to_string()),
-                        version: None,
-                        firmware_version: None,
-                        port: None,
-                        machine_interface_id: None,
-                    },
-                )
-            })
-            .collect()
-    };
-
-    let _ = txn.rollback().await;
-
-    let power_shelves: Vec<rpc::PowerShelf> = power_shelf_list
-        .into_iter()
-        .map(|ps| {
-            let id = ps.id;
-            let bmc_info = bmc_info_map.get(&id).cloned();
-
-            rpc::PowerShelf::try_from(ps).map(|mut rpc_ps| {
-                rpc_ps.bmc_info = bmc_info;
-                rpc_ps
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Failed to convert power shelf: {}", e),
-        })?;
+    let power_shelves = convert_power_shelves(power_shelf_list)?;
 
     Ok(Response::new(rpc::PowerShelfList { power_shelves }))
 }
 
-pub async fn delete_power_shelf(
+pub(crate) async fn delete_power_shelf(
     api: &Api,
     request: Request<rpc::PowerShelfDeletionRequest>,
 ) -> Result<Response<rpc::PowerShelfDeletionResult>, Status> {
@@ -184,7 +206,7 @@ pub async fn delete_power_shelf(
         Some(id) => id,
         None => {
             return Err(
-                CarbideError::InvalidArgument("Power shelf ID is required".to_string()).into(),
+                CarbideError::InvalidArgument("power shelf ID is required".to_string()).into(),
             );
         }
     };
@@ -228,10 +250,11 @@ pub async fn delete_power_shelf(
     Ok(Response::new(rpc::PowerShelfDeletionResult {}))
 }
 
-/// Force deletes a power shelf and optionally its associated interfaces from the database.
-/// Unlike `delete_power_shelf` (soft delete), this immediately hard-deletes the power shelf,
-/// its state history, and optionally its machine interfaces.
-pub async fn admin_force_delete_power_shelf(
+/// Force deletes a power shelf and optionally its associated interfaces
+/// and BMC suppressions from the database.
+/// Unlike `delete_power_shelf` (soft delete), this immediately hard-deletes the power shelf
+/// while retaining its state history.
+pub(crate) async fn admin_force_delete_power_shelf(
     api: &Api,
     request: Request<rpc::AdminForceDeletePowerShelfRequest>,
 ) -> Result<Response<rpc::AdminForceDeletePowerShelfResponse>, Status> {
@@ -245,22 +268,14 @@ pub async fn admin_force_delete_power_shelf(
     let mut txn = api.txn_begin().await?;
 
     // Verify the power shelf exists.
-    let power_shelf_list = db_power_shelf::find_by(
-        &mut txn,
-        db::ObjectColumnFilter::One(db_power_shelf::IdColumn, &power_shelf_id),
-    )
-    .await
-    .map_err(CarbideError::from)?;
-
-    if power_shelf_list.is_empty() {
-        return Err(CarbideError::NotFoundError {
+    let power_shelf = db_power_shelf::find_by_id(&mut txn, &power_shelf_id)
+        .await
+        .map_err(CarbideError::from)?
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "power_shelf",
             id: power_shelf_id.to_string(),
-        }
-        .into());
-    }
+        })?;
 
-    // Optionally delete associated machine interfaces.
     let mut interfaces_deleted: u32 = 0;
     if request.delete_interfaces {
         let interface_ids =
@@ -268,21 +283,36 @@ pub async fn admin_force_delete_power_shelf(
                 .await
                 .map_err(CarbideError::from)?;
         for interface_id in &interface_ids {
-            db::machine_interface::delete(interface_id, &mut txn)
+            db::machine_interface::delete(interface_id, &mut txn, false)
                 .await
                 .map_err(CarbideError::from)?;
         }
         interfaces_deleted = interface_ids.len() as u32;
     }
 
-    // Delete state history.
-    db::state_history::delete_by_object_id(
-        &mut txn,
-        db::state_history::StateHistoryTableId::PowerShelf,
-        &power_shelf_id,
-    )
-    .await
-    .map_err(CarbideError::from)?;
+    if request.delete_bmc_suppressions {
+        let bmc_mac = power_shelf
+            .bmc_info
+            .as_ref()
+            .and_then(|info| info.mac)
+            .or(power_shelf.bmc_mac_address)
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "power shelf {power_shelf_id} has no BMC MAC address; cannot delete BMC suppressions"
+                ))
+            })?;
+
+        db::bmc_suppression::delete_many(
+            &mut txn,
+            &[bmc_mac],
+            BmcSuppressionSubsystem::SiteExplorer,
+        )
+        .await
+        .map_err(CarbideError::from)?;
+        db::bmc_suppression::delete_many(&mut txn, &[bmc_mac], BmcSuppressionSubsystem::Dhcp)
+            .await
+            .map_err(CarbideError::from)?;
+    }
 
     // Hard-delete the power shelf.
     db_power_shelf::final_delete(power_shelf_id, &mut txn)
@@ -297,7 +327,7 @@ pub async fn admin_force_delete_power_shelf(
     }))
 }
 
-pub async fn set_power_shelf_maintenance(
+pub(crate) async fn set_power_shelf_maintenance(
     api: &Api,
     request: Request<rpc::PowerShelfMaintenanceRequest>,
 ) -> Result<Response<()>, Status> {
@@ -333,7 +363,12 @@ pub async fn set_power_shelf_maintenance(
             model::power_shelf::PowerShelfMaintenanceOperation::PowerOn
         }
         rpc::PowerShelfMaintenanceOperation::PowerOff => {
-            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff
+            // `graceful` is opt-in: an absent flag (or an older client that
+            // predates it) defaults to a forced power-off, matching the default
+            // for operator-initiated power actions.
+            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff {
+                graceful: req.graceful.unwrap_or(false),
+            }
         }
         rpc::PowerShelfMaintenanceOperation::Unspecified => {
             return Err(CarbideError::InvalidArgument(
@@ -393,7 +428,7 @@ pub async fn set_power_shelf_maintenance(
     Ok(Response::new(()))
 }
 
-pub async fn find_power_shelf_state_histories(
+pub(crate) async fn find_power_shelf_state_histories(
     api: &Api,
     request: Request<rpc::PowerShelfStateHistoriesRequest>,
 ) -> Result<Response<rpc::StateHistories>, Status> {
@@ -436,6 +471,23 @@ pub async fn find_power_shelf_state_histories(
     txn.commit().await?;
 
     Ok(tonic::Response::new(response))
+}
+
+pub(crate) async fn find_power_shelf_health_histories(
+    api: &Api,
+    request: Request<rpc::PowerShelfHealthHistoriesRequest>,
+) -> Result<Response<rpc::HealthHistories>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+
+    crate::handlers::health::find_health_histories(
+        api,
+        request.power_shelf_ids,
+        db::health_history::HealthHistoryTableId::PowerShelf,
+        request.start_time,
+        request.end_time,
+    )
+    .await
 }
 
 pub(crate) async fn update_power_shelf_metadata(
@@ -488,7 +540,7 @@ pub(crate) async fn update_power_shelf_metadata(
     Ok(tonic::Response::new(()))
 }
 
-pub async fn list_power_shelf_health_reports(
+pub(crate) async fn list_power_shelf_health_reports(
     api: &Api,
     request: Request<rpc::ListPowerShelfHealthReportsRequest>,
 ) -> Result<Response<rpc::ListHealthReportResponse>, Status> {
@@ -527,7 +579,7 @@ pub async fn list_power_shelf_health_reports(
     }))
 }
 
-pub async fn insert_power_shelf_health_report(
+pub(crate) async fn insert_power_shelf_health_report(
     api: &Api,
     request: Request<rpc::InsertPowerShelfHealthReportRequest>,
 ) -> Result<Response<()>, Status> {
@@ -573,7 +625,7 @@ pub async fn insert_power_shelf_health_report(
         report.observed_at = Some(chrono::Utc::now());
     }
     report.triggered_by = triggered_by;
-    report.update_in_alert_since(None);
+    report.update_in_alert_since(power_shelf.health_reports.by_source(&report.source));
 
     match remove_power_shelf_health_report_by_source(&power_shelf, &mut txn, report.source.clone())
         .await
@@ -589,7 +641,7 @@ pub async fn insert_power_shelf_health_report(
     Ok(Response::new(()))
 }
 
-pub async fn remove_power_shelf_health_report(
+pub(crate) async fn remove_power_shelf_health_report(
     api: &Api,
     request: Request<rpc::RemovePowerShelfHealthReportRequest>,
 ) -> Result<Response<()>, Status> {

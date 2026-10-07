@@ -46,7 +46,7 @@ use crate::firmware::error::{FirmwareError, FirmwareResult};
 //   [firmware_credentials]
 //   type = "ssh_agent"
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
 pub enum Credentials {
     // BearerToken uses an Authorization: Bearer <token> header.
     BearerToken {
@@ -71,7 +71,7 @@ pub enum Credentials {
     },
     // SshAgent uses the running SSH agent for authentication. The
     // agent is reached via the SSH_AUTH_SOCK environment variable.
-    SshAgent,
+    SshAgent {},
 }
 
 impl Credentials {
@@ -117,7 +117,7 @@ impl Credentials {
 
     // ssh_agent creates an SshAgent credential.
     pub fn ssh_agent() -> Self {
-        Self::SshAgent
+        Self::SshAgent {}
     }
 
     // type_name returns human-readable details for the credential
@@ -130,7 +130,7 @@ impl Credentials {
             Credentials::BasicAuth { .. } => "basic_auth",
             Credentials::Header { .. } => "header",
             Credentials::SshKey { .. } => "ssh_key",
-            Credentials::SshAgent => "ssh_agent",
+            Credentials::SshAgent {} => "ssh_agent",
         }
     }
 
@@ -141,9 +141,11 @@ impl Credentials {
             Credentials::BearerToken { .. }
             | Credentials::BasicAuth { .. }
             | Credentials::Header { .. } => Ok(()),
-            Credentials::SshKey { .. } | Credentials::SshAgent => Err(FirmwareError::ConfigError(
-                "SSH credentials cannot be used with HTTP sources".to_string(),
-            )),
+            Credentials::SshKey { .. } | Credentials::SshAgent {} => {
+                Err(FirmwareError::ConfigError(
+                    "SSH credentials cannot be used with HTTP sources".to_string(),
+                ))
+            }
         }
     }
 
@@ -151,7 +153,7 @@ impl Credentials {
     // compatible with SSH sources.
     pub fn validate_ssh(&self) -> FirmwareResult<()> {
         match self {
-            Credentials::SshKey { .. } | Credentials::SshAgent => Ok(()),
+            Credentials::SshKey { .. } | Credentials::SshAgent {} => Ok(()),
             Credentials::BearerToken { .. }
             | Credentials::BasicAuth { .. }
             | Credentials::Header { .. } => Err(FirmwareError::ConfigError(
@@ -178,7 +180,7 @@ impl From<Credentials> for FirmwareCredentialsPb {
             Credentials::SshKey { path, passphrase } => {
                 CredentialTypePb::SshKey(SshKeyCredentialsPb { path, passphrase })
             }
-            Credentials::SshAgent => CredentialTypePb::SshAgent(SshAgentCredentialsPb {}),
+            Credentials::SshAgent {} => CredentialTypePb::SshAgent(SshAgentCredentialsPb {}),
         };
         FirmwareCredentialsPb {
             credential_type: Some(credential_type),
@@ -207,7 +209,7 @@ impl TryFrom<FirmwareCredentialsPb> for Credentials {
                 path: sk.path,
                 passphrase: sk.passphrase,
             }),
-            CredentialTypePb::SshAgent(_) => Ok(Credentials::SshAgent),
+            CredentialTypePb::SshAgent(_) => Ok(Credentials::SshAgent {}),
         }
     }
 }
@@ -218,7 +220,7 @@ impl TryFrom<Credentials> for forge_ssh::ssh_client::AuthConfig {
         use forge_ssh::ssh_client::AuthConfig;
         match value {
             Credentials::SshKey { path, passphrase } => Ok(AuthConfig::SshKey { path, passphrase }),
-            Credentials::SshAgent => Ok(AuthConfig::SshAgent),
+            Credentials::SshAgent {} => Ok(AuthConfig::SshAgent),
             _ => Err(FirmwareError::ConfigError(
                 "HTTP credentials cannot be used with SSH sources".to_string(),
             )),
@@ -228,6 +230,9 @@ impl TryFrom<Credentials> for forge_ssh::ssh_client::AuthConfig {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::scenarios;
+
     use super::*;
 
     #[test]
@@ -288,6 +293,34 @@ mod tests {
         let original = Credentials::ssh_agent();
         let proto: FirmwareCredentialsPb = original.clone().into();
         let converted: Credentials = proto.try_into().unwrap();
-        assert!(matches!(converted, Credentials::SshAgent));
+        assert!(matches!(converted, Credentials::SshAgent {}));
+    }
+
+    #[test]
+    fn ssh_agent_serde_rejects_unknown_fields() {
+        scenarios!(
+            run = |input| serde_json::from_str::<Credentials>(input)
+                .map(|credentials| matches!(credentials, Credentials::SshAgent {}))
+                .map_err(drop);
+
+            "valid empty struct variant" {
+                r#"{"type":"ssh_agent"}"# => Yields(true),
+            }
+
+            "unknown fields are rejected" {
+                r#"{"type":"ssh_agent","unexpected":true}"# => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn ssh_agent_json_round_trip_preserves_legacy_shape() {
+        let encoded = serde_json::to_value(Credentials::ssh_agent())
+            .expect("SSH-agent credential serializes");
+        assert_eq!(encoded, serde_json::json!({ "type": "ssh_agent" }));
+
+        let decoded: Credentials =
+            serde_json::from_value(encoded).expect("legacy SSH-agent JSON deserializes");
+        assert!(matches!(decoded, Credentials::SshAgent {}));
     }
 }

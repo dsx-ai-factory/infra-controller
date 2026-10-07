@@ -7,9 +7,9 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,7 +27,7 @@ func TestManageMachineValidation_EnableDisableMachineValidationTestOnSite(t *tes
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.MachineValidationTestEnableDisableTestRequest
+		request *corev1.MachineValidationTestEnableDisableTestRequest
 	}
 	tests := []struct {
 		name    string
@@ -42,7 +42,7 @@ func TestManageMachineValidation_EnableDisableMachineValidationTestOnSite(t *tes
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestEnableDisableTestRequest{
+				request: &corev1.MachineValidationTestEnableDisableTestRequest{
 					TestId:    testID,
 					Version:   testVersion,
 					IsEnabled: true,
@@ -57,7 +57,7 @@ func TestManageMachineValidation_EnableDisableMachineValidationTestOnSite(t *tes
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestEnableDisableTestRequest{
+				request: &corev1.MachineValidationTestEnableDisableTestRequest{
 					Version:   testVersion,
 					IsEnabled: true,
 				},
@@ -71,7 +71,7 @@ func TestManageMachineValidation_EnableDisableMachineValidationTestOnSite(t *tes
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestEnableDisableTestRequest{
+				request: &corev1.MachineValidationTestEnableDisableTestRequest{
 					TestId:    testID,
 					IsEnabled: true,
 				},
@@ -114,7 +114,7 @@ func TestManageMachineValidation_PersistValidationResultOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.MachineValidationResultPostRequest
+		request *corev1.MachineValidationResultPostRequest
 	}
 	tests := []struct {
 		name    string
@@ -129,8 +129,8 @@ func TestManageMachineValidation_PersistValidationResultOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationResultPostRequest{
-					Result: &cwssaws.MachineValidationResult{
+				request: &corev1.MachineValidationResultPostRequest{
+					Result: &corev1.MachineValidationResult{
 						Name: "test-1",
 					},
 				},
@@ -144,7 +144,7 @@ func TestManageMachineValidation_PersistValidationResultOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.MachineValidationResultPostRequest{},
+				request: &corev1.MachineValidationResultPostRequest{},
 			},
 			wantErr: true,
 		},
@@ -184,7 +184,7 @@ func TestManageMachineValidation_GetMachineValidationResultsFromSite(t *testing.
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.MachineValidationGetRequest
+		request *corev1.MachineValidationGetRequest
 	}
 	tests := []struct {
 		name    string
@@ -199,8 +199,8 @@ func TestManageMachineValidation_GetMachineValidationResultsFromSite(t *testing.
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationGetRequest{
-					MachineId: &cwssaws.MachineId{
+				request: &corev1.MachineValidationGetRequest{
+					MachineId: &corev1.MachineId{
 						Id: "machine-id-1",
 					},
 				},
@@ -243,7 +243,7 @@ func TestManageMachineValidation_GetMachineValidationRunsFromSite(t *testing.T) 
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.MachineValidationRunListGetRequest
+		request *corev1.MachineValidationRunListGetRequest
 	}
 	tests := []struct {
 		name    string
@@ -258,8 +258,8 @@ func TestManageMachineValidation_GetMachineValidationRunsFromSite(t *testing.T) 
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationRunListGetRequest{
-					MachineId: &cwssaws.MachineId{
+				request: &corev1.MachineValidationRunListGetRequest{
+					MachineId: &corev1.MachineId{
 						Id: "machine-id-1",
 					},
 				},
@@ -284,7 +284,7 @@ func TestManageMachineValidation_GetMachineValidationRunsFromSite(t *testing.T) 
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.MachineValidationRunListGetRequest{},
+				request: &corev1.MachineValidationRunListGetRequest{},
 			},
 			wantErr: true,
 		},
@@ -313,7 +313,7 @@ func TestManageMachineValidation_GetMachineValidationTestsFromSite(t *testing.T)
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.MachineValidationTestsGetRequest
+		request *corev1.MachineValidationTestsGetRequest
 	}
 	tests := []struct {
 		name    string
@@ -328,7 +328,7 @@ func TestManageMachineValidation_GetMachineValidationTestsFromSite(t *testing.T)
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.MachineValidationTestsGetRequest{},
+				request: &corev1.MachineValidationTestsGetRequest{},
 			},
 			wantErr: false,
 		},
@@ -367,7 +367,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 		coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient
 	}
 	type args struct {
-		request *cwssaws.MachineValidationTestAddRequest
+		request *corev1.MachineValidationTestAddRequest
 	}
 	tests := []struct {
 		name    string
@@ -382,7 +382,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
-				request: &cwssaws.MachineValidationTestAddRequest{
+				request: &corev1.MachineValidationTestAddRequest{
 					Name:    "test-1",
 					Command: "test-command",
 					Args:    "test-args",
@@ -407,7 +407,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
-				request: &cwssaws.MachineValidationTestAddRequest{},
+				request: &corev1.MachineValidationTestAddRequest{},
 			},
 			wantErr: true,
 		},
@@ -417,7 +417,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
-				request: &cwssaws.MachineValidationTestAddRequest{
+				request: &corev1.MachineValidationTestAddRequest{
 					Command: "test-command",
 					Args:    "test-args",
 				},
@@ -430,7 +430,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
-				request: &cwssaws.MachineValidationTestAddRequest{
+				request: &corev1.MachineValidationTestAddRequest{
 					Name: "test-1",
 					Args: "test-args",
 				},
@@ -443,7 +443,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
-				request: &cwssaws.MachineValidationTestAddRequest{
+				request: &corev1.MachineValidationTestAddRequest{
 					Name:    "test-1",
 					Command: "test-command",
 				},
@@ -482,7 +482,7 @@ func TestManageMachineValidation_UpdateMachineValidationTestOnSite(t *testing.T)
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.MachineValidationTestUpdateRequest
+		request *corev1.MachineValidationTestUpdateRequest
 	}
 	tests := []struct {
 		name    string
@@ -497,10 +497,10 @@ func TestManageMachineValidation_UpdateMachineValidationTestOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestUpdateRequest{
+				request: &corev1.MachineValidationTestUpdateRequest{
 					TestId:  "test-1",
 					Version: "version-1",
-					Payload: &cwssaws.MachineValidationTestUpdateRequest_Payload{
+					Payload: &corev1.MachineValidationTestUpdateRequest_Payload{
 						Name: util.GetStrPtr("name-2"),
 					},
 				},
@@ -525,7 +525,7 @@ func TestManageMachineValidation_UpdateMachineValidationTestOnSite(t *testing.T)
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.MachineValidationTestUpdateRequest{},
+				request: &corev1.MachineValidationTestUpdateRequest{},
 			},
 			wantErr: true,
 		},
@@ -536,9 +536,9 @@ func TestManageMachineValidation_UpdateMachineValidationTestOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestUpdateRequest{
+				request: &corev1.MachineValidationTestUpdateRequest{
 					Version: "version-1",
-					Payload: &cwssaws.MachineValidationTestUpdateRequest_Payload{
+					Payload: &corev1.MachineValidationTestUpdateRequest_Payload{
 						Name: util.GetStrPtr("name-2"),
 					},
 				},
@@ -552,9 +552,9 @@ func TestManageMachineValidation_UpdateMachineValidationTestOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestUpdateRequest{
+				request: &corev1.MachineValidationTestUpdateRequest{
 					TestId: "test-1",
-					Payload: &cwssaws.MachineValidationTestUpdateRequest_Payload{
+					Payload: &corev1.MachineValidationTestUpdateRequest_Payload{
 						Name: util.GetStrPtr("name-2"),
 					},
 				},
@@ -568,7 +568,7 @@ func TestManageMachineValidation_UpdateMachineValidationTestOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.MachineValidationTestUpdateRequest{
+				request: &corev1.MachineValidationTestUpdateRequest{
 					TestId:  "test-1",
 					Version: "version-1",
 				},
@@ -600,7 +600,7 @@ func TestManageMachineValidation_GetMachineValidationExternalConfigsFromSite(t *
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.GetMachineValidationExternalConfigsRequest
+		request *corev1.GetMachineValidationExternalConfigsRequest
 	}
 	tests := []struct {
 		name    string
@@ -615,7 +615,7 @@ func TestManageMachineValidation_GetMachineValidationExternalConfigsFromSite(t *
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.GetMachineValidationExternalConfigsRequest{},
+				request: &corev1.GetMachineValidationExternalConfigsRequest{},
 			},
 			wantErr: false,
 		},
@@ -655,7 +655,7 @@ func TestManageMachineValidation_AddUpdateMachineValidationExternalConfigOnSite(
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.AddUpdateMachineValidationExternalConfigRequest
+		request *corev1.AddUpdateMachineValidationExternalConfigRequest
 	}
 	tests := []struct {
 		name    string
@@ -670,7 +670,7 @@ func TestManageMachineValidation_AddUpdateMachineValidationExternalConfigOnSite(
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.AddUpdateMachineValidationExternalConfigRequest{
+				request: &corev1.AddUpdateMachineValidationExternalConfigRequest{
 					Name: "test-1",
 				},
 			},
@@ -694,7 +694,7 @@ func TestManageMachineValidation_AddUpdateMachineValidationExternalConfigOnSite(
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.AddUpdateMachineValidationExternalConfigRequest{},
+				request: &corev1.AddUpdateMachineValidationExternalConfigRequest{},
 			},
 			wantErr: true,
 		},
@@ -723,7 +723,7 @@ func TestManageMachineValidation_RemoveMachineValidationExternalConfigOnSite(t *
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.RemoveMachineValidationExternalConfigRequest
+		request *corev1.RemoveMachineValidationExternalConfigRequest
 	}
 	tests := []struct {
 		name    string
@@ -738,7 +738,7 @@ func TestManageMachineValidation_RemoveMachineValidationExternalConfigOnSite(t *
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.RemoveMachineValidationExternalConfigRequest{
+				request: &corev1.RemoveMachineValidationExternalConfigRequest{
 					Name: "test-1",
 				},
 			},
@@ -762,7 +762,7 @@ func TestManageMachineValidation_RemoveMachineValidationExternalConfigOnSite(t *
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.RemoveMachineValidationExternalConfigRequest{},
+				request: &corev1.RemoveMachineValidationExternalConfigRequest{},
 			},
 			wantErr: true,
 		},

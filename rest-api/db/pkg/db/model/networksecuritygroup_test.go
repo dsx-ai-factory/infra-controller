@@ -16,8 +16,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func getIntPtrToUint32Ptr(i *int) *uint32 {
@@ -43,8 +42,8 @@ func TestNetworkSecurityGroupPropagationDetails_Equal(t *testing.T) {
 	mk := func() *NetworkSecurityGroupPropagationDetails {
 		return &NetworkSecurityGroupPropagationDetails{
 			FriendlyStatus: "Propagated",
-			NetworkSecurityGroupPropagationObjectStatus: &cwssaws.NetworkSecurityGroupPropagationObjectStatus{
-				Status:                  cwssaws.NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_FULL,
+			NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{
+				Status:                  corev1.NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_FULL,
 				Details:                 cutil.GetPtr("ok"),
 				UnpropagatedInstanceIds: []string{"i-1"},
 				RelatedInstanceIds:      []string{"i-2"},
@@ -68,7 +67,7 @@ func TestNetworkSecurityGroupPropagationDetails_Equal(t *testing.T) {
 	t.Run("differing Status returns false", func(t *testing.T) {
 		a := mk()
 		b := mk()
-		b.Status = cwssaws.NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_ERROR
+		b.Status = corev1.NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_ERROR
 		assert.False(t, a.Equal(b))
 	})
 	t.Run("differing Details returns false", func(t *testing.T) {
@@ -111,19 +110,19 @@ func TestNetworkSecurityGroupSQLDAO_Create(t *testing.T) {
 	labels["key"] = "value"
 
 	rule := &NetworkSecurityGroupRule{
-		&cwssaws.NetworkSecurityGroupRuleAttributes{
+		&corev1.NetworkSecurityGroupRuleAttributes{
 			Id:             cutil.GetPtr(uuid.NewString()),
-			Direction:      cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_EGRESS,
-			Protocol:       cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY,
-			Action:         cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_DENY,
+			Direction:      corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_EGRESS,
+			Protocol:       corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY,
+			Action:         corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_DENY,
 			Priority:       55,
-			Ipv6:           false, // We have support for it in ACLs but pretty much nowhere else, so we hide this for now.
+			Ipv6:           false,
 			SrcPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(55)),
 			SrcPortEnd:     getIntPtrToUint32Ptr(cutil.GetPtr(56)),
 			DstPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(57)),
 			DstPortEnd:     getIntPtrToUint32Ptr(cutil.GetPtr(58)),
-			SourceNet:      &cwssaws.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
-			DestinationNet: &cwssaws.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "1.1.1.1/0"},
+			SourceNet:      &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
+			DestinationNet: &corev1.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "1.1.1.1/0"},
 		},
 	}
 
@@ -229,8 +228,6 @@ func TestNetworkSecurityGroupSQLDAO_Create(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -312,8 +309,6 @@ func TestNetworkSecurityGroupSQLDAO_GetByID(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -532,8 +527,6 @@ func TestNetworkSecurityGroupSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -554,11 +547,11 @@ func TestNetworkSecurityGroupSQLDAO_Update(t *testing.T) {
 	labels["key"] = "value"
 
 	rules := []*NetworkSecurityGroupRule{
-		&NetworkSecurityGroupRule{&cwssaws.NetworkSecurityGroupRuleAttributes{}},
+		&NetworkSecurityGroupRule{&corev1.NetworkSecurityGroupRuleAttributes{}},
 	}
 
 	badRules := []*NetworkSecurityGroupRule{
-		&NetworkSecurityGroupRule{&cwssaws.NetworkSecurityGroupRuleAttributes{}},
+		&NetworkSecurityGroupRule{&corev1.NetworkSecurityGroupRuleAttributes{}},
 		nil,
 	}
 
@@ -681,8 +674,6 @@ func TestNetworkSecurityGroupSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -736,8 +727,6 @@ func TestNetworkSecurityGroupSQLDAO_DeleteByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

@@ -4,8 +4,10 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
@@ -14,8 +16,9 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
@@ -42,23 +45,23 @@ func (s *UpdateInstanceTestSuite) Test_UpdateInstance_Success() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.InstanceConfigUpdateRequest{
-		InstanceId: &cwssaws.InstanceId{Value: uuid.NewString()},
-		Metadata: &cwssaws.Metadata{
+	request := &corev1.InstanceConfigUpdateRequest{
+		InstanceId: &corev1.InstanceId{Value: uuid.NewString()},
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
 				},
 			},
 		},
-		Config: &cwssaws.InstanceConfig{
-			Os: &cwssaws.InstanceOperatingSystemConfig{
+		Config: &corev1.InstanceConfig{
+			Os: &corev1.InstanceOperatingSystemConfig{
 				RunProvisioningInstructionsOnEveryBoot: true,
-				Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-					Ipxe: &cwssaws.InlineIpxe{
+				Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+					Ipxe: &corev1.InlineIpxe{
 						IpxeScript: ipxeScript,
 					},
 				},
@@ -85,23 +88,23 @@ func (s *UpdateInstanceTestSuite) Test_UpdateInstance_Failure() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.InstanceConfigUpdateRequest{
-		InstanceId: &cwssaws.InstanceId{Value: uuid.NewString()},
-		Metadata: &cwssaws.Metadata{
+	request := &corev1.InstanceConfigUpdateRequest{
+		InstanceId: &corev1.InstanceId{Value: uuid.NewString()},
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
 				},
 			},
 		},
-		Config: &cwssaws.InstanceConfig{
-			Os: &cwssaws.InstanceOperatingSystemConfig{
+		Config: &corev1.InstanceConfig{
+			Os: &corev1.InstanceOperatingSystemConfig{
 				RunProvisioningInstructionsOnEveryBoot: true,
-				Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-					Ipxe: &cwssaws.InlineIpxe{
+				Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+					Ipxe: &corev1.InlineIpxe{
 						IpxeScript: ipxeScript,
 					},
 				},
@@ -149,23 +152,23 @@ func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_Success() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.InstanceAllocationRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-		Metadata: &cwssaws.Metadata{
+	request := &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
 				},
 			},
 		},
-		Config: &cwssaws.InstanceConfig{
-			Os: &cwssaws.InstanceOperatingSystemConfig{
+		Config: &corev1.InstanceConfig{
+			Os: &corev1.InstanceOperatingSystemConfig{
 				RunProvisioningInstructionsOnEveryBoot: true,
-				Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-					Ipxe: &cwssaws.InlineIpxe{
+				Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+					Ipxe: &corev1.InlineIpxe{
 						IpxeScript: ipxeScript,
 					},
 				},
@@ -192,23 +195,23 @@ func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_Failure() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.InstanceAllocationRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-		Metadata: &cwssaws.Metadata{
+	request := &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
 				},
 			},
 		},
-		Config: &cwssaws.InstanceConfig{
-			Os: &cwssaws.InstanceOperatingSystemConfig{
+		Config: &corev1.InstanceConfig{
+			Os: &corev1.InstanceOperatingSystemConfig{
 				RunProvisioningInstructionsOnEveryBoot: true,
-				Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-					Ipxe: &cwssaws.InlineIpxe{
+				Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+					Ipxe: &corev1.InlineIpxe{
 						IpxeScript: ipxeScript,
 					},
 				},
@@ -227,6 +230,61 @@ func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_Failure() {
 	s.env.ExecuteWorkflow(CreateInstanceV2, request)
 	s.True(s.env.IsWorkflowCompleted())
 	s.Error(s.env.GetWorkflowError())
+}
+
+// Test_CreateInstanceV2_ActivityDeadlineTracksLadder pins the budget that bounds
+// Core. CreateInstanceOnSite passes this context to AllocateInstance, so Core's own
+// deadline is whatever the activity carries. A budget outliving the REST caller's
+// wait would let Core commit an Instance the handler has already rolled back.
+func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_ActivityDeadlineTracksLadder() {
+	var machineManager iActivity.ManageInstance
+
+	var deadline time.Time
+	var hasDeadline bool
+
+	s.env.RegisterActivity(machineManager.CreateInstanceOnSite)
+	s.env.OnActivity(machineManager.CreateInstanceOnSite, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			deadline, hasDeadline = args.Get(0).(context.Context).Deadline()
+		}).Return(nil)
+
+	s.env.ExecuteWorkflow(CreateInstanceV2, &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+	})
+
+	s.True(s.env.IsWorkflowCompleted())
+	s.NoError(s.env.GetWorkflowError())
+	s.True(hasDeadline)
+
+	// Assert against the constant, not a literal, so retuning the ladder does not
+	// require editing this test.
+	remaining := time.Until(deadline)
+	s.Greater(remaining, cloudutils.ActivityStartToCloseTimeout-time.Second)
+	s.LessOrEqual(remaining, cloudutils.ActivityStartToCloseTimeout)
+}
+
+// Test_CreateInstanceV2_DoesNotRetry pins the single attempt. Temporal anchors
+// StartToCloseTimeout at the moment an attempt starts, so a second attempt gets a
+// fresh budget that can outlive both the workflow and the caller, letting Core
+// commit an Instance the handler has already rolled back.
+func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_DoesNotRetry() {
+	var machineManager iActivity.ManageInstance
+
+	attempts := 0
+
+	s.env.RegisterActivity(machineManager.CreateInstanceOnSite)
+	s.env.OnActivity(machineManager.CreateInstanceOnSite, mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) {
+			attempts++
+		}).Return(errors.New("Site Controller communication error"))
+
+	s.env.ExecuteWorkflow(CreateInstanceV2, &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+	})
+
+	s.True(s.env.IsWorkflowCompleted())
+	s.Error(s.env.GetWorkflowError())
+	s.Equal(1, attempts)
 }
 
 func TestCreateInstanceV2TestSuite(t *testing.T) {
@@ -260,25 +318,25 @@ func (s *CreateInstancesTestSuite) Test_CreateInstances_Success() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.BatchInstanceAllocationRequest{
-		InstanceRequests: []*cwssaws.InstanceAllocationRequest{
+	request := &corev1.BatchInstanceAllocationRequest{
+		InstanceRequests: []*corev1.InstanceAllocationRequest{
 			{
-				MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-				Metadata: &cwssaws.Metadata{
+				MachineId: &corev1.MachineId{Id: uuid.NewString()},
+				Metadata: &corev1.Metadata{
 					Name:        "instance_1",
 					Description: "first instance",
-					Labels: []*cwssaws.Label{
+					Labels: []*corev1.Label{
 						{
 							Key:   labelKey,
 							Value: &labelValue,
 						},
 					},
 				},
-				Config: &cwssaws.InstanceConfig{
-					Os: &cwssaws.InstanceOperatingSystemConfig{
+				Config: &corev1.InstanceConfig{
+					Os: &corev1.InstanceOperatingSystemConfig{
 						RunProvisioningInstructionsOnEveryBoot: true,
-						Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-							Ipxe: &cwssaws.InlineIpxe{
+						Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+							Ipxe: &corev1.InlineIpxe{
 								IpxeScript: ipxeScript,
 							},
 						},
@@ -287,22 +345,22 @@ func (s *CreateInstancesTestSuite) Test_CreateInstances_Success() {
 				},
 			},
 			{
-				MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-				Metadata: &cwssaws.Metadata{
+				MachineId: &corev1.MachineId{Id: uuid.NewString()},
+				Metadata: &corev1.Metadata{
 					Name:        "instance_2",
 					Description: "second instance",
-					Labels: []*cwssaws.Label{
+					Labels: []*corev1.Label{
 						{
 							Key:   labelKey,
 							Value: &labelValue,
 						},
 					},
 				},
-				Config: &cwssaws.InstanceConfig{
-					Os: &cwssaws.InstanceOperatingSystemConfig{
+				Config: &corev1.InstanceConfig{
+					Os: &corev1.InstanceOperatingSystemConfig{
 						RunProvisioningInstructionsOnEveryBoot: true,
-						Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-							Ipxe: &cwssaws.InlineIpxe{
+						Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+							Ipxe: &corev1.InlineIpxe{
 								IpxeScript: ipxeScript,
 							},
 						},
@@ -333,25 +391,25 @@ func (s *CreateInstancesTestSuite) Test_CreateInstances_Failure() {
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.BatchInstanceAllocationRequest{
-		InstanceRequests: []*cwssaws.InstanceAllocationRequest{
+	request := &corev1.BatchInstanceAllocationRequest{
+		InstanceRequests: []*corev1.InstanceAllocationRequest{
 			{
-				MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-				Metadata: &cwssaws.Metadata{
+				MachineId: &corev1.MachineId{Id: uuid.NewString()},
+				Metadata: &corev1.Metadata{
 					Name:        "instance_1",
 					Description: "first instance",
-					Labels: []*cwssaws.Label{
+					Labels: []*corev1.Label{
 						{
 							Key:   labelKey,
 							Value: &labelValue,
 						},
 					},
 				},
-				Config: &cwssaws.InstanceConfig{
-					Os: &cwssaws.InstanceOperatingSystemConfig{
+				Config: &corev1.InstanceConfig{
+					Os: &corev1.InstanceOperatingSystemConfig{
 						RunProvisioningInstructionsOnEveryBoot: true,
-						Variant: &cwssaws.InstanceOperatingSystemConfig_Ipxe{
-							Ipxe: &cwssaws.InlineIpxe{
+						Variant: &corev1.InstanceOperatingSystemConfig_Ipxe{
+							Ipxe: &corev1.InlineIpxe{
 								IpxeScript: ipxeScript,
 							},
 						},
@@ -396,8 +454,8 @@ func (s *DeleteInstanceV2TestSuite) AfterTest(suiteName, testName string) {
 func (s *DeleteInstanceV2TestSuite) Test_DeleteInstanceV2_Success() {
 	var instanceManager iActivity.ManageInstance
 
-	request := &cwssaws.InstanceReleaseRequest{
-		Id: &cwssaws.InstanceId{Value: uuid.NewString()},
+	request := &corev1.InstanceReleaseRequest{
+		Id: &corev1.InstanceId{Value: uuid.NewString()},
 	}
 
 	// Mock DeleteInstanceOnSiteActivity activity
@@ -413,8 +471,8 @@ func (s *DeleteInstanceV2TestSuite) Test_DeleteInstanceV2_Success() {
 func (s *DeleteInstanceV2TestSuite) Test_DeleteInstanceV2_Failure() {
 	var machineManager iActivity.ManageInstance
 
-	request := &cwssaws.InstanceReleaseRequest{
-		Id: &cwssaws.InstanceId{Value: uuid.NewString()},
+	request := &corev1.InstanceReleaseRequest{
+		Id: &corev1.InstanceId{Value: uuid.NewString()},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -451,14 +509,14 @@ func (s *RebootInstanceTestSuite) AfterTest(suiteName, testName string) {
 func (s *RebootInstanceTestSuite) Test_RebootInstance_Success() {
 	var machineManager iActivity.ManageInstance
 
-	request := &cwssaws.InstancePowerRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-		Operation: cwssaws.InstancePowerRequest_POWER_RESET,
+	request := &corev1.InstancePowerRequest{
+		InstanceId: &corev1.InstanceId{Value: uuid.NewString()},
+		Operation:  corev1.InstancePowerRequest_POWER_RESET,
 	}
 
 	// Mock RebootInstanceOnSiteActivity activity
 	s.env.RegisterActivity(machineManager.RebootInstanceOnSite)
-	s.env.OnActivity(machineManager.RebootInstanceOnSite, mock.Anything, mock.Anything).Return(nil)
+	s.env.OnActivity(machineManager.RebootInstanceOnSite, mock.Anything, request).Return(nil)
 
 	// execute workflow
 	s.env.ExecuteWorkflow(RebootInstance, request)
@@ -469,16 +527,16 @@ func (s *RebootInstanceTestSuite) Test_RebootInstance_Success() {
 func (s *RebootInstanceTestSuite) Test_RebootInstance_Failure() {
 	var machineManager iActivity.ManageInstance
 
-	request := &cwssaws.InstancePowerRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-		Operation: cwssaws.InstancePowerRequest_POWER_RESET,
+	request := &corev1.InstancePowerRequest{
+		InstanceId: &corev1.InstanceId{Value: uuid.NewString()},
+		Operation:  corev1.InstancePowerRequest_POWER_RESET,
 	}
 
 	errMsg := "Site Controller communication error"
 
 	// Mock RebootInstanceOnSiteActivity activity
 	s.env.RegisterActivity(machineManager.RebootInstanceOnSite)
-	s.env.OnActivity(machineManager.RebootInstanceOnSite, mock.Anything, mock.Anything).Return(errors.New(errMsg))
+	s.env.OnActivity(machineManager.RebootInstanceOnSite, mock.Anything, request).Return(errors.New(errMsg))
 
 	// execute RebootMachineInventory workflow
 	s.env.ExecuteWorkflow(RebootInstance, request)

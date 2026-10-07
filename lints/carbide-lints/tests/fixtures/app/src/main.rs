@@ -1,7 +1,7 @@
 use std::ops::DerefMut;
 
 use sqlx::pool::PoolConnection;
-use sqlx::{Executor, PgConnection, PgTransaction, Postgres};
+use sqlx::{Acquire, Connection, Executor, PgConnection, PgTransaction, Postgres};
 
 async fn good_db_related() {
     let mut txn = make_transaction();
@@ -155,10 +155,21 @@ async fn unrelated_async_work(desc: &'static str) {
 fn non_async_work() {}
 
 mod db {
-    use sqlx::PgExecutor;
+    use sqlx::{PgExecutor, PgTransaction, Postgres};
 
-    pub async fn actually_use_txn(_db: impl sqlx::PgExecutor<'_>) {}
-    pub async fn use_db_as_trait<DB>(_db: &mut DB)
+    pub(super) struct Transaction;
+
+    impl Transaction {
+        pub(super) async fn begin_inner<'a, A>(acquire: A) -> PgTransaction<'a>
+        where
+            A: sqlx::Acquire<'a, Database = Postgres>,
+        {
+            acquire.begin().await.unwrap()
+        }
+    }
+
+    pub(super) async fn actually_use_txn(_db: impl sqlx::PgExecutor<'_>) {}
+    pub(super) async fn use_db_as_trait<DB>(_db: &mut DB)
     where
         for<'db> &'db mut DB: PgExecutor<'db>,
     {
@@ -169,14 +180,14 @@ struct HasDbMethods;
 
 impl HasDbMethods {
     // No warnings: txn is forwarded to db::actually_use_txn
-    pub async fn good_fn(&self, txn: &mut PgTransaction<'_>) {
+    async fn good_fn(&self, txn: &mut PgTransaction<'_>) {
         non_async_work();
         db::actually_use_txn(txn.deref_mut()).await;
         db::use_db_as_trait(&mut **txn).await;
     }
 
     // Warnings: unrelated_async_work is called while txn is in scope
-    pub async fn bad_fn(&self, _txn: &mut PgTransaction<'_>) {
+    async fn bad_fn(&self, _txn: &mut PgTransaction<'_>) {
         unrelated_async_work("bad").await;
     }
 }
@@ -235,6 +246,67 @@ async fn bad_pgpoolconn_fn(_conn: &mut PoolConnection<Postgres>) {
 async fn good_pgpoolconn_fn(conn: PoolConnection<Postgres>) {
     std::mem::drop(conn);
     unrelated_async_work("good").await
+}
+
+async fn good_direct_nested_transaction() {
+    let mut txn = make_transaction();
+    let mut inner = txn.begin().await.unwrap();
+    db::actually_use_txn(inner.deref_mut()).await;
+    inner.commit().await.unwrap();
+    txn.commit().await.unwrap();
+}
+
+async fn good_begin_inner_from_connection() {
+    let mut conn = make_pgconn();
+    let mut inner = db::Transaction::begin_inner(&mut conn).await;
+    db::actually_use_txn(inner.deref_mut()).await;
+    inner.commit().await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[allow(txn_without_commit)]
+async fn good_shadowed_nested_transaction() {
+    let mut txn = make_transaction();
+    let mut txn = db::Transaction::begin_inner(&mut txn).await;
+    db::actually_use_txn(txn.deref_mut()).await;
+    txn.commit().await.unwrap();
+}
+
+async fn good_transitively_nested_transactions() {
+    let mut outer = make_transaction();
+    let mut inner = db::Transaction::begin_inner(&mut outer).await;
+    let mut deepest = db::Transaction::begin_inner(&mut inner).await;
+    db::actually_use_txn(deepest.deref_mut()).await;
+    deepest.commit().await.unwrap();
+    inner.commit().await.unwrap();
+    outer.commit().await.unwrap();
+}
+
+async fn bad_unrelated_work_with_nested_transaction() {
+    let mut outer = make_transaction();
+    let inner = db::Transaction::begin_inner(&mut outer).await;
+    unrelated_async_work("bad").await;
+    inner.commit().await.unwrap();
+    outer.commit().await.unwrap();
+}
+
+#[allow(txn_without_commit)]
+async fn bad_independent_transaction_lineages() {
+    let mut first = make_transaction();
+    let mut inner = db::Transaction::begin_inner(&mut first).await;
+    let second = make_transaction();
+    db::actually_use_txn(inner.deref_mut()).await;
+    std::mem::drop(second);
+    inner.commit().await.unwrap();
+    first.commit().await.unwrap();
+}
+
+async fn bad_after_inner_transaction_commit() {
+    let mut outer = make_transaction();
+    let inner = db::Transaction::begin_inner(&mut outer).await;
+    inner.commit().await.unwrap();
+    unrelated_async_work("bad").await;
+    outer.commit().await.unwrap();
 }
 
 async fn bad_unrelated_work_in_closure_upvars() {
@@ -325,6 +397,16 @@ async fn main() {
     good_txn_as_receiver().await;
     do_txn_by_value().await;
     pgconn_calls().await;
+    good_direct_nested_transaction().await;
+    make_wrapped_transaction().commit_inner().await;
+    good_root_begin_inner().await;
+    good_begin_inner_from_connection().await;
+    good_shadowed_nested_transaction().await;
+    good_transitively_nested_transactions().await;
+    good_nested_typeck_owner().await;
+    bad_unrelated_work_with_nested_transaction().await;
+    bad_independent_transaction_lineages().await;
+    bad_after_inner_transaction_commit().await;
     bad_unrelated_work_in_closure_upvars().await;
     good_related_work_in_closure_upvars().await;
     bad_unrelated_work_in_closure_locals().await;
@@ -334,6 +416,55 @@ async fn main() {
     let owned_txn = good_move_out().await;
     owned_txn.commit().await.unwrap();
     bad_takes_db_reader().await;
+}
+
+async fn good_nested_typeck_owner() {
+    struct Local;
+
+    impl PartialEq for Local {
+        fn eq(&self, _other: &Self) -> bool {
+            let equal = true;
+            equal
+        }
+    }
+
+    let _ = Local == Local;
+    let mut txn = make_transaction();
+    db::actually_use_txn(txn.deref_mut()).await;
+    txn.commit().await.unwrap();
+}
+
+struct Transaction<'a> {
+    inner: PgTransaction<'a>,
+}
+
+impl<'a> Transaction<'a> {
+    async fn begin_inner(conn: &'a mut PgConnection) -> Self {
+        Self {
+            inner: Acquire::begin(conn).await.unwrap(),
+        }
+    }
+
+    fn as_pgconn(&mut self) -> &mut PgConnection {
+        &mut self.inner
+    }
+
+    #[allow(txn_without_commit)]
+    async fn commit_inner(self) {
+        self.inner.commit().await.unwrap();
+    }
+}
+
+fn make_wrapped_transaction() -> Transaction<'static> {
+    todo!()
+}
+
+async fn good_root_begin_inner() {
+    let mut conn = make_pgconn();
+    let mut txn = Transaction::begin_inner(&mut conn).await;
+    db::actually_use_txn(txn.as_pgconn()).await;
+    txn.commit_inner().await;
+    conn.close().await.unwrap();
 }
 
 pub mod db_read {

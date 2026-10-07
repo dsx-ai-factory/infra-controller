@@ -1,3 +1,4 @@
+{{- $ipv6 := default (dict) .Values.ipv6 -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -5,9 +6,14 @@ metadata:
   namespace: {{ include "unbound.namespace" . }}
   labels:
     {{- include "unbound.labels" . | nindent 4 }}
+    {{- if .Values.exporter.enabled }}
+    app.kubernetes.io/metrics: nico-unbound
+    {{- end }}
   annotations:
     {{- include "unbound.annotations" . | nindent 4 }}
 spec:
+  ipFamilyPolicy: {{ if $ipv6.enabled }}PreferDualStack{{ else }}SingleStack{{ end }}
+  ipFamilies: [IPv4]
   selector:
     {{- include "unbound.selectorLabels" . | nindent 4 }}
   ports:
@@ -19,7 +25,9 @@ spec:
       targetPort: dns-tcp
       protocol: TCP
       name: dns-tcp
+    {{- if .Values.exporter.enabled }}
     - port: 9167
-      protocol: TCP
       targetPort: metrics
+      protocol: TCP
       name: unbound-metrics
+    {{- end }}

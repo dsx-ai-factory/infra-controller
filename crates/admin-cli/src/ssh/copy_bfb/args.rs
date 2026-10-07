@@ -27,9 +27,9 @@ Copy a BFB image to a DPU BMC's RSHIM:
     $ nico-admin-cli ssh copy-bfb 192.0.2.10:22 admin mypassword /path/to/image.bfb
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub ssh_args: SshArgs,
+    pub(super) ssh_args: SshArgs,
     #[clap(help = "BFB Path")]
-    pub bfb_path: String,
+    pub(super) bfb_path: String,
 }

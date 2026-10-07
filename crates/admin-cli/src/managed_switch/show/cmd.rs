@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::switch::SwitchId;
 use prettytable::{Cell, Row, Table};
 use rpc::admin_cli::OutputFormat;
@@ -386,19 +387,19 @@ fn show_managed_switch_details_view(m: ManagedSwitchOutput) -> CarbideCliResult<
         ("  ID", m.switch_id),
         ("  Slot Number", m.slot_number.map(|n| n.to_string())),
         ("  Tray Index", m.tray_index.map(|n| n.to_string())),
-        ("  Serial Number", non_empty(m.serial_number)),
+        ("  Serial Number", m.serial_number.none_if_empty()),
         ("  Rack ID", m.rack_id),
         ("  Power State", m.power_state),
         ("  Health", m.health_status),
         (
             "  NVOS MAC Addresses",
-            non_empty(m.nvos_mac_addresses.join(", ")),
+            m.nvos_mac_addresses.join(", ").none_if_empty(),
         ),
         ("  BMC", Some(String::new())),
         ("    Version", m.bmc_version),
         ("    Firmware Version", m.bmc_firmware_version),
         ("    IP", m.bmc_ip),
-        ("    MAC", non_empty(m.bmc_mac)),
+        ("    MAC", m.bmc_mac.none_if_empty()),
     ];
 
     for (key, value) in data {
@@ -418,11 +419,7 @@ fn show_managed_switch_details_view(m: ManagedSwitchOutput) -> CarbideCliResult<
     Ok(())
 }
 
-fn non_empty(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
-}
-
-pub async fn handle_show(
+pub(super) async fn handle_show(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     args: Args,
     output_format: OutputFormat,

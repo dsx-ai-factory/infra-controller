@@ -52,6 +52,7 @@ async fn test_update_instance_operating_system(_: PgPoolOptions, options: PgConn
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
 
     let tinstance = mh.instance_builer(&env).config(config).build().await;
@@ -121,7 +122,7 @@ async fn test_update_instance_operating_system(_: PgPoolOptions, options: PgConn
     assert_eq!(
         status.message(),
         format!(
-            "An object of type instance was intended to be modified did not have the expected version {}",
+            "an object of type instance was intended to be modified did not have the expected version {}",
             initial_config_version.version_string()
         ),
         "Message is {}",
@@ -194,7 +195,7 @@ async fn test_update_instance_operating_system(_: PgPoolOptions, options: PgConn
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         err.message(),
-        "Invalid value: InlineIpxe::ipxe_script is empty"
+        "invalid value: InlineIpxe::ipxe_script is empty"
     );
 }
 
@@ -211,7 +212,7 @@ async fn test_create_instance_with_ipxe_template_os(_: PgPoolOptions, options: P
             rpc::forge::CreateOperatingSystemRequest {
                 id: None,
                 name: "template-os".to_string(),
-                tenant_organization_id: "test-org".to_string(),
+                tenant_organization_id: Some("test-org".to_string()),
                 description: Some("iPXE template based OS".to_string()),
                 is_active: true,
                 allow_override: true,
@@ -254,6 +255,7 @@ async fn test_create_instance_with_ipxe_template_os(_: PgPoolOptions, options: P
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
 
     let tinstance = mh.instance_builer(&env).config(config).build().await;
@@ -298,7 +300,7 @@ async fn create_os_definition(
             rpc::forge::CreateOperatingSystemRequest {
                 id: None,
                 name: name.to_string(),
-                tenant_organization_id: "test-org".to_string(),
+                tenant_organization_id: Some("test-org".to_string()),
                 description: None,
                 is_active,
                 allow_override: false,
@@ -332,7 +334,7 @@ async fn test_allocate_instance_rejects_inactive_os(_: PgPoolOptions, options: P
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(rpc::forge::InstanceOperatingSystemConfig {
@@ -351,6 +353,7 @@ async fn test_allocate_instance_rejects_inactive_os(_: PgPoolOptions, options: P
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
+                power_profile: None,
             }),
             instance_id: None,
             instance_type_id: None,
@@ -386,7 +389,7 @@ async fn test_allocate_instance_rejects_not_ready_os(_: PgPoolOptions, options: 
             rpc::forge::CreateOperatingSystemRequest {
                 id: None,
                 name: "not-ready-os".to_string(),
-                tenant_organization_id: "test-org".to_string(),
+                tenant_organization_id: Some("test-org".to_string()),
                 description: None,
                 is_active: true,
                 allow_override: false,
@@ -419,7 +422,7 @@ async fn test_allocate_instance_rejects_not_ready_os(_: PgPoolOptions, options: 
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(rpc::forge::InstanceOperatingSystemConfig {
@@ -438,6 +441,7 @@ async fn test_allocate_instance_rejects_not_ready_os(_: PgPoolOptions, options: 
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
+                power_profile: None,
             }),
             instance_id: None,
             instance_type_id: None,
@@ -486,6 +490,7 @@ async fn test_update_instance_os_rejects_inactive_os(_: PgPoolOptions, options: 
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
     let tinstance = mh.instance_builer(&env).config(config).build().await;
 
@@ -582,6 +587,7 @@ async fn test_create_instance_with_os_image_and_verify_pxe_rendering(
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
 
     let tinstance = mh.instance_builer(&env).config(config).build().await;
@@ -627,7 +633,7 @@ async fn test_create_instance_with_os_image_and_verify_pxe_rendering(
         pxe.pxe_script
     );
     assert!(
-        pxe.pxe_script.contains("ds=nocloud-net"),
+        pxe.pxe_script.contains("ds=nocloud-net;"),
         "Expected cloud-init data source when userdata is set, got: {}",
         pxe.pxe_script
     );
@@ -650,7 +656,7 @@ async fn test_create_instance_with_raw_ipxe_os_and_verify_pxe_rendering(
             rpc::forge::CreateOperatingSystemRequest {
                 id: None,
                 name: "raw-ipxe-os".to_string(),
-                tenant_organization_id: "test-org".to_string(),
+                tenant_organization_id: Some("test-org".to_string()),
                 description: Some("raw iPXE OS for instance test".to_string()),
                 is_active: true,
                 allow_override: true,
@@ -690,6 +696,7 @@ async fn test_create_instance_with_raw_ipxe_os_and_verify_pxe_rendering(
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
 
     let tinstance = mh.instance_builer(&env).config(config).build().await;
@@ -735,7 +742,7 @@ async fn test_create_instance_with_templated_ipxe_os_with_artifacts_and_verify_p
             rpc::forge::CreateOperatingSystemRequest {
                 id: None,
                 name: "templated-os-with-artifacts".to_string(),
-                tenant_organization_id: "test-org".to_string(),
+                tenant_organization_id: Some("test-org".to_string()),
                 description: Some("templated iPXE OS with artifacts".to_string()),
                 is_active: true,
                 allow_override: true,
@@ -818,6 +825,7 @@ async fn test_create_instance_with_templated_ipxe_os_with_artifacts_and_verify_p
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
 
     let tinstance = mh.instance_builer(&env).config(config).build().await;

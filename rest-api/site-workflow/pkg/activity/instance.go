@@ -15,7 +15,7 @@ import (
 
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
@@ -26,7 +26,7 @@ type ManageInstance struct {
 }
 
 // Function Update NICo Instance with the Site Controller
-func (mm *ManageInstance) UpdateInstanceOnSite(ctx context.Context, request *cwssaws.InstanceConfigUpdateRequest) error {
+func (mm *ManageInstance) UpdateInstanceOnSite(ctx context.Context, request *corev1.InstanceConfigUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateInstanceOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -51,19 +51,20 @@ func (mm *ManageInstance) UpdateInstanceOnSite(ctx context.Context, request *cws
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateInstanceConfig(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update config for Instance using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update config for Instance using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to Create (allocate) NICo Instance with the Site Controller
-func (mm *ManageInstance) CreateInstanceOnSite(ctx context.Context, request *cwssaws.InstanceAllocationRequest) error {
+func (mm *ManageInstance) CreateInstanceOnSite(ctx context.Context, request *corev1.InstanceAllocationRequest) error {
 	logger := log.With().Str("Activity", "CreateInstanceOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -88,20 +89,21 @@ func (mm *ManageInstance) CreateInstanceOnSite(ctx context.Context, request *cws
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.AllocateInstance(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Instance using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create Instance using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // CreateInstancesOnSite is an activity to create (allocate) multiple NICo Instances with the Site Controller
 // in a single transaction. This is the batch version of CreateInstanceOnSite.
-func (mm *ManageInstance) CreateInstancesOnSite(ctx context.Context, request *cwssaws.BatchInstanceAllocationRequest) error {
+func (mm *ManageInstance) CreateInstancesOnSite(ctx context.Context, request *corev1.BatchInstanceAllocationRequest) error {
 	logger := log.With().Str("Activity", "CreateInstancesOnSite").Logger()
 
 	var err error
@@ -130,18 +132,20 @@ func (mm *ManageInstance) CreateInstancesOnSite(ctx context.Context, request *cw
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.AllocateInstances(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Int("Count", len(request.InstanceRequests)).Msg("Failed to batch create Instances using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to batch create Instances using Core gRPC API")
 		return swe.WrapErr(err)
 	}
 
-	logger.Info().Int("Count", len(request.InstanceRequests)).Msg("Completed batch instance allocation activity")
+	logger.Info().Int("Count", len(request.InstanceRequests)).Dur("grpc_duration", duration).Msg("Completed batch instance allocation activity")
 	return nil
 }
 
 // Function to Create (allocate) NICo Instance with the Site Controller
-func (mm *ManageInstance) RebootInstanceOnSite(ctx context.Context, request *cwssaws.InstancePowerRequest) error {
+func (mm *ManageInstance) RebootInstanceOnSite(ctx context.Context, request *corev1.InstancePowerRequest) error {
 	logger := log.With().Str("Activity", "RebootInstanceOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -151,8 +155,8 @@ func (mm *ManageInstance) RebootInstanceOnSite(ctx context.Context, request *cws
 	// Validate request
 	if request == nil {
 		err = errors.New("received empty reboot Instance request")
-	} else if request.MachineId == nil {
-		err = errors.New("received reboot Instance request without Machine ID")
+	} else if request.InstanceId == nil {
+		err = errors.New("received reboot Instance request without Instance ID")
 	}
 
 	if err != nil {
@@ -166,19 +170,20 @@ func (mm *ManageInstance) RebootInstanceOnSite(ctx context.Context, request *cws
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.InvokeInstancePower(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to reboot Instance using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to reboot Instance using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to Delete NICo Instance with the Site Controller
-func (mm *ManageInstance) DeleteInstanceOnSite(ctx context.Context, request *cwssaws.InstanceReleaseRequest) error {
+func (mm *ManageInstance) DeleteInstanceOnSite(ctx context.Context, request *corev1.InstanceReleaseRequest) error {
 	logger := log.With().Str("Activity", "DeleteInstanceOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -203,13 +208,14 @@ func (mm *ManageInstance) DeleteInstanceOnSite(ctx context.Context, request *cws
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.ReleaseInstance(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete Instance using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete Instance using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
@@ -230,7 +236,7 @@ type ManageInstanceInventory struct {
 func (mmi *ManageInstanceInventory) DiscoverInstanceInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverInstanceInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[*cwssaws.InstanceId, *cwssaws.Instance, *cwssaws.InstanceInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.InstanceId, *corev1.Instance, *corev1.InstanceInventory]{
 		itemType:                          "Instance",
 		config:                            mmi.config,
 		internalFindIDs:                   instanceFindIDs,
@@ -248,18 +254,18 @@ func NewManageInstanceInventory(config ManageInventoryConfig) ManageInstanceInve
 	}
 }
 
-func instanceFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.InstanceId, error) {
+func instanceFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.InstanceId, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	instanceIdList, err := grpcServiceClient.FindInstanceIds(ctx, &cwssaws.InstanceSearchFilter{})
+	instanceIdList, err := grpcServiceClient.FindInstanceIds(ctx, &corev1.InstanceSearchFilter{})
 	if err != nil {
 		return nil, err
 	}
 	return instanceIdList.GetInstanceIds(), nil
 }
 
-func instanceFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.InstanceId) ([]*cwssaws.Instance, error) {
+func instanceFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.InstanceId) ([]*corev1.Instance, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	instanceList, err := grpcServiceClient.FindInstancesByIds(ctx, &cwssaws.InstancesByIdsRequest{
+	instanceList, err := grpcServiceClient.FindInstancesByIds(ctx, &corev1.InstancesByIdsRequest{
 		InstanceIds: ids,
 	})
 	if err != nil {
@@ -271,7 +277,7 @@ func instanceFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, 
 
 // instancePagedInventoryPostProcess will attach NSG propagation information for the inventory page of instances.
 // This will only be called for pages with inventory.
-func instancePagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.CoreGrpcClient, inventory *cwssaws.InstanceInventory) (*cwssaws.InstanceInventory, error) {
+func instancePagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.CoreGrpcClient, inventory *corev1.InstanceInventory) (*corev1.InstanceInventory, error) {
 	instanceIds := make([]string, len(inventory.GetInstances()))
 
 	for i, instance := range inventory.GetInstances() {
@@ -279,7 +285,7 @@ func instancePagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.
 	}
 
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	propList, err := grpcServiceClient.GetNetworkSecurityGroupPropagationStatus(ctx, &cwssaws.GetNetworkSecurityGroupPropagationStatusRequest{
+	propList, err := grpcServiceClient.GetNetworkSecurityGroupPropagationStatus(ctx, &corev1.GetNetworkSecurityGroupPropagationStatusRequest{
 		InstanceIds: instanceIds,
 	})
 
@@ -292,14 +298,14 @@ func instancePagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.
 	return inventory, nil
 }
 
-func instancePagedInventory(allItemIDs []*cwssaws.InstanceId, pagedItems []*cwssaws.Instance, input *pagedInventoryInput) *cwssaws.InstanceInventory {
+func instancePagedInventory(allItemIDs []*corev1.InstanceId, pagedItems []*corev1.Instance, input *pagedInventoryInput) *corev1.InstanceInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of Machines
-	instanceInventory := &cwssaws.InstanceInventory{
+	instanceInventory := &corev1.InstanceInventory{
 		Instances: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),

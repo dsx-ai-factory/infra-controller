@@ -1,0 +1,215 @@
+# Example API Workflows
+
+This section provides example REST API workflows for common NICo tasks. All examples use `curl` for API calls and assume a bearer token authentication system is in place.
+
+## Viewing Site Inventory
+
+<AccordionGroup>
+  <Accordion title="View Your Sites">
+    Use the value of `id` from the output of the preceding example as the value for the infrastructureProviderId URL parameter:
+    <Code src="snippets/input/view_sites.sh" title="Example Call" />
+    The Site ID in the response is a required input for many configuration requests.
+    <Code src="snippets/output/view_sites.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="View Your Machines">
+    Use the `id` value from the output of the preceding examples as the values for the `infrastructureProviderId` and `siteId` URL parameters. The following sample command uses URL parameters to filter for machines that are in a `Ready` state and are not assigned an instance type.
+    <Code src="snippets/input/view_machines.sh" title="Example Call" />
+    <Code src="snippets/output/view_machines.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="View Existing IP Blocks">
+    Use the value of `id` from the output of the preceding example as the value for the `infrastructureProviderId` and `siteId` URL parameters.
+    The response includes the IP Block NICo creates for each fabric prefix the Site reports, such as `site-fabric-ipv4-192-168-20-0-24` in the example response.
+    <Code src="snippets/input/view_ip_blocks.sh" title="Example Call" />
+    <Code src="snippets/output/view_ip_blocks.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Managing Virtual Private Clouds
+
+<Note>
+`networkVirtualizationType` selects the VPC's tenant network resource. `FNN`
+VPCs use VPC Prefixes, and their Instance interfaces reference a
+`vpcPrefixId`. `ETHERNET_VIRTUALIZER` VPCs use IPv4 Subnets, and their Instance
+interfaces reference a `subnetId`. `FLAT` VPCs attach the network automatically
+and use neither resource. `FNN` is the supported target for production
+deployments with DPUs.
+
+`tenantId` is the ID of the Tenant organization generated during setup. This value is distinct from the organization name used in the API URL path.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="Create a VPC">
+    Create an `FNN` VPC and specify a name.
+    <Code src="snippets/input/create_vpc.sh" title="Example Call" />
+    <Code src="snippets/output/create_vpc.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="(Optional) Confirm the VPC Status">
+    Poll the VPC endpoint to confirm the status changes to `Ready`:
+    <Code src="snippets/input/poll_vpc_status.sh" title="Example Call" />
+    <Code src="snippets/output/poll_vpc_status.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add an Instance with a Single Interface">
+    Add one or more compute instances. The `interfaces` array configures how each DPU port is assigned a network address. This example requires the pre-existing `ETHERNET_VIRTUALIZER` VPC and IPv4 Subnet from the Subnet examples below, so the interface specifies a `subnetId`. The VPC ID is distinct from the `FNN` VPC created above.
+
+    The `isPhysical` flag determines whether a physical function (PF) or a virtual function (VF) is configured on the DPU port. Set `isPhysical: true` for standard bare-metal configurations. VFs (`isPhysical: false`) are used when running VMs on the host that require direct hardware passthrough of a DPU port.
+    <Code src="snippets/input/create_instance_single_interface.sh" title="Example Call" />
+    <Code src="snippets/output/create_instance_single_interface.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add an Instance with Multiple Interfaces">
+    <Code src="snippets/input/create_instance_multiple_interfaces.sh" title="Example Call" />
+    <Code src="snippets/output/create_instance_multiple_interfaces.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="(Optional) Confirm the Instance Status">
+    Poll the Instance to confirm the status changes to `Ready`:
+    <Code src="snippets/input/poll_instance_status.sh" title="Example Call" />
+    <Code src="snippets/output/poll_instance_status.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Allocating Machines
+
+Before allocating Machines, you should have the ID of the Instance Type. You can get the ID by making a `GET` request to the `/v2/org/{org-name}/nico/instance/type` endpoint and specifying the `infrastructureProviderId=<provider-id>` and `siteId=<site-id>` parameters.
+
+<AccordionGroup>
+  <Accordion title="Allocate Compute Instances">
+    <Code src="snippets/input/allocate_machines.sh" title="Example Call" />
+    <Code src="snippets/output/allocate_machines.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Assigning Instance Types to Machines
+
+Before assigning Instance Types, you should have the ID of the Instance Type. You can get the ID by making a `GET` request to the `/v2/org/{org-name}/nico/instance/type` endpoint and specifying the `siteId=<site-id>` parameter.
+
+<AccordionGroup>
+  <Accordion title="Get Machines Without an Instance Type">
+    Get the machines that do not have an instance type assigned and that report a status of `Ready`:
+    <Code src="snippets/input/get_machines_without_instance_type.sh" title="Example Call" />
+    <Code src="snippets/output/get_machines_without_instance_type.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Associate Machines with an Instance Type">
+    You can specify one or more machine IDs in the `machineIds` parameter.
+    <Code src="snippets/input/associate_machines_with_instance_type.sh" title="Example Call" />
+    <Code src="snippets/output/associate_machines_with_instance_type.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Managing Operating Systems
+
+Before adding an operating system image, ensure you have:
+
+- An iPXE script as a one-line string.
+- **Optional**: A cloud-init script as a one-line string.
+- For the iPXE string and cloud-init string, replace newline characters with `\n` and escape quotation marks with `\"`.
+- Your Tenant ID.
+
+<AccordionGroup>
+  <Accordion title="Add an Operating System Image">
+    <Code src="snippets/input/add_operating_system.sh" title="Example Call" />
+    <Code src="snippets/output/add_operating_system.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add an Image-Based Operating System">
+    The `imageDisk` value identifies the whole disk that NICo overwrites. A `/dev/disk/by-id/` selector is stable across enumeration changes but must exist on every eligible machine. Use `smallest` only when the intended boot disk is consistently the smallest whole disk. See [Image-Based Operating Systems](../../docs/configuration/image-based-operating-systems.md) for selection, update, and filesystem-identity behavior.
+    <Code src="snippets/input/add_image_operating_system.sh" title="Example Call" />
+    <Code src="snippets/output/add_image_operating_system.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Managing Subnets and VPC Prefixes
+
+Before managing these resources, ensure you have a tenant IP Block at the VPC's
+Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
+`FNN` VPCs. IPv4 Subnets configure `ETHERNET_VIRTUALIZER` VPCs.
+
+<AccordionGroup>
+  <Accordion title="Add a Subnet">
+    Add an IPv4 Subnet to a Ready `ETHERNET_VIRTUALIZER` VPC. Before running this example, use the [Create VPC endpoint](/infra-controller/rest-api-reference/api-reference/vpc/create-vpc) to create that VPC and set `networkVirtualizationType` to `ETHERNET_VIRTUALIZER`. Replace the pre-existing sample VPC ID `f466a2d5-5820-4824-a845-3218fdff801b` with the new VPC's ID. This VPC is distinct from the `FNN` VPC used by the VPC Prefix examples. The Subnet's `ipv4BlockId` identifies a Ready tenant IPv4 IP Block at the same Site, and `prefixLength` accepts values from 8 through 30.
+    <Code src="snippets/input/create_subnet.sh" title="Example Call" />
+    <Code src="snippets/output/create_subnet.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="(Optional) Confirm the Subnet Status">
+    Poll the subnet endpoint to confirm that the status changes to `Ready`:
+    <Code src="snippets/input/poll_subnet_status.sh" title="Example Call" />
+    <Code src="snippets/output/poll_subnet_status.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add a VPC Prefix">
+    Add a VPC Prefix to the Ready `FNN` VPC created above at a Registered Site. Use a Ready tenant IP Block at that Site; the block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
+    <Code src="snippets/input/create_vpc_prefix.sh" title="Automatic Allocation" />
+    <Code src="snippets/output/create_vpc_prefix.json" title="Automatic Allocation Response" />
+    <Code src="snippets/input/create_vpc_prefix_explicit.sh" title="Explicit CIDR Allocation" />
+    <Code src="snippets/output/create_vpc_prefix_explicit.json" title="Explicit CIDR Allocation Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Managing IP Blocks
+
+<AccordionGroup>
+  <Accordion title="Add an IP Block">
+    NICo already creates an IP Block for each fabric prefix the Site reports, so add one only for another range. A range that overlaps an existing Site IP Block returns 409.
+    <Code src="snippets/input/add_ip_block.sh" title="Example Call" />
+    <Code src="snippets/output/add_ip_block.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Allocate an IP Block">
+    <Code src="snippets/input/allocate_ip_block.sh" title="Example Call" />
+    <Code src="snippets/output/allocate_ip_block.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Managing Network Security Groups
+
+<AccordionGroup>
+  <Accordion title="Retrieve All Network Security Groups">
+    <Code src="snippets/input/get_nsgs.sh" title="Example Call" />
+    <Code src="snippets/output/get_nsgs.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Create a Network Security Group that Limits Traffic">
+    <Code src="snippets/input/create_nsg_limit_traffic.sh" title="Example Call" />
+    <Code src="snippets/output/create_nsg_limit_traffic.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Create a Network Security Group that Permits All Traffic">
+    <Code src="snippets/input/create_nsg_permit_all.sh" title="Example Call" />
+    <Code src="snippets/output/create_nsg_permit_all.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Modify the Rules for a Network Security Group">
+    <Code src="snippets/input/update_nsg_rules.sh" title="Example Call" />
+    <Code src="snippets/output/update_nsg_rules.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>
+
+## Accessing the Serial Console
+
+<AccordionGroup>
+  <Accordion title="Enable the Serial Console on a Compute Instance">
+    <Code src="snippets/input/enable_serial_console.sh" title="Example Call" />
+    <Code src="snippets/output/enable_serial_console.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add an SSH Key Group">
+    The SSH key should be in RSA, ECDSA, or ED25519 format. Add the SSH Key Group:
+    <Code src="snippets/input/add_ssh_key_group.sh" title="Example Call" />
+    Note the value of the `version` field — you will need it to update the SSH Key Group.
+    <Code src="snippets/output/add_ssh_key_group.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add a Public SSH Key">
+    <Code src="snippets/input/add_ssh_key.sh" title="Example Call" />
+    <Code src="snippets/output/add_ssh_key.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add the Public SSH Key to the Key Group">
+    Specify the new and existing key IDs to keep in the `sshKeyIds` field.
+    <Code src="snippets/input/add_key_to_group.sh" title="Example Call" />
+    <Code src="snippets/output/add_key_to_group.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add Sites to the Key Group">
+    Specify the new and existing Site IDs to keep in the `siteIds` field. You can combine this step and the preceding step by specifying both the SSH Key IDs and Site IDs in the same request.
+    <Code src="snippets/input/add_sites_to_key_group.sh" title="Example Call" />
+    <Code src="snippets/output/add_sites_to_key_group.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="View Instances That Belong to the VPC">
+    <Code src="snippets/input/get_vpc_instances.sh" title="Example Call" />
+    <Code src="snippets/output/get_vpc_instances.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Parse IP Addresses from the Response">
+    Use a command like the following to retrieve the IP Addresses from the response, then access the host or application deployed on the Instance.
+    <Code src="snippets/input/parse_instance_ip_addresses.sh" title="Example Call" />
+    <Code src="snippets/output/parse_instance_ip_addresses.json" title="Example Response" />
+  </Accordion>
+</AccordionGroup>

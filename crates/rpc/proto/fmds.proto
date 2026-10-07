@@ -40,6 +40,8 @@ message UpdateConfigResponse {
 // tenants via its REST API, ensuring the data stored
 // within FMDS is targeted specifically for FMDS use.
 message FmdsConfigUpdate {
+  // Current agents send the IPv4 value served by `GET …/meta-data/public-ipv4`.
+  // Older agents may send either address family here, so the field name stays `address` for wire compatibility.
   string address = 1;
   string hostname = 2;
   optional string sitename = 3;
@@ -53,6 +55,14 @@ message FmdsConfigUpdate {
   // When omitted, FMDS leaves machine-identity serving unchanged (startup defaults from `FmdsState::try_new`
   // until the first update that includes this field).
   optional FmdsMachineIdentityConfig machine_identity = 9;
+
+  // Human-readable instance name from forge.Instance.metadata.name.
+  optional string instance_name = 10;
+
+  // IPv6 value served by `GET …/meta-data/public-ipv6`.
+  // On each config update, an empty or omitted value falls back to an IPv6 value in the legacy
+  // `address` field; a non-empty value takes precedence.
+  string address_ipv6 = 11;
 }
 
 // Mirrors carbide-dpu-agent `[machine-identity]` for standalone FMDS.

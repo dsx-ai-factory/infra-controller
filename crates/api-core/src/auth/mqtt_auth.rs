@@ -21,7 +21,7 @@ use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials}
 
 use crate::cfg::file::{MqttAuthConfig, MqttAuthMode};
 
-pub async fn build_credentials_provider(
+pub(crate) async fn build_credentials_provider(
     auth_config: &MqttAuthConfig,
     credential_key: CredentialKey,
     credential_reader: Arc<dyn CredentialReader>,
@@ -34,7 +34,7 @@ pub async fn build_credentials_provider(
                 .await?
                 .ok_or_else(|| {
                     eyre::eyre!(
-                        "Missing MQTT credentials for {}",
+                        "missing MQTT credentials for {}",
                         credential_key.to_key_str()
                     )
                 })?;

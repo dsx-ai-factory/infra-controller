@@ -25,7 +25,8 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 
-	wflows "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // Errors
@@ -57,6 +58,13 @@ const (
 	// gRPC client default dial timeout
 	defaultCoreGrpcDialTimeoutSeconds = 5 // 5 seconds
 
+	// coreGrpcMaxRecvMsgSize raises the Go gRPC 4 MiB default. Instance inventory already
+	// returns ~7.8 MB for a page of 100, and a ceiling near that size leaves the inventory
+	// pager's site page ladder in permanent use, where every rejected response still costs Core
+	// a full query and serialization. This is a limit rather than a reservation, so the headroom
+	// only consumes memory once a response arrives to fill it.
+	coreGrpcMaxRecvMsgSize = 32 * 1024 * 1024
+
 	// CoreGrpcConnectionRetryTimeout is the maximum time to retry establishing a Core gRPC connection.
 	CoreGrpcConnectionRetryTimeout = 15 * time.Minute
 	// CoreGrpcConnectionBackoffInitial is the initial delay between connection retries.
@@ -81,6 +89,9 @@ type CoreGrpcClientConfig struct {
 	ClientKeyPath string
 	// client metrics interface
 	ClientMetrics Metrics
+	// OnRPCFinish observes each completed RPC once, including stream termination.
+	// It must be safe for concurrent calls; nil disables the callback.
+	OnRPCFinish func(error) `json:"-"`
 }
 
 // NewCoreGrpcClient creates a new Core gRPC client, this is called by Site Agent startup code and cert reload routine
@@ -172,6 +183,12 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 		return nil, ErrCoreGrpcClientInvalidSecureOpts
 	}
 
+	client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGrpcMaxRecvMsgSize)))
+
+	if config.OnRPCFinish != nil {
+		client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.OnFinish(config.OnRPCFinish)))
+	}
+
 	// configure interceptors
 	var unaryInterceptors []grpc.UnaryClientInterceptor
 	if config.ClientMetrics != nil {
@@ -181,7 +198,7 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 	if config.ClientMetrics != nil {
 		streamInterceptors = append(streamInterceptors, newGrpcStreamMetricsInterceptor(config.ClientMetrics))
 	}
-	if os.Getenv("LS_SERVICE_NAME") != "" {
+	if cotel.TransportEnabled() {
 		handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
 		client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
 	}
@@ -201,13 +218,13 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 	log.Info().Msg("CoreGrpcClient: gRPC client initialized")
 
 	// Create Core gRPC service client
-	client.grpcServiceClient = wflows.NewForgeClient(client.conn)
+	client.grpcServiceClient = corev1.NewForgeClient(client.conn)
 	log.Info().Msg("CoreGrpcClient: Client created")
 
 	// Check the version of the server
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Duration(defaultCoreGrpcDialTimeoutSeconds)*time.Second))
 	defer cancel()
-	_, err = client.grpcServiceClient.Version(ctx, &wflows.VersionRequest{})
+	_, err = client.grpcServiceClient.Version(ctx, &corev1.VersionRequest{})
 	if err != nil {
 		log.Error().Err(err).Msg("CoreGrpcClient: Failed to get version from server")
 		return nil, fmt.Errorf("CoreGrpcClient: Failed to get version from server: %w", err)
@@ -225,7 +242,7 @@ type CoreGrpcClient struct {
 	// gRPC dial options
 	dialOpts []grpc.DialOption
 	// gRPC service client interface
-	grpcServiceClient wflows.ForgeClient
+	grpcServiceClient corev1.ForgeClient
 }
 
 // Close gracefully shuts down the client's gRPC connection.
@@ -238,7 +255,7 @@ func (cc *CoreGrpcClient) Close() error {
 }
 
 // GrpcServiceClient client getter
-func (client *CoreGrpcClient) GrpcServiceClient() wflows.ForgeClient {
+func (client *CoreGrpcClient) GrpcServiceClient() corev1.ForgeClient {
 	return client.grpcServiceClient
 }
 
@@ -261,16 +278,21 @@ func (cac *CoreGrpcAtomicClient) SwapClient(newClient *CoreGrpcClient) *CoreGrpc
 	// Atomically replace the current client with the new one and return the old client.
 	oldClientInterface := cac.value.Swap(newClient)
 
+	// Increment the version number. Every successful swap advances it, including the
+	// initial creation, where there is no previous client to hand back.
+	cac.version.Add(1)
+
+	if oldClientInterface == nil {
+		return nil
+	}
+
 	// Type assert the returned value to *CoreGrpcClient.
-	// This should always succeed if the correct type was stored initially.
+	// This should always succeed once a client has been stored.
 	oldClient, ok := oldClientInterface.(*CoreGrpcClient)
 	if !ok {
 		log.Error().Msg("SwapClient: Type assertion failed for the old client")
 		return nil
 	}
-
-	// Increment the version number
-	cac.version.Add(1)
 
 	return oldClient
 }

@@ -29,8 +29,10 @@ const ROOT_CERT_PATH: &str = "dev/certs/forge_developer_local_only_root_cert_pem
 
 #[tokio::test]
 async fn test_upgrade_check() -> eyre::Result<()> {
-    carbide_host_support::init_logging("nico-dpu-agent")?;
-
+    // SAFETY: Initial lint enablement: these test settings are installed before the
+    // upgrade begins, but the parallel test harness may already have other threads.
+    // Unix process-wide exclusion from environment readers is not proven; this needs
+    // owner review.
     unsafe {
         env::set_var("DISABLE_TLS_ENFORCEMENT", "true");
         env::set_var("IGNORE_MGMT_VRF", "true");
@@ -43,11 +45,11 @@ async fn test_upgrade_check() -> eyre::Result<()> {
     let app = axum::Router::new()
         .route("/up", get(handle_up))
         .route(
-            "/forge.Forge/DpuAgentUpgradeCheck",
+            ::rpc::service_path!("DpuAgentUpgradeCheck"),
             post(dpu_agent_upgrade_check),
         )
         // ForgeApiClient needs a working Version route for connection retrying
-        .route("/forge.Forge/Version", post(handle_version));
+        .route(::rpc::service_path!("Version"), post(handle_version));
     let (addr, join_handle) = common::run_grpc_server(app).await?;
 
     let client_config =

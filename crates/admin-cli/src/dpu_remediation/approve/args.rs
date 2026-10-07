@@ -27,9 +27,9 @@ Approve a remediation:
     $ nico-admin-cli dpu-remediation approve --id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The id of the remediation to approve", long)]
-    pub id: RemediationId,
+    pub(super) id: RemediationId,
 }
 
 impl From<Args> for ApproveRemediationRequest {

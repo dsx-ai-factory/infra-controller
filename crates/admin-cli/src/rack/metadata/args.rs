@@ -19,7 +19,7 @@ use carbide_uuid::rack::RackId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Set the Name or Description of the Rack")]
     Set(RackMetadataCommandSet),
     #[clap(about = "Show the Metadata of the Rack")]
@@ -40,9 +40,9 @@ Show a rack's metadata:
     $ nico-admin-cli rack metadata show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct RackMetadataCommandShow {
+pub(crate) struct RackMetadataCommandShow {
     #[clap(help = "The rack which should get its metadata displayed")]
-    pub rack: RackId,
+    pub(super) rack: RackId,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -54,13 +54,13 @@ Set a rack's name and description:
     --name rack-01 --description \"Row C, position 1\"
 
 ")]
-pub struct RackMetadataCommandSet {
+pub(crate) struct RackMetadataCommandSet {
     #[clap(help = "The rack which should get updated metadata")]
-    pub rack: RackId,
+    pub(super) rack: RackId,
     #[clap(long, help = "The updated name of the Rack")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
     #[clap(long, help = "The updated description of the Rack")]
-    pub description: Option<String>,
+    pub(super) description: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -75,13 +75,13 @@ Add a key/value label:
     --key row --value C
 
 ")]
-pub struct RackMetadataCommandAddLabel {
+pub(crate) struct RackMetadataCommandAddLabel {
     #[clap(help = "The rack which should get updated metadata")]
-    pub rack: RackId,
+    pub(super) rack: RackId,
     #[clap(long, help = "The key to add")]
-    pub key: String,
+    pub(super) key: String,
     #[clap(long, help = "The optional value to add")]
-    pub value: Option<String>,
+    pub(super) value: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -93,11 +93,11 @@ Remove one or more labels by key:
     --keys row --keys edge
 
 ")]
-pub struct RackMetadataCommandRemoveLabels {
+pub(crate) struct RackMetadataCommandRemoveLabels {
     #[clap(help = "The rack which should get updated metadata")]
-    pub rack: RackId,
+    pub(super) rack: RackId,
     #[clap(long, help = "The keys to remove")]
-    pub keys: Vec<String>,
+    pub(super) keys: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -112,9 +112,9 @@ Overwrite the rack's metadata with the expected-rack's values:
     --replace-all
 
 ")]
-pub struct RackMetadataCommandFromExpectedRack {
+pub(crate) struct RackMetadataCommandFromExpectedRack {
     #[clap(help = "The rack which should get updated metadata")]
-    pub rack: RackId,
+    pub(super) rack: RackId,
     /// Whether to fully replace the Metadata that is currently stored on the Rack.
     /// - If not set, existing Metadata on the Rack will not be touched by executing
     ///   the command:
@@ -127,5 +127,5 @@ pub struct RackMetadataCommandFromExpectedRack {
     ///   they would if the Rack would get freshly ingested.
     ///   Metadata that is currently set on the Rack will be overridden.
     #[clap(long, verbatim_doc_comment)]
-    pub replace_all: bool,
+    pub(super) replace_all: bool,
 }

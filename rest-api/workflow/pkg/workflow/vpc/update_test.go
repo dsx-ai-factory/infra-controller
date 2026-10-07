@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateVpcTestSuite struct {
@@ -40,13 +40,13 @@ func (s *UpdateVpcTestSuite) Test_UpdateVpcInventory_Success() {
 	var inventoryMetricsManager cwm.ManageInventoryMetrics
 
 	siteID := uuid.New()
-	vpcInventory := &cwssaws.VPCInventory{
-		Vpcs: []*cwssaws.Vpc{
+	vpcInventory := &corev1.VPCInventory{
+		Vpcs: []*corev1.Vpc{
 			{
-				Id: &cwssaws.VpcId{Value: uuid.NewString()},
+				Id: &corev1.VpcId{Value: uuid.NewString()},
 			},
 			{
-				Id: &cwssaws.VpcId{Value: uuid.NewString()},
+				Id: &corev1.VpcId{Value: uuid.NewString()},
 			},
 		},
 	}
@@ -73,13 +73,13 @@ func (s *UpdateVpcTestSuite) Test_UpdateVpcInventory_ActivityFails() {
 	var vpcManager vpcActivity.ManageVpc
 
 	siteID := uuid.New()
-	vpcInventory := &cwssaws.VPCInventory{
-		Vpcs: []*cwssaws.Vpc{
+	vpcInventory := &corev1.VPCInventory{
+		Vpcs: []*corev1.Vpc{
 			{
-				Id: &cwssaws.VpcId{Value: uuid.NewString()},
+				Id: &corev1.VpcId{Value: uuid.NewString()},
 			},
 			{
-				Id: &cwssaws.VpcId{Value: uuid.NewString()},
+				Id: &corev1.VpcId{Value: uuid.NewString()},
 			},
 		},
 	}

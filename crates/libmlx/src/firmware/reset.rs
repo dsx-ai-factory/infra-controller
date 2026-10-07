@@ -103,7 +103,7 @@ impl MlxFwResetRunner {
             return Err(FirmwareError::DryRun(self.build_command(&args)));
         }
 
-        tracing::debug!(cmd = %self.build_command(&args), "Executing mlxfwreset");
+        tracing::debug!(command = %self.build_command(&args), "Executing mlxfwreset");
 
         let output = Command::new(&self.mlxfwreset_path)
             .args(args)

@@ -28,16 +28,16 @@ Delete a compute allocation:
     --tenant-organization-id fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "Compute allocation ID to delete")]
-    pub id: ComputeAllocationId,
+    pub(super) id: ComputeAllocationId,
 
     #[clap(
         short = 't',
         long,
         help = "Tenant organization ID for the compute allocation"
     )]
-    pub tenant_organization_id: String,
+    tenant_organization_id: String,
 }
 
 impl From<Args> for DeleteComputeAllocationRequest {

@@ -16,11 +16,36 @@ global:
 nico-rest-api:
   replicaCount: 3
   nodePort:
+    # Set false when enabling ingress; the chart rejects exposing plaintext
+    # NodePort alongside TLS ingress.
     enabled: true
     port: 30388
+  # To expose REST through the optional Contour/Envoy controller, run setup.sh
+  # with --install-contour, set nodePort.enabled false above, and uncomment the
+  # block below. The ingress routes to the chart-managed ClusterIP Service on
+  # service.port. For the block below, hosts is the only place the DNS name goes:
+  # the chart derives the ingress spec.tls entry and the certificate dnsNames and
+  # common name from it, so a rename here cannot leave the host served over
+  # plaintext HTTP. Overriding ingress.tls or certificate.dnsNames replaces the
+  # matching derived list, and the chart then rejects any host the override
+  # leaves uncovered.
+  # ingress:
+  #   enabled: true
+  #   className: contour
+  #   hosts:
+  #     - host: api.example.com
+  #       paths:
+  #         - path: /
+  #           pathType: Prefix
+  #   certificate:
+  #     enabled: true
+  #     secretName: api-example-com-tls
   config:
     keycloak:
       enabled: true
+      # Hostname must match helm-prereqs/values.yaml::keycloak.namespace
+      # (default "nico-rest") — that value is not propagated here
+      # automatically, so update both together if you change it.
       baseURL: "http://keycloak.nico-rest:8082"
       externalBaseURL: "http://keycloak.nico-rest:8082"
       realm: "nico"
@@ -38,45 +63,3 @@ nico-rest-workflow:
     replicaCount: 3
   siteWorker:
     replicaCount: 3
-
-# Site-agent config — v1.0.4 binary reads DB config from env vars.
-# NICo postgres uses the 'nico' user and 'elektratest' database.
-# CLUSTER_ID and TEMPORAL_SUBSCRIBE_* are set via --set in setup.sh
-# using the NICO_SITE_UUID variable (default: a1b2c3d4-e5f6-4000-8000-000000000001).
-nico-rest-site-agent:
-  replicaCount: 3
-  bootstrap:
-    enabled: true
-    siteManager:
-      address: "nico-rest-site-manager.nico-rest:8100"
-  certificate:
-    # Service identifier must match "elektra-site-agent" for nico-api's SiteAgent RBAC role.
-    # The base path /nico-system/sa/ is one of nico-api's recognized spiffe_service_base_paths.
-    uris:
-      - "spiffe://nico.local/nico-system/sa/elektra-site-agent"
-  envConfig:
-    # DEV ONLY — these values match the dev postgres instance deployed by setup.sh.
-    # DB_USER and DB_PASSWORD are injected from the db-creds Secret (secrets.dbCreds).
-    DB_ADDR: "postgres.postgres.svc.cluster.local"
-    DB_DATABASE: "elektratest"
-    DB_PORT: "5432"
-    ESA_PORT: "8080"
-    METRICS_PORT: "2112"
-    DEV_MODE: "true"
-    ENABLE_DEBUG: "true"
-    ENABLE_TLS: "true"
-    # mTLS to nico-api (NICO_SEC_OPT=2). Cert issued from vault-nico-issuer
-    # so nico-api trusts it (same Vault PKI CA as nico-api's own cert).
-    NICO_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
-    NICO_SEC_OPT: "2"
-    CLUSTER_ID: "a1b2c3d4-e5f6-4000-8000-000000000001"
-    TEMPORAL_HOST: "temporal-frontend.temporal"
-    TEMPORAL_PORT: "7233"
-    TEMPORAL_SERVER: "interservice.server.temporal.local"
-    TEMPORAL_PUBLISH_NAMESPACE: "site"
-    TEMPORAL_PUBLISH_QUEUE: "site"
-    TEMPORAL_SUBSCRIBE_NAMESPACE: "a1b2c3d4-e5f6-4000-8000-000000000001"
-    TEMPORAL_SUBSCRIBE_QUEUE: "site"
-    TEMPORAL_INVENTORY_SCHEDULE: "@every 3m"
-    TEMPORAL_CERT_PATH: "/etc/temporal-certs"
-    TEMPORAL_CERT: "temporal-client-site-agent-certs"

@@ -11,27 +11,28 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // SetMachineMaintenance is a workflow to set Machine maintenance mode using SetMaintenanceOnSite activity
-func SetMachineMaintenance(ctx workflow.Context, request *cwssaws.MaintenanceRequest) error {
+func SetMachineMaintenance(ctx workflow.Context, request *corev1.MaintenanceRequest) error {
 	logger := log.With().Str("Workflow", "SetMachineMaintenance").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -52,21 +53,20 @@ func SetMachineMaintenance(ctx workflow.Context, request *cwssaws.MaintenanceReq
 	return nil
 }
 
-func UpdateMachineMetadata(ctx workflow.Context, request *cwssaws.MachineMetadataUpdateRequest) error {
+func UpdateMachineMetadata(ctx workflow.Context, request *corev1.MachineMetadataUpdateRequest) error {
 	logger := log.With().Str("Workflow", "UpdateMachineMetadata").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -88,18 +88,18 @@ func UpdateMachineMetadata(ctx workflow.Context, request *cwssaws.MachineMetadat
 }
 
 // CreateMachineHealthReport inserts the tenant-reported OnlineRepair health report on Site.
-func CreateMachineHealthReport(ctx workflow.Context, request *cwssaws.InsertMachineHealthReportRequest) error {
+func CreateMachineHealthReport(ctx workflow.Context, request *corev1.InsertMachineHealthReportRequest) error {
 	logger := log.With().Str("Workflow", "CreateMachineHealthReport").Logger()
 	logger.Info().Msg("Starting workflow")
 
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 	ctx = workflow.WithActivityOptions(ctx, options)
@@ -115,18 +115,18 @@ func CreateMachineHealthReport(ctx workflow.Context, request *cwssaws.InsertMach
 }
 
 // DeleteMachineHealthReport removes the tenant-reported OnlineRepair health report on Site.
-func DeleteMachineHealthReport(ctx workflow.Context, request *cwssaws.RemoveMachineHealthReportRequest) error {
+func DeleteMachineHealthReport(ctx workflow.Context, request *corev1.RemoveMachineHealthReportRequest) error {
 	logger := log.With().Str("Workflow", "DeleteMachineHealthReport").Logger()
 	logger.Info().Msg("Starting workflow")
 
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 	ctx = workflow.WithActivityOptions(ctx, options)
@@ -178,21 +178,20 @@ func CollectAndPublishMachineInventory(ctx workflow.Context) error {
 }
 
 // GetDpuMachines is a workflow to retrieve DPU Machines by IDs with network configuration
-func GetDpuMachines(ctx workflow.Context, dpuMachineIDs []string) ([]*cwssaws.DpuMachine, error) {
+func GetDpuMachines(ctx workflow.Context, dpuMachineIDs []string) (*corev1.DpuMachineList, error) {
 	logger := log.With().Str("Workflow", "GetDpuMachines").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -202,7 +201,7 @@ func GetDpuMachines(ctx workflow.Context, dpuMachineIDs []string) ([]*cwssaws.Dp
 	// Invoke GetDpuMachinesByIDs activity
 	var machineManager activity.ManageMachine
 
-	var result []*cwssaws.DpuMachine
+	var result corev1.DpuMachineList
 	err := workflow.ExecuteActivity(ctx, machineManager.GetDpuMachinesByIDs, dpuMachineIDs).Get(ctx, &result)
 	if err != nil {
 		logger.Error().Err(err).Str("Activity", "GetDpuMachinesByIDs").Msg("Failed to execute activity from workflow")
@@ -211,5 +210,5 @@ func GetDpuMachines(ctx workflow.Context, dpuMachineIDs []string) ([]*cwssaws.Dp
 
 	logger.Info().Msg("Completing workflow")
 
-	return result, nil
+	return &result, nil
 }

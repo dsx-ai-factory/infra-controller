@@ -48,12 +48,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: BOOTSTRAP_SECRET_NAME
+              value: {{ .Values.secrets.siteRegistration | quote }}
           volumeMounts:
             - name: site-registration
               mountPath: /etc/sitereg
               readOnly: true
             - name: nico-certs
-              mountPath: /etc/nico
+              mountPath: /etc/core-grpc
               readOnly: true
             - name: temporal-certs
               mountPath: /etc/temporal-certs

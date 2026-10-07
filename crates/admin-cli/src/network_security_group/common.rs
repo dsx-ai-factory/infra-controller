@@ -25,7 +25,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 ///
 /// * `nsgs`    - A reference to an active DB transaction
 /// * `verbose` - A bool to select more verbose output (e.g., include full rule details)
-pub fn convert_nsgs_to_table(
+pub(super) fn convert_nsgs_to_table(
     nsgs: &[forgerpc::NetworkSecurityGroup],
     verbose: bool,
 ) -> CarbideCliResult<Box<Table>> {

@@ -1,0 +1,28 @@
+{{/*
+External LoadBalancer service for Override Mode (development).
+Only used when mat-k8s-controller is disabled - provides a single external endpoint.
+When mat-k8s-controller is enabled, it creates a Service per BMC with the BMC IP as externalIP.
+*/}}
+{{- if and .Values.externalService.enabled (not (index .Values "mat-k8s-controller" "enabled")) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-machine-a-tron.name" . }}-external
+  namespace: {{ include "nico-machine-a-tron.namespace" . }}
+  labels:
+    {{- include "nico-machine-a-tron.labels" . | nindent 4 }}
+  {{- with .Values.externalService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.externalService.type }}
+  externalTrafficPolicy: {{ .Values.externalService.externalTrafficPolicy }}
+  selector:
+    {{- include "nico-machine-a-tron.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.service.bmcMock.port }}
+      name: bmc-mock
+      targetPort: redfish
+      protocol: TCP
+{{- end }}

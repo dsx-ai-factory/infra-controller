@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn trim_measured_boot(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn trim_measured_boot(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let request = ::rpc::forge::TrimTableRequest {
         target: ::rpc::forge::TrimTableTarget::MeasuredBoot.into(),
         keep_entries: args.keep_entries,

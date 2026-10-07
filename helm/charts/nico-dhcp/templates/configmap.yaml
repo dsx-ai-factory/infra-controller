@@ -16,6 +16,14 @@
 {{- if and (hasKey .Values.config "keaConfigJsonRaw") .Values.config.keaConfigJsonRaw (not (kindIs "string" .Values.config.keaConfigJsonRaw)) }}
 {{- fail (printf "nico-dhcp: `config.keaConfigJsonRaw` must be a string (got %s). Set to a complete kea_config.json blob, or leave empty/omit to use the structured `config.kea` block." (kindOf .Values.config.keaConfigJsonRaw)) }}
 {{- end }}
+{{- /* Conflict guard: the raw escape hatch skips the structured `config.kea`
+       block entirely, including the server-identifier pinning (issue #3663).
+       An explicitly set `config.kea.serverIdentifier` alongside a raw blob
+       would be silently ignored — fail loudly so the operator either drops
+       the structured override or adds the option-data to the raw JSON. */ -}}
+{{- if and (trim (default "" .Values.config.keaConfigJsonRaw)) (trim (printf "%v" (dig "kea" "serverIdentifier" "" .Values.config))) }}
+{{- fail "nico-dhcp: `config.kea.serverIdentifier` is ignored when `config.keaConfigJsonRaw` is set. Remove the structured override, or add the dhcp-server-identifier option-data to the raw kea_config.json blob (see issue #3663)." }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

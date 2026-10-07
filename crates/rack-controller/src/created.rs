@@ -23,6 +23,7 @@
 //! power shelves with `rack_id` FK).
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::{machine as db_machine, power_shelf as db_power_shelf, switch as db_switch};
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -49,7 +50,7 @@ pub async fn handle_created(
 
     let mut txn = ctx.services.db_pool.begin().await?;
 
-    let compute_count = db_machine::find_machine_ids(
+    let compute_count = db_machine::find_machine_ids::<MachineId>(
         txn.as_mut(),
         MachineSearchConfig {
             rack_id: Some(id.clone()),
@@ -93,11 +94,11 @@ pub async fn handle_created(
     }
 
     tracing::info!(
-        "Rack {} has all expected devices (compute={}, switch={}, power_shelf={}). Transitioning to Discovering.",
-        id,
+        rack_id = %id,
         compute_count,
         switch_count,
-        power_shelf_count
+        power_shelf_count,
+        "Rack has all expected devices (compute, switch, power_shelf). Transitioning to Discovering.",
     );
     Ok(StateHandlerOutcome::transition(RackState::Discovering).with_txn(txn))
 }

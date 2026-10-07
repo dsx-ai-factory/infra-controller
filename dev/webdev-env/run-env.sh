@@ -38,11 +38,6 @@ trap cleanup SIGINT
 
 [[ -z "$1" ]] && { echo "Usage: $0 /path/to/pg_dump.sql"; exit 1; }
 [[ ! -f "$1" ]] && { echo "Error: File not found: $1"; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "Error: npm is required but not installed."; exit 1; }
-if [[ ! -d "${SCRIPT_DIR}/node_modules" ]]; then
-    echo "Installing npm dependencies..."
-    npm install --prefix "${SCRIPT_DIR}"
-fi
 PG_DUMP_FILE="$1"
 
 if ! docker ps --filter name=vault-webdev --format '{{.Names}}' | grep -q vault-webdev || \
@@ -81,6 +76,7 @@ export VAULT_KV_MOUNT_LOCATION="secrets"
 export VAULT_PKI_MOUNT_LOCATION="certs"
 export VAULT_PKI_ROLE_NAME="role"
 export CARBIDE_WEB_AUTH_TYPE="none"
+# This local-only environment explicitly disables auth. Deployed WebUIs default to Basic.
 
 # Run SQL migrations
 echo "Running database migrations..."
@@ -92,8 +88,8 @@ menu() {
 
   ┌─────────────────────────────────────────┐
   │  http://localhost:1079/admin/           │
-  │  No in-process auth                     │
-  │  (recommended to set oauth2)            │
+  │  No auth (local development only)       │
+  │  Deployed WebUIs default to Basic       │
   │                                         │
   │  Templates: crates/api/templates/       │
   │                                         │
@@ -117,13 +113,6 @@ menu
 echo "  Building..."
 
 while true; do
-    # Build CSS
-    if ! npm run --prefix "${SCRIPT_DIR}" build:css; then
-        echo -e "\n  ✗ CSS build failed! Press r to retry, q to quit..."
-        wait_for_key
-        echo "  Rebuilding..."
-        continue
-    fi
     # Build Rust
     if cargo build --package carbide-api --no-default-features; then
         echo -e "\n  ✓ Build successful! Starting server..."

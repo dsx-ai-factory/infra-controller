@@ -35,6 +35,8 @@ use sqlx::{
 
 use crate::DbPrimaryUuid;
 
+static SWITCH_ID_PREFIX: &str = "sw100";
+
 /// This is a fixed-size hash of the switch hardware.
 pub type HardwareHash = [u8; 32];
 /// This is the base32-encoded representation of the hardware hash. It is a fixed size instead of a
@@ -202,6 +204,10 @@ impl SwitchId {
             SwitchType::NvLink,
         )
     }
+
+    pub(crate) fn is_matching_prefix(s: &str) -> bool {
+        s.starts_with(SWITCH_ID_PREFIX)
+    }
 }
 
 impl DbPrimaryUuid for SwitchId {
@@ -286,13 +292,14 @@ impl std::fmt::Display for SwitchId {
         // `sw` is for switch
         // `1` is a version identifier
         // The next 2 bytes `00` are reserved
-        f.write_str("sw100")?;
+        f.write_str(SWITCH_ID_PREFIX)?;
         // Write the switch type
         f.write_char(self.ty.id_char())?;
         // The next character determines how the SwitchId is derived (`SwitchIdSource`)
         f.write_char(self.source.id_char())?;
-        // Then follows the actual source data. self.hardware_id is guaranteed to have been written
-        // from a valid string, so we can use from_utf8_unchecked.
+        // Then follows the source data.
+        // SAFETY: `hardware_id` is private and populated only from `BASE32_DNSSEC::encode`, whose
+        // output is ASCII and therefore valid UTF-8.
         unsafe { f.write_str(std::str::from_utf8_unchecked(self.hardware_id.as_slice())) }
     }
 }
@@ -328,11 +335,11 @@ pub const SWITCH_ID_LENGTH: usize = SWITCH_ID_PREFIX_LENGTH + SWITCH_ID_HARDWARE
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum SwitchIdParseError {
-    #[error("The Switch ID has an invalid length of {0}")]
+    #[error("the switch ID has an invalid length of {0}")]
     Length(usize),
-    #[error("The Switch ID {0} has an invalid prefix")]
+    #[error("the switch ID {0} has an invalid prefix")]
     Prefix(String),
-    #[error("The Switch ID {0} has an invalid encoding")]
+    #[error("the switch ID {0} has an invalid encoding")]
     Encoding(String),
 }
 
@@ -344,7 +351,7 @@ impl FromStr for SwitchId {
             return Err(SwitchIdParseError::Length(s.len()));
         }
         // Check for version 1 and 2 reserved bytes
-        if !s.starts_with("sw100") {
+        if !s.starts_with(SWITCH_ID_PREFIX) {
             return Err(SwitchIdParseError::Prefix(s.to_string()));
         }
 
@@ -445,9 +452,9 @@ mod legacy_rpc {
     /// manually every time, while still interacting with peers that expect a `.common.SwitchId`
     /// to be serialized.
     #[derive(prost::Message)]
-    pub struct SwitchId {
+    pub(super) struct SwitchId {
         #[prost(string, tag = "1")]
-        pub id: String,
+        pub(super) id: String,
     }
 
     impl From<super::SwitchId> for SwitchId {

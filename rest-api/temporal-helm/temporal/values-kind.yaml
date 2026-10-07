@@ -94,8 +94,9 @@ server:
   config:
     logLevel: "debug,info"
 
-    # IMPORTANT: This value cannot be changed, once it's set.
-    numHistoryShards: 512
+    # Keep the single-node development database responsive during inventory
+    # bursts. This value cannot be changed after Temporal initializes its data.
+    numHistoryShards: 4
 
     persistence:
       defaultStore: default
@@ -106,7 +107,7 @@ server:
 
         sql:
           driver: "postgres12"
-          host: "postgres.postgres.svc.cluster.local"
+          host: "postgres.postgres.svc.cluster.local."
           port: 5432
           database: "temporal"
           user: "temporal"
@@ -119,7 +120,7 @@ server:
 
         sql:
           driver: "postgres12"
-          host: "postgres.postgres.svc.cluster.local"
+          host: "postgres.postgres.svc.cluster.local."
           port: 5432
           database: "temporal_visibility"
           user: "temporal"

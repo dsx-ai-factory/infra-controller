@@ -37,6 +37,7 @@ impl TryFrom<rpc::forge::VpcPrefixCreationRequest> for NewVpcPrefix {
             vpc_id,
             config,
             metadata,
+            site_prefix_id,
         } = value;
 
         let id = id.unwrap_or_else(VpcPrefixId::new);
@@ -63,9 +64,11 @@ impl TryFrom<rpc::forge::VpcPrefixCreationRequest> for NewVpcPrefix {
 
         Ok(Self {
             id,
+            site_prefix_id,
             config,
             metadata,
             vpc_id,
+            overlap_vpc_id: None,
         })
     }
 }
@@ -153,6 +156,7 @@ impl From<VpcPrefix> for rpc::forge::VpcPrefix {
 
         let VpcPrefix {
             id,
+            site_prefix_id,
             config,
             metadata,
             status,
@@ -193,16 +197,19 @@ impl From<VpcPrefix> for rpc::forge::VpcPrefix {
             }),
             metadata: Some(metadata.into()),
             config: Some(rpc::forge::VpcPrefixConfig { prefix }),
+            site_prefix_id,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use carbide_uuid::site_prefix::SitePrefixId;
     use carbide_uuid::vpc::VpcId;
     use chrono::{DateTime, Utc};
     use config_version::{ConfigVersion, Versioned};
     use model::vpc_prefix::{VpcPrefixDeletionState, VpcPrefixStatus};
+    use prost::Message;
 
     use super::*;
 
@@ -213,7 +220,9 @@ mod tests {
     ) -> VpcPrefix {
         VpcPrefix {
             id: VpcPrefixId::new(),
+            site_prefix_id: Some(SitePrefixId::new()),
             vpc_id: VpcId::new(),
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: "10.0.0.0/24".parse().unwrap(),
             },
@@ -274,5 +283,89 @@ mod tests {
             .expect("VPC prefix lifecycle should be populated");
         assert_eq!(lifecycle.state, r#"{"state":"ready"}"#);
         assert_eq!(status.tenant_state, TenantState::Terminating as i32);
+    }
+
+    #[test]
+    fn vpc_prefix_creation_preserves_site_prefix_id() {
+        let site_prefix_id = SitePrefixId::new();
+        let request = rpc::forge::VpcPrefixCreationRequest {
+            id: None,
+            prefix: "10.0.0.0/24".to_owned(),
+            vpc_id: Some(VpcId::new()),
+            config: None,
+            metadata: None,
+            site_prefix_id: Some(site_prefix_id),
+        };
+
+        let new_vpc_prefix = NewVpcPrefix::try_from(request).unwrap();
+
+        assert_eq!(new_vpc_prefix.site_prefix_id, Some(site_prefix_id));
+    }
+
+    #[test]
+    fn vpc_prefix_projection_preserves_site_prefix_id() {
+        let vpc_prefix = test_vpc_prefix(VpcPrefixControllerState::Ready, None);
+        let expected_site_prefix_id = vpc_prefix.site_prefix_id;
+
+        let rpc_vpc_prefix = rpc::forge::VpcPrefix::from(vpc_prefix);
+
+        assert_eq!(rpc_vpc_prefix.site_prefix_id, expected_site_prefix_id);
+    }
+
+    #[test]
+    fn site_prefix_fields_use_fresh_protobuf_tags() {
+        let descriptor_set =
+            prost_types::FileDescriptorSet::decode(crate::REFLECTION_API_SERVICE_DESCRIPTOR)
+                .unwrap();
+        let forge = descriptor_set
+            .file
+            .iter()
+            .find(|file| file.package.as_deref() == Some("forge"))
+            .unwrap();
+
+        for (message_name, field_number) in [
+            ("VpcPrefix", 11),
+            ("VpcPrefixCreationRequest", 8),
+            ("VpcPrefixSearchQuery", 7),
+        ] {
+            let message = forge
+                .message_type
+                .iter()
+                .find(|message| message.name.as_deref() == Some(message_name))
+                .unwrap();
+            let site_prefix_id = message
+                .field
+                .iter()
+                .find(|field| field.name.as_deref() == Some("site_prefix_id"))
+                .unwrap();
+            assert_eq!(site_prefix_id.number, Some(field_number), "{message_name}");
+        }
+
+        for message_name in ["VpcPrefix", "VpcPrefixCreationRequest"] {
+            let message = forge
+                .message_type
+                .iter()
+                .find(|message| message.name.as_deref() == Some(message_name))
+                .unwrap();
+            assert!(
+                message
+                    .reserved_range
+                    .iter()
+                    .any(|range| range.start == Some(5) && range.end == Some(6)),
+                "{message_name} must retain reserved field 5",
+            );
+        }
+
+        let search = forge
+            .message_type
+            .iter()
+            .find(|message| message.name.as_deref() == Some("VpcPrefixSearchQuery"))
+            .unwrap();
+        let legacy_tenant_prefix_id = search
+            .field
+            .iter()
+            .find(|field| field.name.as_deref() == Some("tenant_prefix_id"))
+            .unwrap();
+        assert_eq!(legacy_tenant_prefix_id.number, Some(2));
     }
 }

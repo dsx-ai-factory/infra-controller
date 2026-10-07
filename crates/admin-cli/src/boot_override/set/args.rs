@@ -38,12 +38,12 @@ Set both a custom iPXE script and custom user-data:
     --custom-pxe ./boot.ipxe --custom-user-data ./user-data.yaml
 
 ")]
-pub struct Args {
-    pub interface_id: MachineInterfaceId,
+pub(crate) struct Args {
+    interface_id: MachineInterfaceId,
     #[clap(short = 'p', long)]
-    pub custom_pxe: Option<String>,
+    custom_pxe: Option<String>,
     #[clap(short = 'u', long)]
-    pub custom_user_data: Option<String>,
+    custom_user_data: Option<String>,
 }
 
 impl TryFrom<Args> for MachineBootOverride {

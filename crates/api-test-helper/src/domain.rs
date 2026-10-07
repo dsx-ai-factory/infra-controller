@@ -17,15 +17,29 @@
 
 use std::net::SocketAddr;
 
-use super::grpcurl::grpcurl_id;
+use eyre::ContextCompat;
+use rpc::dns::CreateDomainRequest;
+
+use crate::api_client;
 
 pub async fn create(carbide_api_addrs: &[SocketAddr], name: &str) -> eyre::Result<String> {
     tracing::info!("Creating domain");
 
-    let data = serde_json::json!({
-        "name": name,
-    });
-    let domain_id = grpcurl_id(carbide_api_addrs, "CreateDomain", &data.to_string()).await?;
-    tracing::info!("Domain created with ID {domain_id}");
-    Ok(domain_id)
+    let request = CreateDomainRequest {
+        name: name.to_string(),
+        default_ttl: None,
+        vpc_id: None,
+    };
+    let domain = api_client::call(carbide_api_addrs, "CreateDomain", |mut client| async move {
+        client.create_domain(request).await
+    })
+    .await?;
+    let domain_id = domain
+        .id
+        .context("CreateDomain response has no domain ID")?;
+    tracing::info!(
+        domain_id = %domain_id,
+        "Domain created",
+    );
+    Ok(domain_id.to_string())
 }

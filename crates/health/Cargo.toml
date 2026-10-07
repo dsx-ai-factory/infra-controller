@@ -20,6 +20,7 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 # TODO: rename to carbide-hw-health
@@ -27,27 +28,45 @@ name = "forge-hw-health"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
 futures = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 hyper = { workspace = true }
-hyper-rustls = { workspace = true, features = ["http2"] }
-hyper-util = { workspace = true }
+hyper-rustls = { workspace = true, features = ["http1", "http2"] }
+hyper-util = { workspace = true, features = [
+  "client-legacy",
+  "http1",
+  "http2",
+  "tokio",
+] }
 mac_address = { workspace = true }
+metrics-endpoint = { path = "../metrics-endpoint" }
+opentelemetry = { workspace = true }
+opentelemetry-proto = { workspace = true, default-features = false, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+] }
 prometheus = { workspace = true }
-reqwest = { workspace = true, features = ["query", "json"] }
+reqwest = { workspace = true, features = ["query", "json", "rustls"] }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 rustls-pki-types = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -57,28 +76,36 @@ tracing-subscriber = { features = [
 ], workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls-native-roots"] }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 nv-redfish = { workspace = true, features = [
   "bmc-http",
   "chassis",
   "computer-systems",
   "event-service",
+  "http-extras",
   "log-services",
   "managers",
   "memory",
+  "oem-delta",
+  "oem-liteon",
+  "oem-nvidia",
   "power-supplies",
   "processors",
   "sensors",
   "storages",
+  "telemetry-service",
   "thermal",
   "update-service",
   "resource-status",
 ] }
 rand = { workspace = true }
 url = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
+x509-parser = { workspace = true }
 
 # [local-dependencies]
 carbide-health-report = { path = "../health-report" }
@@ -97,9 +124,14 @@ tonic-prost-build = { workspace = true }
 bench-hooks = []
 
 [dev-dependencies]
+axum = { workspace = true }
+bmc-mock = { path = "../bmc-mock" }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 criterion = { workspace = true }
-tempfile = { workspace = true }
+figment = { workspace = true, features = ["test"] }
+rcgen = { workspace = true }
+time = { workspace = true }
 
 [[bench]]
 name = "sink_pipeline"

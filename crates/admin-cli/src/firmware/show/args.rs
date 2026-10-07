@@ -25,4 +25,4 @@ Show all available firmware:
     $ nico-admin-cli firmware show
 
 ")]
-pub struct Args {}
+pub(crate) struct Args {}

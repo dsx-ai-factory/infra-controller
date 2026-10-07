@@ -17,7 +17,11 @@
 
 use serde_json::json;
 
-pub fn dell_nic_info(function_id: &str, slot: usize, serial_number: &str) -> serde_json::Value {
+pub(crate) fn dell_nic_info(
+    function_id: &str,
+    slot: usize,
+    serial_number: &str,
+) -> serde_json::Value {
     json!({
         "Dell": {
             "@odata.type": "#DellOem.v1_3_0.DellOemResources",

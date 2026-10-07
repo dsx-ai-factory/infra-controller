@@ -7,11 +7,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util/labels"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -26,7 +23,7 @@ func TestManageExpectedRack_CreateExpectedRackOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedRack
+		request *corev1.ExpectedRack
 	}
 	tests := []struct {
 		name    string
@@ -41,9 +38,9 @@ func TestManageExpectedRack_CreateExpectedRackOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRack{
-					RackId:        &cwssaws.RackId{Id: "test-rack-001"},
-					RackProfileId: &cwssaws.RackProfileId{Id: "test-rack-profile-001"},
+				request: &corev1.ExpectedRack{
+					RackId:        &corev1.RackId{Id: "test-rack-001"},
+					RackProfileId: &corev1.RackProfileId{Id: "test-rack-profile-001"},
 				},
 			},
 			wantErr: false,
@@ -55,26 +52,26 @@ func TestManageExpectedRack_CreateExpectedRackOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRack{
+				request: &corev1.ExpectedRack{
 					RackId:        nil,
-					RackProfileId: &cwssaws.RackProfileId{Id: "test-rack-profile-001"},
+					RackProfileId: &corev1.RackProfileId{Id: "test-rack-profile-001"},
 				},
 			},
 			wantErr: true,
 		},
 		{
-			name: "test create expected rack fail on missing rack_profile_id",
+			name: "create without caller profile",
 			fields: fields{
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRack{
-					RackId:        &cwssaws.RackId{Id: "test-rack-002"},
-					RackProfileId: &cwssaws.RackProfileId{Id: ""},
+				request: &corev1.ExpectedRack{
+					RackId:        &corev1.RackId{Id: "test-rack-002"},
+					RackProfileId: nil,
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "test create expected rack fail on missing request",
@@ -90,7 +87,7 @@ func TestManageExpectedRack_CreateExpectedRackOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient, nil)
+			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient)
 			err := mer.CreateExpectedRackOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -112,7 +109,7 @@ func TestManageExpectedRack_UpdateExpectedRackOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedRack
+		request *corev1.ExpectedRack
 	}
 	tests := []struct {
 		name    string
@@ -127,9 +124,9 @@ func TestManageExpectedRack_UpdateExpectedRackOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRack{
-					RackId:        &cwssaws.RackId{Id: "test-update-rack-001"},
-					RackProfileId: &cwssaws.RackProfileId{Id: "test-update-rack-profile-001"},
+				request: &corev1.ExpectedRack{
+					RackId:        &corev1.RackId{Id: "test-update-rack-001"},
+					RackProfileId: &corev1.RackProfileId{Id: "test-update-rack-profile-001"},
 				},
 			},
 			wantErr: false,
@@ -141,26 +138,26 @@ func TestManageExpectedRack_UpdateExpectedRackOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRack{
+				request: &corev1.ExpectedRack{
 					RackId:        nil,
-					RackProfileId: &cwssaws.RackProfileId{Id: "test-update-rack-profile-001"},
+					RackProfileId: &corev1.RackProfileId{Id: "test-update-rack-profile-001"},
 				},
 			},
 			wantErr: true,
 		},
 		{
-			name: "test update expected rack fail on missing rack_profile_id",
+			name: "update without caller profile",
 			fields: fields{
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRack{
-					RackId:        &cwssaws.RackId{Id: "test-update-rack-002"},
-					RackProfileId: &cwssaws.RackProfileId{Id: ""},
+				request: &corev1.ExpectedRack{
+					RackId:        &corev1.RackId{Id: "test-update-rack-002"},
+					RackProfileId: nil,
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "test update expected rack fail on missing request",
@@ -176,7 +173,7 @@ func TestManageExpectedRack_UpdateExpectedRackOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient, nil)
+			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient)
 			err := mer.UpdateExpectedRackOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -198,7 +195,7 @@ func TestManageExpectedRack_DeleteExpectedRackOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedRackRequest
+		request *corev1.ExpectedRackRequest
 	}
 	tests := []struct {
 		name    string
@@ -213,7 +210,7 @@ func TestManageExpectedRack_DeleteExpectedRackOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRackRequest{
+				request: &corev1.ExpectedRackRequest{
 					RackId: "test-delete-rack-001",
 				},
 			},
@@ -226,7 +223,7 @@ func TestManageExpectedRack_DeleteExpectedRackOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRackRequest{
+				request: &corev1.ExpectedRackRequest{
 					RackId: "",
 				},
 			},
@@ -246,7 +243,7 @@ func TestManageExpectedRack_DeleteExpectedRackOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient, nil)
+			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient)
 			err := mer.DeleteExpectedRackOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -268,7 +265,7 @@ func TestManageExpectedRack_ReplaceAllExpectedRacksOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedRackList
+		request *corev1.ExpectedRackList
 	}
 	tests := []struct {
 		name    string
@@ -283,7 +280,7 @@ func TestManageExpectedRack_ReplaceAllExpectedRacksOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.ExpectedRackList{},
+				request: &corev1.ExpectedRackList{},
 			},
 			wantErr: false,
 		},
@@ -294,15 +291,15 @@ func TestManageExpectedRack_ReplaceAllExpectedRacksOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedRackList{
-					ExpectedRacks: []*cwssaws.ExpectedRack{
+				request: &corev1.ExpectedRackList{
+					ExpectedRacks: []*corev1.ExpectedRack{
 						{
-							RackId:        &cwssaws.RackId{Id: "test-replace-rack-001"},
-							RackProfileId: &cwssaws.RackProfileId{Id: "test-replace-rack-profile-001"},
+							RackId:        &corev1.RackId{Id: "test-replace-rack-001"},
+							RackProfileId: &corev1.RackProfileId{Id: "test-replace-rack-profile-001"},
 						},
 						{
-							RackId:        &cwssaws.RackId{Id: "test-replace-rack-002"},
-							RackProfileId: &cwssaws.RackProfileId{Id: "test-replace-rack-profile-002"},
+							RackId:        &corev1.RackId{Id: "test-replace-rack-002"},
+							RackProfileId: &corev1.RackProfileId{Id: "test-replace-rack-profile-002"},
 						},
 					},
 				},
@@ -323,7 +320,7 @@ func TestManageExpectedRack_ReplaceAllExpectedRacksOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient, nil)
+			mer := NewManageExpectedRack(tt.fields.coreGrpcAtomicClient)
 			err := mer.ReplaceAllExpectedRacksOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -340,130 +337,14 @@ func TestManageExpectedRack_DeleteAllExpectedRacksOnSite(t *testing.T) {
 	coreGrpcAtomicClient := cClient.NewCoreGrpcAtomicClient(&cClient.CoreGrpcClientConfig{})
 	coreGrpcAtomicClient.SwapClient(mockCoreGrpcClient)
 
-	mer := NewManageExpectedRack(coreGrpcAtomicClient, nil)
+	mer := NewManageExpectedRack(coreGrpcAtomicClient)
 	err := mer.DeleteAllExpectedRacksOnSite(context.Background())
 	assert.NoError(t, err)
 }
 
 func TestManageExpectedRack_CreateExpectedRackOnFlow(t *testing.T) {
-	t.Run("nil Flow client skips gracefully", func(t *testing.T) {
-		mer := ManageExpectedRack{flowGrpcAtomicClient: nil}
-		err := mer.CreateExpectedRackOnFlow(context.Background(), &cwssaws.ExpectedRack{
-			RackId:        &cwssaws.RackId{Id: uuid.NewString()},
-			RackProfileId: &cwssaws.RackProfileId{Id: uuid.NewString()},
-		})
-		assert.NoError(t, err)
-	})
+	manager := NewManageExpectedRack(nil)
 
-	t.Run("nil Flow client connection skips gracefully", func(t *testing.T) {
-		mer := ManageExpectedRack{flowGrpcAtomicClient: cClient.NewFlowGrpcAtomicClient(&cClient.FlowGrpcClientConfig{})}
-		err := mer.CreateExpectedRackOnFlow(context.Background(), &cwssaws.ExpectedRack{
-			RackId:        &cwssaws.RackId{Id: uuid.NewString()},
-			RackProfileId: &cwssaws.RackProfileId{Id: uuid.NewString()},
-		})
-		assert.NoError(t, err)
-	})
-}
-
-func Test_expectedRackToFlowRack(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-
-	t.Run("maps all fields with full labels", func(t *testing.T) {
-		rack := &cwssaws.ExpectedRack{
-			RackId:        &cwssaws.RackId{Id: "rack-001"},
-			RackProfileId: &cwssaws.RackProfileId{Id: "rack-profile-001"},
-			Metadata: &cwssaws.Metadata{
-				Name:        "rack-alpha",
-				Description: "Primary compute rack",
-				Labels: []*cwssaws.Label{
-					{Key: labels.RackLabelChassisManufacturer, Value: strPtr("NVIDIA")},
-					{Key: labels.RackLabelChassisSerialNumber, Value: strPtr("SN-RACK-001")},
-					{Key: labels.RackLabelChassisModel, Value: strPtr("MGX-1000")},
-					{Key: labels.RackLabelLocationRegion, Value: strPtr("us-east-1")},
-					{Key: labels.RackLabelLocationDatacenter, Value: strPtr("dc1")},
-					{Key: labels.RackLabelLocationRoom, Value: strPtr("room-A")},
-					{Key: labels.RackLabelLocationPosition, Value: strPtr("row-3-col-7")},
-				},
-			},
-		}
-		var flowRack *flowv1.Rack = expectedRackToFlowRack(rack)
-
-		if assert.NotNil(t, flowRack.Info) {
-			assert.NotNil(t, flowRack.Info.Id)
-			assert.Equal(t, "rack-001", flowRack.Info.Id.Id)
-			assert.Equal(t, "rack-alpha", flowRack.Info.Name)
-			assert.Equal(t, "NVIDIA", flowRack.Info.Manufacturer)
-			assert.Equal(t, "SN-RACK-001", flowRack.Info.SerialNumber)
-			if assert.NotNil(t, flowRack.Info.Model) {
-				assert.Equal(t, "MGX-1000", *flowRack.Info.Model)
-			}
-			if assert.NotNil(t, flowRack.Info.Description) {
-				assert.Equal(t, "Primary compute rack", *flowRack.Info.Description)
-			}
-		}
-
-		if assert.NotNil(t, flowRack.Location) {
-			assert.Equal(t, "us-east-1", flowRack.Location.Region)
-			assert.Equal(t, "dc1", flowRack.Location.Datacenter)
-			assert.Equal(t, "room-A", flowRack.Location.Room)
-			assert.Equal(t, "row-3-col-7", flowRack.Location.Position)
-		}
-	})
-
-	t.Run("handles minimal fields (no metadata)", func(t *testing.T) {
-		rack := &cwssaws.ExpectedRack{
-			RackId:        &cwssaws.RackId{Id: "rack-002"},
-			RackProfileId: &cwssaws.RackProfileId{Id: "rack-profile-002"},
-		}
-		flowRack := expectedRackToFlowRack(rack)
-
-		if assert.NotNil(t, flowRack.Info) {
-			if assert.NotNil(t, flowRack.Info.Id) {
-				assert.Equal(t, "rack-002", flowRack.Info.Id.Id)
-			}
-			assert.Empty(t, flowRack.Info.Name)
-			assert.Empty(t, flowRack.Info.Manufacturer)
-			assert.Empty(t, flowRack.Info.SerialNumber)
-			assert.Nil(t, flowRack.Info.Model)
-			assert.Nil(t, flowRack.Info.Description)
-		}
-
-		if assert.NotNil(t, flowRack.Location) {
-			assert.Empty(t, flowRack.Location.Region)
-			assert.Empty(t, flowRack.Location.Datacenter)
-			assert.Empty(t, flowRack.Location.Room)
-			assert.Empty(t, flowRack.Location.Position)
-		}
-	})
-
-	t.Run("handles partial labels", func(t *testing.T) {
-		rack := &cwssaws.ExpectedRack{
-			RackId:        &cwssaws.RackId{Id: "rack-003"},
-			RackProfileId: &cwssaws.RackProfileId{Id: "rack-profile-003"},
-			Metadata: &cwssaws.Metadata{
-				Name: "rack-bravo",
-				Labels: []*cwssaws.Label{
-					{Key: labels.RackLabelChassisManufacturer, Value: strPtr("NVIDIA")},
-					{Key: labels.RackLabelLocationRegion, Value: strPtr("us-west-2")},
-				},
-			},
-		}
-		flowRack := expectedRackToFlowRack(rack)
-
-		if assert.NotNil(t, flowRack.Info) {
-			assert.Equal(t, "rack-bravo", flowRack.Info.Name)
-			assert.Equal(t, "NVIDIA", flowRack.Info.Manufacturer)
-			assert.Empty(t, flowRack.Info.SerialNumber)
-			assert.Nil(t, flowRack.Info.Model)
-			assert.Nil(t, flowRack.Info.Description)
-		}
-
-		if assert.NotNil(t, flowRack.Location) {
-			assert.Equal(t, "us-west-2", flowRack.Location.Region)
-			assert.Empty(t, flowRack.Location.Datacenter)
-			assert.Empty(t, flowRack.Location.Room)
-			assert.Empty(t, flowRack.Location.Position)
-		}
-	})
-
+	assert.NoError(t, manager.CreateExpectedRackOnFlow(context.Background(), nil))
+	assert.NoError(t, manager.CreateExpectedRackOnFlow(context.Background(), &corev1.ExpectedRack{}))
 }

@@ -32,6 +32,7 @@ use crate::profile::profile::MlxConfigProfile;
 // Serializable representation of an MLX configuration profile.
 // This is the format used for YAML/JSON serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SerializableProfile {
     // Profile name for identification and documentation
     pub name: String,

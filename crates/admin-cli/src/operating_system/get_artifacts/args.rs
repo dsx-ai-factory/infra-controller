@@ -25,7 +25,7 @@ Get the artifact list for an OS definition:
     $ nico-admin-cli operating-system get-artifacts 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "UUID of the operating system definition.")]
-    pub id: String,
+    pub(super) id: String,
 }

@@ -1,0 +1,76 @@
+suite: ssh-console operator certificate configuration
+templates:
+  - templates/configmap.yaml
+release:
+  name: test-nico
+  namespace: nico-system
+tests:
+  - it: leaves certificate auth disabled by default
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'openssh_certificate_ca_fingerprints = \[\]'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'admin_certificate_role = ""'
+
+  - it: substitutes the CA fingerprints and the admin role
+    set:
+      sshConsole:
+        opensshCertificateCaFingerprints:
+          - "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        adminCertificateRole: access-dsx-dev-env
+    documentIndex: 0
+    asserts:
+      # A silent no-op is the failure mode this guards: if the packaged
+      # config.toml ever stops carrying the exact placeholder lines, the
+      # replace matches nothing and certificate auth stays off.
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'openssh_certificate_ca_fingerprints = \["SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\]'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'admin_certificate_role = "access-dsx-dev-env"'
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'openssh_certificate_ca_fingerprints = \[\]'
+
+  - it: renders multiple CA fingerprints as a TOML array
+    set:
+      sshConsole:
+        opensshCertificateCaFingerprints: ["SHA256:one", "SHA256:two"]
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'openssh_certificate_ca_fingerprints = \["SHA256:one","SHA256:two"\]'
+
+  - it: sets each independently
+    set:
+      sshConsole:
+        adminCertificateRole: access-dsx-qa-env
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'admin_certificate_role = "access-dsx-qa-env"'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'openssh_certificate_ca_fingerprints = \[\]'
+
+  - it: leaves a fully supplied config untouched
+    set:
+      configFiles.config: |
+        listen_address = "0.0.0.0:22"
+        admin_certificate_role = ""
+      sshConsole:
+        adminCertificateRole: access-dsx-dev-env
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'admin_certificate_role = ""'
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'access-dsx-dev-env'

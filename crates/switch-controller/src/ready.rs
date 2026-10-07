@@ -18,12 +18,16 @@
 //! Handler for SwitchControllerState::Ready.
 
 use carbide_uuid::switch::SwitchId;
-use model::switch::{ReProvisioningState, Switch, SwitchControllerState};
+use db::switch as db_switch;
+use model::switch::{ConfiguringState, Switch, SwitchControllerState, SwitchDecommissioningState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate::context::SwitchStateHandlerContextObjects;
+use crate::nvos_password_rotation::needs_nvos_password_reconciliation;
+use crate::reprovisioning::first_reprovisioning_state;
+use crate::rotating_bmc::should_enter_bmc_rotation;
 
 /// Handles the Ready state for a switch.
 ///
@@ -31,16 +35,27 @@ use crate::context::SwitchStateHandlerContextObjects;
 /// If a maintenance request has been posted via `switch_maintenance_requested`,
 /// transitions to `Maintenance` with the requested operation. If rack-level
 /// reprovisioning has been requested, transitions to `ReProvisioning`.
-/// Otherwise idles.
+/// Otherwise, actionable NVOS convergence work transitions back to `Configuring`.
 pub async fn handle_ready(
-    _switch_id: &SwitchId,
+    switch_id: &SwitchId,
     state: &mut Switch,
-    _ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     if state.is_marked_as_deleted() {
         return Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Deleting,
         ));
+    }
+
+    if state.decommission_requested {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        db_switch::clear_decommission_requested(&mut txn, *switch_id).await?;
+        return Ok(
+            StateHandlerOutcome::transition(SwitchControllerState::Decommissioning {
+                decommissioning_state: SwitchDecommissioningState::SuppressingSiteExplorer,
+            })
+            .with_txn(txn),
+        );
     }
 
     if let Some(req) = state.switch_maintenance_requested.as_ref() {
@@ -50,35 +65,70 @@ pub async fn handle_ready(
             "Switch maintenance requested; transitioning to Maintenance"
         );
         return Ok(StateHandlerOutcome::transition(
-            SwitchControllerState::Maintenance {
-                operation: req.operation,
-            },
+            SwitchControllerState::maintenance_for_request(req.clone()),
         ));
     }
 
     if let Some(req) = &state.switch_reprovisioning_requested {
-        if req.initiator.starts_with("rack-") {
-            tracing::info!(
-                "Rack-level firmware upgrade requested — transitioning to WaitingForRackFirmwareUpgrade"
+        if !req.initiator.starts_with("rack-") {
+            tracing::warn!(
+                initiator = %req.initiator,
+                "Unknown initiator for switch reprovisioning request",
             );
-            return Ok(StateHandlerOutcome::transition(
-                SwitchControllerState::ReProvisioning {
-                    reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
-                },
-            ));
+            let cause = format!(
+                "unknown initiator for switch reprovisioning request: {}",
+                req.initiator
+            );
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
+            return Ok(
+                StateHandlerOutcome::transition(SwitchControllerState::Error { cause })
+                    .with_txn(txn),
+            );
         }
 
-        tracing::warn!(
-            "unknown initiator for switch reprovisioning request: {}",
-            req.initiator
+        let Some(reprovisioning_state) = first_reprovisioning_state(req) else {
+            tracing::warn!(
+                switch_id = %switch_id,
+                initiator = %req.initiator,
+                "Rack reprovision request has no switch-relevant activities; clearing request"
+            );
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+        };
+
+        tracing::info!(
+            ?reprovisioning_state,
+            "Rack-level reprovisioning requested — entering ReProvisioning"
         );
         return Ok(StateHandlerOutcome::transition(
-            SwitchControllerState::Error {
-                cause: format!(
-                    "unknown initiator for switch reprovisioning request: {}",
-                    req.initiator
-                ),
+            SwitchControllerState::ReProvisioning {
+                reprovisioning_state,
             },
+        ));
+    }
+
+    if needs_nvos_password_reconciliation(switch_id, state, ctx).await? {
+        tracing::info!(
+            switch_id = ?switch_id,
+            "Switch: NVOS password reconciliation pending; transitioning to Configuring",
+        );
+
+        return Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::Configuring {
+                config_state: ConfiguringState::RotateOsPassword,
+            },
+        ));
+    }
+
+    // Lowest precedence: only converge the BMC credential once the switch is
+    // otherwise idle in Ready, so rotation never contends with NVOS
+    // reconfiguration, maintenance, or reprovisioning. The site-flag gate and
+    // the operator force-converge override live in `should_enter_bmc_rotation`.
+    if should_enter_bmc_rotation(ctx.services, state).await? {
+        return Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::RotatingBmc { retry_count: 0 },
         ));
     }
 

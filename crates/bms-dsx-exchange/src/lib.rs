@@ -331,29 +331,102 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_rack_metadata() {
-        let metadata = parse_supported_metadata(
-            "BMS/v1/PUB/Metadata/Rack/RackLiquidIsolationRequest/site/rack-01",
-            r#"{
-                "pointType": "RackLiquidIsolationRequest",
-                "objectType": "Rack",
-                "rackName": "Rack-01",
-                "rackId": "rack-01",
-                "integration": "CM"
-            }"#
-            .as_bytes(),
-        )
-        .unwrap()
-        .unwrap();
+    fn parses_supported_metadata() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
 
-        assert_eq!(
-            metadata.point_type(),
-            POINT_TYPE_RACK_LIQUID_ISOLATION_REQUEST
-        );
-        assert_eq!(metadata.integration(), "CM");
-        assert_eq!(
-            metadata.value_topic(),
-            "BMS/v1/CM/Value/Rack/RackLiquidIsolationRequest/site/rack-01"
+        /// A metadata topic paired with its raw JSON payload.
+        struct Message {
+            topic: &'static str,
+            payload: &'static str,
+        }
+
+        // Each success row pins the three observable fields the parse derives:
+        // the canonical point type, the integration, and the value topic.
+        scenarios!(
+            run = |Message { topic, payload }: Message| {
+                parse_supported_metadata(topic, payload.as_bytes())
+                    .map(|maybe| {
+                        maybe.map(|m| {
+                            (
+                                m.point_type().to_string(),
+                                m.integration().to_string(),
+                                m.value_topic().to_string(),
+                            )
+                        })
+                    })
+                    // The error type isn't PartialEq; the failing rows assert only
+                    // that the input is rejected, so carry the message as a String.
+                    .map_err(|e| e.to_string())
+            };
+            "a supported point type parses, deriving the value topic from the metadata topic" {
+                Message {
+                    topic: "BMS/v1/PUB/Metadata/Rack/RackLiquidIsolationRequest/site/rack-01",
+                    payload: r#"{
+                        "pointType": "RackLiquidIsolationRequest",
+                        "objectType": "Rack",
+                        "rackName": "Rack-01",
+                        "rackId": "rack-01",
+                        "integration": "CM"
+                    }"#,
+                } => Yields(Some((
+                    POINT_TYPE_RACK_LIQUID_ISOLATION_REQUEST.to_string(),
+                    "CM".to_string(),
+                    "BMS/v1/CM/Value/Rack/RackLiquidIsolationRequest/site/rack-01".to_string(),
+                ))),
+                Message {
+                    topic: "BMS/v1/PUB/Metadata/System/HeartbeatTimestampIntegration/site",
+                    payload: r#"{
+                        "pointType": "HeartbeatTimestampIntegration",
+                        "objectType": "System",
+                        "integration": "CM"
+                    }"#,
+                } => Yields(Some((
+                    POINT_TYPE_HEARTBEAT_TIMESTAMP_INTEGRATION.to_string(),
+                    "CM".to_string(),
+                    "BMS/v1/CM/Value/System/HeartbeatTimestampIntegration/site".to_string(),
+                ))),
+                // The value topic is derived from the metadata topic, not the payload's
+                // point type — here the topic names a different request than the body.
+                Message {
+                    topic: "BMS/v1/PUB/Metadata/Rack/RackElectricalIsolationRequest/site/rack-01",
+                    payload: r#"{
+                        "pointType": "RackLiquidIsolationRequest",
+                        "objectType": "Rack",
+                        "rackName": "Rack-01",
+                        "rackId": "rack-01",
+                        "integration": "CM"
+                    }"#,
+                } => Yields(Some((
+                    POINT_TYPE_RACK_LIQUID_ISOLATION_REQUEST.to_string(),
+                    "CM".to_string(),
+                    "BMS/v1/CM/Value/Rack/RackElectricalIsolationRequest/site/rack-01".to_string(),
+                ))),
+            }
+            "an empty required field is rejected (MissingMetadataField)" {
+                Message {
+                    topic: "BMS/v1/PUB/Metadata/Rack/RackLiquidIsolationRequest/site/rack-01",
+                    payload: r#"{
+                        "pointType": "RackLiquidIsolationRequest",
+                        "objectType": "Rack",
+                        "rackName": "Rack-01",
+                        "rackId": "rack-01",
+                        "integration": ""
+                    }"#,
+                } => Fails,
+            }
+            "a topic that is not a metadata topic is rejected (InvalidMetadataTopic)" {
+                Message {
+                    topic: "BMS/v1/CM/Value/Rack/RackLiquidIsolationRequest/site/rack-01",
+                    payload: r#"{
+                        "pointType": "RackLiquidIsolationRequest",
+                        "objectType": "Rack",
+                        "rackName": "Rack-01",
+                        "rackId": "rack-01",
+                        "integration": "CM"
+                    }"#,
+                } => Fails,
+            }
         );
     }
 
@@ -370,102 +443,6 @@ mod tests {
                 "timestamp": 1_712_345_678_901_i64,
                 "quality": "1"
             })
-        );
-    }
-
-    #[test]
-    fn parses_heartbeat_metadata() {
-        let metadata = parse_supported_metadata(
-            "BMS/v1/PUB/Metadata/System/HeartbeatTimestampIntegration/site",
-            r#"{
-                "pointType": "HeartbeatTimestampIntegration",
-                "objectType": "System",
-                "integration": "CM"
-            }"#
-            .as_bytes(),
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            metadata.point_type(),
-            POINT_TYPE_HEARTBEAT_TIMESTAMP_INTEGRATION
-        );
-        assert_eq!(metadata.integration(), "CM");
-        assert_eq!(
-            metadata.value_topic(),
-            "BMS/v1/CM/Value/System/HeartbeatTimestampIntegration/site"
-        );
-    }
-
-    #[test]
-    fn rejects_supported_metadata_empty_required_field() {
-        let error = parse_supported_metadata(
-            "BMS/v1/PUB/Metadata/Rack/RackLiquidIsolationRequest/site/rack-01",
-            r#"{
-                "pointType": "RackLiquidIsolationRequest",
-                "objectType": "Rack",
-                "rackName": "Rack-01",
-                "rackId": "rack-01",
-                "integration": ""
-            }"#
-            .as_bytes(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            BmsDsxExchangeError::MissingMetadataField {
-                field: "integration",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_metadata_topic() {
-        let error = parse_supported_metadata(
-            "BMS/v1/CM/Value/Rack/RackLiquidIsolationRequest/site/rack-01",
-            r#"{
-                "pointType": "RackLiquidIsolationRequest",
-                "objectType": "Rack",
-                "rackName": "Rack-01",
-                "rackId": "rack-01",
-                "integration": "CM"
-            }"#
-            .as_bytes(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            BmsDsxExchangeError::InvalidMetadataTopic { .. }
-        ));
-    }
-
-    #[test]
-    fn uses_metadata_topic_to_derive_value_topic() {
-        let metadata = parse_supported_metadata(
-            "BMS/v1/PUB/Metadata/Rack/RackElectricalIsolationRequest/site/rack-01",
-            r#"{
-                "pointType": "RackLiquidIsolationRequest",
-                "objectType": "Rack",
-                "rackName": "Rack-01",
-                "rackId": "rack-01",
-                "integration": "CM"
-            }"#
-            .as_bytes(),
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            metadata.point_type(),
-            POINT_TYPE_RACK_LIQUID_ISOLATION_REQUEST
-        );
-        assert_eq!(
-            metadata.value_topic(),
-            "BMS/v1/CM/Value/Rack/RackElectricalIsolationRequest/site/rack-01"
         );
     }
 }

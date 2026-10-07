@@ -23,12 +23,12 @@ use super::TestEnv;
 use crate::api::rpc::forge_server::Forge;
 use crate::api::rpc::{NvLinkLogicalPartitionConfig, NvLinkLogicalPartitionCreationRequest};
 
-pub struct NvlLogicalPartitionFixture {
-    pub id: NvLinkLogicalPartitionId,
-    pub logical_partition: rpc::NvLinkLogicalPartition,
+pub(in crate::tests) struct NvlLogicalPartitionFixture {
+    pub(in crate::tests) id: NvLinkLogicalPartitionId,
+    pub(in crate::tests) logical_partition: rpc::NvLinkLogicalPartition,
 }
 
-pub async fn create_nvl_logical_partition(
+pub(in crate::tests) async fn create_nvl_logical_partition(
     env: &TestEnv,
     name: String,
 ) -> NvlLogicalPartitionFixture {

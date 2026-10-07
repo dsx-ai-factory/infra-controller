@@ -1,0 +1,17 @@
+# Patterns to ignore when loading/packaging the nico-prereqs chart (chart: ".").
+# Keep non-chart artifacts out of helm - notably the doca-platform and nv-rms
+# git submodules setup.sh installs from, whose large .git pack files otherwise
+# exceed helm's per-file size limit. .dpf-src/ and .rms-src/ are the clone
+# caches older setup.sh versions left behind.
+.dpf-src/
+.rms-src/
+doca-platform/
+nv-rms/
+.git/
+.gitignore
+*.bak
+values/*.dpf.bak
+# Common editor/VCS noise
+*.swp
+*.tmp
+.DS_Store

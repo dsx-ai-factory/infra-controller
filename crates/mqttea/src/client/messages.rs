@@ -58,7 +58,7 @@ impl ReceivedMessage {
         let payload = publish.payload.to_vec();
         let payload_size = payload.len();
 
-        debug!("Looking for pattern match for topic: {}", topic);
+        debug!(%topic, "Looking for pattern match for topic");
         let registry_guard = registry.read().await;
         registry_guard
             .find_matching_type_for_topic(&topic)

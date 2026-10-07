@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use ::rpc::forge::{self as rpc};
 use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeTlsClient};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use chrono::Utc;
 use clap::ValueEnum;
 use eyre::{Context, Result};
@@ -49,7 +49,7 @@ const DPU_LIST_FETCH_INTERVAL: u64 = 30 * 60; // Interval in seconds for fetchin
 /// Structure to store peer DPU information
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize)]
 pub struct DpuInfo {
-    pub id: MachineId,
+    pub id: DpuMachineId,
     pub ip: IpAddr,
 }
 
@@ -92,14 +92,14 @@ impl DpuPingResult {
 
 /// Network monitor struct handles network connectivity checks
 pub struct NetworkMonitor {
-    machine_id: MachineId,                            // DPU id
+    machine_id: DpuMachineId,                         // DPU id
     metrics: Option<Arc<NetworkMonitorMetricsState>>, // Metrics for monitoring
     pinger: Arc<dyn Ping>,                            // Pinger that help ping DPUs and get results
 }
 
 impl NetworkMonitor {
     pub fn new(
-        machine_id: MachineId,
+        machine_id: DpuMachineId,
         metrics: Option<Arc<NetworkMonitorMetricsState>>,
         pinger: Arc<dyn Ping>,
     ) -> Self {
@@ -131,7 +131,10 @@ impl NetworkMonitor {
                 loopback_ip = Some(dpu_info.ip);
             }
             Err(e) => {
-                tracing::debug!("Network monitor failed to get dpu info list from API {}", e);
+                tracing::debug!(
+                    error = %e,
+                    "Network monitor failed to get dpu info list from API"
+                );
             }
         }
 
@@ -152,7 +155,10 @@ impl NetworkMonitor {
                             loopback_ip = Some(dpu_info.ip);
                         }
                         Err(e) => {
-                            tracing::debug!("Network monitor failed to get dpu info list from API {}", e);
+                            tracing::debug!(
+                                error = %e,
+                                "Network monitor failed to get dpu info list from API"
+                            );
                             peer_dpus = Vec::new();
                             loopback_ip = None;
                         }
@@ -201,7 +207,7 @@ impl NetworkMonitor {
                         metrics.update_network_reachable_map(reachable_map);
                     }
                 }
-                Err(e) => tracing::error!("Failed to run network check: {}", e),
+                Err(e) => tracing::error!(error = %e, "Failed to run network check"),
             }
             elapsed_time = start_time.elapsed();
         }
@@ -223,14 +229,17 @@ impl NetworkMonitor {
         {
             Ok((dpu_info, new_peer_dpus)) => (dpu_info.ip, new_peer_dpus),
             Err(e) => {
-                tracing::error!("Network monitor failed to get dpu info list from API {}", e);
+                tracing::error!(
+                    error = %e,
+                    "Network monitor failed to get dpu info list from API"
+                );
                 return;
             }
         };
 
         match self.monitor_concurrent(&peer_dpus, loopback_ip).await {
             Ok(results) => self.format_results(&results, loopback_ip.to_string()),
-            Err(e) => tracing::error!("Failed to run network check: {}", e),
+            Err(e) => tracing::error!(error = %e, "Failed to run network check"),
         }
     }
 
@@ -284,8 +293,8 @@ impl NetworkMonitor {
         let results = recv_task.await.map_err(|err| {
             self.record_error_metrics(NetworkMonitorError::TaskJoinError, None);
             tracing::error!(
-                "Failed to join task spawned for collecting ping result: {}",
-                err
+                error = %err,
+                "Failed to join task spawned for collecting ping result"
             );
             err
         })?;
@@ -327,7 +336,7 @@ impl NetworkMonitor {
 
         match serde_json::to_string_pretty(&final_result) {
             Ok(json) => println!("{json}"),
-            Err(e) => tracing::error!("Failed to serialize results to JSON: {}", e),
+            Err(e) => tracing::error!(error = %e, "Failed to serialize results to JSON"),
         }
     }
 
@@ -371,7 +380,7 @@ impl NetworkMonitor {
     fn record_error_metrics(
         &self,
         error_type: NetworkMonitorError,
-        dest_dpu_id: Option<MachineId>,
+        dest_dpu_id: Option<DpuMachineId>,
     ) {
         if let Some(metrics) = &self.metrics.clone() {
             match dest_dpu_id {
@@ -396,7 +405,7 @@ pub(crate) async fn fetch_dpu_info_list(
         .await
         .map_err(|err| {
             eyre::Report::new(err).wrap_err(format!(
-                "Could not connect to Forge API server at {forge_api}"
+                "could not connect to forge API server at {forge_api}"
             ))
         })?;
 
@@ -405,7 +414,7 @@ pub(crate) async fn fetch_dpu_info_list(
         client.get_dpu_info_list(request).await.map_err(|err| {
             eyre::Report::new(err)
                 .wrap_err(format!("forge_api: {forge_api}"))
-                .wrap_err("Error while executing the GetDpuInfoList gRPC call")
+                .wrap_err("error while executing the GetDpuInfoList gRPC call")
         })?;
 
     Ok(response.into_inner())
@@ -558,7 +567,7 @@ impl Ping for HbnExecPinger {
     ) -> Result<DpuPingResult, (NetworkMonitorError, eyre::Report)> {
         let container_id: String = hbn::get_hbn_container_id()
             .await
-            .wrap_err("Failed to get hbn container id")
+            .wrap_err("failed to get hbn container id")
             .map_err(|e| (NetworkMonitorError::HbnContainerIdNotFound, e))?;
 
         match hbn::run_in_container(
@@ -589,7 +598,7 @@ impl Ping for HbnExecPinger {
                     (
                         NetworkMonitorError::PingOutputParseError,
                         eyre::eyre!(
-                            "Unexpected parse error for container ping result: {}",
+                            "unexpected parse error for container ping result: {}",
                             regex_err.to_string()
                         ),
                     )
@@ -601,7 +610,7 @@ impl Ping for HbnExecPinger {
                     .ok_or_else(|| {
                         (
                             NetworkMonitorError::HbnContainerCommandExecError,
-                            eyre::eyre!("Error running ping in container: {}", err),
+                            eyre::eyre!("error running ping in container: {}", err),
                         )
                     })?;
 
@@ -615,21 +624,15 @@ impl Ping for HbnExecPinger {
 /// Parse ping standard output to valid dpu ping result,
 /// including number of successful pings and average latency.
 pub fn parse_ping_stdout(dpu_info: DpuInfo, stdout: &str) -> Result<DpuPingResult, eyre::Report> {
-    let summary_re = Regex::new(r"(\d+) packets transmitted, (\d+) received, (\d+)% packet loss")?;
+    let summary_re = Regex::new(
+        r"(\d+) packets transmitted, (\d+) received,(?:\s*\+\d+ errors,)? (\d+)% packet loss",
+    )?;
     let rtt_re = Regex::new(r"rtt min/avg/max/mdev = [\d\.]+/([\d\.]+)/[\d\.]+/[\d\.]+ ms")?;
 
-    let mut lines_iter = stdout.lines().rev();
-    let rtt_line = lines_iter
-        .next()
-        .ok_or_else(|| eyre::eyre!("Failed to find RTT line"))?;
-    let summary_line = lines_iter
-        .next()
-        .ok_or_else(|| eyre::eyre!("Failed to find summary line"))?;
-
     let success_count = summary_re
-        .captures(summary_line)
+        .captures(stdout)
         .and_then(|caps| caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok()))
-        .ok_or_else(|| eyre::eyre!("Failed to parse number of success packets"))?;
+        .ok_or_else(|| eyre::eyre!("failed to parse number of success packets"))?;
 
     if success_count == 0 {
         return Ok(DpuPingResult {
@@ -640,15 +643,67 @@ pub fn parse_ping_stdout(dpu_info: DpuInfo, stdout: &str) -> Result<DpuPingResul
     }
 
     let latency = rtt_re
-        .captures(rtt_line)
+        .captures(stdout)
         .and_then(|caps| caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()))
-        .ok_or_else(|| eyre::eyre!("Failed to average latency"))?;
+        .ok_or_else(|| eyre::eyre!("failed to average latency"))?;
 
     Ok(DpuPingResult {
         dpu_info,
         success_count,
         average_latency: Some(Duration::from_secs_f64(latency / 1000.0)),
     })
+}
+
+#[cfg(test)]
+mod parse_ping_stdout_tests {
+    use std::time::Duration;
+
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::{DpuInfo, parse_ping_stdout};
+
+    const DPU_ID: &str = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg";
+
+    #[test]
+    fn parses_ping_results() {
+        scenarios!(run = |stdout| {
+            let result = parse_ping_stdout(
+                DpuInfo {
+                    id: DPU_ID.parse().expect("valid machine id"),
+                    ip: "172.20.0.200".parse().expect("valid IP address"),
+                },
+                stdout,
+            )
+            .map_err(|_| ())?;
+
+            Ok::<_, ()>((result.success_count, result.average_latency))
+        };
+            "successful ping" {
+                "5 packets transmitted, 5 received, 0% packet loss, time 4006ms\n\
+                 rtt min/avg/max/mdev = 0.084/0.102/0.127/0.014 ms" =>
+                    Yields((5, Some(Duration::from_secs_f64(0.102 / 1000.0)))),
+            }
+
+            "complete packet loss without RTT line" {
+                "PING 172.20.0.200 (172.20.0.200) 56(84) bytes of data.\n\n\
+                 --- 172.20.0.200 ping statistics ---\n\
+                 5 packets transmitted, 0 received, 100% packet loss, time 4092ms" =>
+                    Yields((0, None)),
+            }
+
+            "complete packet loss with errors field" {
+                "PING 172.20.0.200 (172.20.0.200) 56(84) bytes of data.\n\n\
+                 --- 172.20.0.200 ping statistics ---\n\
+                 5 packets transmitted, 0 received, +5 errors, 100% packet loss, time 4092ms" =>
+                    Yields((0, None)),
+            }
+
+            "missing packet summary" {
+                "PING 172.20.0.200 (172.20.0.200) 56(84) bytes of data." => Fails,
+            }
+        );
+    }
 }
 
 #[derive(Debug)]

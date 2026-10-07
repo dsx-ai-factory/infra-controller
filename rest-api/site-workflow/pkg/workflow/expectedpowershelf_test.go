@@ -7,12 +7,13 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	temporalworkflow "go.temporal.io/sdk/workflow"
 )
 
 type InventoryExpectedPowerShelfTestSuite struct {
@@ -83,8 +84,8 @@ func (cepsts *CreateExpectedPowerShelfTestSuite) AfterTest(suiteName, testName s
 func (cepsts *CreateExpectedPowerShelfTestSuite) Test_CreateExpectedPowerShelf_Success() {
 	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
 
-	request := &cwssaws.ExpectedPowerShelf{
-		ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-create-workflow-001"},
+	request := &corev1.ExpectedPowerShelf{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-create-workflow-001"},
 		BmcMacAddress:        "00:11:22:33:44:55",
 		ShelfSerialNumber:    "SHELF-001",
 	}
@@ -93,11 +94,41 @@ func (cepsts *CreateExpectedPowerShelfTestSuite) Test_CreateExpectedPowerShelf_S
 	cepsts.env.RegisterActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnSite)
 	cepsts.env.OnActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnSite, mock.Anything, mock.Anything).Return(nil)
 
-	// Mock CreateExpectedPowerShelfOnFlow activity
-	cepsts.env.RegisterActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnFlow)
-	cepsts.env.OnActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnFlow, mock.Anything, mock.Anything).Return(nil)
+	cepsts.env.OnGetVersion(
+		removeCreateExpectedPowerShelfOnFlowChangeID,
+		temporalworkflow.DefaultVersion,
+		removeCreateExpectedPowerShelfOnFlowVersion,
+	).Return(removeCreateExpectedPowerShelfOnFlowVersion)
+	cepsts.env.OnActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnFlow, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// Execute CreateExpectedPowerShelf workflow
+	cepsts.env.ExecuteWorkflow(CreateExpectedPowerShelf, request)
+	cepsts.True(cepsts.env.IsWorkflowCompleted())
+	cepsts.NoError(cepsts.env.GetWorkflowError())
+	cepsts.env.AssertActivityNumberOfCalls(cepsts.T(), "CreateExpectedPowerShelfOnFlow", 0)
+}
+
+func (cepsts *CreateExpectedPowerShelfTestSuite) Test_CreateExpectedPowerShelf_LegacyVersion_FlowFailure() {
+	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
+
+	request := &corev1.ExpectedPowerShelf{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-create-workflow-001"},
+		BmcMacAddress:        "00:11:22:33:44:55",
+		ShelfSerialNumber:    "SHELF-001",
+	}
+
+	cepsts.env.RegisterActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnSite)
+	cepsts.env.OnActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnSite, mock.Anything, mock.Anything).Return(nil)
+
+	cepsts.env.OnGetVersion(
+		removeCreateExpectedPowerShelfOnFlowChangeID,
+		temporalworkflow.DefaultVersion,
+		removeCreateExpectedPowerShelfOnFlowVersion,
+	).Return(temporalworkflow.DefaultVersion)
+
+	cepsts.env.RegisterActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnFlow)
+	cepsts.env.OnActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnFlow, mock.Anything, mock.Anything).Return(errors.New("Flow communication error"))
+
 	cepsts.env.ExecuteWorkflow(CreateExpectedPowerShelf, request)
 	cepsts.True(cepsts.env.IsWorkflowCompleted())
 	cepsts.NoError(cepsts.env.GetWorkflowError())
@@ -106,8 +137,8 @@ func (cepsts *CreateExpectedPowerShelfTestSuite) Test_CreateExpectedPowerShelf_S
 func (cepsts *CreateExpectedPowerShelfTestSuite) Test_CreateExpectedPowerShelf_Failure() {
 	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
 
-	request := &cwssaws.ExpectedPowerShelf{
-		ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-create-workflow-001"},
+	request := &corev1.ExpectedPowerShelf{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-create-workflow-001"},
 		BmcMacAddress:        "00:11:22:33:44:55",
 		ShelfSerialNumber:    "SHELF-001",
 	}
@@ -117,9 +148,6 @@ func (cepsts *CreateExpectedPowerShelfTestSuite) Test_CreateExpectedPowerShelf_F
 	// Mock CreateExpectedPowerShelfOnSite activity
 	cepsts.env.RegisterActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnSite)
 	cepsts.env.OnActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnSite, mock.Anything, mock.Anything).Return(errors.New(errMsg))
-
-	// Register CreateExpectedPowerShelfOnFlow activity (not called when Core fails)
-	cepsts.env.RegisterActivity(expectedPowerShelfManager.CreateExpectedPowerShelfOnFlow)
 
 	// execute CreateExpectedPowerShelf workflow
 	cepsts.env.ExecuteWorkflow(CreateExpectedPowerShelf, request)
@@ -149,8 +177,8 @@ func (uepsts *UpdateExpectedPowerShelfTestSuite) AfterTest(suiteName, testName s
 func (uepsts *UpdateExpectedPowerShelfTestSuite) Test_UpdateExpectedPowerShelf_Success() {
 	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
 
-	request := &cwssaws.ExpectedPowerShelf{
-		ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-update-workflow-001"},
+	request := &corev1.ExpectedPowerShelf{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-update-workflow-001"},
 		BmcMacAddress:        "00:11:22:33:44:55",
 		ShelfSerialNumber:    "SHELF-001",
 	}
@@ -168,8 +196,8 @@ func (uepsts *UpdateExpectedPowerShelfTestSuite) Test_UpdateExpectedPowerShelf_S
 func (uepsts *UpdateExpectedPowerShelfTestSuite) Test_UpdateExpectedPowerShelf_Failure() {
 	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
 
-	request := &cwssaws.ExpectedPowerShelf{
-		ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-update-workflow-001"},
+	request := &corev1.ExpectedPowerShelf{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-update-workflow-001"},
 		BmcMacAddress:        "00:11:22:33:44:55",
 		ShelfSerialNumber:    "SHELF-001",
 	}
@@ -208,8 +236,8 @@ func (depsts *DeleteExpectedPowerShelfTestSuite) AfterTest(suiteName, testName s
 func (depsts *DeleteExpectedPowerShelfTestSuite) Test_DeleteExpectedPowerShelf_Success() {
 	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
 
-	request := &cwssaws.ExpectedPowerShelfRequest{
-		ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-delete-workflow-001"},
+	request := &corev1.ExpectedPowerShelfRequest{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-delete-workflow-001"},
 		BmcMacAddress:        "00:11:22:33:44:55",
 	}
 
@@ -226,8 +254,8 @@ func (depsts *DeleteExpectedPowerShelfTestSuite) Test_DeleteExpectedPowerShelf_S
 func (depsts *DeleteExpectedPowerShelfTestSuite) Test_DeleteExpectedPowerShelf_Failure() {
 	var expectedPowerShelfManager iActivity.ManageExpectedPowerShelf
 
-	request := &cwssaws.ExpectedPowerShelfRequest{
-		ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-delete-workflow-001"},
+	request := &corev1.ExpectedPowerShelfRequest{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "test-delete-workflow-001"},
 		BmcMacAddress:        "00:11:22:33:44:55",
 	}
 

@@ -35,39 +35,39 @@ Create a named, labelled allocation with an explicit ID:
     --name \"training-pool\" --labels '{\"team\":\"research\"}'
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'i',
         long,
         help = "Optional, unique ID to use when creating the compute allocation"
     )]
-    pub id: Option<ComputeAllocationId>,
+    id: Option<ComputeAllocationId>,
 
     #[clap(
         short = 't',
         long,
         help = "Tenant organization ID for the compute allocation"
     )]
-    pub tenant_organization_id: String,
+    tenant_organization_id: String,
 
     #[clap(long, help = "Instance type ID from which compute is being allocated")]
-    pub instance_type_id: String,
+    instance_type_id: String,
 
     #[clap(short = 'c', long, help = "Count to allocate for the instance type")]
-    pub count: u32,
+    count: u32,
 
     #[clap(short = 'n', long, help = "Name of the compute allocation")]
-    pub name: Option<String>,
+    name: Option<String>,
 
     #[clap(short = 'd', long, help = "Description of the compute allocation")]
-    pub description: Option<String>,
+    description: Option<String>,
 
     #[clap(
         short = 'l',
         long,
         help = "JSON map of simple key:value pairs to be applied as labels to the compute allocation"
     )]
-    pub labels: Option<String>,
+    labels: Option<String>,
 }
 
 impl TryFrom<Args> for CreateComputeAllocationRequest {

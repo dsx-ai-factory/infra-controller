@@ -67,6 +67,8 @@ test_selection_mode = "EnableAll"
 [machine_state_controller]
 dpu_wait_time = "24h"
 power_down_wait = "24h"
+
+[machine_state_controller.controller]
 iteration_time = "24h"
 
 [network_segment_state_controller]

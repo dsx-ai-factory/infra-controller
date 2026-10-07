@@ -27,13 +27,13 @@ use mqttea::traits::RawMessageType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct HelloWorld {
+struct HelloWorld {
     #[prost(string, tag = "1")]
-    pub message: String,
+    message: String,
     #[prost(int64, tag = "2")]
-    pub timestamp: i64,
+    timestamp: i64,
     #[prost(string, tag = "3")]
-    pub device_id: String,
+    device_id: String,
 }
 
 // Test message types for various serialization formats

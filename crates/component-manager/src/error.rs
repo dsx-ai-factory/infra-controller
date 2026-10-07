@@ -12,6 +12,27 @@ pub enum ComponentManagerError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// The selected backend does not implement or enable the requested operation.
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
+
+    /// The backend rejected a mutating request before accepting any work.
+    #[error("operation rejected before dispatch: {0}")]
+    RejectedBeforeDispatch(String),
+
+    /// A mutating operation may still be running when local observation ends,
+    /// so its outcome cannot be determined yet.
+    ///
+    /// When a job handle is available, callers must retain it and continue
+    /// status observation rather than resubmitting the mutation. Without a job
+    /// handle, callers must preserve the staged target until their reconciliation
+    /// policy decides whether it is safe to retry.
+    ///
+    /// For [`crate::nv_switch_manager::NvSwitchManager::ensure_password_rotation`],
+    /// callers retain the exact current-to-target request and retry it later.
+    #[error("operation outcome unknown: {0}")]
+    OperationOutcomeUnknown(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 

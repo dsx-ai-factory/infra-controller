@@ -17,4 +17,4 @@
 
 // Disable shares the same modify_dpf_state logic as enable,
 // re-exported from the enable subcommand module.
-pub use crate::dpf::enable::cmd::modify_dpf_state;
+pub(super) use crate::dpf::enable::cmd::modify_dpf_state;

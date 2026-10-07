@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-mcp.name" . }}
+  namespace: {{ include "nico-mcp.namespace" . }}
+  labels:
+    {{- include "nico-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nico-mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-mcp.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nico-mcp
+          image: "{{ include "nico-mcp.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          args:
+            - "--listen"
+            - ":{{ .Values.service.port }}"
+            - "--path"
+            - "{{ .Values.config.path }}"
+            - "--shutdown-timeout"
+            - "{{ .Values.config.shutdownTimeout }}"
+            {{- if .Values.config.baseURL }}
+            - "--base-url"
+            - "{{ .Values.config.baseURL }}"
+            {{- end }}
+            {{- if .Values.config.org }}
+            - "--org"
+            - "{{ .Values.config.org }}"
+            {{- end }}
+            {{- if .Values.config.apiName }}
+            - "--api-name"
+            - "{{ .Values.config.apiName }}"
+            {{- end }}
+            {{- if .Values.config.debug }}
+            - "--debug"
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+          # The MCP endpoint only answers JSON-RPC POSTs, so use a TCP probe
+          # rather than an HTTP health check.
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

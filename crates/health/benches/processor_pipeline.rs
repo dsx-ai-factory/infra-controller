@@ -20,7 +20,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData};
+use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
 use carbide_health::metrics::MetricsManager;
 use carbide_health::processor::{
     EventProcessingPipeline, EventProcessor, HealthReportProcessor, LeakEventProcessor,
@@ -43,9 +43,14 @@ impl DataSink for CountingSink {
         "counting_sink"
     }
 
-    fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), carbide_health::HealthError> {
         std::hint::black_box(context);
         std::hint::black_box(event);
+        Ok(())
     }
 }
 
@@ -87,15 +92,18 @@ fn event_context() -> EventContext {
         addr: BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             port: Some(443),
-            mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+            mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
         },
         collector_type: "sensor_collector",
+        labels: Default::default(),
         metadata: Some(EndpointMetadata::Machine(MachineData {
-            machine_id: MACHINE_ID.parse().expect("valid machine id"),
+            machine_id: Some(MACHINE_ID.parse().expect("valid machine id")),
             machine_serial: None,
+            system_uuid: SharedSystemUuid::default(),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
+            driver_version: None,
         })),
         rack_id: None,
     }
@@ -264,15 +272,18 @@ fn rack_event_contexts(rack_id: &str, tray_count: usize) -> Vec<EventContext> {
                 addr: BmcAddr {
                     ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, (idx + 1) as u8)),
                     port: Some(443),
-                    mac: MacAddress::from_str(&mac).unwrap(),
+                    mac: Some(MacAddress::from_str(&mac).unwrap()),
                 },
                 collector_type: "sensor_collector",
+                labels: Default::default(),
                 metadata: Some(EndpointMetadata::Machine(MachineData {
-                    machine_id: MACHINE_ID.parse().expect("valid machine id"),
+                    machine_id: Some(MACHINE_ID.parse().expect("valid machine id")),
                     machine_serial: None,
+                    system_uuid: SharedSystemUuid::default(),
                     slot_number: None,
                     tray_index: None,
                     nvlink_domain_uuid: None,
+                    driver_version: None,
                 })),
                 rack_id: Some(RackId::new(rack_id)),
             }

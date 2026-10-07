@@ -36,7 +36,7 @@ pub async fn handle_deleting(
     _state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-    tracing::info!("Deleting PowerShelf {}", power_shelf_id);
+    tracing::info!(%power_shelf_id, "Deleting PowerShelf");
     let mut txn = ctx.services.db_pool.begin().await?;
     db_power_shelf::final_delete(*power_shelf_id, &mut txn).await?;
     Ok(StateHandlerOutcome::deleted().with_txn(txn))

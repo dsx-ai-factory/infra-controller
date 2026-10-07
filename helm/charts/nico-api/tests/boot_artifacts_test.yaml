@@ -17,18 +17,17 @@ tests:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /boot-artifacts/blobs/internal
-            readOnly: true
+            mountPath: /forge-boot-artifacts/blobs/internal
 
   - it: should render boot artifact init containers with auto-injected volume mount
     set:
       bootArtifactContainers:
         - name: boot-artifacts-x86-64
           image: registry.example.com/boot-artifacts-x86_64:latest
-          command: ["sh", "-c", "cp -r /x86_64 /boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
         - name: boot-artifacts-aarch64
           image: registry.example.com/boot-artifacts-aarch64:latest
-          command: ["sh", "-c", "cp -r /aarch64 /apt /firmware /boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "cp -r /aarch64 /apt /firmware /forge-boot-artifacts/blobs/internal"]
     asserts:
       - exists:
           path: spec.template.spec.initContainers
@@ -45,19 +44,44 @@ tests:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /boot-artifacts/blobs/internal
+            mountPath: /forge-boot-artifacts/blobs/internal
       - contains:
           path: spec.template.spec.initContainers[1].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /boot-artifacts/blobs/internal
+            mountPath: /forge-boot-artifacts/blobs/internal
+
+  - it: should build image from repository + tag when provided (new fields win)
+    set:
+      bootArtifactContainers:
+        - name: boot-artifacts-x86-64
+          repository: registry.example.com/boot-artifacts-x86_64
+          tag: v1.2.3
+          command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: registry.example.com/boot-artifacts-x86_64:v1.2.3
+
+  - it: should ignore combined image when repository + tag are also set (new fields win)
+    set:
+      bootArtifactContainers:
+        - name: boot-artifacts-x86-64
+          repository: registry.example.com/boot-artifacts-x86_64
+          tag: v1.2.3
+          image: legacy.example.com/should-be-ignored:old
+          command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: registry.example.com/boot-artifacts-x86_64:v1.2.3
 
   - it: should add boot-artifacts volume and mount on main container
     set:
       bootArtifactContainers:
         - name: boot-artifacts-x86-64
           image: registry.example.com/boot-artifacts-x86_64:latest
-          command: ["sh", "-c", "cp -r /x86_64 /boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
     asserts:
       - contains:
           path: spec.template.spec.volumes
@@ -68,15 +92,14 @@ tests:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /boot-artifacts/blobs/internal
-            readOnly: true
+            mountPath: /forge-boot-artifacts/blobs/internal
 
   - it: should merge bootArtifactContainers and initContainers
     set:
       bootArtifactContainers:
         - name: boot-artifacts-x86-64
           image: registry.example.com/boot-artifacts-x86_64:latest
-          command: ["sh", "-c", "cp -r /x86_64 /boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
       initContainers:
         - name: custom-init
           image: busybox:latest
@@ -97,7 +120,7 @@ tests:
       bootArtifactContainers:
         - name: boot-artifacts-x86-64
           image: registry.example.com/boot-artifacts-x86_64:latest
-          command: ["sh", "-c", "cp -r /x86_64 /boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
           volumeMounts:
             - name: extra-volume
               mountPath: /extra
@@ -109,9 +132,20 @@ tests:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /boot-artifacts/blobs/internal
+            mountPath: /forge-boot-artifacts/blobs/internal
       - contains:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: extra-volume
             mountPath: /extra
+
+  - it: should reject empty split and fallback images
+    set:
+      bootArtifactContainers:
+        - name: empty-image
+          repository: registry.example.com/boot-artifacts
+          tag: ""
+          image: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api.bootArtifactContainers[0] requires either non-empty repository and tag or a non-empty image"

@@ -16,7 +16,7 @@
  */
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use db::DatabaseError;
 use db::db_read::DbReader;
 use model::site_explorer::ExploredManagedHost;
@@ -29,16 +29,16 @@ use model::site_explorer::ExploredManagedHost;
 /// It sets the machine_id when attaching the first DPU to a given host.
 /// It will use the machine_id from this structure when attaching all other DPUs to a host.
 #[derive(Debug, Clone)]
-pub struct ManagedHost<'a> {
+pub(super) struct ManagedHost<'a> {
     /// Retrieved from the explored_managed_host table
-    pub explored_host: &'a ExploredManagedHost,
+    pub(super) explored_host: &'a ExploredManagedHost,
     /// The site explorer uses the machine_id as the host's machine ID when attaching a DPU to a host.
     /// The site explorer sets this field as part of attaching the first DPU to a host in the create_managed_host function.
-    pub machine_id: Option<MachineId>,
+    pub(super) machine_id: Option<HostMachineId>,
 }
 
 impl<'a> ManagedHost<'a> {
-    pub fn init(explored_host: &'a ExploredManagedHost) -> Self {
+    pub(super) fn init(explored_host: &'a ExploredManagedHost) -> Self {
         Self {
             explored_host,
             machine_id: None,

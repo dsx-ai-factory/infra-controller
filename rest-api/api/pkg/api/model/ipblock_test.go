@@ -25,9 +25,10 @@ func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
 	prefLen19 := 19
 
 	tests := []struct {
-		desc      string
-		obj       APIIPBlockCreateRequest
-		expectErr bool
+		desc           string
+		obj            APIIPBlockCreateRequest
+		expectErr      bool
+		expectedPrefix string
 	}{
 		{
 			desc:      "error when Name is not provided",
@@ -62,6 +63,26 @@ func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
 		{
 			desc:      "error when Prefix is not valid ipv4 address",
 			obj:       APIIPBlockCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "::2001", PrefixLength: prefLen, ProtocolVersion: cdbm.IPBlockProtocolVersionV4},
+			expectErr: true,
+		},
+		{
+			desc:      "error when dotted-tail IPv6 prefix is declared IPv4",
+			obj:       APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "2001:db8::0.0.0.0", PrefixLength: 32, ProtocolVersion: cdbm.IPBlockProtocolVersionV4},
+			expectErr: true,
+		},
+		{
+			desc:      "error when Prefix is not valid ipv6 address",
+			obj:       APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "192.164.10.0", PrefixLength: prefLen, ProtocolVersion: cdbm.IPBlockProtocolVersionV6},
+			expectErr: true,
+		},
+		{
+			desc:           "ok with expanded uppercase IPv6 network address",
+			obj:            APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "2001:0DB8:0:0:0:0:0:0", PrefixLength: 64, ProtocolVersion: cdbm.IPBlockProtocolVersionV6},
+			expectedPrefix: "2001:db8::",
+		},
+		{
+			desc:      "error when expanded IPv6 prefix has nonzero host bits",
+			obj:       APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "2001:0DB8:0:0:0:0:0:1", PrefixLength: 64, ProtocolVersion: cdbm.IPBlockProtocolVersionV6},
 			expectErr: true,
 		},
 		{
@@ -112,8 +133,13 @@ func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			expectedPrefix := tc.expectedPrefix
+			if expectedPrefix == "" {
+				expectedPrefix = tc.obj.Prefix
+			}
 			err := tc.obj.Validate()
 			assert.Equal(t, tc.expectErr, err != nil)
+			assert.Equal(t, expectedPrefix, tc.obj.Prefix)
 			if err != nil {
 				fmt.Println(err.Error())
 			}

@@ -15,4 +15,4 @@
  * limitations under the License.
  */
 
-pub mod bluefield;
+pub(crate) mod bluefield;

@@ -81,12 +81,6 @@
                 action: deny
                 match:
                   any: {}
-          DPU_FROM_TRAFFIC_INTERCEPT_PEER_PREFIX_LIST_IPV6:
-            rule:
-              '65535':
-                action: deny
-                match:
-                  any: {}
         route-map:
           dpu_to_instance:
             rule:
@@ -118,36 +112,6 @@
                   tag: 65101
                   community:
                       none: {}
-                  large-community:
-                    none: {}
-              '65535':
-                action:
-                  deny: {}
-          dpu_from_traffic_intercept_gw_peer_ipv6:
-            rule:
-              '10':
-                action:
-                  permit: {}
-                match:
-                  type: ipv6
-                  ip-prefix-list: DPU_FROM_TRAFFIC_INTERCEPT_PEER_PREFIX_LIST_IPV6
-                  community-list: BYOIP_LEAK_COMMUNITY_LIST
-                set:
-                  tag: 65100
-                  community:
-                    none: {}
-                  large-community:
-                    none: {}
-              '11':
-                action:
-                  permit: {}
-                match:
-                  type: ipv6
-                  ip-prefix-list: DPU_FROM_TRAFFIC_INTERCEPT_PEER_PREFIX_LIST_IPV6
-                set:
-                  tag: 65101
-                  community:
-                    none: {}
                   large-community:
                     none: {}
               '65535':

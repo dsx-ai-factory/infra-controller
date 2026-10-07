@@ -33,7 +33,7 @@ Explore a host, supplying the MAC it sent DHCP from:
     $ nico-admin-cli site-explorer explore 192.0.2.10 --mac 00:11:22:33:44:55
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: ExploreOptions,
+    pub(super) inner: ExploreOptions,
 }

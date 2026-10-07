@@ -26,7 +26,7 @@ Get the SPDM attestation status for a machine:
     $ nico-admin-cli attestation spdm get 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Machine ID")]
-    pub machine_id: MachineId,
+    pub(super) machine_id: MachineId,
 }

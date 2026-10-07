@@ -1,6 +1,6 @@
-# HELP carbide_machine_updates_started_count The number of machines in the system that are in the process of updating.
+# HELP carbide_machine_updates_started_count Number of machines in the system in the process of updating
 # TYPE carbide_machine_updates_started_count gauge
 carbide_machine_updates_started_count 100
-# HELP carbide_machines_in_maintenance_count The total number of machines in the system that are in maintenance.
+# HELP carbide_machines_in_maintenance_count Number of machines in the system in maintenance
 # TYPE carbide_machines_in_maintenance_count gauge
 carbide_machines_in_maintenance_count 100

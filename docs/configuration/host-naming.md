@@ -1,6 +1,6 @@
 # Host Naming
 
-Every machine interface NICo manages gets a hostname, and that hostname is what NICo's DNS serves -- the A/AAAA records for a machine are built from its stored hostname and current addresses. How those hostnames are derived is a site-wide choice, set once in the `nico-api` config:
+Every machine interface NICo manages gets a hostname, and that hostname is what [NICo's DNS](dns.md) serves -- the A/AAAA records for a machine are built from its stored hostname and current addresses. How those hostnames are derived is a site-wide choice, set once in the `nico-api` config:
 
 ```toml
 # nico-api config TOML

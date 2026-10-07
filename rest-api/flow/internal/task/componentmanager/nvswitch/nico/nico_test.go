@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestInjectExpectation(t *testing.T) {
@@ -65,8 +65,8 @@ func TestInjectExpectation(t *testing.T) {
 			m := New(tc.client, nil)
 
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeNVSwitch,
-				ComponentIDs: []string{"switch-1"},
+				Type:        devicetypes.ComponentTypeNVSwitch,
+				Identifiers: []string{"switch-1"},
 			}
 
 			err := m.InjectExpectation(context.Background(), target, tc.info)
@@ -82,12 +82,46 @@ func TestInjectExpectation(t *testing.T) {
 	}
 }
 
+func TestNormalizeDecommissionState(t *testing.T) {
+	testCases := map[string]struct {
+		raw  string
+		want string
+	}{
+		"terminal state": {
+			raw:  `{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}`,
+			want: "Decommissioned",
+		},
+		"in-progress state": {
+			raw:  `{"state":"decommissioning","decommissioning_state":{"state":"factoryresetbmc"}}`,
+			want: "Decommissioning/factoryresetbmc",
+		},
+		"unrelated state remains unchanged": {
+			raw:  `{"state":"ready"}`,
+			want: `{"state":"ready"}`,
+		},
+		"malformed state remains unchanged": {
+			raw:  "Ready",
+			want: "Ready",
+		},
+		"decommissioning state without substate remains unchanged": {
+			raw:  `{"state":"decommissioning"}`,
+			want: `{"state":"decommissioning"}`,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeDecommissionState(tc.raw))
+		})
+	}
+}
+
 func TestPowerControl(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"switch-1", "switch-2"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1", "switch-2"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -96,26 +130,77 @@ func TestPowerControl(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestFirmwareControl(t *testing.T) {
+func TestPowerControlRejectsColdReset(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
+	target := common.Target{
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1"},
+	}
+
+	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+		Operation: operations.PowerOperationColdReset,
+	})
+	require.ErrorContains(t, err, "unsupported power operation for NVSwitch: ColdReset")
+}
+
+func TestMACTargetRequests(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
+	macs := []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}
+	target := common.Target{
+		Type:           devicetypes.ComponentTypeNVSwitch,
+		IdentifierType: common.IdentifierTypeMACAddress,
+		Identifiers:    macs,
+	}
+
+	require.NoError(t, m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+		Operation: operations.PowerOperationPowerOn,
+	}))
+	assert.Equal(t, macs, client.LastComponentPowerControlRequest().GetSwitchBmcMacs().GetMacAddresses())
+
+	_, err := m.GetPowerStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentInventoryRequest().GetSwitchBmcMacs().GetMacAddresses())
+
+	require.NoError(t, m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		TargetVersion: "2.0.0",
+	}))
+	assert.Equal(t, macs, client.LastUpdateComponentFirmwareRequest().GetSwitches().GetBmcMacs().GetMacAddresses())
+
+	_, err = m.GetFirmwareStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentFirmwareStatusRequest().GetSwitchBmcMacs().GetMacAddresses())
+}
+
+func TestFirmwareControl(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"switch-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		TargetVersion: "2.0.0",
+		TargetVersion:        "2.0.0",
+		AccessToken:          "switch-token",
+		OverrideVersionCheck: true,
 	})
 	assert.NoError(t, err)
+	assert.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
+	assert.Equal(
+		t,
+		"switch-token",
+		client.LastUpdateComponentFirmwareRequest().GetAccessToken(),
+	)
 }
 
 func TestGetFirmwareStatus(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"switch-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1"},
 	}
 
 	statuses, err := m.GetFirmwareStatus(context.Background(), target)
@@ -124,10 +209,10 @@ func TestGetFirmwareStatus(t *testing.T) {
 }
 
 func TestAggregateNICoStatuses(t *testing.T) {
-	mkStatus := func(compID string, state pb.FirmwareUpdateState, errMsg string) *pb.FirmwareUpdateStatus {
-		return &pb.FirmwareUpdateStatus{
-			Result: &pb.ComponentResult{
-				ComponentId: compID,
+	mkStatus := func(compID string, state corev1.FirmwareUpdateState, errMsg string) *corev1.FirmwareUpdateStatus {
+		return &corev1.FirmwareUpdateStatus{
+			Result: &corev1.ComponentResult{
+				ComponentId: &compID,
 				Error:       errMsg,
 			},
 			State: state,
@@ -135,7 +220,7 @@ func TestAggregateNICoStatuses(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		statuses      []*pb.FirmwareUpdateStatus
+		statuses      []*corev1.FirmwareUpdateStatus
 		expectedState operations.FirmwareUpdateState
 		expectedError string
 	}{
@@ -144,50 +229,50 @@ func TestAggregateNICoStatuses(t *testing.T) {
 			expectedState: operations.FirmwareUpdateStateUnknown,
 		},
 		"all completed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateCompleted,
 		},
 		"any failure marks overall failed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_FAILED, "BMC update failed"),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_FAILED, "BMC update failed"),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateFailed,
 			expectedError: "BMC update failed",
 		},
 		"last completed but earlier failed still reports failed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_FAILED, "CPLD flash error"),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_FAILED, "CPLD flash error"),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateFailed,
 			expectedError: "CPLD flash error",
 		},
 		"cancelled treated as failed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_CANCELLED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_CANCELLED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateFailed,
 		},
 		"still in progress": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_IN_PROGRESS, ""),
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_QUEUED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_IN_PROGRESS, ""),
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_QUEUED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateQueued,
 		},
 		"single completed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("sw-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("sw-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateCompleted,
 		},
@@ -239,8 +324,8 @@ func TestPowerControl_RefusesWhenRackHostInUse(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -262,8 +347,8 @@ func TestPowerControl_AllowsWhenRackHostsReady(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -282,8 +367,8 @@ func TestFirmwareControl_RefusesWhenRackHostInUse(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -310,8 +395,8 @@ func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{

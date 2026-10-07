@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmd;
+mod args;
+mod cmd;
 
-pub use args::Args;
+pub(super) use args::Args;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -28,6 +28,9 @@ impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
         match self {
             Args::Start(options) => cmd::on_demand_rack_maintenance(&ctx.api_client, options).await,
+            Args::Terminate(options) => {
+                cmd::terminate_rack_maintenance(&ctx.api_client, options).await
+            }
         }
     }
 }

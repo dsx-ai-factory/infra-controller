@@ -8,13 +8,13 @@ This guide describes what is in place for running Cargo (build, test, check) via
 
 | Item | Location | Purpose |
 |------|----------|--------|
-| **Makefile task: `cargo-docker-minimal`** | `Makefile.toml` | Run Cargo in the minimal image (`nico-build-minimal`: Rust 1.95 + protoc). **Recommended on Mac.** Requires `build-cargo-docker-image-minimal` once. |
+| **Makefile task: `cargo-docker-minimal`** | `Makefile.toml` | Run Cargo in the minimal image (`nico-build-minimal`: Rust 1.97 + protoc). **Recommended on Mac.** Requires `build-cargo-docker-image-minimal` once. |
 | **Makefile task: `build-cargo-docker-image-minimal`** | `Makefile.toml` | Build the minimal image (Rust + protoc only). Quick (~2–5 min). Required once for workspace builds (e.g. `nico-rpc` needs `protoc`). |
 | **Makefile task: `cargo-docker`** | `Makefile.toml` | Run Cargo inside the repo’s full build container (`nico-build-x86_64`). Requires building that image first. |
 | **Makefile task: `build-cargo-docker-image`** | `Makefile.toml` | Build the full Linux build image from `dev/docker/Dockerfile.build-container-x86_64`. Slow on Apple Silicon (45+ min). |
-| **This guide** | `docs/development/cargo-via-docker-macos.md` | How to use the above and when to choose which option. |
-| **Minimal Dockerfile** | `dev/docker/Dockerfile.cargo-docker-minimal` | Rust 1.95 + `protobuf-compiler` + `libprotobuf-dev` (well-known types). Used for `nico-build-minimal`. |
-| **Full build Dockerfile** | `dev/docker/Dockerfile.build-container-x86_64` | Defines the full build image (Rust 1.95, PostgreSQL, protobuf, TSS, etc.). |
+| **This guide** | `docs/manuals/cargo-via-docker-macos.md` | How to use the above and when to choose which option. |
+| **Minimal Dockerfile** | `dev/docker/Dockerfile.cargo-docker-minimal` | Rust 1.97 + `protobuf-compiler` + `libprotobuf-dev` (well-known types). Used for `nico-build-minimal`. |
+| **Full build Dockerfile** | `dev/docker/Dockerfile.build-container-x86_64` | Defines the full build image (Rust 1.97, PostgreSQL, protobuf, TSS, etc.). |
 
 All commands below are run from the **repository root** unless noted.
 
@@ -173,7 +173,7 @@ If you get an error about the `loki` logging plugin, use: `docker-compose -f doc
 
 **2. Run IB partition tests:**
 
-**Locally (Rust 1.95 + `DATABASE_URL`):**
+**Locally (Rust 1.97 + `DATABASE_URL`):**
 
 ```bash
 export DATABASE_URL="postgres://nico_development:notforprod@localhost:5432/nico_development"
@@ -248,7 +248,7 @@ Output binaries appear under `target/` in your repo as usual.
 
 **When to use:** Day-to-day builds and checks on macOS when you don’t need the full API test stack (PostgreSQL, TSS, etc.).
 
-**What it uses:** The image `nico-build-minimal` (Rust 1.95 + `protoc`). You must build it once with `build-cargo-docker-image-minimal` (~2–5 min). The `nico-rpc` crate needs `protoc` and the Google well-known proto files (`libprotobuf-dev`), so the bare `rust:1.95.0-slim-bookworm` image is not enough for workspace builds.
+**What it uses:** The image `nico-build-minimal` (Rust 1.97 + `protoc`). You must build it once with `build-cargo-docker-image-minimal` (~2–5 min). The `nico-rpc` crate needs `protoc` and the Google well-known proto files (`libprotobuf-dev`), so the bare `rust:1.97.1-slim-bookworm` image is not enough for workspace builds.
 
 ### Usage
 
@@ -288,7 +288,10 @@ cargo make build-cargo-docker-image
 Or manually:
 
 ```bash
-docker build -f dev/docker/Dockerfile.build-container-x86_64 -t nico-build-x86_64 dev/docker
+KEA_VERSION=$(cat dev/docker/kea.version)
+docker build --build-arg KEA_VERSION="${KEA_VERSION}" \
+  -f dev/docker/Dockerfile.build-container-x86_64 \
+  -t nico-build-x86_64 dev/docker
 ```
 
 On Apple Silicon this runs under emulation and can take a long time; step 7 (installing cargo tools) alone often takes 45+ minutes.

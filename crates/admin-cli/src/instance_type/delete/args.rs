@@ -26,9 +26,9 @@ Delete an instance type by id:
     $ nico-admin-cli instance-type delete --id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "Instance type ID to delete")]
-    pub id: String,
+    pub(super) id: String,
 }
 
 impl From<Args> for DeleteInstanceTypeRequest {

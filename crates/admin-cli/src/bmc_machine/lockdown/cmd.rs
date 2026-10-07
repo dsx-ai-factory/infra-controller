@@ -22,7 +22,7 @@ use crate::bmc_machine::common::AdminPowerControlAction;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn lockdown(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn lockdown(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let machine = args.machine;
     let action = if args.enable {
         forgerpc::LockdownAction::Enable

@@ -17,97 +17,136 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
+use carbide_uuid::nvlink::NvLinkDomainId;
+use carbide_uuid::power_shelf::PowerShelfId;
 use prometheus::{Histogram, HistogramOpts};
+use tokio::sync::Notify;
 
+use super::reachability::ReachabilitySpec;
 use crate::HealthError;
+use crate::api_client::ApiClientWrapper;
 use crate::bmc::BmcClient;
-use crate::collectors::{Collector, LogDowngradeRegistry, SharedInventory};
+use crate::collectors::{Collector, LogDowngradeRegistry, NmxcSchemaOverride, SharedInventory};
 use crate::config::{
-    Config, Configurable, DiscoveryConfig, FirmwareCollectorConfig as FirmwareCollectorOptions,
+    AttributesConfig, Config, Configurable, DiscoveryConfig,
+    FirmwareCollectorConfig as FirmwareCollectorOptions, GpuInventoryConfig,
     LeakDetectorCollectorConfig as LeakDetectorCollectorOptions,
-    LogsCollectorConfig as LogsCollectorOptions, MetricsCollectorConfig as MetricsCollectorOptions,
-    NmxtCollectorConfig as NmxtCollectorOptions, NvueCollectorConfig as NvueCollectorOptions,
+    LogsCollectorConfig as LogsCollectorOptions, ManagerCollectorConfig as ManagerCollectorOptions,
+    MetricsCollectorConfig as MetricsCollectorOptions, MtlsProfileConfig,
+    NmxcCollectorConfig as NmxcCollectorOptions, NmxtCollectorConfig as NmxtCollectorOptions,
+    NvueCollectorConfig as NvueCollectorOptions, ReachabilityCollectorConfig,
     SensorCollectorConfig as SensorCollectorOptions,
+    TelemetryCollectorConfig as TelemetryCollectorOptions,
 };
+use crate::inventory::InventoryMetrics;
 use crate::limiter::RateLimiter;
 use crate::metrics::{MetricsManager, operation_duration_buckets_seconds};
+use crate::tls::MtlsHttpClientProvider;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(super) enum CollectorKind {
     Discovery,
     Sensor,
     Metrics,
+    Telemetry,
     Logs,
     Firmware,
     LeakDetector,
     Nmxt,
+    Nmxc,
     NvueRest,
     NvueGnmi,
+    GpuInventory,
+    Manager,
+    Reachability,
 }
 
 impl CollectorKind {
-    pub(super) const ALL: [CollectorKind; 9] = [
+    pub(super) const ALL: [CollectorKind; 13] = [
         CollectorKind::Discovery,
         CollectorKind::Sensor,
         CollectorKind::Metrics,
+        CollectorKind::Telemetry,
         CollectorKind::Logs,
         CollectorKind::Firmware,
         CollectorKind::LeakDetector,
         CollectorKind::Nmxt,
+        CollectorKind::Nmxc,
         CollectorKind::NvueRest,
         CollectorKind::NvueGnmi,
+        CollectorKind::GpuInventory,
+        CollectorKind::Manager,
     ];
-
-    pub(super) fn stop_message(self) -> &'static str {
-        match self {
-            CollectorKind::Discovery => {
-                "Stopping entity discovery collector for removed BMC endpoint"
-            }
-            CollectorKind::Sensor => "Stopping sensor collector for removed BMC endpoint",
-            CollectorKind::Metrics => "Stopping entity metrics collector for removed BMC endpoint",
-            CollectorKind::Logs => "Stopping logs collector for removed BMC endpoint",
-            CollectorKind::Firmware => "Stopping firmware collector for removed BMC endpoint",
-            CollectorKind::LeakDetector => {
-                "Stopping leak detector collector for removed BMC endpoint"
-            }
-            CollectorKind::Nmxt => "Stopping NMX-T collector for removed BMC endpoint",
-            CollectorKind::NvueRest => "Stopping NVUE REST collector for removed BMC endpoint",
-            CollectorKind::NvueGnmi => {
-                "Stopping NVUE gNMI streaming collector for removed switch endpoint"
-            }
-        }
-    }
 }
 
 pub(super) struct CollectorState {
     discovery: HashMap<Cow<'static, str>, Collector>,
     sensors: HashMap<Cow<'static, str>, Collector>,
     metrics: HashMap<Cow<'static, str>, Collector>,
+    telemetry: HashMap<Cow<'static, str>, Collector>,
     firmware: HashMap<Cow<'static, str>, Collector>,
     leak_detector: HashMap<Cow<'static, str>, Collector>,
     logs: HashMap<Cow<'static, str>, Collector>,
     nmxt: HashMap<Cow<'static, str>, Collector>,
+    nmxc: HashMap<Cow<'static, str>, Collector>,
     nvue_rest: HashMap<Cow<'static, str>, Collector>,
     nvue_gnmi: HashMap<Cow<'static, str>, Collector>,
+    gpu_inventory: HashMap<Cow<'static, str>, Collector>,
+    manager: HashMap<Cow<'static, str>, Collector>,
+    reachability: HashMap<Cow<'static, str>, Collector>,
     inventories: HashMap<Cow<'static, str>, SharedInventory<BmcClient>>,
+    machine_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
+    switch_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
+    power_shelf_ids: HashMap<Cow<'static, str>, Option<PowerShelfId>>,
+    pub(super) reachability_specs: HashMap<Cow<'static, str>, ReachabilitySpec>,
 }
 
 impl CollectorState {
+    /// Stores the first value as a baseline and reports subsequent changes.
+    fn observe_value<T: PartialEq>(
+        values: &mut HashMap<Cow<'static, str>, Option<T>>,
+        key: &str,
+        value: Option<T>,
+    ) -> bool {
+        match values.get_mut(key) {
+            Some(previous) if previous != &value => {
+                *previous = value;
+                true
+            }
+            Some(_) => false,
+            None => {
+                values.insert(Cow::Owned(key.to_string()), value);
+                false
+            }
+        }
+    }
+
     fn new() -> Self {
         Self {
             discovery: HashMap::new(),
             sensors: HashMap::new(),
             metrics: HashMap::new(),
+            telemetry: HashMap::new(),
             firmware: HashMap::new(),
             leak_detector: HashMap::new(),
             logs: HashMap::new(),
             nmxt: HashMap::new(),
+            nmxc: HashMap::new(),
             nvue_rest: HashMap::new(),
             nvue_gnmi: HashMap::new(),
+            gpu_inventory: HashMap::new(),
+            manager: HashMap::new(),
+            reachability: HashMap::new(),
             inventories: HashMap::new(),
+            machine_domain_uuids: HashMap::new(),
+            switch_domain_uuids: HashMap::new(),
+            power_shelf_ids: HashMap::new(),
+            reachability_specs: HashMap::new(),
         }
     }
 
@@ -116,12 +155,17 @@ impl CollectorState {
             CollectorKind::Discovery => &self.discovery,
             CollectorKind::Sensor => &self.sensors,
             CollectorKind::Metrics => &self.metrics,
+            CollectorKind::Telemetry => &self.telemetry,
             CollectorKind::Logs => &self.logs,
             CollectorKind::Firmware => &self.firmware,
             CollectorKind::LeakDetector => &self.leak_detector,
             CollectorKind::Nmxt => &self.nmxt,
+            CollectorKind::Nmxc => &self.nmxc,
             CollectorKind::NvueRest => &self.nvue_rest,
             CollectorKind::NvueGnmi => &self.nvue_gnmi,
+            CollectorKind::GpuInventory => &self.gpu_inventory,
+            CollectorKind::Manager => &self.manager,
+            CollectorKind::Reachability => &self.reachability,
         }
     }
 
@@ -133,12 +177,17 @@ impl CollectorState {
             CollectorKind::Discovery => &mut self.discovery,
             CollectorKind::Sensor => &mut self.sensors,
             CollectorKind::Metrics => &mut self.metrics,
+            CollectorKind::Telemetry => &mut self.telemetry,
             CollectorKind::Logs => &mut self.logs,
             CollectorKind::Firmware => &mut self.firmware,
             CollectorKind::LeakDetector => &mut self.leak_detector,
             CollectorKind::Nmxt => &mut self.nmxt,
+            CollectorKind::Nmxc => &mut self.nmxc,
             CollectorKind::NvueRest => &mut self.nvue_rest,
             CollectorKind::NvueGnmi => &mut self.nvue_gnmi,
+            CollectorKind::GpuInventory => &mut self.gpu_inventory,
+            CollectorKind::Manager => &mut self.manager,
+            CollectorKind::Reachability => &mut self.reachability,
         }
     }
 
@@ -155,6 +204,67 @@ impl CollectorState {
     /// Drop the shared inventory handle for a removed endpoint.
     pub(super) fn remove_inventory(&mut self, key: &str) {
         self.inventories.remove(key);
+    }
+
+    /// Records the latest machine domain and reports whether it changed.
+    ///
+    /// The first observation establishes a baseline without forcing a restart.
+    /// Later transitions between absent and present values, or between two UUIDs,
+    /// require a restart because running collectors retain their startup metadata.
+    pub(super) fn observe_machine_domain(
+        &mut self,
+        key: &str,
+        domain_uuid: Option<NvLinkDomainId>,
+    ) -> bool {
+        Self::observe_value(&mut self.machine_domain_uuids, key, domain_uuid)
+    }
+
+    /// Removes baselines for machines absent from the discovery pass.
+    pub(super) fn retain_machine_domains(&mut self, active_endpoints: &HashSet<Cow<'static, str>>) {
+        self.machine_domain_uuids
+            .retain(|key, _| active_endpoints.contains(key));
+    }
+
+    /// Records the latest switch domain and reports whether it changed.
+    ///
+    /// The first observation establishes a baseline without forcing a restart.
+    /// Later transitions between absent and present values, or between two UUIDs,
+    /// require a restart because running collectors retain their startup metadata.
+    pub(super) fn observe_switch_domain(
+        &mut self,
+        key: &str,
+        domain_uuid: Option<NvLinkDomainId>,
+    ) -> bool {
+        Self::observe_value(&mut self.switch_domain_uuids, key, domain_uuid)
+    }
+
+    pub(super) fn retain_switch_domains(
+        &mut self,
+        active_switch_endpoints: &HashSet<Cow<'static, str>>,
+    ) {
+        self.switch_domain_uuids
+            .retain(|key, _| active_switch_endpoints.contains(key));
+    }
+
+    /// Records the latest PowerShelf ID and reports whether it changed.
+    ///
+    /// Running collectors retain their startup metadata, so a changed ID
+    /// requires a restart before sinks can publish the updated identity.
+    pub(super) fn observe_power_shelf_id(
+        &mut self,
+        key: &str,
+        power_shelf_id: Option<PowerShelfId>,
+    ) -> bool {
+        Self::observe_value(&mut self.power_shelf_ids, key, power_shelf_id)
+    }
+
+    /// Removes saved PowerShelf IDs for endpoints absent from the discovery pass.
+    pub(super) fn retain_power_shelf_ids(
+        &mut self,
+        active_power_shelf_endpoints: &HashSet<Cow<'static, str>>,
+    ) {
+        self.power_shelf_ids
+            .retain(|key, _| active_power_shelf_endpoints.contains(key));
     }
 
     pub(super) fn contains(&self, kind: CollectorKind, key: &str) -> bool {
@@ -182,12 +292,16 @@ impl CollectorState {
             .keys()
             .chain(self.sensors.keys())
             .chain(self.metrics.keys())
+            .chain(self.telemetry.keys())
             .chain(self.logs.keys())
             .chain(self.firmware.keys())
             .chain(self.leak_detector.keys())
             .chain(self.nmxt.keys())
+            .chain(self.nmxc.keys())
             .chain(self.nvue_rest.keys())
             .chain(self.nvue_gnmi.keys())
+            .chain(self.gpu_inventory.keys())
+            .chain(self.manager.keys())
             .filter(|key| !active_keys.contains(*key))
             .cloned()
             .collect()
@@ -212,17 +326,48 @@ pub struct DiscoveryLoopContext {
     pub(super) collectors: CollectorState,
     pub(crate) discovery_iteration_histogram: Histogram,
     pub(crate) discovery_endpoint_fetch_histogram: Histogram,
+    pub(crate) inventory_metrics: InventoryMetrics,
     pub(crate) limiter: Arc<dyn RateLimiter>,
+    pub(crate) bmc_request_concurrency: NonZeroUsize,
     pub(crate) metrics_manager: Arc<MetricsManager>,
     pub(crate) discovery_config: DiscoveryConfig,
     pub(crate) sensors_config: Configurable<SensorCollectorOptions>,
     pub(crate) metrics_config: Configurable<MetricsCollectorOptions>,
+    pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
+    pub(crate) nmxc_config: Configurable<NmxcCollectorOptions>,
+    pub(crate) nmxc_schema_override: Option<Arc<NmxcSchemaOverride>>,
     pub(crate) nvue_config: Configurable<NvueCollectorOptions>,
+    pub(crate) tls_config: Option<MtlsProfileConfig>,
+    pub(crate) tls_http_client_provider: Option<MtlsHttpClientProvider>,
+
+    /// Whether any enabled sink consumes `CollectorEvent::Log` payloads.
+    pub(crate) log_event_sink_enabled: bool,
+
+    /// Whether NMX-C domain health reports have an enabled consumer.
+    pub(crate) nvlink_domain_health_report_sink_enabled: bool,
+
+    /// Active reachability configuration.
+    ///
+    /// This is absent when the collector is disabled or no metric or log sink
+    /// can consume its observations.
+    pub(super) reachability_config: Option<ReachabilityCollectorConfig>,
+    pub(crate) gpu_inventory_config: Configurable<GpuInventoryConfig>,
+    pub(crate) api_client: Option<Arc<ApiClientWrapper>>,
     pub(crate) log_downgrade_registry: Arc<LogDowngradeRegistry>,
+
+    /// Wakes endpoint discovery when an auto-mode log collector changes mode.
+    pub(crate) collector_transition_notify: Arc<Notify>,
+
+    /// Whether log collectors should attach diagnostic payload carriers.
+    pub(crate) logs_include_diagnostics: bool,
+
+    /// Opt-in identity attributes attached to logs and metric datapoints.
+    pub(crate) attributes: AttributesConfig,
 }
 
 impl DiscoveryLoopContext {
@@ -230,6 +375,17 @@ impl DiscoveryLoopContext {
         limiter: Arc<dyn RateLimiter>,
         metrics_manager: Arc<MetricsManager>,
         config: Arc<Config>,
+    ) -> Result<Self, HealthError> {
+        let nmxc_schema_override = load_nmxc_schema_override(&config)?;
+        Self::new_with_tls_config(limiter, metrics_manager, config, None, nmxc_schema_override)
+    }
+
+    pub(crate) fn new_with_tls_config(
+        limiter: Arc<dyn RateLimiter>,
+        metrics_manager: Arc<MetricsManager>,
+        config: Arc<Config>,
+        tls_config: Option<MtlsProfileConfig>,
+        nmxc_schema_override: Option<Arc<NmxcSchemaOverride>>,
     ) -> Result<Self, HealthError> {
         let registry = metrics_manager.global_registry();
 
@@ -253,23 +409,108 @@ impl DiscoveryLoopContext {
         )?;
         registry.register(Box::new(discovery_endpoint_fetch_histogram.clone()))?;
 
+        let inventory_metrics = InventoryMetrics::new(registry, metrics_prefix)?;
+
+        let tls_config = tls_config.or_else(|| config.tls.switch.clone());
+
+        // Periodic HTTP switch collectors share one provider because
+        // `[tls.switch]` is a single profile. The shortest enabled HTTP poll
+        // interval bounds cert reload staleness without rebuilding a client per
+        // switch target.
+        let tls_http_client_provider = tls_config.clone().and_then(|tls_config| {
+            switch_http_reload_interval(&config)
+                .map(|reload_interval| MtlsHttpClientProvider::new(tls_config, reload_interval))
+        });
+
+        let reachability_config =
+            if config.sinks.prometheus.is_enabled() || config.sinks.includes_log_events() {
+                config.collectors.reachability.as_option().cloned()
+            } else {
+                None
+            };
+
         Ok(Self {
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
+            inventory_metrics,
             limiter,
+            bmc_request_concurrency: config.bmc_request_concurrency,
             metrics_manager,
             discovery_config: config.collectors.discovery.clone(),
             sensors_config: config.collectors.sensors.clone(),
             metrics_config: config.collectors.metrics.clone(),
+            telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),
+            nmxc_config: config.collectors.nmxc.clone(),
+            nmxc_schema_override,
             nvue_config: config.collectors.nvue.clone(),
+            tls_config,
+            tls_http_client_provider,
+            log_event_sink_enabled: config.sinks.includes_log_events(),
+            nvlink_domain_health_report_sink_enabled: config
+                .sinks
+                .nvlink_domain_health_report
+                .is_enabled(),
+            reachability_config,
+            gpu_inventory_config: config.collectors.gpu_inventory.clone(),
+            api_client: match &config.endpoint_sources.carbide_api {
+                Configurable::Enabled(source_cfg) => Some(Arc::new(ApiClientWrapper::new(
+                    source_cfg.root_ca.clone(),
+                    source_cfg.client_cert.clone(),
+                    source_cfg.client_key.clone(),
+                    &source_cfg.api_url,
+                ))),
+                _ => None,
+            },
             log_downgrade_registry: Arc::new(LogDowngradeRegistry::new()),
+            collector_transition_notify: Arc::new(Notify::new()),
+            logs_include_diagnostics: config.sinks.includes_log_diagnostics(),
+            attributes: config.attributes.clone(),
         })
     }
+}
+
+pub(crate) fn load_nmxc_schema_override(
+    config: &Config,
+) -> Result<Option<Arc<NmxcSchemaOverride>>, HealthError> {
+    let Some(nmxc) = config.collectors.nmxc.as_option() else {
+        return Ok(None);
+    };
+
+    let Some(schema_override) = &nmxc.schema_override else {
+        return Ok(None);
+    };
+
+    NmxcSchemaOverride::load(schema_override, nmxc)
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|error| HealthError::NmxcSchemaOverride(Box::new(error)))
+}
+
+/// Returns the cadence at which periodic HTTP switch collectors reload mTLS material.
+fn switch_http_reload_interval(config: &Config) -> Option<Duration> {
+    let mut reload_interval = None;
+
+    if let Configurable::Enabled(nmxt_config) = &config.collectors.nmxt {
+        reload_interval = Some(nmxt_config.scrape_interval);
+    }
+
+    if let Configurable::Enabled(nvue_config) = &config.collectors.nvue
+        && let Configurable::Enabled(rest_config) = &nvue_config.rest
+    {
+        reload_interval = Some(
+            reload_interval
+                .map(|existing: Duration| existing.min(rest_config.poll_interval))
+                .unwrap_or(rest_config.poll_interval),
+        );
+    }
+
+    reload_interval
 }
 
 #[cfg(test)]
@@ -279,6 +520,7 @@ mod tests {
 
     use super::*;
     use crate::collectors::Collector;
+    use crate::config::MtlsProfileConfig;
 
     fn noop_collector() -> Collector {
         Collector::spawn_task(|_| async {})
@@ -303,5 +545,33 @@ mod tests {
 
         assert!(removed.contains(&Cow::Borrowed("removed-gNMI-endpoint")));
         assert!(!removed.contains(&Cow::Borrowed("active-rest-endpoint")));
+    }
+
+    #[test]
+    fn context_carries_tls_switch_config() {
+        let mut config = Config::default();
+
+        let tls_config = MtlsProfileConfig {
+            ca_cert_path: "/switch/ca.crt".into(),
+            client_cert_path: "/switch/tls.crt".into(),
+            client_key_path: "/switch/tls.key".into(),
+            tls_server_name: Some("switches.example.forge".to_string()),
+        };
+
+        config.tls.switch = Some(tls_config.clone());
+
+        let context = DiscoveryLoopContext::new(
+            Arc::new(crate::limiter::NoopLimiter),
+            Arc::new(MetricsManager::new("tls_context").expect("metrics manager")),
+            Arc::new(config),
+        )
+        .expect("context should initialize");
+
+        let actual_tls_config = context
+            .tls_config
+            .as_ref()
+            .expect("[tls.switch] config should be present");
+
+        assert_eq!(actual_tls_config, &tls_config);
     }
 }

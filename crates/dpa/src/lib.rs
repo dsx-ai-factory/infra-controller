@@ -19,9 +19,14 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Instant;
 
+use carbide_instrument::emit;
 use mqttea::client::MqtteaClient;
 
+use crate::metrics::{DpaCommandSendFailed, DpaCommandSent};
+
+mod metrics;
 pub mod rpc;
 
 pub struct DpaInfo {
@@ -65,17 +70,25 @@ pub async fn send_dpa_command(
 
     let topic = format!("dpa/command/{maddr}/SetVni");
 
-    match client.send_message(&topic, &svni).await {
+    let send_started_at = Instant::now();
+    let send_result = client.send_message(&topic, &svni).await;
+    let send_latency = send_started_at.elapsed();
+
+    match send_result {
         Ok(()) => {
-            println!("send_dpa_command revision: {revision} vni: {vni}");
+            emit(DpaCommandSent {
+                latency: send_latency,
+                revision,
+                vni: i64::from(vni),
+            });
         }
         Err(e) => {
-            tracing::error!(
-                "send_dpa_command -  error: {:#?} sending message: {:#?} to topic: {}",
-                e,
-                svni,
-                topic
-            );
+            emit(DpaCommandSendFailed {
+                latency: send_latency,
+                error: format!("{e:?}"),
+                payload: format!("{svni:?}"),
+                topic,
+            });
             return Err(eyre::eyre!("send_message error: {e}"));
         }
     }

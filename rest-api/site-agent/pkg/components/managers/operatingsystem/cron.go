@@ -8,6 +8,7 @@ import (
 
 	"go.temporal.io/sdk/client"
 
+	wfmgr "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
 	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
 )
 
@@ -18,23 +19,30 @@ const (
 	InventoryCarbidePageSize = 100
 	// InventoryCloudPageSize is the number of items to be sent to Cloud at a time
 	InventoryCloudPageSize = 25
-	// InventoryDefaultSchedule is the default schedule for inventory discovery
-	InventoryDefaultSchedule = "@every 3m"
 )
 
-// RegisterCron - Register Cron
+// RegisterCron registers the OsImage, OperatingSystem, and iPXE template inventory
+// discovery crons.
 func (api *API) RegisterCron() error {
-	// Validate the OS Image config later
-	ManagerAccess.Data.EB.Log.Info().Msg("OS Image: Registering Inventory Collect/Publish cron")
-
-	workflowID := "inventory-os-image-" + ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace
-
-	cronSchedule := InventoryDefaultSchedule
-	if ManagerAccess.Conf.EB.Temporal.TemporalInventorySchedule != "" {
-		cronSchedule = ManagerAccess.Conf.EB.Temporal.TemporalInventorySchedule
+	if err := api.registerInventoryCron("OS Image", "inventory-os-image-", sww.DiscoverOsImageInventory); err != nil {
+		return err
 	}
+	if err := api.registerInventoryCron("OperatingSystem", "inventory-operating-system-", sww.DiscoverOperatingSystemInventory); err != nil {
+		return err
+	}
+	return api.registerInventoryCron("iPXE Template", "inventory-ipxe-template-", sww.DiscoverIpxeTemplateInventory)
+}
 
-	ManagerAccess.Data.EB.Log.Info().Str("Schedule", cronSchedule).Msg("OS Image: Inventory Collect/Publish cron schedule")
+// registerInventoryCron schedules a periodic inventory discovery workflow on the
+// subscribe queue.
+func (api *API) registerInventoryCron(label, workflowIDPrefix string, workflowFunc interface{}) error {
+	ManagerAccess.Data.EB.Log.Info().Msgf("%s: Registering Inventory Collect/Publish cron", label)
+
+	workflowID := workflowIDPrefix + ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace
+
+	cronSchedule := wfmgr.EffectiveCronSchedule()
+
+	ManagerAccess.Data.EB.Log.Info().Str("Schedule", cronSchedule).Msgf("%s: Inventory Collect/Publish cron schedule", label)
 
 	workflowOptions := client.StartWorkflowOptions{
 		ID:           workflowID,
@@ -45,11 +53,11 @@ func (api *API) RegisterCron() error {
 	we, err := ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber.ExecuteWorkflow(
 		context.Background(),
 		workflowOptions,
-		sww.DiscoverOsImageInventory,
+		workflowFunc,
 	)
 
 	if err != nil {
-		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("OS Image: Error registering Inventory Collect/Publish cron")
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msgf("%s: Error registering Inventory Collect/Publish cron", label)
 		return err
 	}
 
@@ -58,7 +66,7 @@ func (api *API) RegisterCron() error {
 		wid = we.GetID()
 	}
 
-	ManagerAccess.Data.EB.Log.Info().Interface("Workflow ID", wid).Msg("OS Image: successfully registered Inventory Collect/Publish cron")
+	ManagerAccess.Data.EB.Log.Info().Interface("Workflow ID", wid).Msgf("%s: successfully registered Inventory Collect/Publish cron", label)
 
 	return nil
 }

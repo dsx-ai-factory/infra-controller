@@ -28,13 +28,13 @@ Delete a managed switch by ID:
     $ nico-admin-cli managed-switch delete 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Switch ID to delete.")]
-    pub switch_id: String,
+    switch_id: String,
 }
 
 impl Args {
-    pub fn parse_switch_id(&self) -> Result<SwitchId, String> {
+    pub(super) fn parse_switch_id(&self) -> Result<SwitchId, String> {
         SwitchId::from_str(&self.switch_id)
             .map_err(|_| format!("Invalid switch ID: {}", self.switch_id))
     }

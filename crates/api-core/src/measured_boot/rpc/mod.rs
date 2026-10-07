@@ -29,9 +29,9 @@
  *  - `site`: Site management.
  */
 
-pub mod bundle;
-pub mod journal;
-pub mod machine;
-pub mod profile;
-pub mod report;
-pub mod site;
+pub(crate) mod bundle;
+pub(crate) mod journal;
+pub(crate) mod machine;
+pub(crate) mod profile;
+pub(crate) mod report;
+pub(crate) mod site;

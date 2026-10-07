@@ -25,4 +25,4 @@ List all racks:
     $ nico-admin-cli rack list
 
 ")]
-pub struct Args;
+pub(crate) struct Args;

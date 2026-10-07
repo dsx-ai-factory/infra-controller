@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let mbo = api_client.0.get_machine_boot_override(args).await?;
 
     tracing::info!(

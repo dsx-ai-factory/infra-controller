@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,9 +32,10 @@ mod util;
 
 use ::ssh_console::shutdown_handle::ShutdownHandle;
 use api_test_helper::utils::REPO_ROOT;
+use util::recording_ipmitool::RecordingIpmitool;
 use util::ssh_console_test_helper;
 
-use crate::util::ssh_client::PermissiveSshClient;
+use crate::util::ssh_client::{ConnectionConfig, PermissiveSshClient};
 use crate::util::{BaselineTestAssertion, MockBmcType, run_baseline_test_environment};
 
 static TENANT_SSH_PUBKEY: &str = include_str!("fixtures/tenant_ssh_key.pub");
@@ -45,6 +47,29 @@ lazy_static! {
         REPO_ROOT.join("crates/ssh-console/tests/fixtures/admin_ssh_key");
 }
 
+async fn wait_for_bmc_state(
+    metrics_address: SocketAddr,
+    machine_id: &str,
+    state: &str,
+) -> eyre::Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(metrics) = ssh_console_test_helper::get_metrics(metrics_address).await
+                && metrics.lines().any(|line| {
+                    line.starts_with("ssh_console_bmc_status{")
+                        && line.contains(machine_id)
+                        && line.contains(state)
+                })
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("ssh-console did not report BMC {machine_id} as {state}"))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ssh_console() -> eyre::Result<()> {
     if std::env::var("REPO_ROOT").is_err() {
@@ -54,15 +79,26 @@ async fn test_ssh_console() -> eyre::Result<()> {
     let Some(env) = run_baseline_test_environment(vec![
         MockBmcType::Ipmi,
         MockBmcType::Ssh,
+        MockBmcType::LenovoAmiSsh,
         MockBmcType::DpuSsh,
     ])
     .await?
     else {
         return Ok(());
     };
+    env.start_console_output();
 
     // Run new ssh-console
-    let handle = ssh_console_test_helper::spawn(env.mock_api_server.addr.port(), None).await?;
+    // Keep the complete continuous-output interval so lifecycle markers and all three transport
+    // streams can be checked together. Log rotation has a dedicated integration test below.
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            log_rotate_max_size: Some(size::Size::from_mebibytes(1)),
+            ..Default::default()
+        }),
+    )
+    .await?;
 
     // Run the same assertions we do with legacy ssh-console
     env.run_baseline_assertions(
@@ -155,8 +191,262 @@ async fn test_ssh_console() -> eyre::Result<()> {
             log_path.display(),
             logs
         );
+
+        let own_output_marker = format!("machine={}", mock_host.machine_id);
+        assert!(
+            logs.contains(&own_output_marker),
+            "{} does not contain simulated boot output for its machine:\n{}",
+            log_path.display(),
+            logs
+        );
+        for other_host in env
+            .mock_hosts
+            .iter()
+            .filter(|other_host| other_host.machine_id != mock_host.machine_id)
+        {
+            let other_output_marker = format!("machine={}", other_host.machine_id);
+            assert!(
+                !logs.contains(&other_output_marker),
+                "{} contains simulated boot output for another machine {}:\n{}",
+                log_path.display(),
+                other_host.machine_id,
+                logs
+            );
+        }
     }
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shutdown_deactivates_owned_ipmi_sol_session() -> eyre::Result<()> {
+    if std::env::var("REPO_ROOT").is_err() {
+        tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
+        return Ok(());
+    }
+    let Some(env) = run_baseline_test_environment(vec![MockBmcType::Ipmi]).await? else {
+        return Ok(());
+    };
+    let mock_host = &env.mock_hosts[0];
+    let ipmi_port = mock_host
+        .ipmi_port
+        .expect("IPMI mock should provide an IPMI port");
+    let ipmitool = RecordingIpmitool::new(false)?;
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            ipmitool_path: Some(ipmitool.path.clone()),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    wait_for_bmc_state(
+        handle.metrics_address,
+        &mock_host.machine_id.to_string(),
+        "Connected",
+    )
+    .await?;
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        handle.spawn_handle.shutdown_and_wait(),
+    )
+    .await
+    .context("ssh-console did not shut down after cancellation")?;
+
+    let invocations = ipmitool.invocations()?;
+    let deactivate_invocations = invocations
+        .iter()
+        .filter(|invocation| invocation.ends_with("sol deactivate"))
+        .collect::<Vec<_>>();
+    let expected = format!(
+        "-I lanplus -H {} -p {ipmi_port} -U root -E -C 3 sol deactivate",
+        mock_host.bmc_ip
+    );
+
+    assert_eq!(deactivate_invocations, vec![&expected]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shutdown_does_not_deactivate_unowned_ipmi_sol_session() -> eyre::Result<()> {
+    if std::env::var("REPO_ROOT").is_err() {
+        tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
+        return Ok(());
+    }
+    let Some(env) = run_baseline_test_environment(vec![MockBmcType::Ipmi]).await? else {
+        return Ok(());
+    };
+    let mock_host = &env.mock_hosts[0];
+    let ipmitool = RecordingIpmitool::new(true)?;
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            ipmitool_path: Some(ipmitool.path.clone()),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    wait_for_bmc_state(
+        handle.metrics_address,
+        &mock_host.machine_id.to_string(),
+        "Connected",
+    )
+    .await?;
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        handle.spawn_handle.shutdown_and_wait(),
+    )
+    .await
+    .context("ssh-console did not shut down after cancellation")?;
+
+    let invocations = ipmitool.invocations()?;
+
+    assert!(
+        invocations
+            .iter()
+            .all(|invocation| !invocation.ends_with("sol deactivate")),
+        "shutdown deactivated a SOL session that ssh-console never owned: {invocations:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ipmi_sol_conflict_does_not_evict_existing_session_by_default() -> eyre::Result<()> {
+    if std::env::var("REPO_ROOT").is_err() {
+        tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
+        return Ok(());
+    }
+    let Some(env) = run_baseline_test_environment(vec![MockBmcType::Ipmi]).await? else {
+        return Ok(());
+    };
+    let mock_host = &env.mock_hosts[0];
+    let active_sol_session = util::ipmi_sim::activate_sol(
+        mock_host
+            .ipmi_port
+            .expect("IPMI mock should provide an IPMI port"),
+    )
+    .await?;
+
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            reconnect_interval_base: Some(Duration::from_secs(1)),
+            reconnect_interval_max: Some(Duration::from_secs(1)),
+            successful_connection_minimum_duration: Some(Duration::from_secs(60)),
+            ..Default::default()
+        }),
+    )
+    .await?;
+
+    let machine_id = mock_host.machine_id.to_string();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(metrics) = ssh_console_test_helper::get_metrics(handle.metrics_address).await
+                && metrics.lines().any(|line| {
+                    line.starts_with("ssh_console_bmc_status{")
+                        && line.contains(&machine_id)
+                        && line.contains("ConnectionError")
+                })
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .context("ssh-console did not report the expected conflicting SOL connection error")?;
+
+    let expected_prompt = format!("root@{} # ", mock_host.machine_id).into_bytes();
+    active_sol_session
+        .assert_console_works(&expected_prompt)
+        .await?;
+
+    handle.spawn_handle.shutdown_and_wait().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ipmi_sol_conflict_recovery_when_enabled() -> eyre::Result<()> {
+    if std::env::var("REPO_ROOT").is_err() {
+        tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
+        return Ok(());
+    }
+    let Some(env) = run_baseline_test_environment(vec![MockBmcType::Ipmi]).await? else {
+        return Ok(());
+    };
+    let mock_host = &env.mock_hosts[0];
+    let active_sol_session = util::ipmi_sim::activate_sol(
+        mock_host
+            .ipmi_port
+            .expect("IPMI mock should provide an IPMI port"),
+    )
+    .await?;
+
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            reconnect_interval_base: Some(Duration::from_secs(30)),
+            reconnect_interval_max: Some(Duration::from_secs(30)),
+            successful_connection_minimum_duration: Some(Duration::from_secs(60)),
+            force_deactivate_conflicting_ipmi_sol_sessions: Some(true),
+            log_rotate_max_size: None,
+            ipmitool_path: None,
+        }),
+    )
+    .await?;
+
+    let user = mock_host.machine_id.to_string();
+    let expected_prompt = format!("root@{} # ", mock_host.machine_id).into_bytes();
+    // Connecting within twenty seconds proves the stale holder was evicted and retried immediately,
+    // rather than waiting for the configured 30-second normal reconnect delay. Keep the holder
+    // process alive until then so dropping its local PTY cannot make the conflict disappear.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        util::ssh_client::assert_connection_works_with_retries_and_timeout(
+            &ConnectionConfig {
+                connection_name: "ssh-console after conflicting IPMI SOL session recovery",
+                user: &user,
+                private_key_path: &ADMIN_SSH_KEY_PATH,
+                addr: handle.addr,
+                expected_prompt: &expected_prompt,
+            },
+            5,
+            Duration::from_secs(10),
+        ),
+    )
+    .await
+    .context("ssh-console did not recover the conflicting SOL session before normal backoff")??;
+
+    drop(active_sol_session);
+
+    handle.spawn_handle.shutdown_and_wait().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssh_console_lenovo_sr650_sol_fallback() -> eyre::Result<()> {
+    if std::env::var("REPO_ROOT").is_err() {
+        tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
+        return Ok(());
+    }
+    let Some(env) = run_baseline_test_environment(vec![MockBmcType::LenovoSr650Ssh]).await? else {
+        return Ok(());
+    };
+
+    let handle = ssh_console_test_helper::spawn(env.mock_api_server.addr.port(), None).await?;
+
+    env.run_baseline_assertions(
+        handle.addr,
+        "new-ssh-console Lenovo SR650",
+        &[BaselineTestAssertion::ConnectAsMachineId],
+        || None,
+        false,
+    )
+    .await?;
+
+    handle.spawn_handle.shutdown_and_wait().await;
     Ok(())
 }
 
@@ -180,6 +470,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
             reconnect_interval_base: Some(Duration::from_secs(3)),
             reconnect_interval_max: Some(reconnect_interval_max),
             successful_connection_minimum_duration: Some(Duration::from_secs(60)),
+            ..Default::default()
         }),
     )
     .await?;
@@ -207,7 +498,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
                 ),
             )
             .await
-            .context("Error authenticating with public key")?;
+            .context("error authenticating with public key")?;
 
         Ok::<_, eyre::Error>(session)
     }?;
@@ -216,13 +507,13 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
     let channel = session
         .channel_open_session()
         .await
-        .context("Error opening session")?;
+        .context("error opening session")?;
 
     // Request PTY
     channel
         .request_pty(false, "xterm", 80, 24, 0, 0, &[])
         .await
-        .context("Error requesting PTY")?;
+        .context("error requesting PTY")?;
 
     // Request Shell
     channel.request_shell(false).await?;
@@ -363,7 +654,7 @@ async fn test_ssh_console_log_rotation() -> eyre::Result<()> {
             assert!(path.exists(), "did not see any logs at {}", path.display());
             let size = path.metadata()?.len();
             assert!(
-                size < 1024 * 10,
+                size <= 1024 * 10,
                 "logs at {} exceeded configured size: {} > 10 KiB",
                 path.display(),
                 size

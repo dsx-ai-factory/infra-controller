@@ -42,19 +42,19 @@ type BorrowckQueryFn = Box<
 >;
 
 /// This is set by CarbideLints::config when starting up, once all default queries are populated.
-pub static ORIG_BORROWCK_QUERY: LazyLock<Arc<RwLock<Option<BorrowckQueryFn>>>> =
+pub(crate) static ORIG_BORROWCK_QUERY: LazyLock<Arc<RwLock<Option<BorrowckQueryFn>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(None)));
 
-pub struct BorrowckShim;
+pub(crate) struct BorrowckShim;
 
 impl BorrowckShim {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         BorrowckShim {}
     }
 
     /// Entrypoint to our lint(s) for a given LocalDefId: First call the default mir_borrowck, then
     /// before returning, if LocalDefId refers to an async function, run TxnHeldAcrossAwait on it.
-    pub fn mir_borrowck<'tcx>(
+    pub(crate) fn mir_borrowck<'tcx>(
         &mut self,
         tcx: TyCtxt<'tcx>,
         def_id: LocalDefId,

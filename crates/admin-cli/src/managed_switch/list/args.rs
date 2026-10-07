@@ -25,4 +25,4 @@ List all managed switches:
     $ nico-admin-cli managed-switch list
 
 ")]
-pub struct Args;
+pub(crate) struct Args;

@@ -48,13 +48,13 @@ struct LogsPage {}
 impl Base for LogsPage {}
 
 /// `GET /admin/logs` — the unified live log viewer hub.
-pub async fn page() -> Html<String> {
+pub(super) async fn page() -> Html<String> {
     Html(LogsPage {}.render().unwrap())
 }
 
 /// Handle `GET /admin/logs/{source}/stream`, which opens up
 /// the Server-Sent Events stream of nico-api log lines.
-pub async fn stream(State(state): State<Arc<Api>>, Path(source): Path<String>) -> Response {
+pub(super) async fn stream(State(state): State<Arc<Api>>, Path(source): Path<String>) -> Response {
     if source != "api" {
         return (
             StatusCode::NOT_FOUND,
@@ -96,7 +96,7 @@ pub async fn stream(State(state): State<Arc<Api>>, Path(source): Path<String>) -
 
 /// Query parameters for the scrollback history endpoint.
 #[derive(serde::Deserialize)]
-pub struct HistoryQuery {
+pub(super) struct HistoryQuery {
     /// Return lines older than this `seq` cursor. Absent = newest page.
     before: Option<u64>,
     /// Max lines to return; clamped to `MAX_PAGE_SIZE`. Absent = `DEFAULT_PAGE_SIZE`.
@@ -106,7 +106,7 @@ pub struct HistoryQuery {
 /// `GET /admin/logs/{source}/history?before=<seq>&limit=<n>` — one page of
 /// buffered lines (oldest-first) for scrollback. With `before`, returns the
 /// page just older than that cursor; without it, the newest page.
-pub async fn history(
+pub(super) async fn history(
     State(state): State<Arc<Api>>,
     Path(source): Path<String>,
     Query(query): Query<HistoryQuery>,

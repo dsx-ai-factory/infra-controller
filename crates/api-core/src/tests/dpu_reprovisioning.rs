@@ -19,14 +19,20 @@ use std::collections::HashMap;
 
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
-use common::api_fixtures::{create_managed_host_multi_dpu, create_test_env, reboot_completed};
-use libredfish::SystemPowerControl;
+use common::api_fixtures::{
+    create_managed_host_multi_dpu, create_managed_host_with_hardware_info_template,
+    create_test_env, reboot_completed,
+};
+use libredfish::{EnabledDisabled, SystemPowerControl};
 use model::instance::status::tenant::TenantState;
 use model::machine::{
-    DpuInitState, FailureDetails, InstallDpuOsState, InstanceState, MachineLastRebootRequestedMode,
-    MachineState, ManagedHostState, ReprovisionState,
+    DpuInitState, FailureCause, FailureDetails, FailureSource, InstallDpuOsState, InstanceState,
+    Machine, MachineLastRebootRequestedMode, MachineState, ManagedHostState, PowerState,
+    ReprovisionState, SetBootOrderInfo, SetBootOrderState, StateMachineArea, UnlockHostState,
 };
+use model::test_support::HardwareInfoTemplate;
 use rpc::forge::MachineArchitecture;
 use rpc::forge::dpu_reprovisioning_request::Mode;
 use rpc::forge::forge_server::Forge;
@@ -39,8 +45,246 @@ use crate::tests::common::api_fixtures::instance::TestInstance;
 use crate::tests::common::api_fixtures::rpc_instance::RpcInstance;
 use crate::tests::common::api_fixtures::test_machine::TestMachineInterface;
 use crate::tests::common::api_fixtures::{
-    TestEnv, TestManagedHost, create_managed_host, forge_agent_control, update_time_params,
+    TestEnv, TestMachine, TestManagedHost, create_managed_host, forge_agent_control,
+    update_time_params,
 };
+
+const DGX_H100_INFO_JSON: &[u8] = br#"{
+    "machine_type": "x86_64",
+    "dmi_data": {
+        "product_name": "DGXH100",
+        "sys_vendor": "NVIDIA"
+    }
+}"#;
+
+fn reprovision_set_host_boot_order_state(
+    set_boot_order_state: SetBootOrderState,
+) -> ReprovisionState {
+    ReprovisionState::SetHostBootOrder {
+        set_boot_order_info: SetBootOrderInfo {
+            set_boot_order_jid: None,
+            set_boot_order_state,
+            retry_count: 0,
+        },
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReprovisionHostBootRepairShape {
+    SingleDpu,
+    AssignedSingleDpu,
+    FirstDpuOnly,
+    AllDpus,
+}
+
+fn reprovision_host_boot_repair_states(
+    mh: &TestManagedHost,
+    shape: ReprovisionHostBootRepairShape,
+) -> Vec<ManagedHostState> {
+    let states = [
+        ReprovisionState::PrepareHostBootRepair,
+        ReprovisionState::UnlockHostForBootRepair {
+            unlock_host_state: UnlockHostState::DisableLockdown,
+        },
+        ReprovisionState::CheckHostBootConfig,
+        reprovision_set_host_boot_order_state(SetBootOrderState::SetBootOrder),
+        reprovision_set_host_boot_order_state(SetBootOrderState::WaitForSetBootOrderJobScheduled),
+        reprovision_set_host_boot_order_state(SetBootOrderState::RebootHost),
+        reprovision_set_host_boot_order_state(SetBootOrderState::WaitForSetBootOrderJobCompletion),
+        reprovision_set_host_boot_order_state(SetBootOrderState::CheckBootOrder),
+        ReprovisionState::LockHostAfterBootRepair,
+        ReprovisionState::RebootHostBmc,
+    ];
+
+    states
+        .into_iter()
+        .map(|state| match shape {
+            ReprovisionHostBootRepairShape::SingleDpu => mh.new_dpu_reprovision_state(state),
+            ReprovisionHostBootRepairShape::AssignedSingleDpu => {
+                mh.new_dpu_assigned_reprovision_state(state)
+            }
+            ReprovisionHostBootRepairShape::FirstDpuOnly => {
+                let not_under_reprovision = ReprovisionState::NotUnderReprovision;
+                let mut states = vec![&state];
+                states.extend((1..mh.dpu_ids.len()).map(|_| &not_under_reprovision));
+                mh.new_dpus_reprovision_state(&states)
+            }
+            ReprovisionHostBootRepairShape::AllDpus => {
+                mh.new_dpus_reprovision_state(&vec![&state; mh.dpu_ids.len()])
+            }
+        })
+        .collect()
+}
+
+/// Return true when any DPU in a reprovisioning managed-host state matches.
+fn has_dpu_reprovision_state(
+    state: &ManagedHostState,
+    matches_state: impl FnMut(&ReprovisionState) -> bool,
+) -> bool {
+    match state {
+        ManagedHostState::DPUReprovision { dpu_states }
+        | ManagedHostState::Assigned {
+            instance_state: InstanceState::DPUReprovision { dpu_states },
+        } => dpu_states.states.values().any(matches_state),
+        _ => false,
+    }
+}
+
+async fn assert_dpu_reprovision_host_boot_repair<ID>(
+    env: &TestEnv,
+    machine: &TestMachine<ID>,
+    expected_states: Vec<ManagedHostState>,
+) -> Machine<ID>
+where
+    ID: MachineIdSubtypeTrait,
+    db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
+    env.redfish_sim.set_lockdown(EnabledDisabled::Enabled);
+    env.redfish_sim.set_is_bios_setup(true);
+    env.redfish_sim.set_is_boot_order_setup(false);
+
+    let redfish_timepoint = env.redfish_sim.timepoint();
+
+    // Drive the shared repair path; each expected state should be externally restartable.
+    for expected_state in expected_states {
+        let current_machine = machine.next_iteration_machine(env).await;
+        assert_eq!(current_machine.current_state(), &expected_state);
+
+        // Keep restart available so wedged BIOS/job/boot-order repair can be operator-restarted.
+        assert!(
+            current_machine.reprovision_requested.is_some(),
+            "expected DPU reprovision request to remain present during host boot repair"
+        );
+
+        // Disable lockdown so Redfish reflects writable host BIOS/boot state.
+        if has_dpu_reprovision_state(&expected_state, |state| {
+            matches!(state, ReprovisionState::CheckHostBootConfig)
+        }) {
+            assert!(
+                env.redfish_sim
+                    .lockdown_states()
+                    .contains(&EnabledDisabled::Disabled),
+                "expected DPU reprovision host boot repair to disable lockdown before boot config checks"
+            );
+        }
+
+        // Re-enable lockdown so DPU reprovision preserves the host profile's security posture.
+        if has_dpu_reprovision_state(&expected_state, |state| {
+            matches!(state, ReprovisionState::RebootHostBmc)
+        }) {
+            let lockdown_states = env.redfish_sim.lockdown_states();
+            assert!(
+                !lockdown_states.is_empty()
+                    && lockdown_states
+                        .iter()
+                        .all(|state| *state == EnabledDisabled::Enabled),
+                "expected DPU reprovision host boot repair to re-enable lockdown before rebooting the host BMC"
+            );
+        }
+    }
+
+    let actions = env
+        .redfish_sim
+        .actions_since(&redfish_timepoint)
+        .all_hosts();
+    let (set_boot_order_pos, set_boot_order_mac) = actions
+        .iter()
+        .enumerate()
+        .find_map(|(position, action)| match action {
+            RedfishSimAction::SetBootOrderDpuFirst { boot_interface_mac } => {
+                Some((position, boot_interface_mac))
+            }
+            _ => None,
+        })
+        .expect("expected DPU reprovision boot repair to set DPU-first boot order");
+    let boot_order_checks = actions
+        .iter()
+        .enumerate()
+        .filter_map(|(position, action)| match action {
+            RedfishSimAction::IsBootOrderSetup { boot_interface_mac } => {
+                Some((position, boot_interface_mac))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        actions
+            .iter()
+            .all(|action| !matches!(action, RedfishSimAction::MachineSetup { .. })),
+        "expected order-only DPU reprovision boot repair to preserve the configured HTTP boot device; got: {actions:?}"
+    );
+    assert!(
+        boot_order_checks
+            .iter()
+            .filter(|(position, _)| *position < set_boot_order_pos)
+            .count()
+            >= 2,
+        "expected both CheckHostBootConfig and SetBootOrder to inspect the order before writing it; got: {actions:?}"
+    );
+    assert!(
+        boot_order_checks
+            .iter()
+            .any(|(position, _)| *position > set_boot_order_pos),
+        "expected boot-order verification after the write; got: {actions:?}"
+    );
+    assert!(
+        boot_order_checks
+            .iter()
+            .all(|(_, boot_interface_mac)| *boot_interface_mac == set_boot_order_mac),
+        "expected every order check and write to target the same interface; got: {actions:?}"
+    );
+
+    let rebooting_machine = machine.next_iteration_machine(env).await;
+    assert!(
+        has_dpu_reprovision_state(rebooting_machine.current_state(), |state| {
+            matches!(state, ReprovisionState::RebootHost)
+        }),
+        "expected DPU reprovision host boot repair to transition to RebootHost; got: {:?}",
+        rebooting_machine.current_state()
+    );
+    assert!(
+        rebooting_machine.reprovision_requested.is_some(),
+        "expected DPU reprovision request to remain present until the final host reboot is handled"
+    );
+
+    // Clearing the request before RebootHost would make wedged repair work non-restartable.
+    let final_reboot_timepoint = env.redfish_sim.timepoint();
+    let terminal_machine = machine.next_iteration_machine(env).await;
+    assert!(
+        terminal_machine.reprovision_requested.is_none(),
+        "expected DPU reprovision request to be cleared after final host reboot"
+    );
+    assert_eq!(
+        env.redfish_sim
+            .actions_since(&final_reboot_timepoint)
+            .all_hosts(),
+        vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
+    );
+
+    terminal_machine
+}
+
+async fn prepare_dpu_reprovision_host_boot_check(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+) -> TestMachine<DpuMachineId> {
+    let dpu_machine = mh.dpu();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::update_state(
+        &mut txn,
+        &mh.id,
+        &mh.new_dpu_reprovision_state(ReprovisionState::CheckHostBootConfig),
+    )
+    .await
+    .unwrap();
+    db::machine::trigger_dpu_reprovisioning_request(&dpu_machine.id, &mut txn, "AdminCli", true)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    dpu_machine
+}
 
 #[crate::sqlx_test]
 async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
@@ -79,160 +323,259 @@ async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test]
-async fn test_dpu_for_reprovisioning_with_firmware_upgrade(pool: sqlx::PgPool) {
+async fn test_dpu_reprovision_host_boot_repair_runs_machine_setup_when_bios_not_setup(
+    pool: sqlx::PgPool,
+) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
+    let dpu_machine = prepare_dpu_reprovision_host_boot_check(&env, &mh).await;
+
+    env.redfish_sim.set_is_boot_order_setup(true);
+    env.redfish_sim.set_is_bios_setup(false);
+
+    let redfish_timepoint = env.redfish_sim.timepoint();
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::ConfigureHostBoot { retry_count: 0 })
+    );
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::PollingHostBiosSetup { retry_count: 0 })
+    );
+
+    let actions = env
+        .redfish_sim
+        .actions_since(&redfish_timepoint)
+        .all_hosts();
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, RedfishSimAction::MachineSetup { .. })),
+        "expected DPU reprovision host boot repair to run machine_setup when BIOS setup is false; got: {actions:?}"
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_reprovision_viking_repairs_bios_before_boot_order_skip(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(DGX_H100_INFO_JSON),
+    )
+    .await;
+    let dpu_machine = prepare_dpu_reprovision_host_boot_check(&env, &mh).await;
+
+    env.redfish_sim.set_is_boot_order_setup(false);
+    env.redfish_sim.set_is_bios_setup(false);
+
+    let redfish_timepoint = env.redfish_sim.timepoint();
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::ConfigureHostBoot { retry_count: 0 })
+    );
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::PollingHostBiosSetup { retry_count: 0 })
+    );
+
+    env.redfish_sim.set_is_bios_setup(true);
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::LockHostAfterBootRepair)
+    );
+
+    let actions = env
+        .redfish_sim
+        .actions_since(&redfish_timepoint)
+        .all_hosts();
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, RedfishSimAction::MachineSetup { .. })),
+        "expected DPU reprovision host boot repair to run machine_setup when Viking BIOS setup is false; got: {actions:?}"
+    );
+    assert!(
+        actions.iter().all(|action| !matches!(
+            action,
+            RedfishSimAction::SetBootOrderDpuFirst { .. }
+                | RedfishSimAction::IsBootOrderSetup { .. }
+        )),
+        "expected Viking DPU reprovision host boot repair to skip boot-order remediation after BIOS repair; got: {actions:?}"
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_reprovision_viking_skips_boot_order_when_bios_setup(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(DGX_H100_INFO_JSON),
+    )
+    .await;
+    let dpu_machine = prepare_dpu_reprovision_host_boot_check(&env, &mh).await;
+
+    env.redfish_sim.set_is_boot_order_setup(false);
+    env.redfish_sim.set_is_bios_setup(true);
+
+    let redfish_timepoint = env.redfish_sim.timepoint();
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::LockHostAfterBootRepair)
+    );
+
+    let actions = env
+        .redfish_sim
+        .actions_since(&redfish_timepoint)
+        .all_hosts();
+    assert!(
+        actions.iter().all(|action| !matches!(
+            action,
+            RedfishSimAction::MachineSetup { .. }
+                | RedfishSimAction::SetBootOrderDpuFirst { .. }
+                | RedfishSimAction::IsBootOrderSetup { .. }
+        )),
+        "expected Viking DPU reprovision host boot repair to skip BIOS and boot-order remediation when BIOS setup is true; got: {actions:?}"
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_reprovision_viking_finishes_parked_boot_order_recovery(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(DGX_H100_INFO_JSON),
+    )
+    .await;
+    let dpu_machine = prepare_dpu_reprovision_host_boot_check(&env, &mh).await;
+
+    // A controller upgrade can find a Viking in a persisted recovery substate
+    // created before boot-order remediation was disabled for this platform.
+    // Finish restoring host power before taking the safe terminal shortcut.
+    let parked_recovery = mh.new_dpu_reprovision_state(reprovision_set_host_boot_order_state(
+        SetBootOrderState::HandleJobFailure {
+            failure: "persisted failed boot-order job".to_string(),
+            power_state: PowerState::Off,
+        },
+    ));
     let mut txn = env.pool.begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    assert!(dpu.reprovision_requested.is_none(),);
-
-    let dpu_interface = mh.dpu().first_interface(&mut txn).await;
-    let dpu_arch = rpc::forge::MachineArchitecture::Arm;
-
-    mh.mark_machine_for_updates().await;
-
-    let redfish_timepoint = env.redfish_sim.timepoint();
-    mh.dpu().trigger_dpu_reprovisioning(Mode::Set, true).await;
-
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    assert_eq!(&dpu.reprovision_requested.unwrap().initiator, "AdminCli");
-
-    let last_reboot_requested_time = dpu.last_reboot_requested;
-
-    env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    assert_ne!(
-        dpu.last_reboot_requested.as_ref().unwrap().time,
-        last_reboot_requested_time.as_ref().unwrap().time
-    );
-    // DPU restart on Ready -> Reprovision state
-    assert_eq!(
-        env.redfish_sim
-            .actions_since(&redfish_timepoint)
-            .all_hosts(),
-        vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
-    );
-    let redfish_timepoint = env.redfish_sim.timepoint();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    assert_eq!(
-        dpu.current_state(),
-        &mh.new_dpu_reprovision_state(ReprovisionState::InstallDpuOs {
-            substate: InstallDpuOsState::InstallingBFB
-        }),
-    );
-
-    env.run_machine_state_controller_iteration().await;
-
-    env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    assert_eq!(
-        dpu.current_state(),
-        &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall)
-    );
-
-    let pxe = dpu_interface.get_pxe_instructions(dpu_arch).await;
-    assert_ne!(pxe.pxe_script, "exit".to_string());
-
-    let _response = mh.dpu().forge_agent_control().await;
-    mh.dpu().discovery_completed().await;
-
-    // No reboots before PowerOff
-    assert_eq!(
-        env.redfish_sim
-            .actions_since(&redfish_timepoint)
-            .all_hosts(),
-        vec![]
-    );
-    let redfish_timepoint = env.redfish_sim.timepoint();
-
-    env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    assert_eq!(
-        dpu.current_state(),
-        &mh.new_dpu_reprovision_state(ReprovisionState::PoweringOffHost)
-    );
+    db::machine::update_state(&mut txn, &mh.id, &parked_recovery)
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
 
-    let pxe = dpu_interface.get_pxe_instructions(dpu_arch).await;
-    assert!(
-        pxe.pxe_script
-            .contains("Current state: Reprovisioning/PoweringOffHost")
-    );
-    assert!(pxe.pxe_script.contains(
-        "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
-    ));
-
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
-    assert_eq!(
-        dpu.current_state(),
-        &mh.new_dpu_reprovision_state(ReprovisionState::PowerDown)
-    );
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(dpu.current_state(), &parked_recovery);
     assert_eq!(
         env.redfish_sim
             .actions_since(&redfish_timepoint)
             .all_hosts(),
-        vec![RedfishSimAction::Power(SystemPowerControl::ForceOff)]
+        vec![RedfishSimAction::Power(SystemPowerControl::ForceOff)],
+        "Viking policy must not abandon an in-flight power recovery"
     );
-    let redfish_timepoint = env.redfish_sim.timepoint();
 
-    for state in [
-        ReprovisionState::VerifyFirmareVersions,
-        ReprovisionState::WaitingForNetworkConfig,
-    ] {
-        let dpu = mh.dpu().next_iteration_machine(&env).await;
-        assert_eq!(dpu.current_state(), &mh.new_dpu_reprovision_state(state));
-    }
+    let recovering_power_on = mh.new_dpu_reprovision_state(reprovision_set_host_boot_order_state(
+        SetBootOrderState::HandleJobFailure {
+            failure: "persisted failed boot-order job".to_string(),
+            power_state: PowerState::On,
+        },
+    ));
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(dpu.current_state(), &recovering_power_on);
     assert_eq!(
         env.redfish_sim
             .actions_since(&redfish_timepoint)
             .all_hosts(),
-        vec![RedfishSimAction::Power(SystemPowerControl::On)]
-    );
-    let redfish_timepoint = env.redfish_sim.timepoint();
-
-    let pxe = dpu_interface.get_pxe_instructions(dpu_arch).await;
-    assert!(
-        pxe.pxe_script
-            .contains("Current state: Reprovisioning/WaitingForNetworkConfig")
-    );
-    assert!(pxe.pxe_script.contains(
-        "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
-    ));
-
-    let response = mh.dpu().forge_agent_control().await;
-    assert!(matches!(response.action, Some(Action::Noop(_))));
-    assert_eq!(
-        response.legacy_action,
-        rpc::forge::forge_agent_control_response::LegacyAction::Noop as i32
+        vec![RedfishSimAction::BmcReset(None)],
+        "parked recovery should reset the BMC after the host powers off"
     );
 
-    mh.network_configured(&env).await;
-    for state in [
-        ReprovisionState::RebootHostBmc,
-        ReprovisionState::RebootHost,
-    ] {
-        let dpu = mh.dpu().next_iteration_machine(&env).await;
-        assert_eq!(dpu.current_state(), &mh.new_dpu_reprovision_state(state));
+    // ForceOff records last_reboot_requested; backdate it so power_down_wait
+    // elapses in-process before the controller restores host power.
+    {
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        update_time_params(&env.pool, &host, 1, None).await;
     }
 
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
-    assert!(matches!(
-        dpu.current_state(),
-        &ManagedHostState::HostInit {
-            machine_state: MachineState::Discovered { .. },
-        }
-    ));
-
-    let _response = mh.host().forge_agent_control().await;
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
-    assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
-
-    // HostInit::Discovered -> Ready goes through restart
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(dpu.current_state(), &recovering_power_on);
     assert_eq!(
         env.redfish_sim
             .actions_since(&redfish_timepoint)
             .all_hosts(),
-        vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
+        vec![RedfishSimAction::Power(SystemPowerControl::On)],
+        "parked recovery should restore host power after the BMC reset"
+    );
+
+    let safe_terminal = mh.new_dpu_reprovision_state(reprovision_set_host_boot_order_state(
+        SetBootOrderState::CheckBootOrder,
+    ));
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(dpu.current_state(), &safe_terminal);
+    assert!(
+        env.redfish_sim
+            .actions_since(&redfish_timepoint)
+            .all_hosts()
+            .is_empty(),
+        "completed recovery should naturally reach CheckBootOrder"
+    );
+
+    // CheckBootOrder has no unfinished operation behind it, but its preceding
+    // reboot may have reverted the HTTP boot device. Repair that BIOS drift
+    // without touching the unsupported Viking boot-order APIs, and spend one
+    // attempt from the shared convergence budget.
+    env.redfish_sim.set_is_bios_setup(false);
+
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::ConfigureHostBoot { retry_count: 1 })
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&redfish_timepoint)
+            .all_hosts()
+            .is_empty(),
+        "Viking BIOS recovery must not read or write boot order"
+    );
+
+    // Once BIOS is intact, the same safe terminal skips boot-order
+    // verification and completes the repair.
+    env.redfish_sim.set_is_bios_setup(true);
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::update_state(&mut txn, &mh.id, &safe_terminal)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::LockHostAfterBootRepair)
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&redfish_timepoint)
+            .all_hosts()
+            .is_empty(),
+        "safe Viking completion should not touch Redfish boot order"
     );
 }
 
@@ -250,7 +593,7 @@ async fn test_dpu_for_reprovisioning_fail_if_maintenance_not_set(pool: sqlx::PgP
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.dpu().id.into(),
+                    machine_id: Some(mh.dpu().id.into()),
                     mode: rpc::forge::dpu_reprovisioning_request::Mode::Set as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: true
@@ -271,7 +614,7 @@ async fn test_dpu_for_reprovisioning_fail_if_state_is_not_ready(pool: sqlx::PgPo
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: dpu_machine_id.into(),
+                    machine_id: Some(dpu_machine_id.into()),
                     mode: rpc::forge::dpu_reprovisioning_request::Mode::Set as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: true
@@ -354,15 +697,15 @@ async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool
 
     let _response = mh.dpu().forge_agent_control().await;
     mh.network_configured(&env).await;
-    for state in [
-        ReprovisionState::RebootHostBmc,
-        ReprovisionState::RebootHost,
-    ] {
-        let dpu = mh.dpu().next_iteration_machine(&env).await;
-        assert_eq!(dpu.current_state(), &mh.new_dpu_reprovision_state(state));
-    }
 
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
+    // Repair host boot setup before the final BMC and host reboot sequence.
+    let dpu_machine = mh.dpu();
+    let dpu = assert_dpu_reprovision_host_boot_repair(
+        &env,
+        &dpu_machine,
+        reprovision_host_boot_repair_states(&mh, ReprovisionHostBootRepairShape::SingleDpu),
+    )
+    .await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::HostInit {
@@ -371,7 +714,7 @@ async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool
     ));
 
     let _response = mh.host().forge_agent_control().await;
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
@@ -411,7 +754,6 @@ async fn instance_reprov_start(
     env.api
         .invoke_instance_power(tonic::Request::new(::rpc::forge::InstancePowerRequest {
             instance_id: tinstance.id.into(),
-            machine_id: None,
             apply_updates_on_reboot: true,
             boot_with_custom_ipxe: false,
             operation: 0,
@@ -563,32 +905,14 @@ async fn instance_reprov_complete(
     );
     mh.network_configured(env).await;
 
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
-    assert_eq!(
-        dpu.current_state(),
-        &mh.new_dpu_assigned_reprovision_state(ReprovisionState::RebootHostBmc)
-    );
-
-    assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
-
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
-    assert_eq!(
-        dpu.current_state(),
-        &mh.new_dpu_assigned_reprovision_state(ReprovisionState::RebootHost),
-    );
-
-    assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
-
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    // Repair host boot setup before returning the assigned host to service.
+    let dpu_machine = mh.dpu();
+    let dpu = assert_dpu_reprovision_host_boot_repair(
+        env,
+        &dpu_machine,
+        reprovision_host_boot_repair_states(mh, ReprovisionHostBootRepairShape::AssignedSingleDpu),
+    )
+    .await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::Assigned {
@@ -614,6 +938,7 @@ async fn assert_reprov_tenant_state(
     assert_eq!(
         instance_snapshot_derive_status(
             &db_instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -655,7 +980,6 @@ async fn test_instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
     env.api
         .invoke_instance_power(tonic::Request::new(::rpc::forge::InstancePowerRequest {
             instance_id: tinstance.id.into(),
-            machine_id: None,
             apply_updates_on_reboot: true,
             boot_with_custom_ipxe: false,
             operation: 0,
@@ -702,7 +1026,6 @@ async fn test_instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
         env.api
             .invoke_instance_power(tonic::Request::new(::rpc::forge::InstancePowerRequest {
                 instance_id: tinstance.id.into(),
-                machine_id: None,
                 apply_updates_on_reboot: true,
                 boot_with_custom_ipxe: false,
                 operation: 0,
@@ -782,18 +1105,14 @@ async fn test_instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
     );
     mh.network_configured(&env).await;
 
-    for state in [
-        ReprovisionState::RebootHostBmc,
-        ReprovisionState::RebootHost,
-    ] {
-        let dpu = mh.dpu().next_iteration_machine(&env).await;
-        assert_eq!(
-            dpu.current_state(),
-            &mh.new_dpu_assigned_reprovision_state(state)
-        );
-    }
-
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
+    // Repair host boot setup before returning the assigned host to service.
+    let dpu_machine = mh.dpu();
+    let dpu = assert_dpu_reprovision_host_boot_repair(
+        &env,
+        &dpu_machine,
+        reprovision_host_boot_repair_states(&mh, ReprovisionHostBootRepairShape::AssignedSingleDpu),
+    )
+    .await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::Assigned {
@@ -828,7 +1147,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
         .into_inner();
 
     assert_eq!(res.dpus.len(), 1);
-    assert_eq!(res.dpus[0].id, mh.dpu().id.into());
+    assert_eq!(res.dpus[0].id, Some(mh.dpu().id));
 
     db::machine::update_dpu_reprovision_start_time(&mh.dpu().id, &mut txn)
         .await
@@ -839,7 +1158,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.dpu().id.into(),
+                    machine_id: Some(mh.dpu().id.into()),
                     mode: rpc::forge::dpu_reprovisioning_request::Mode::Clear as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: true
@@ -856,6 +1175,12 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
 
 #[crate::sqlx_test]
 async fn test_reboot_retry(pool: sqlx::PgPool) {
+    // The reconcile-heavy body builds a future too large for the test
+    // thread's stack in debug builds; box it like its siblings above.
+    Box::pin(test_reboot_retry_impl(pool)).await;
+}
+
+async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
     let mut txn = env.pool.begin().await.unwrap();
@@ -868,14 +1193,14 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
 
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_eq!(dpu.reprovision_requested.unwrap().initiator, "AdminCli");
-    let last_reboot_requested_time = dpu.last_reboot_requested.as_ref();
+    let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
     for _ in 0..3 {
         env.run_machine_state_controller_iteration().await;
     }
 
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_ne!(
-        dpu.last_reboot_requested.unwrap().time,
+        dpu.status.last_reboot_requested.unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
 
@@ -921,7 +1246,7 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
     update_time_params(&env.pool, &dpu, 1, None).await;
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
 
@@ -931,18 +1256,18 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
     let dpu_ = mh.dpu().db_machine(&mut txn).await;
 
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu_.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
     txn.commit().await.unwrap();
 
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert_ne!(
-        dpu_.last_reboot_requested.as_ref().unwrap().time,
-        dpu.last_reboot_requested.as_ref().unwrap().time
+        dpu_.status.last_reboot_requested.as_ref().unwrap().time,
+        dpu.status.last_reboot_requested.as_ref().unwrap().time
     );
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
 
@@ -950,7 +1275,7 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
     update_time_params(&env.pool, &dpu, 3, None).await;
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
 
@@ -958,7 +1283,7 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
     update_time_params(&env.pool, &dpu, 4, None).await;
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::PowerOff
     ));
 
@@ -966,7 +1291,7 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
     update_time_params(&env.pool, &dpu, 5, None).await;
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::PowerOn
     ));
 
@@ -974,7 +1299,7 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
     update_time_params(&env.pool, &dpu, 5, None).await;
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert!(matches!(
-        dpu.last_reboot_requested.as_ref().unwrap().mode,
+        dpu.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
 }
@@ -998,7 +1323,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
         "AdminCli"
     );
 
-    let last_reboot_requested_time = dpu.last_reboot_requested.as_ref();
+    let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
     let handler = MachineStateHandlerBuilder::builder()
         .hardware_models(env.config.get_firmware_config())
@@ -1015,7 +1340,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
     assert_ne!(
-        dpu.last_reboot_requested.as_ref().unwrap().time,
+        dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
 
@@ -1045,11 +1370,11 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
     let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     let dpu = mh.dpu().db_machine(&mut txn).await;
-    let last_reboot_requested = host.last_reboot_requested.as_ref().unwrap();
+    let last_reboot_requested = host.status.last_reboot_requested.as_ref().unwrap();
 
-    tracing::info!("power request: {:?}", last_reboot_requested);
+    tracing::info!(?last_reboot_requested, "power request",);
     assert!(matches!(
-        host.last_reboot_requested.as_ref().unwrap().mode,
+        host.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
 
@@ -1114,7 +1439,7 @@ async fn test_clear_maintenance_when_reprov_is_set(pool: sqlx::PgPool) {
     assert!(
         env.api
             .set_maintenance(tonic::Request::new(::rpc::forge::MaintenanceRequest {
-                host_id: mh.id.into(),
+                host_id: Some(mh.id.into()),
                 operation: 1,
                 reference: Some("no reference".to_string()),
             }))
@@ -1145,7 +1470,7 @@ async fn test_dpu_reset(pool: sqlx::PgPool) {
         4,
         ManagedHostState::DPUInit {
             dpu_states: model::machine::DpuInitStates {
-                states: HashMap::from([(mh.dpu().id, DpuInitState::WaitingForNetworkConfig)]),
+                states: HashMap::from([(mh.dpu_ids[0], DpuInitState::WaitingForNetworkConfig)]),
             },
         },
     )
@@ -1169,7 +1494,7 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.id.into(),
+                    machine_id: Some(mh.id.into()),
                     mode: Mode::Restart as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: false,
@@ -1213,12 +1538,12 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
             .restart_reprovision_requested_at
     );
 
-    let _expected_state = ManagedHostState::DPUReprovision {
-        dpu_states: model::machine::DpuReprovisionStates {
-            states: HashMap::from([(mh.dpu().id, ReprovisionState::WaitingForNetworkInstall)]),
-        },
-    };
-    assert!(matches!(dpu.current_state(), _expected_state));
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::InstallDpuOs {
+            substate: InstallDpuOsState::InstallingBFB
+        }),
+    );
 
     // change the mode
     mh.host()
@@ -1239,6 +1564,68 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
         &mh.new_dpu_reprovision_state(ReprovisionState::InstallDpuOs {
             substate: InstallDpuOsState::InstallingBFB
         }),
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_restart_dpu_reprov_unassigned_host_boot_failure(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+    let dpu_machine = mh.dpu();
+    mh.mark_machine_for_updates().await;
+
+    let failed_at = Utc::now();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::trigger_dpu_reprovisioning_request(&dpu_machine.id, &mut txn, "AdminCli", true)
+        .await
+        .unwrap();
+    db::machine::update_dpu_reprovision_explicit_start_time(&dpu_machine.id, failed_at, &mut txn)
+        .await
+        .unwrap();
+    db::machine::update_state(
+        &mut txn,
+        &mh.id,
+        &ManagedHostState::Failed {
+            machine_id: mh.id.into(),
+            retry_count: 0,
+            details: FailureDetails {
+                cause: FailureCause::BiosSetupFailed {
+                    err: "host boot repair exhausted retries".to_string(),
+                },
+                failed_at,
+                source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Restart detection is intentionally gated on a request newer than the failed state.
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    mh.host()
+        .trigger_dpu_reprovisioning(Mode::Restart, true)
+        .await;
+
+    // The repair failure preserves the DPU request so operators can restart from top-level Failed.
+    let redfish_timepoint = env.redfish_sim.timepoint();
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::InstallDpuOs {
+            substate: InstallDpuOsState::InstallingBFB
+        }),
+    );
+    assert!(
+        dpu.reprovision_requested
+            .as_ref()
+            .is_some_and(|request| request.started_at.is_some())
+    );
+    assert_eq!(
+        env.redfish_sim
+            .actions_since(&redfish_timepoint)
+            .all_hosts(),
+        vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
     );
 }
 
@@ -1267,7 +1654,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
         "AdminCli"
     );
 
-    let last_reboot_requested_time = dpu.last_reboot_requested.as_ref();
+    let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
@@ -1286,7 +1673,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
     assert_ne!(
-        dpu.last_reboot_requested.as_ref().unwrap().time,
+        dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
     assert_eq!(
@@ -1357,18 +1744,14 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
     );
     mh.network_configured(&env).await;
 
-    for state in [
-        ReprovisionState::RebootHostBmc,
-        ReprovisionState::RebootHost,
-    ] {
-        let dpu = mh.dpu_n(0).next_iteration_machine(&env).await;
-        assert_eq!(
-            dpu.current_state(),
-            &mh.new_dpus_reprovision_state(&[&state, &state])
-        );
-    }
-
-    let dpu = mh.dpu_n(0).next_iteration_machine(&env).await;
+    // Host boot repair is host-scoped, but reprovision ownership stays limited to the requested DPU.
+    let dpu_machine = mh.dpu_n(0);
+    let dpu = assert_dpu_reprovision_host_boot_repair(
+        &env,
+        &dpu_machine,
+        reprovision_host_boot_repair_states(&mh, ReprovisionHostBootRepairShape::FirstDpuOnly),
+    )
+    .await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::HostInit {
@@ -1378,7 +1761,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
 
     let _response = mh.host().forge_agent_control().await;
 
-    let dpu = mh.dpu_n(0).next_iteration_machine(&env).await;
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
@@ -1408,12 +1791,12 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
         "AdminCli"
     );
 
-    let last_reboot_requested_time = dpu.last_reboot_requested.as_ref();
+    let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
     env.run_machine_state_controller_iteration().await;
     let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
     assert_ne!(
-        dpu.last_reboot_requested.as_ref().unwrap().time,
+        dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
     assert_eq!(
@@ -1434,7 +1817,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
 
     let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
     assert_ne!(
-        dpu.last_reboot_requested.as_ref().unwrap().time,
+        dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
     assert_eq!(
@@ -1512,18 +1895,14 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     );
     mh.network_configured(&env).await;
 
-    for state in [
-        ReprovisionState::RebootHostBmc,
-        ReprovisionState::RebootHost,
-    ] {
-        let dpu = mh.dpu_n(0).next_iteration_machine(&env).await;
-        assert_eq!(
-            dpu.current_state(),
-            &mh.new_dpus_reprovision_state(&[&state, &state])
-        );
-    }
-
-    let dpu = mh.dpu_n(0).next_iteration_machine(&env).await;
+    // Repair host boot setup across all reprovisioned DPUs.
+    let dpu_machine = mh.dpu_n(0);
+    let dpu = assert_dpu_reprovision_host_boot_repair(
+        &env,
+        &dpu_machine,
+        reprovision_host_boot_repair_states(&mh, ReprovisionHostBootRepairShape::AllDpus),
+    )
+    .await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::HostInit {
@@ -1532,12 +1911,16 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     ));
 
     mh.host().forge_agent_control().await;
-    let dpu = mh.dpu_n(0).next_iteration_machine(&env).await;
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
 #[crate::sqlx_test]
 async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
+    Box::pin(test_instance_reprov_restart_failed_impl(pool)).await;
+}
+
+async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
@@ -1559,7 +1942,6 @@ async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
     env.api
         .invoke_instance_power(tonic::Request::new(::rpc::forge::InstancePowerRequest {
             instance_id: tinstance.id.into(),
-            machine_id: None,
             apply_updates_on_reboot: true,
             boot_with_custom_ipxe: false,
             operation: 0,
@@ -1589,7 +1971,11 @@ async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
 
     let dpu = mh.dpu().db_machine(&mut txn).await;
 
-    tracing::info!(machine_id = %dpu.id, "{} {}", dpu.current_state(), "curr state:");
+    tracing::info!(
+        machine_id = %dpu.id,
+        dpu_state = %dpu.current_state(),
+        "current DPU state",
+    );
 
     assert!(matches!(
         dpu.current_state(),
@@ -1610,7 +1996,6 @@ async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
         env.api
             .invoke_instance_power(tonic::Request::new(::rpc::forge::InstancePowerRequest {
                 instance_id: tinstance.id.into(),
-                machine_id: None,
                 apply_updates_on_reboot: true,
                 boot_with_custom_ipxe: false,
                 operation: 0,
@@ -1717,7 +2102,7 @@ async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
                     source: model::machine::FailureSource::Scout,
                     failed_at
                 },
-                machine_id: dpu.id
+                machine_id: dpu.id.into()
             }
         }
     );
@@ -1727,7 +2112,7 @@ async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.id.into(),
+                    machine_id: Some(mh.id.into()),
                     mode: Mode::Restart as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: false,
@@ -1808,18 +2193,14 @@ async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
     );
     mh.network_configured(&env).await;
 
-    for state in [
-        ReprovisionState::RebootHostBmc,
-        ReprovisionState::RebootHost,
-    ] {
-        let dpu = mh.dpu().next_iteration_machine(&env).await;
-        assert_eq!(
-            dpu.current_state(),
-            &mh.new_dpu_assigned_reprovision_state(state)
-        );
-    }
-
-    let dpu = mh.dpu().next_iteration_machine(&env).await;
+    // Repair host boot setup before returning the assigned host to service.
+    let dpu_machine = mh.dpu();
+    let dpu = assert_dpu_reprovision_host_boot_repair(
+        &env,
+        &dpu_machine,
+        reprovision_host_boot_repair_states(&mh, ReprovisionHostBootRepairShape::AssignedSingleDpu),
+    )
+    .await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::Assigned {
@@ -1847,7 +2228,7 @@ async fn test_dpu_for_reprovisioning_cannot_restart_if_not_started(pool: sqlx::P
         .trigger_dpu_reprovisioning(tonic::Request::new(
             ::rpc::forge::DpuReprovisioningRequest {
                 dpu_id: None,
-                machine_id: mh.id.into(),
+                machine_id: Some(mh.id.into()),
                 mode: rpc::forge::dpu_reprovisioning_request::Mode::Restart as i32,
                 initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                 update_firmware: true,
@@ -1863,11 +2244,11 @@ async fn test_dpu_for_reprovisioning_cannot_restart_if_not_started(pool: sqlx::P
 }
 
 impl TestManagedHost {
-    pub async fn mark_machine_for_updates(&self) {
+    pub(in crate::tests) async fn mark_machine_for_updates(&self) {
         self.api
             .insert_machine_health_report(tonic::Request::new(
                 rpc::forge::InsertMachineHealthReportRequest {
-                    machine_id: self.id.into(),
+                    machine_id: Some(self.id.into()),
                     health_report_entry: Some(rpc::forge::HealthReportEntry {
                         report: Some(
                             health_report::HealthReport {

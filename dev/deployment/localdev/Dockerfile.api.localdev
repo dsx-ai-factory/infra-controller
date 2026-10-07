@@ -19,11 +19,14 @@
 FROM runtime-container-localdev:latest as carbide
 
 WORKDIR ./carbide
+RUN mkdir -p /opt/carbide/scout-firmware-scripts
+
 COPY .skaffold/target/carbide-api/debug/carbide-api /opt/carbide/
 COPY .skaffold/target/nico-admin-cli/debug/nico-admin-cli /opt/carbide/
 RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli && \
     ln -s /opt/carbide/nico-admin-cli /opt/carbide/forge-admin-cli
 COPY crates/api/casbin-policy.csv /opt/carbide/
+COPY pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
 COPY pxe/static/blobs/internal/aarch64/secure-boot-pk.pem /forge-boot-artifacts/blobs/internal/aarch64/secure-boot-pk.pem
 COPY pxe/static/blobs/internal/aarch64/preingestion.bfb /forge-boot-artifacts/blobs/internal/aarch64/preingestion.bfb
 ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv

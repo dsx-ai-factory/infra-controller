@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use carbide_firmware::FirmwareConfig;
@@ -27,5 +28,6 @@ pub struct PreingestionManagerConfig {
     pub max_concurrent_bfb_copies: usize,
     pub autoupdate: bool,
     pub no_reset_retries: bool,
+    pub firmware_download_cache_directory: PathBuf,
     pub firmware: FirmwareConfig,
 }

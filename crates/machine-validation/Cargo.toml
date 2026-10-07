@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "machine_validation"
@@ -28,6 +29,7 @@ name = "machine_validation"
 
 [dependencies]
 
+carbide-instrument = { path = "../instrument" }
 carbide-uuid = { path = "../uuid" }
 
 tokio = { features = ["full"], workspace = true }
@@ -45,6 +47,12 @@ reqwest = { default-features = false, features = [
   "stream",
 ], workspace = true }
 futures-util = { workspace = true }
+libc = { workspace = true }
+uuid = { features = ["v4"], workspace = true }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

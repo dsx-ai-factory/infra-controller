@@ -40,6 +40,10 @@ pub struct Config {
     pub listen_address: SocketAddr,
     #[serde(default = "Defaults::metrics_address")]
     pub metrics_address: SocketAddr,
+    #[serde(default = "Defaults::api_listen_address")]
+    pub api_listen_address: SocketAddr,
+    #[serde(default = "Defaults::api_allowed_client_spiffe_id")]
+    pub api_allowed_client_spiffe_id: String,
     #[serde(
         rename = "carbide_url",
         default = "Defaults::carbide_uri",
@@ -65,6 +69,10 @@ pub struct Config {
     pub override_ipmi_port: Option<u16>,
     #[serde(default)]
     pub insecure_ipmi_ciphers: bool,
+    #[serde(default = "Defaults::ipmitool_path")]
+    pub ipmitool_path: PathBuf,
+    #[serde(default)]
+    pub force_deactivate_conflicting_ipmi_sol_sessions: bool,
     #[serde(default = "Defaults::root_ca_path")]
     pub forge_root_ca_path: PathBuf,
     #[serde(default = "Defaults::client_cert_path")]
@@ -198,6 +206,8 @@ impl Config {
         let Self {
             listen_address,
             metrics_address,
+            api_listen_address,
+            api_allowed_client_spiffe_id,
             authorized_keys_path: _,
             override_bmcs: _,
             host_key_path,
@@ -208,6 +218,8 @@ impl Config {
             override_bmc_ssh_port: _,
             override_ipmi_port: _,
             insecure_ipmi_ciphers,
+            ipmitool_path,
+            force_deactivate_conflicting_ipmi_sol_sessions,
             forge_root_ca_path,
             client_cert_path,
             client_key_path,
@@ -232,6 +244,7 @@ impl Config {
         let carbide_uri = carbide_uri.to_string();
         let listen_address = listen_address.to_string();
         let metrics_address = metrics_address.to_string();
+        let api_listen_address = api_listen_address.to_string();
         let log_rotate_max_size = log_rotate_max_size
             .format()
             .with_base(size::Base::Base2)
@@ -273,6 +286,12 @@ listen_address = {listen_address:?}
 ## Address to listen on for prometheus metrics requests (HTTP)
 metrics_address = {metrics_address:?}
 
+## Address for the private console-log gRPC API.
+api_listen_address = {api_listen_address:?}
+
+## The only SPIFFE identity permitted to call the private API.
+api_allowed_client_spiffe_id = {api_allowed_client_spiffe_id:?}
+
 ## Address for carbide-api
 carbide_url = {carbide_uri:?}
 
@@ -313,6 +332,14 @@ insecure = {insecure}
 
 ## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
 insecure_ipmi_ciphers = {insecure_ipmi_ciphers}
+
+## Path to the ipmitool executable.
+ipmitool_path = {ipmitool_path:?}
+
+## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
+## whether the existing session is stale or belongs to an active operator, so enabling this may
+## disconnect someone using the console. Enable only when ssh-console has exclusive SOL ownership.
+force_deactivate_conflicting_ipmi_sol_sessions = {force_deactivate_conflicting_ipmi_sol_sessions}
 
 ## Optional: For development mode, gives keys that are authorized to connect to ssh-console. Meant
 ## for integration tests. For interactive use, consider using openssh certificates instead.
@@ -384,7 +411,10 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
 
     pub fn make_forge_api_client(&self) -> ForgeApiClient {
         let carbide_uri_string = self.carbide_uri.to_string();
-        tracing::info!("carbide_uri_string: {}", carbide_uri_string);
+        tracing::info!(
+            carbide_uri = carbide_uri_string.as_str(),
+            "Configured Carbide API URI"
+        );
 
         // TODO: The API's for ClientCert/ForgeClientConfig/etc really ought to take PathBufs, not Strings.
         let client_cert = ClientCert {
@@ -445,6 +475,8 @@ impl Default for Config {
         Self {
             listen_address: Defaults::listen_address(),
             metrics_address: Defaults::metrics_address(),
+            api_listen_address: Defaults::api_listen_address(),
+            api_allowed_client_spiffe_id: Defaults::api_allowed_client_spiffe_id(),
             host_key_path: Defaults::host_key_path(),
             carbide_uri: Defaults::carbide_uri(),
             forge_root_ca_path: Defaults::root_ca_path(),
@@ -468,6 +500,8 @@ impl Default for Config {
             override_bmcs: None,
             insecure: false,
             insecure_ipmi_ciphers: false,
+            ipmitool_path: Defaults::ipmitool_path(),
+            force_deactivate_conflicting_ipmi_sol_sessions: false,
             override_bmc_ssh_host: None,
             admin_certificate_role: None,
             openssh_certificate_ca_fingerprints: vec![],
@@ -479,7 +513,7 @@ pub struct Defaults;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
-    #[error("Could not read config file at {path}: {error}")]
+    #[error("could not read config file at {path}: {error}")]
     CouldNotRead { path: String, error: std::io::Error },
     #[error("TOML error reading config file at {path}: {error}")]
     InvalidToml {
@@ -494,7 +528,7 @@ pub enum ConfigError {
     },
     #[error("{what} {host} did not resolve to any addresses")]
     HostNotFound { what: String, host: String },
-    #[error("Invalid machine_id in BMC override config: {0}")]
+    #[error("invalid machine_id in BMC override config: {0}")]
     InvalidBmcOverrideMachineId(MachineIdParseError),
 }
 
@@ -511,8 +545,22 @@ impl Defaults {
             .expect("BUG: default listen_address is invalid")
     }
 
+    pub fn api_listen_address() -> SocketAddr {
+        "[::]:1079"
+            .parse()
+            .expect("BUG: default api_listen_address is invalid")
+    }
+
+    pub fn api_allowed_client_spiffe_id() -> String {
+        "spiffe://nico.local/nico-system/sa/nico-api".to_string()
+    }
+
     pub fn host_key_path() -> PathBuf {
         "/etc/ssh/ssh_host_ed25519_key".into()
+    }
+
+    pub fn ipmitool_path() -> PathBuf {
+        "ipmitool".into()
     }
 
     pub fn dpus() -> bool {
@@ -674,6 +722,16 @@ mod tests {
         let empty_config: Config = toml::from_str("").expect("empty toml didn't parse");
         let default_config = Config::default();
         assert_eq!(empty_config, default_config);
+        assert!(!empty_config.force_deactivate_conflicting_ipmi_sol_sessions);
+    }
+
+    #[test]
+    fn test_conflicting_ipmi_sol_deactivation_requires_explicit_opt_in() {
+        let config: Config =
+            toml::from_str("force_deactivate_conflicting_ipmi_sol_sessions = true")
+                .expect("explicit opt-in config didn't parse");
+
+        assert!(config.force_deactivate_conflicting_ipmi_sol_sessions);
     }
 
     #[test]

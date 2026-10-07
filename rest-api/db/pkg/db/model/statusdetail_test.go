@@ -11,7 +11,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -19,155 +18,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 )
 
-func TestStatusDetailSQLDAO_GetAllByEntityID(t *testing.T) {
-	type fields struct {
-		dbSession *db.Session
-	}
-
-	type args struct {
-		ctx      context.Context
-		entityid string
-		offset   *int
-		limit    *int
-		orderBy  *paginator.OrderBy
-	}
-
-	// Create test DB
-	dbSession := util.GetTestDBSession(t, false)
-	defer dbSession.Close()
-
-	// Create tables
-	err := dbSession.DB.ResetModel(context.Background(), (*StatusDetail)(nil))
-	assert.NoError(t, err)
-
-	entityID := uuid.NewString()
-	totalCount := 30
-
-	sds := []StatusDetail{}
-
-	for i := 0; i < totalCount; i++ {
-		status := VpcStatusPending
-		if i%2 == 1 {
-			status = VpcStatusProvisioning
-		}
-
-		sd := &StatusDetail{
-			ID:       uuid.New(),
-			EntityID: entityID,
-			Count:    1,
-			Status:   status,
-			Message:  cutil.GetPtr("test message"),
-			Created:  db.GetCurTime().Add(time.Duration(i) * time.Second),
-		}
-
-		_, err = dbSession.DB.NewInsert().Model(sd).Exec(context.Background())
-		assert.NoError(t, err)
-		sds = append(sds, *sd)
-	}
-
-	// OTEL Spanner configuration
-	_, _, ctx := testCommonTraceProviderSetup(t, context.Background())
-
-	tests := []struct {
-		name                string
-		fields              fields
-		args                args
-		wantCount           int
-		wantTotalCount      *int
-		wantFirstEntry      *StatusDetail
-		firstEntryAttribute *string
-		wantErr             bool
-		verifyChildSpanner  bool
-	}{
-		{
-			name: "get all Status Details by Entity ID",
-			fields: fields{
-				dbSession: dbSession,
-			},
-			args: args{
-				ctx:      ctx,
-				entityid: entityID,
-			},
-			wantCount:          paginator.DefaultLimit,
-			wantTotalCount:     &totalCount,
-			wantErr:            false,
-			verifyChildSpanner: true,
-		},
-		{
-			name: "get all Status Details with limit",
-			fields: fields{
-				dbSession: dbSession,
-			},
-			args: args{
-				ctx:      context.Background(),
-				entityid: entityID,
-				limit:    cutil.GetPtr(10),
-			},
-			wantCount:      10,
-			wantTotalCount: &totalCount,
-			wantErr:        false,
-		},
-		{
-			name: "get all Status Details with offset",
-			fields: fields{
-				dbSession: dbSession,
-			},
-			args: args{
-				ctx:      context.Background(),
-				entityid: entityID,
-				offset:   cutil.GetPtr(15),
-			},
-			wantCount:      15,
-			wantTotalCount: &totalCount,
-			wantErr:        false,
-		},
-		{
-			name: "get all Status Details ordered by created",
-			fields: fields{
-				dbSession: dbSession,
-			},
-			args: args{
-				ctx:      context.Background(),
-				entityid: entityID,
-				orderBy:  &paginator.OrderBy{Field: "created", Order: paginator.OrderDescending},
-			},
-			wantCount:           paginator.DefaultLimit,
-			wantFirstEntry:      &sds[totalCount-1], // The last entry would have last timestamp, and would appear first in the list
-			firstEntryAttribute: cutil.GetPtr("Created"),
-			wantErr:             false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sdDAO := StatusDetailSQLDAO{
-				dbSession: tt.fields.dbSession,
-			}
-
-			got, total, err := sdDAO.GetAllByEntityID(tt.args.ctx, nil, tt.args.entityid, tt.args.offset, tt.args.limit, tt.args.orderBy)
-			if tt.wantErr {
-				assert.NotNil(t, err)
-			} else {
-				assert.Equal(t, tt.wantCount, len(got))
-			}
-
-			if tt.wantTotalCount != nil {
-				assert.Equal(t, *tt.wantTotalCount, total)
-			}
-
-			if tt.wantFirstEntry != nil {
-				assert.True(t, tt.wantFirstEntry.Created.Equal(got[0].Created))
-			}
-			if tt.verifyChildSpanner {
-				span := otrace.SpanFromContext(ctx)
-				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
-			}
-		})
-	}
-}
-
-func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
+func TestStatusDetailSQLDAO_GetAll(t *testing.T) {
 	// Create test DB
 	dbSession := util.GetTestDBSession(t, false)
 	defer dbSession.Close()
@@ -211,9 +62,7 @@ func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
 	type args struct {
 		ctx       context.Context
 		entityids []string
-		offset    *int
-		limit     *int
-		orderBy   *paginator.OrderBy
+		page      paginator.PageInput
 	}
 
 	// OTEL Spanner configuration
@@ -278,7 +127,7 @@ func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
 			args: args{
 				ctx:       context.Background(),
 				entityids: []string{entityID1, entityID2},
-				limit:     cutil.GetPtr(10),
+				page:      paginator.PageInput{Limit: cutil.GetPtr(10)},
 			},
 			wantCount:      10,
 			wantTotalCount: &totalCount,
@@ -292,7 +141,7 @@ func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
 			args: args{
 				ctx:       context.Background(),
 				entityids: []string{entityID1, entityID2},
-				offset:    cutil.GetPtr(15),
+				page:      paginator.PageInput{Offset: cutil.GetPtr(15)},
 			},
 			wantCount:      15,
 			wantTotalCount: &totalCount,
@@ -306,7 +155,7 @@ func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
 			args: args{
 				ctx:       context.Background(),
 				entityids: []string{entityID1, entityID2},
-				orderBy:   &paginator.OrderBy{Field: "created", Order: paginator.OrderDescending},
+				page:      paginator.PageInput{OrderBy: &paginator.OrderBy{Field: "created", Order: paginator.OrderDescending}},
 			},
 			wantCount:           paginator.DefaultLimit,
 			wantFirstEntry:      &sds[totalCount-1], // The last entry would have last timestamp, and would appear first in the list
@@ -320,7 +169,7 @@ func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
 				dbSession: tt.fields.dbSession,
 			}
 
-			got, total, err := sdDAO.GetAllByEntityIDs(tt.args.ctx, nil, tt.args.entityids, tt.args.offset, tt.args.limit, tt.args.orderBy)
+			got, total, err := sdDAO.GetAll(tt.args.ctx, nil, StatusDetailFilterInput{EntityIDs: tt.args.entityids}, tt.args.page)
 			if tt.wantErr {
 				assert.NotNil(t, err)
 			} else {
@@ -338,24 +187,20 @@ func TestStatusDetailSQLDAO_GetAllByEntityIDs(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestStatusDetailSQLDAO_CreateFromParams(t *testing.T) {
+func TestStatusDetailSQLDAO_Create(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session
 	}
 
 	type args struct {
-		ctx      context.Context
-		tx       *db.Tx
-		entityID string
-		status   string
-		message  *string
+		ctx   context.Context
+		tx    *db.Tx
+		input StatusDetailCreateInput
 	}
 
 	// Create test DB
@@ -391,10 +236,12 @@ func TestStatusDetailSQLDAO_CreateFromParams(t *testing.T) {
 				dbSession: dbSession,
 			},
 			args: args{
-				ctx:      ctx,
-				entityID: sd.EntityID,
-				status:   sd.Status,
-				message:  sd.Message,
+				ctx: ctx,
+				input: StatusDetailCreateInput{
+					EntityID: sd.EntityID,
+					Status:   sd.Status,
+					Message:  sd.Message,
+				},
 			},
 			want:               sd,
 			wantErr:            false,
@@ -407,7 +254,7 @@ func TestStatusDetailSQLDAO_CreateFromParams(t *testing.T) {
 				dbSession: tt.fields.dbSession,
 			}
 
-			nsd, err := sdd.CreateFromParams(tt.args.ctx, tt.args.tx, tt.args.entityID, tt.args.status, tt.args.message)
+			nsd, err := sdd.Create(tt.args.ctx, tt.args.tx, tt.args.input)
 			if tt.wantErr {
 				require.NotNil(t, err)
 			} else {
@@ -423,23 +270,19 @@ func TestStatusDetailSQLDAO_CreateFromParams(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestStatusDetailSQLDAO_UpdateFromParams(t *testing.T) {
+func TestStatusDetailSQLDAO_Update(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session
 	}
 
 	type args struct {
-		ctx     context.Context
-		id      uuid.UUID
-		status  string
-		message *string
+		ctx   context.Context
+		input StatusDetailUpdateInput
 	}
 
 	// Create test DB
@@ -491,10 +334,12 @@ func TestStatusDetailSQLDAO_UpdateFromParams(t *testing.T) {
 				dbSession: dbSession,
 			},
 			args: args{
-				ctx:     ctx,
-				id:      sd.ID,
-				status:  usd.Status,
-				message: usd.Message,
+				ctx: ctx,
+				input: StatusDetailUpdateInput{
+					StatusDetailID: sd.ID,
+					Status:         usd.Status,
+					Message:        usd.Message,
+				},
 			},
 			want:               usd,
 			wantErr:            false,
@@ -507,37 +352,23 @@ func TestStatusDetailSQLDAO_UpdateFromParams(t *testing.T) {
 				dbSession: tt.fields.dbSession,
 			}
 
-			got, err := sddao.UpdateFromParams(tt.args.ctx, nil, tt.args.id, tt.args.status, tt.args.message)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("StatusDetailSQLDAO.UpdateFromParams() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			got, err := sddao.Update(tt.args.ctx, nil, tt.args.input)
+			if tt.wantErr {
+				assert.NotNil(t, err)
+			} else {
+				assert.Nil(t, err)
+				require.NotNil(t, got)
 			}
 
-			if got.EntityID != tt.want.EntityID {
-				t.Errorf("StatusDetailSQLDAO.UpdateFromParams() EntityID got = %v, want %v", got.EntityID, tt.want.EntityID)
-			}
-
-			if got.Status != tt.want.Status {
-				t.Errorf("StatusDetailSQLDAO.UpdateFromParams() Status got = %v, want %v", got.Status, tt.want.Status)
-			}
-
-			if *got.Message != *tt.want.Message {
-				t.Errorf("StatusDetailSQLDAO.UpdateFromParams() Message got = %v, want %v", got.Message, tt.want.Message)
-			}
-
-			if got.Count != 2 {
-				t.Errorf("StatusDetailSQLDAO.UpdateFromParams() Count got = %v, want %v", got.Count, 2)
-			}
-
-			if got.Updated.String() == tt.want.Updated.String() {
-				t.Errorf("StatusDetailSQLDAO.UpdateFromParams() Updated = %v, want = %v", got.Updated, tt.want.Updated)
-			}
+			assert.Equal(t, tt.want.EntityID, got.EntityID)
+			assert.Equal(t, tt.want.Status, got.Status)
+			assert.Equal(t, *tt.want.Message, *got.Message)
+			assert.Equal(t, 2, got.Count)
+			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

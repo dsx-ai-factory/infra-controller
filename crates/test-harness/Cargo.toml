@@ -21,13 +21,19 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 carbide-api-core = { path = "../api-core", features = ["test-support"] }
 carbide-api-db = { path = "../api-db", default-features = false }
-carbide-api-model = { path = "../api-model", default-features = false, features = ["test-support"] }
-carbide-site-explorer = { path = "../site-explorer", features = ["test-support"] }
+carbide-api-model = { path = "../api-model", default-features = false, features = [
+  "test-support",
+] }
+carbide-site-explorer = { path = "../site-explorer", features = [
+  "test-support",
+] }
 carbide-macros = { path = "../macros", default-features = false }
+carbide-network = { path = "../network" }
 carbide-network-segment-controller = { path = "../network-segment-controller", default-features = false }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-utils = { path = "../utils", features = ["test-support"] }

@@ -201,18 +201,18 @@ impl ExploredEndpointIndexBuilder {
     pub fn with_expected_power_shelves(mut self, shelves: Vec<ExpectedPowerShelf>) -> Self {
         for shelf in shelves {
             tracing::info!(
-                "expected_power_shelf from DB: {} {}",
-                shelf.bmc_mac_address,
-                shelf.metadata.name
+                bmc_mac_address = %shelf.bmc_mac_address,
+                power_shelf_name = %shelf.metadata.name,
+                "loaded expected power shelf from database"
             );
             if let Some(iface) = self
                 .explored_underlay_interfaces
                 .get(&shelf.bmc_mac_address)
             {
                 tracing::info!(
-                    "iface mac address {} expected power shelf mac address {}",
-                    iface.mac_address,
-                    shelf.bmc_mac_address
+                    interface_mac_address = %iface.mac_address,
+                    expected_power_shelf_mac_address = %shelf.bmc_mac_address,
+                    "matched interface to expected power shelf"
                 );
                 for addr in &iface.addresses {
                     self.explored_power_shelves_addr_index
@@ -229,18 +229,18 @@ impl ExploredEndpointIndexBuilder {
         // Create a mapping of expected switches by IP address and MAC address
         for switch in switches {
             tracing::info!(
-                "expected_switch from DB: {} {}",
-                switch.bmc_mac_address,
-                switch.metadata.name
+                bmc_mac_address = %switch.bmc_mac_address,
+                switch_name = %switch.metadata.name,
+                "loaded expected switch from database"
             );
             if let Some(iface) = self
                 .explored_underlay_interfaces
                 .get(&switch.bmc_mac_address)
             {
                 tracing::info!(
-                    "iface mac address {} expected switch mac address {}",
-                    iface.mac_address,
-                    switch.bmc_mac_address
+                    interface_mac_address = %iface.mac_address,
+                    expected_switch_mac_address = %switch.bmc_mac_address,
+                    "matched interface to expected switch"
                 );
                 for addr in &iface.addresses {
                     self.explored_switches_addr_index

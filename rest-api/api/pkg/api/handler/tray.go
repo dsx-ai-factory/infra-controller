@@ -13,10 +13,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	tClient "go.temporal.io/sdk/client"
+
+	temporalEnums "go.temporal.io/api/enums/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -24,62 +25,51 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
-	temporalEnums "go.temporal.io/api/enums/v1"
-	tp "go.temporal.io/sdk/temporal"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 // ~~~~~ Slot resolution helpers ~~~~~ //
 
-// resolveTrayIDsBySlot enumerates trays for the given baseSpec via Flow's
-// GetTrays workflow and returns the UUIDs of components at the requested slot.
+// resolveTrayIDsBySlot enumerates trays for the given baseSpec through Flow's
+// GetComponents and returns the external IDs of components at the requested slot.
 //
 // baseSpec is the OperationTargetSpec the request would otherwise have
-// produced (rack scope, component-pinning ids/componentIds, or "all trays
+// produced (rack scope, component-pinning IDs, or "all trays
 // in site"); the resolver post-filters its result by slot. An empty result
 // is not an error — callers decide whether to treat it as a no-op or
 // surface 404.
 //
 // Flow has no by-slot component target shape; REST resolves slotId to
-// component UUIDs and drives downstream workflows with ComponentTargets.
+// external component IDs and drives downstream workflows with ComponentTargets.
+//
+// It returns the proxy's own APIError rather than a plain error so a slot
+// filter cannot downgrade the status the endpoint would otherwise report: a
+// timeout here means the same thing to a client as a timeout on the call the
+// slot resolution precedes.
 func resolveTrayIDsBySlot(
 	ctx context.Context,
 	stc tClient.Client,
 	baseSpec *flowv1.OperationTargetSpec,
 	slot model.RackComponentSlotMatcher,
-) ([]string, error) {
+) ([]string, *cutil.APIError) {
 	flowReq := &flowv1.GetComponentsRequest{TargetSpec: baseSpec}
 
 	workflowID := fmt.Sprintf("tray-resolve-by-slot-%s",
 		common.RequestHash(flowReq))
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       workflowID,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-	}
-
-	wfCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(wfCtx, workflowOptions, "GetTrays", flowReq)
-	if err != nil {
-		return nil, fmt.Errorf("execute GetTrays workflow: %w", err)
-	}
-
 	var resp flowv1.GetComponentsResponse
-	err = we.Get(wfCtx, &resp)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || errors.Is(err, context.DeadlineExceeded) || wfCtx.Err() != nil {
-			return nil, fmt.Errorf("GetTrays workflow timed out: %w", err)
-		}
-		return nil, fmt.Errorf("get GetTrays result: %w", err)
+	apiErr := common.ExecuteFlowGRPC(
+		ctx, stc,
+		flowv1.Flow_GetComponents_FullMethodName,
+		flowReq, &resp,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		"",
+	)
+	if apiErr != nil {
+		return nil, apiErr
 	}
 
 	ids := make([]string, 0, len(resp.GetComponents()))
@@ -87,24 +77,30 @@ func resolveTrayIDsBySlot(
 		if !slot.Matches(comp) {
 			continue
 		}
-		if id := comp.GetInfo().GetId(); id != nil && id.GetId() != "" {
-			ids = append(ids, id.GetId())
+		if id := comp.GetComponentId(); id != "" {
+			ids = append(ids, id)
 		}
 	}
 	return ids, nil
 }
 
 // componentTargetSpecFromIDs builds an OperationTargetSpec that targets
-// the given component UUIDs. Returns nil for an empty slice, which Flow
+// the given external component IDs. Returns nil for an empty slice, which Flow
 // rejects; callers should short-circuit before calling.
-func componentTargetSpecFromIDs(ids []string) *flowv1.OperationTargetSpec {
+func componentTargetSpecFromIDs(ids []string, componentType *string) *flowv1.OperationTargetSpec {
 	if len(ids) == 0 {
 		return nil
+	}
+	protoType := flowv1.ComponentType_COMPONENT_TYPE_UNKNOWN
+	if componentType != nil {
+		protoType = flowv1.ComponentType(flowv1.ComponentType_value[model.APIToProtoComponentTypeName[*componentType]])
 	}
 	targets := make([]*flowv1.ComponentTarget, 0, len(ids))
 	for _, id := range ids {
 		targets = append(targets, &flowv1.ComponentTarget{
-			Identifier: &flowv1.ComponentTarget_Id{Id: &flowv1.UUID{Id: id}},
+			Identifier: &flowv1.ComponentTarget_External{
+				External: &flowv1.ExternalRef{Type: protoType, Id: id},
+			},
 		})
 	}
 	return &flowv1.OperationTargetSpec{
@@ -118,21 +114,19 @@ func componentTargetSpecFromIDs(ids []string) *flowv1.OperationTargetSpec {
 
 // GetTrayHandler is the API Handler for getting a Tray by ID
 type GetTrayHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetTrayHandler initializes and returns a new handler for getting a Tray
 func NewGetTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetTrayHandler {
 	return GetTrayHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -149,7 +143,7 @@ func NewGetTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Client
 // @Success 200 {object} model.APITray
 // @Router /v2/org/{org}/nico/tray/{id} [get]
 func (gth GetTrayHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Get", c, gth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -218,10 +212,7 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
-	gth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Get the temporal client for the site
 	stc, err := gth.scp.GetClientByID(site.ID)
@@ -236,34 +227,19 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 	}
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       fmt.Sprintf("tray-get-%s", trayStrID),
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "GetTray", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute GetTray workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to get Tray details", nil)
-	}
-
-	// Get workflow result
+	//
+	// Concurrent identical reads do not coalesce here, unlike the tray reads
+	// below. Whether they should is a question about this endpoint rather than
+	// about its transport, so the policy crosses to the proxy unchanged.
 	var flowResponse flowv1.GetComponentInfoResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, fmt.Sprintf("tray-get-%s", trayStrID), err, "Tray", "GetTray")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from GetTray workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to get Tray details: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_GetComponentInfoByID_FullMethodName,
+		flowRequest, &flowResponse,
+		fmt.Sprintf("tray-get-%s", trayStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -281,21 +257,19 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 
 // GetAllTrayHandler is the API Handler for getting all Trays
 type GetAllTrayHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllTrayHandler initializes and returns a new handler for getting all Trays
 func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllTrayHandler {
 	return GetAllTrayHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -311,8 +285,7 @@ func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Param rackId query string false "Filter by Rack ID"
 // @Param rackName query string false "Filter by Rack name"
 // @Param type query string false "Filter by tray type (Compute, NVSwitch, PowerShelf)"
-// @Param componentId query string false "Filter by component ID (use repeated params for multiple values)"
-// @Param id query string false "Filter by tray UUID (use repeated params for multiple values)"
+// @Param id query string false "Filter by component ID (use repeated params for multiple values)"
 // @Param slotId query int false "Filter by rack slot ID (position.slotId). Requires rackId or rackName. Composes with other filters via AND."
 // @Param orderBy query string false "Order by field (e.g. name_ASC, manufacturer_DESC)"
 // @Param pageNumber query int false "Page number (1-based)"
@@ -320,7 +293,7 @@ func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Success 200 {array} model.APITray
 // @Router /v2/org/{org}/nico/tray [get]
 func (gath GetAllTrayHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "GetAll", c, gath.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -404,6 +377,9 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.TrayDefaultOrderBy)
+	}
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.TrayOrderByFieldMap)))
 	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")
@@ -445,34 +421,19 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("tray-get-all-%s", common.QueryParamHash(hashValues))
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       workflowID,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "GetTrays", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute GetTrays workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to get Trays", nil)
-	}
-
-	// Get workflow result
+	//
+	// As in GetTrayHandler, concurrent identical reads do not coalesce, and
+	// changing that is a decision about the endpoint rather than part of moving
+	// it onto the proxy.
 	var flowResponse flowv1.GetComponentsResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, workflowID, err, "Tray", "GetTrays")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from GetTrays workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to get Trays: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_GetComponents_FullMethodName,
+		flowRequest, &flowResponse,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	components := flowResponse.GetComponents()
@@ -527,21 +488,19 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 
 // ValidateTrayHandler is the API Handler for validating a single Tray's components
 type ValidateTrayHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateTrayHandler initializes and returns a new handler for validating a Tray
 func NewValidateTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateTrayHandler {
 	return ValidateTrayHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -558,7 +517,7 @@ func NewValidateTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/tray/{id}/validation [get]
 func (vth ValidateTrayHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Validate", c, vth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Validate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -596,10 +555,7 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
-	vth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Get site ID from query param (required)
 	siteStrID := c.QueryParam("siteId")
@@ -646,9 +602,7 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 				Components: &flowv1.ComponentTargets{
 					Targets: []*flowv1.ComponentTarget{
 						{
-							Identifier: &flowv1.ComponentTarget_Id{
-								Id: &flowv1.UUID{Id: trayStrID},
-							},
+							Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: trayStrID}},
 						},
 					},
 				},
@@ -657,35 +611,15 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 	}
 
 	// Execute workflow
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       fmt.Sprintf("tray-validate-%s", trayStrID),
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "ValidateRackComponents", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute ValidateComponents workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Tray", nil)
-	}
-
-	// Get workflow result
 	var flowResponse flowv1.ValidateComponentsResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, fmt.Sprintf("tray-validate-%s", trayStrID), err, "Tray", "ValidateRackComponents")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from ValidateComponents workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to validate Tray: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_ValidateComponents_FullMethodName,
+		flowRequest, &flowResponse,
+		fmt.Sprintf("tray-validate-%s", trayStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -701,21 +635,19 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 // ValidateTraysHandler is the API Handler for validating Trays with optional filters.
 // If no filter is specified, validates all trays in the Site.
 type ValidateTraysHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateTraysHandler initializes and returns a new handler for validating Trays
 func NewValidateTraysHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateTraysHandler {
 	return ValidateTraysHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -733,12 +665,12 @@ func NewValidateTraysHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Param name query string false "Filter trays by name"
 // @Param manufacturer query string false "Filter trays by manufacturer"
 // @Param type query string false "Filter trays by type (Compute, NVSwitch, PowerShelf)"
-// @Param componentId query string false "Filter by external component ID (requires type; mutually exclusive with rackId/rackName; use repeated params for multiple values)"
+// @Param id query string false "Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)"
 // @Param slotId query int false "Validate only trays at this rack slot (position.slotId). Requires rackId or rackName. Composes via AND."
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/tray/validation [get]
 func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "ValidateTrays", c, vtsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "ValidateTrays", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -818,21 +750,21 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Resolve slotId (when set) to component UUIDs before building
+	// Resolve slotId (when set) to external component IDs before building
 	// the flow request: Flow has no by-slot component target shape.
 	targetSpec := apiRequest.ToTargetSpec()
 	if apiRequest.HasSlotFilter() {
 		ids, resolveErr := resolveTrayIDsBySlot(ctx, stc, targetSpec,
 			model.RackComponentSlotMatcher{SlotID: apiRequest.SlotID})
 		if resolveErr != nil {
-			logger.Error().Err(resolveErr).Msg("failed to resolve trays by slot")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Trays by slot", nil)
+			logger.Error().Err(resolveErr.Diagnosis()).Msg("failed to resolve trays by slot")
+			return cutil.NewAPIErrorResponse(c, resolveErr.Code, resolveErr.Message, nil)
 		}
 		if len(ids) == 0 {
 			logger.Info().Msg("no trays match slot filter; returning empty validation result")
 			return c.JSON(http.StatusOK, model.NewAPIRackValidationResult(&flowv1.ValidateComponentsResponse{}))
 		}
-		targetSpec = componentTargetSpecFromIDs(ids)
+		targetSpec = componentTargetSpecFromIDs(ids, apiRequest.Type)
 	}
 
 	flowRequest := &flowv1.ValidateComponentsRequest{
@@ -842,35 +774,15 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 
 	workflowID := fmt.Sprintf("tray-validate-all-%s", common.QueryParamHash(apiRequest.QueryValues()))
 
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:                       workflowID,
-		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		TaskQueue:                queue.SiteTaskQueue,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-	defer cancel()
-
-	we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "ValidateRackComponents", flowRequest)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to execute ValidateComponents workflow")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Trays", nil)
-	}
-
-	// Get workflow result
 	var flowResponse flowv1.ValidateComponentsResponse
-	err = we.Get(ctx, &flowResponse)
-	if err != nil {
-		var timeoutErr *tp.TimeoutError
-		if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded || ctx.Err() != nil {
-			return common.TerminateWorkflowOnTimeOut(c, logger, stc, workflowID, err, "Tray", "ValidateRackComponents")
-		}
-		code, err := common.UnwrapWorkflowError(err)
-		logger.Error().Err(err).Msg("failed to get result from ValidateComponents workflow")
-
-		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to validate Trays: %s", err), nil)
+	proxyErr := common.ProxyFlowGRPC(
+		ctx, logger, stc,
+		flowv1.Flow_ValidateComponents_FullMethodName,
+		flowRequest, &flowResponse,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	)
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -885,27 +797,25 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 
 // UpdateTrayPowerStateHandler is the API Handler for power controlling a single Tray by ID
 type UpdateTrayPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateTrayPowerStateHandler initializes and returns a new handler for power controlling a Tray
 func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateTrayPowerStateHandler {
 	return UpdateTrayPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Power control a Tray
-// @Description Power control a Tray identified by Tray UUID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Tray identified by component ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -916,7 +826,7 @@ func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/tray/{id}/power [patch]
 func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControl", c, pcth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControl", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -954,10 +864,7 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
-	pcth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdatePowerStateRequest{}
@@ -998,19 +905,17 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 			Components: &flowv1.ComponentTargets{
 				Targets: []*flowv1.ComponentTarget{
 					{
-						Identifier: &flowv1.ComponentTarget_Id{
-							Id: &flowv1.UUID{Id: trayStrID},
-						},
+						Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: trayStrID}},
 					},
 				},
 			},
 		},
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", apiRequest.State, trayStrID), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", apiRequest.State).Msg("finishing API handler")
@@ -1021,27 +926,25 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 // BatchUpdateTrayPowerStateHandler is the API Handler for power controlling Trays with optional filters
 type BatchUpdateTrayPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateTrayPowerStateHandler initializes and returns a new handler for batch power controlling Trays
 func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateTrayPowerStateHandler {
 	return BatchUpdateTrayPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Power control Trays
-// @Description Power control Trays with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all trays in the Site.
+// @Description Power control Trays with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all trays in the Site.
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -1051,7 +954,7 @@ func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/tray/power [patch]
 func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControlBatch", c, pctbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControlBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1121,26 +1024,26 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Build TargetSpec from filter (nil filter = all trays). When the
 	// filter pins a rack slot, Flow has no by-slot target shape, so we
-	// resolve to component UUIDs first.
+	// resolve to external component IDs first.
 	targetSpec := request.Filter.ToTargetSpec()
 	if request.Filter.HasSlotFilter() {
 		ids, resolveErr := resolveTrayIDsBySlot(ctx, stc, targetSpec,
 			model.RackComponentSlotMatcher{SlotID: request.Filter.SlotID})
 		if resolveErr != nil {
-			logger.Error().Err(resolveErr).Msg("failed to resolve trays by slot")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Trays by slot", nil)
+			logger.Error().Err(resolveErr.Diagnosis()).Msg("failed to resolve trays by slot")
+			return cutil.NewAPIErrorResponse(c, resolveErr.Code, resolveErr.Message, nil)
 		}
 		if len(ids) == 0 {
 			logger.Info().Msg("no trays match slot filter; returning empty task list")
 			return c.JSON(http.StatusOK, model.NewAPIUpdatePowerStateResponse(nil))
 		}
-		targetSpec = componentTargetSpecFromIDs(ids)
+		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -1151,38 +1054,36 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 // UpdateTrayFirmwareHandler is the API Handler for upgrading firmware on a single Tray by ID
 type UpdateTrayFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateTrayFirmwareHandler initializes and returns a new handler for firmware upgrading a Tray
 func NewUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateTrayFirmwareHandler {
 	return UpdateTrayFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Firmware update a Tray
-// @Description Update firmware on a Tray identified by Tray UUID.
+// @Description Update firmware on a Tray identified by component ID.
 // @Tags tray
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Tray"
+// @Param id path string true "Component ID"
 // @Param body body model.APIUpdateFirmwareRequest true "Firmware update request"
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/tray/{id}/firmware [patch]
 func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdate", c, futh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1220,15 +1121,12 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
-	futh.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1262,19 +1160,19 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 			Components: &flowv1.ComponentTargets{
 				Targets: []*flowv1.ComponentTarget{
 					{
-						Identifier: &flowv1.ComponentTarget_Id{
-							Id: &flowv1.UUID{Id: trayStrID},
-						},
+						Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: trayStrID}},
 					},
 				},
 			},
 		},
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
-		apiRequest.Targets, apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
+		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID,
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
+		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1285,21 +1183,19 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 
 // BatchUpdateTrayFirmwareHandler is the API Handler for firmware upgrading Trays with optional filters
 type BatchUpdateTrayFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateTrayFirmwareHandler initializes and returns a new handler for batch firmware upgrading Trays
 func NewBatchUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateTrayFirmwareHandler {
 	return BatchUpdateTrayFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1315,7 +1211,7 @@ func NewBatchUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/tray/firmware [patch]
 func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdateBatch", c, futbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdateBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1323,7 +1219,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchTrayFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch tray firmware update request")
@@ -1384,27 +1280,29 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	// Build TargetSpec from filter (nil filter = all trays). When the
-	// filter pins a rack slot, resolve to component UUIDs first; Flow has
+	// filter pins a rack slot, resolve to external component IDs first; Flow has
 	// no by-slot target shape.
 	targetSpec := request.Filter.ToTargetSpec()
 	if request.Filter.HasSlotFilter() {
 		ids, resolveErr := resolveTrayIDsBySlot(ctx, stc, targetSpec,
 			model.RackComponentSlotMatcher{SlotID: request.Filter.SlotID})
 		if resolveErr != nil {
-			logger.Error().Err(resolveErr).Msg("failed to resolve trays by slot")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Trays by slot", nil)
+			logger.Error().Err(resolveErr.Diagnosis()).Msg("failed to resolve trays by slot")
+			return cutil.NewAPIErrorResponse(c, resolveErr.Code, resolveErr.Message, nil)
 		}
 		if len(ids) == 0 {
 			logger.Info().Msg("no trays match slot filter; returning empty task list")
 			return c.JSON(http.StatusOK, model.NewAPIUpdateFirmwareResponse(nil))
 		}
-		targetSpec = componentTargetSpecFromIDs(ids)
+		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
-		request.Targets, request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
+		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
+		request.OverrideReadinessCheck, request.OverrideVersionCheck,
+		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

@@ -23,13 +23,23 @@ SELECT m.* FROM (
     INNER JOIN LATERAL (
         SELECT
         m2.*,
+        boot_interface.desired_mac_address AS desired_boot_interface_mac,
+        boot_interface.desired_interface_id AS desired_boot_interface_id,
+        boot_interface.desired_version AS desired_boot_interface_version,
+        boot_interface.selection_source AS boot_interface_selection_source,
+        boot_interface.selection_updated_at AS boot_interface_selection_updated_at,
+        boot_interface.verified_version AS boot_interface_verified_version,
+        boot_interface.observed_at AS boot_interface_observed_at,
+        COALESCE(boot_interface.assumed, false) AS boot_interface_observation_assumed,
         sku.device_type as hw_sku_device_type,
         COALESCE(i.json, '[]') AS interfaces,
         COALESCE(t.json, '[]') AS topology,
-        COALESCE(bmc.json, t.bmc_info, '{}'::jsonb) AS bmc_info,
+        COALESCE(bmc.json, t.bmc_info - 'ip' - 'mac', '{}'::jsonb) AS bmc_info,
         COALESCE(p.json, '[]') AS power_options
         __HISTORY_SELECT__
         FROM machines m2
+        LEFT JOIN machine_boot_interfaces boot_interface
+        ON boot_interface.machine_id = m2.id
         LEFT JOIN machine_skus sku on m2.hw_sku = sku.id
 
         -- (1.1) Join in interfaces as JSON
@@ -85,8 +95,8 @@ SELECT m.* FROM (
                 COALESCE(t.bmc_info, '{}'::jsonb) ||
                 jsonb_build_object(
                     'machine_interface_id', bmc_i.id,
-                    'ip', COALESCE(host(bmc_addr.address), t.bmc_info->>'ip'),
-                    'mac', COALESCE(bmc_i.mac_address::text, t.bmc_info->>'mac')
+                    'ip', host(bmc_addr.address),
+                    'mac', bmc_i.mac_address::text
                 )
             ) AS json
             FROM machine_interfaces bmc_i
@@ -123,13 +133,23 @@ SELECT m.* FROM (
         SELECT
         mi_parent.machine_id AS managed_host_id,
         m2.*,
+        boot_interface.desired_mac_address AS desired_boot_interface_mac,
+        boot_interface.desired_interface_id AS desired_boot_interface_id,
+        boot_interface.desired_version AS desired_boot_interface_version,
+        boot_interface.selection_source AS boot_interface_selection_source,
+        boot_interface.selection_updated_at AS boot_interface_selection_updated_at,
+        boot_interface.verified_version AS boot_interface_verified_version,
+        boot_interface.observed_at AS boot_interface_observed_at,
+        COALESCE(boot_interface.assumed, false) AS boot_interface_observation_assumed,
         COALESCE(i.json, '[]') AS interfaces,
         COALESCE(t.json, '[]') AS topology,
-        COALESCE(bmc.json, t.bmc_info, '{}'::jsonb) AS bmc_info
+        COALESCE(bmc.json, t.bmc_info - 'ip' - 'mac', '{}'::jsonb) AS bmc_info
         __HISTORY_SELECT__
         FROM machine_interfaces mi_parent
         INNER JOIN machines m2
         ON (m2.id = mi_parent.attached_dpu_machine_id)
+        LEFT JOIN machine_boot_interfaces boot_interface
+        ON boot_interface.machine_id = m2.id
 
         -- (2.1) Join in interfaces as JSON
         LEFT JOIN LATERAL (
@@ -184,8 +204,8 @@ SELECT m.* FROM (
                 COALESCE(t.bmc_info, '{}'::jsonb) ||
                 jsonb_build_object(
                     'machine_interface_id', bmc_i.id,
-                    'ip', COALESCE(host(bmc_addr.address), t.bmc_info->>'ip'),
-                    'mac', COALESCE(bmc_i.mac_address::text, t.bmc_info->>'mac')
+                    'ip', host(bmc_addr.address),
+                    'mac', bmc_i.mac_address::text
                 )
             ) AS json
             FROM machine_interfaces bmc_i

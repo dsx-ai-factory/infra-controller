@@ -100,7 +100,13 @@ async fn test_network_segment_lifecycle_impl(
             .map(|c| c.prefixes.as_slice())
             .unwrap_or(&[]);
         assert_eq!(prefixes.len(), 1);
-        assert_eq!(prefixes[0].free_ip_count, 255 - num_reserved as u32);
+        let expected_count = 255 - u64::try_from(num_reserved).unwrap();
+        assert_eq!(
+            prefixes[0].free_ip_count,
+            u32::try_from(expected_count).unwrap()
+        );
+        assert_eq!(prefixes[0].free_ip_count_v2, Some(expected_count));
+        assert!(!prefixes[0].free_ip_count_saturated);
     }
 
     env.api

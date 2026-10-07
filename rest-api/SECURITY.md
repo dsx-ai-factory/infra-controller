@@ -3,28 +3,24 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-## Security
+# Security Policy: NVIDIA Infra Controller REST API
 
-NVIDIA is dedicated to the security and trust of our software products and services, including all source code repositories managed through our organization.
+The repository-wide security policy in [`../SECURITY.md`](../SECURITY.md) is
+canonical for this `rest-api/` tree. It contains the reporting policy,
+architecture context, threat model, critical security assumptions, deployment
+hardening checklist, scope, and dependency-security guidance for NICo REST and
+its supporting services.
 
-If you need to report a security issue, please use the appropriate contact points outlined below. **Please do not report security vulnerabilities through GitHub.**
+REST-specific surfaces covered by the root policy include:
 
-## Reporting Potential Security Vulnerability in an NVIDIA Product
+- Go/Echo REST API routes under `/v*/org/:orgName/<apiName>/...`.
+- JWT, JWKS, Keycloak, service-account, organization, and role processing.
+- Temporal cloud and site workflows, site-agent communication, and Core gRPC
+  proxying.
+- PostgreSQL/Bun persistence, audit logging, OpenTelemetry, Prometheus, and
+  Sentry integration.
+- REST Helm charts, local development deployment files, OpenAPI contracts, and
+  generated SDKs.
 
-To report a potential security vulnerability in any NVIDIA product:
-- Web: [Security Vulnerability Submission Form](https://www.nvidia.com/object/submit-security-vulnerability.html)
-
-- E-Mail: psirt@nvidia.com
-	 - We encourage you to use the following PGP key for secure email communication: [NVIDIA public PGP Key for communication](https://www.nvidia.com/en-us/security/pgp-key)
-	 - Please include the following information:
-	 - Product/Driver name and version/branch that contains the vulnerability
-	 - Type of vulnerability (code execution, denial of service, buffer overflow, etc.)
-	 - Instructions to reproduce the vulnerability
-	 - Proof-of-concept or exploit code
-	 - Potential impact of the vulnerability, including how an attacker could exploit the vulnerability
-
-While NVIDIA currently does not have a bug bounty program, we do offer acknowledgement when an externally reported security issue is addressed under our coordinated vulnerability disclosure policy. Please visit our [Product Security Incident Response Team (PSIRT)](https://www.nvidia.com/en-us/security/psirt-policies/) policies page for more information.
-
-## NVIDIA Product Security
-
-For all security-related concerns, please visit NVIDIA's Product Security portal at https://www.nvidia.com/en-us/security
+Report potential vulnerabilities through NVIDIA PSIRT as described in the root
+policy. Do not open public issues or pull requests with vulnerability details.

@@ -34,7 +34,7 @@
 					<details>
 						<summary>JSON Details</summary>
 						<div style="overflow: auto; max-height: 300px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--bg-tertiary); margin-top: 0.5rem;">
-							<pre style="margin: 0; padding: 1rem; background-color: transparent; white-space: pre-wrap;"><code class="prettyjson">{{ entry|json|safe }}</code></pre>
+							<pre style="margin: 0; padding: 1rem; background-color: transparent; white-space: pre-wrap;"><code>{{ entry|json|pretty_json }}</code></pre>
 						</div>
 					</details>
 					<button id="remove-health-report-{{ entry.health_report.source }}" class="delete-button">Remove</button>

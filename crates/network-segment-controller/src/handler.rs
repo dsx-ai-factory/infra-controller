@@ -20,10 +20,13 @@
 use std::sync::Arc;
 
 use carbide_uuid::network::NetworkSegmentId;
+use db::ConditionalWrite;
+use db::resource_pool::ResourcePoolAllocationNotOwned;
+use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentDeletionState, NetworkSegmentType,
 };
-use model::resource_pool::ResourcePool;
+use model::resource_pool::{OwnerType, ResourcePool};
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -39,6 +42,22 @@ pub struct NetworkSegmentStateHandler {
 
     pool_vlan_id: Arc<ResourcePool<i16>>,
     pool_vni: Arc<ResourcePool<i32>>,
+}
+
+fn available_ip_metric_value(count: Option<u128>) -> usize {
+    count
+        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+        .unwrap_or_default()
+}
+
+fn compatibility_metric_prefix(prefixes: &[NetworkPrefix]) -> Option<&NetworkPrefix> {
+    // These metrics expose one compatibility series per segment and historically
+    // describe IPv4. Prefer it explicitly so dual-stack DB row order cannot
+    // change the reported prefix or counts.
+    prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .or_else(|| prefixes.first())
 }
 
 impl NetworkSegmentStateHandler {
@@ -65,22 +84,20 @@ impl NetworkSegmentStateHandler {
             return;
         }
 
-        // The code below assumes that we have only one prefix of type IPV4
-        ctx.metrics.available_ips = state.prefixes[0].num_free_ips as usize;
-        ctx.metrics.reserved_ips = state.prefixes[0].num_reserved as usize;
+        let metric_prefix = compatibility_metric_prefix(&state.prefixes)
+            .expect("non-empty prefix list was checked above");
+        ctx.metrics.available_ips = available_ip_metric_value(metric_prefix.num_free_ips);
+        ctx.metrics.reserved_ips = metric_prefix.num_reserved as usize;
         ctx.metrics.seg_name = state.config.name.clone();
 
         ctx.metrics.seg_type = state.config.segment_type.to_string();
         ctx.metrics.seg_id = state.id.to_string();
-        ctx.metrics.prefix = state.prefixes[0].prefix.to_string();
+        ctx.metrics.prefix = metric_prefix.prefix.to_string();
 
-        let total = state.prefixes[0].prefix.size();
-
-        let total_cnt: u32 = match total {
-            ipnetwork::NetworkSize::V4(nf) => nf,
-            ipnetwork::NetworkSize::V6(_n128) => 0,
+        ctx.metrics.total_ips = match metric_prefix.prefix.size() {
+            ipnetwork::NetworkSize::V4(count) => count as usize,
+            ipnetwork::NetworkSize::V6(count) => usize::try_from(count).unwrap_or(usize::MAX),
         };
-        ctx.metrics.total_ips = total_cnt as usize;
     }
 }
 
@@ -103,7 +120,7 @@ impl StateHandler for NetworkSegmentStateHandler {
         match controller_state {
             NetworkSegmentControllerState::Provisioning => {
                 let new_state = NetworkSegmentControllerState::Ready;
-                tracing::info!(%segment_id, state = ?new_state, "Network Segment state transition");
+                tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
                 Ok(StateHandlerOutcome::transition(new_state))
             }
             NetworkSegmentControllerState::Ready => {
@@ -116,7 +133,7 @@ impl StateHandler for NetworkSegmentStateHandler {
                             delete_at,
                         },
                     };
-                    tracing::info!(%segment_id, state = ?new_state, "Network Segment state transition");
+                    tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
                     Ok(StateHandlerOutcome::transition(new_state))
                 } else {
                     Ok(StateHandlerOutcome::do_nothing())
@@ -129,34 +146,29 @@ impl StateHandler for NetworkSegmentStateHandler {
                         // If ones are still allocated, we can not delete and have to
                         // update the `delete_at` timestamp.
                         let mut txn = ctx.services.db_pool.begin().await?;
-                        let num_machine_interfaces =
-                            db::machine_interface::count_by_segment_id(&mut txn, &state.id).await?;
-                        let num_instance_addresses =
-                            db::instance_address::count_by_segment_id(&mut txn, &state.id).await?;
-                        if num_machine_interfaces + num_instance_addresses > 0 {
+                        if db::instance_address::segment_has_allocations(&mut txn, &state.id)
+                            .await?
+                        {
                             let delete_at = chrono::Utc::now()
                                 .checked_add_signed(self.drain_period)
                                 .unwrap_or_else(chrono::Utc::now);
-                            let total_allocated_ips =
-                                num_machine_interfaces + num_instance_addresses;
                             tracing::info!(
                                 ?delete_at,
-                                total_allocated_ips,
-                                segment = %state.id,
-                                "{total_allocated_ips} allocated IPs for segment. Waiting for deletion until {delete_at:?}",
+                                network_segment_id = %segment_id,
+                                "Segment still has allocated IPs; waiting until the drain deadline to delete",
                             );
                             let new_state = NetworkSegmentControllerState::Deleting {
                                 deletion_state: NetworkSegmentDeletionState::DrainAllocatedIps {
                                     delete_at,
                                 },
                             };
-                            tracing::info!(%segment_id, state = ?new_state, "Network Segment state transition");
+                            tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
                             Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                         } else if chrono::Utc::now() >= *delete_at {
                             let new_state = NetworkSegmentControllerState::Deleting {
                                 deletion_state: NetworkSegmentDeletionState::DBDelete,
                             };
-                            tracing::info!(%segment_id, state = ?new_state, "Network Segment state transition");
+                            tracing::info!(network_segment_id = %segment_id, next_state = ?new_state, "Network Segment state transition");
                             Ok(StateHandlerOutcome::transition(new_state).with_txn(txn))
                         } else {
                             Ok(StateHandlerOutcome::wait(format!(
@@ -168,15 +180,37 @@ impl StateHandler for NetworkSegmentStateHandler {
                     }
                     NetworkSegmentDeletionState::DBDelete => {
                         let mut txn = ctx.services.db_pool.begin().await?;
+                        // Free or reassigned values leave this segment nothing to release.
                         if let Some(vni) = state.status.vni.take() {
-                            db::resource_pool::release(&self.pool_vni, &mut txn, vni).await?;
+                            match db::resource_pool::release(
+                                &self.pool_vni,
+                                &mut txn,
+                                vni,
+                                OwnerType::NetworkSegment,
+                                &state.config.name,
+                            )
+                            .await?
+                            {
+                                ConditionalWrite::Applied(())
+                                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                            }
                         }
                         if let Some(vlan_id) = state.status.vlan_id.take() {
-                            db::resource_pool::release(&self.pool_vlan_id, &mut txn, vlan_id)
-                                .await?;
+                            match db::resource_pool::release(
+                                &self.pool_vlan_id,
+                                &mut txn,
+                                vlan_id,
+                                OwnerType::NetworkSegment,
+                                &state.config.name,
+                            )
+                            .await?
+                            {
+                                ConditionalWrite::Applied(())
+                                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                            }
                         }
                         tracing::info!(
-                            %segment_id,
+                            network_segment_id = %segment_id,
                             "Network Segment getting removed from the database",
                         );
                         db::network_segment::final_delete(*segment_id, &mut txn).await?;
@@ -185,5 +219,65 @@ impl StateHandler for NetworkSegmentStateHandler {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+    use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
+    use model::network_prefix::NetworkPrefix;
+
+    use super::{available_ip_metric_value, compatibility_metric_prefix};
+
+    fn network_prefix(prefix: &str) -> NetworkPrefix {
+        NetworkPrefix {
+            id: NetworkPrefixId::new(),
+            segment_id: NetworkSegmentId::new(),
+            prefix: prefix.parse().unwrap(),
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 0,
+            vpc_prefix_id: None,
+            vpc_prefix: None,
+            svi_ip: None,
+            num_free_ips: None,
+        }
+    }
+
+    #[test]
+    fn available_ip_metric_preserves_or_saturates_counts() {
+        value_scenarios!(run = available_ip_metric_value;
+            "omitted count" {
+                None => 0,
+            }
+
+            "representable count" {
+                Some(42) => 42,
+            }
+
+            "overflowing count" {
+                Some(u128::MAX) => usize::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn compatibility_metric_prefix_prefers_ipv4() {
+        value_scenarios!(run = |prefixes: Vec<NetworkPrefix>| {
+            compatibility_metric_prefix(&prefixes).map(|prefix| prefix.prefix)
+        };
+            "dual-stack prefix order" {
+                vec![network_prefix("192.0.2.0/24"), network_prefix("2001:db8::/64")]
+                    => Some("192.0.2.0/24".parse().unwrap()),
+                vec![network_prefix("2001:db8::/64"), network_prefix("192.0.2.0/24")]
+                    => Some("192.0.2.0/24".parse().unwrap()),
+            }
+
+            "IPv6-only segment" {
+                vec![network_prefix("2001:db8::/64")]
+                    => Some("2001:db8::/64".parse().unwrap()),
+            }
+        );
     }
 }

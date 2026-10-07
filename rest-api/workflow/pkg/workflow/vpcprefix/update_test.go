@@ -13,7 +13,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	vpcPrefixActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpcprefix"
 )
@@ -38,13 +38,13 @@ func (s *UpdateVpcPrefixTestSuite) Test_UpdateVpcPrefixInventory_Success() {
 	var VpcPrefixManager vpcPrefixActivity.ManageVpcPrefix
 
 	siteID := uuid.New()
-	VpcPrefixInventory := &cwssaws.VpcPrefixInventory{
-		VpcPrefixes: []*cwssaws.VpcPrefix{
+	VpcPrefixInventory := &corev1.VpcPrefixInventory{
+		VpcPrefixes: []*corev1.VpcPrefix{
 			{
-				Id: &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+				Id: &corev1.VpcPrefixId{Value: uuid.NewString()},
 			},
 			{
-				Id: &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+				Id: &corev1.VpcPrefixId{Value: uuid.NewString()},
 			},
 		},
 	}
@@ -64,13 +64,13 @@ func (s *UpdateVpcPrefixTestSuite) Test_UpdateVpcPrefixInventory_ActivityFails()
 	var VpcPrefixManager vpcPrefixActivity.ManageVpcPrefix
 
 	siteID := uuid.New()
-	VpcPrefixInventory := &cwssaws.VpcPrefixInventory{
-		VpcPrefixes: []*cwssaws.VpcPrefix{
+	VpcPrefixInventory := &corev1.VpcPrefixInventory{
+		VpcPrefixes: []*corev1.VpcPrefix{
 			{
-				Id: &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+				Id: &corev1.VpcPrefixId{Value: uuid.NewString()},
 			},
 			{
-				Id: &cwssaws.VpcPrefixId{Value: uuid.NewString()},
+				Id: &corev1.VpcPrefixId{Value: uuid.NewString()},
 			},
 		},
 	}

@@ -25,10 +25,10 @@ Browse a UFM fabric path via the API server (no BMC --address needed):
     $ nico-admin-cli browse ufm --fabric-id default --path /ufmRest/resources/systems
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "UFM fabric ID")]
-    pub fabric_id: String,
+    pub(super) fabric_id: String,
 
     #[clap(long, help = "Path to browse within the fabric")]
-    pub path: String,
+    pub(super) path: String,
 }

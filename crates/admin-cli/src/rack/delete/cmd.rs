@@ -20,7 +20,7 @@ use color_eyre::Result;
 use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub async fn delete_rack(api_client: &ApiClient, delete_opts: Args) -> Result<()> {
+pub(super) async fn delete_rack(api_client: &ApiClient, delete_opts: Args) -> Result<()> {
     api_client.0.delete_rack(delete_opts).await?;
     Ok(())
 }

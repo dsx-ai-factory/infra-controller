@@ -23,6 +23,7 @@ use crate::SpiffeContext;
 use crate::spiffe_id::{SpiffeIdError, TrustDomain};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustConfig {
     /// The SPIFFE trust domain which client certs must adhere to
     pub spiffe_trust_domain: String,
@@ -58,6 +59,7 @@ pub enum CertComponent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AllowedCertCriteria {
     /// These components of the cert must equal the given values to be approved
     pub required_equals: HashMap<CertComponent, String>,

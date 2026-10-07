@@ -27,11 +27,53 @@ impl UuidSubtype for MachineValidationIdMarker {
 /// MachineValidationId is a strongly typed UUID for MachineValidations.
 pub type MachineValidationId = TypedUuid<MachineValidationIdMarker>;
 
+/// Marker type for MachineValidationRunItemId
+pub struct MachineValidationRunItemIdMarker;
+
+impl UuidSubtype for MachineValidationRunItemIdMarker {
+    const TYPE_NAME: &'static str = "MachineValidationRunItemId";
+}
+
+/// MachineValidationRunItemId is a strongly typed UUID for validation run items.
+pub type MachineValidationRunItemId = TypedUuid<MachineValidationRunItemIdMarker>;
+
+/// Marker type for MachineValidationAttemptId
+pub struct MachineValidationAttemptIdMarker;
+
+impl UuidSubtype for MachineValidationAttemptIdMarker {
+    const TYPE_NAME: &'static str = "MachineValidationAttemptId";
+}
+
+/// MachineValidationAttemptId is a strongly typed UUID for validation attempts.
+pub type MachineValidationAttemptId = TypedUuid<MachineValidationAttemptIdMarker>;
+
 #[cfg(test)]
-mod tests {
+mod machine_validation_id_tests {
     use super::*;
     use crate::typed_uuid_tests;
     // Run all boilerplate TypedUuid tests for this type, also
     // ensuring TYPE_NAME and DB_COLUMN_NAME test correctly.
     typed_uuid_tests!(MachineValidationId, "MachineValidationId", "id");
+}
+
+#[cfg(test)]
+mod machine_validation_run_item_id_tests {
+    use super::*;
+    use crate::typed_uuid_tests;
+    typed_uuid_tests!(
+        MachineValidationRunItemId,
+        "MachineValidationRunItemId",
+        "id"
+    );
+}
+
+#[cfg(test)]
+mod machine_validation_attempt_id_tests {
+    use super::*;
+    use crate::typed_uuid_tests;
+    typed_uuid_tests!(
+        MachineValidationAttemptId,
+        "MachineValidationAttemptId",
+        "id"
+    );
 }

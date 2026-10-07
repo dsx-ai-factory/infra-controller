@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -22,19 +22,32 @@ use std::sync::Arc;
 use std::time::{self, Duration};
 
 use ::carbide_utils::HostPortPair;
-use ::machine_a_tron::{BmcMockRegistry, HostMachineHandle, MachineATronConfig, MachineConfig};
-use api_test_helper::{
-    IntegrationTestEnvironment, domain, instance, machine, metrics, subnet, tenant, utils, vpc,
-    vpc_prefix,
+use ::machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
+use ::machine_a_tron::{
+    BmcMockRegistry, DeviceHandle, DhcpType, LogFormat, MachineATronConfig, MachineConfig,
 };
-use bmc_mock::{HostHardwareType, ListenerOrAddress};
-use eyre::ContextCompat;
+use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
+use api_test_helper::utils::TestApiServerArgs;
+use api_test_helper::{
+    IntegrationTestEnvironment, domain, instance, machine, metrics, scout_stream, subnet, tenant,
+    utils, vpc, vpc_prefix,
+};
+use bmc_mock::test_support::TEST_MAC_POOL;
+use bmc_mock::{HardwareType, ListenerOrAddress};
+use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::site_prefix::SitePrefixId;
+use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
 use itertools::Itertools;
-use sqlx::{Postgres, Row};
+use mac_address::MacAddress;
+use model::machine_boot_interface::BootInterfaceSelectionSource;
+use model::metadata::Metadata;
+use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+
+const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
 
 #[ctor::ctor(unsafe)]
 fn setup() {
@@ -47,14 +60,48 @@ async fn test_integration() -> eyre::Result<()> {
     // NOTE: These tests run two carbide-api servers, and the clients are configured to randomly
     // switch between them on every API call. This helps prevent issues that arise when multiple API
     // severs may be running in production.
-    let Some(test_env) =
+    let Some(mut test_env) =
         IntegrationTestEnvironment::try_from_environment(2, "api_server_test_integration").await?
     else {
         println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
         return Ok(());
     };
 
-    let carbide_api_addrs = &test_env.carbide_api_addrs;
+    // Persist a predecessor root without a protection request before either API
+    // starts, then verify that the background controller makes it ready.
+    db::migrations::migrate(&test_env.db_pool).await?;
+    let mut txn = test_env.db_pool.begin().await?;
+    let recovery_tenant_id = "site-prefix-recovery";
+    db::tenant::create_and_persist(
+        recovery_tenant_id.to_string(),
+        Metadata {
+            name: "SitePrefix Recovery".to_string(),
+            ..Default::default()
+        },
+        None,
+        &mut txn,
+    )
+    .await?;
+    let site_prefix = db::site_prefix::create_tenant_managed(
+        NewTenantManagedSitePrefix {
+            id: SitePrefixId::new(),
+            tenant_organization_id: recovery_tenant_id.parse()?,
+            prefix: "10.250.0.0/24".parse()?,
+            metadata: Metadata {
+                name: "readiness-recovery".to_string(),
+                ..Default::default()
+            },
+        },
+        1,
+        &mut txn,
+    )
+    .await?
+    .site_prefix;
+    txn.commit().await?;
+    assert_eq!(
+        site_prefix.status.lifecycle_state,
+        SitePrefixLifecycleState::Provisioning,
+    );
 
     let bmc_address_registry = BmcMockRegistry::default();
     let certs_dir = PathBuf::from(format!("{}/crates/bmc-mock", test_env.root_dir.display()));
@@ -78,35 +125,68 @@ async fn test_integration() -> eyre::Result<()> {
     // Begin the integration test by starting an API server. This will be shared between multiple
     // individual machine-a-tron-based tests, which can run in parallel against the same instance.
     let cancel_token = CancellationToken::new();
-    let (server_handle_1, server_handle_2) = (
-        utils::start_api_server(
-            test_env.clone(),
-            Some(HostPortPair::HostAndPort(
+    let server_handle_1 = utils::start_api_server(
+        &mut test_env,
+        TestApiServerArgs {
+            bmc_proxy: Some(HostPortPair::HostAndPort(
                 "127.0.0.1".to_string(),
                 bmc_mock_handle.address.port(),
             )),
-            empty_firmware_dir.path().to_owned(),
-            0,
-            true,
-            cancel_token.clone(),
-        )
-        .await?,
-        utils::start_api_server(
-            test_env.clone(),
-            Some(HostPortPair::HostAndPort(
+            firmware_directory: empty_firmware_dir.path().to_owned(),
+            addr_index: 0,
+            put_dev_bin_in_path: true,
+            insecure_discovery: true,
+        },
+        cancel_token.clone(),
+    )
+    .await?;
+    let server_handle_2 = utils::start_api_server(
+        &mut test_env,
+        TestApiServerArgs {
+            bmc_proxy: Some(HostPortPair::HostAndPort(
                 "127.0.0.1".to_string(),
                 bmc_mock_handle.address.port(),
             )),
-            empty_firmware_dir.path().to_owned(),
-            1,
-            true,
-            cancel_token.clone(),
-        )
-        .await?,
+            firmware_directory: empty_firmware_dir.path().to_owned(),
+            addr_index: 1,
+            put_dev_bin_in_path: true,
+            insecure_discovery: true,
+        },
+        cancel_token.clone(),
+    )
+    .await?;
+
+    assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
+    assert_ne!(
+        test_env.carbide_metrics_addrs[0],
+        test_env.carbide_metrics_addrs[1]
     );
+    let carbide_api_addrs = &test_env.carbide_api_addrs;
 
     let tenant_org_id = "tenant_organization";
     tenant::create(carbide_api_addrs, tenant_org_id, "Tenant Organization").await?;
+
+    // The first enqueue is immediate; allow later 30-second passes and jitter.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let stored = db::site_prefix::find_by_ids(&test_env.db_pool, &[site_prefix.id])
+                .await?
+                .pop()
+                .context("readiness fixture SitePrefix disappeared")?;
+            if stored.status.lifecycle_state == SitePrefixLifecycleState::Ready {
+                return Ok::<(), eyre::Report>(());
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        eyre::eyre!(
+            "SitePrefix {} did not become ready within 120 seconds",
+            site_prefix.id,
+        )
+    })??;
+
     let tenant1_vpc = vpc::create(carbide_api_addrs, tenant_org_id).await?;
     let domain_id = domain::create(carbide_api_addrs, "tenant-1.local").await?;
     let managed_segment_id =
@@ -115,7 +195,8 @@ async fn test_integration() -> eyre::Result<()> {
     // HostInband segments must live in a Flat VPC -- those VPC types are
     // mutually bound. Create one for the HostInband fixture.
     let flat_vpc = vpc::create_flat(carbide_api_addrs, tenant_org_id).await?;
-    subnet::create(carbide_api_addrs, &flat_vpc, &domain_id, 11, true).await?;
+    let host_inband_segment_id =
+        subnet::create(carbide_api_addrs, &flat_vpc, &domain_id, 11, true).await?;
 
     // Create FNN VPC + VPC prefixes (IPv4 + IPv6) for dual-stack L3 linknet testing.
     let fnn_vpc = vpc::create_fnn(carbide_api_addrs, tenant_org_id).await?;
@@ -130,66 +211,126 @@ async fn test_integration() -> eyre::Result<()> {
 
     // Run several tests in parallel.
     let all_tests = join_all([
-        test_machine_a_tron_multidpu(
-            HostHardwareType::DellPowerEdgeR750,
+        test_force_delete_waits_for_instance_dpu(
             &test_env,
             &bmc_address_registry,
             &managed_segment_id,
-            // Relay IP in admin net
-            Ipv4Addr::new(172, 20, 0, 2),
         )
         .boxed(),
         test_machine_a_tron_multidpu(
-            HostHardwareType::NvidiaDgxH100,
+            HardwareType::DellPowerEdgeR750,
             &test_env,
             &bmc_address_registry,
             &managed_segment_id,
-            // Relay IP in admin net
-            Ipv4Addr::new(172, 20, 0, 2),
+            UNDERLAY_DHCP_RELAY_ADDRESS,
         )
         .boxed(),
         test_machine_a_tron_multidpu(
-            HostHardwareType::WiwynnGB200Nvl,
+            HardwareType::NvidiaDgxH100,
             &test_env,
             &bmc_address_registry,
             &managed_segment_id,
-            // Relay IP in admin net
-            Ipv4Addr::new(172, 20, 0, 2),
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::WiwynnGB200Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::LenovoGB300Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::NvidiaDgxGb300,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::SupermicroGb300Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
         )
         .boxed(),
         test_machine_a_tron_zerodpu(
-            HostHardwareType::DellPowerEdgeR750,
+            HardwareType::DellPowerEdgeR750,
             &test_env,
             &bmc_address_registry,
-            // Relay IP in host-inband net
-            Ipv4Addr::new(10, 10, 11, 2),
+            &flat_vpc,
         )
         .boxed(),
-        test_machine_a_tron_singledpu_nic_mode(
-            HostHardwareType::DellPowerEdgeR750,
+        test_machine_a_tron_nic_mode(
+            HardwareType::DellPowerEdgeR750,
             &test_env,
             &bmc_address_registry,
-            // Relay IP in host-inband  net
-            Ipv4Addr::new(10, 10, 11, 2),
+            &flat_vpc,
+            &host_inband_segment_id,
         )
         .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::HpeProliantDl380aGen11,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::WiwynnGB200Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::SupermicroGb300Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        // TODO: https://github.com/NVIDIA/infra-controller/issues/3709
+        // Re-enable `test_machine_a_tron_dpu_to_nic_mode_reregistration` after the
+        // Admin-to-HostInband re-ingestion race is fixed. The scenario currently flakes in CI when
+        // the host-facing DPU MAC is re-created on the Admin segment before the NIC-mode
+        // transition completes.
         test_machine_a_tron_dual_stack(
-            HostHardwareType::DellPowerEdgeR750,
+            HardwareType::DellPowerEdgeR750,
             &test_env,
             &bmc_address_registry,
+            tenant_org_id,
             &v4_vpc_prefix_id,
             &v6_vpc_prefix_id,
-            // Relay IP in admin net
-            Ipv4Addr::new(172, 20, 0, 2),
+            UNDERLAY_DHCP_RELAY_ADDRESS,
         )
         .boxed(),
         test_machine_a_tron_dual_stack_l2(
-            HostHardwareType::DellPowerEdgeR750,
+            HardwareType::DellPowerEdgeR750,
             &test_env,
             &bmc_address_registry,
             &dual_stack_l2_segment_id,
-            // Relay IP in admin net
-            Ipv4Addr::new(172, 20, 0, 2),
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_scout_stream(
+            &test_env,
+            &bmc_address_registry,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
         )
         .boxed(),
     ]);
@@ -201,6 +342,37 @@ async fn test_integration() -> eyre::Result<()> {
         }
     }
 
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_boot_interface_selections_total{mechanism="redfish_chassis_id"}"#,
+    )
+    .await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_boot_interface_selections_total{mechanism="redfish_serial_number"}"#,
+    )
+    .await?;
+    // The Wiwynn mock deliberately gives the `RedfishChassisId` selection the higher
+    // scout PCI slot so the integration path exercises automatic reconciliation.
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_scout_pci_evaluations_total{result="differs_from_stored"}"#,
+    )
+    .await?;
+
+    let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
+    assert!(
+        metric_infos.iter().any(|metric| {
+            metric.name == "carbide_site_explorer_boot_interface_selections_total"
+        }),
+        "the multi-DPU integration paths must exercise boot-interface selection observability",
+    );
+    assert!(
+        metric_infos
+            .iter()
+            .any(|metric| metric.name == "carbide_scout_pci_evaluations_total"),
+        "the MaT scout path must exercise PCI comparison observability",
+    );
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
 
     cancel_token.cancel();
@@ -212,12 +384,18 @@ async fn test_integration() -> eyre::Result<()> {
 }
 
 fn generate_core_metric_docs(metrics_endpoints: &[SocketAddr]) {
-    let infos = metrics::collect_metric_infos(metrics_endpoints).unwrap();
+    let mut infos = metrics::collect_metric_infos(metrics_endpoints).unwrap();
+    retain_existing_core_metric_infos(&mut infos);
+
     // Delete everything with "alt_metric_" prefix
-    let infos: Vec<_> = infos
+    let mut infos: Vec<_> = infos
         .into_iter()
         .filter(|metric| !metric.name.starts_with("alt_metric"))
         .collect();
+
+    // Sort metrics for consistency
+    infos.sort_by(|e1, e2| e1.name.cmp(&e2.name));
+
     let mut docs = "# NVIDIA Infra Controller (NICo) Core Metrics\n\n".to_string();
     use std::fmt::Write;
 
@@ -227,7 +405,9 @@ fn generate_core_metric_docs(metrics_endpoints: &[SocketAddr]) {
         &mut docs,
         "This file contains a list of metrics exported by NVIDIA Infra Controller (NICo). \
         The list is auto-generated from an integration test (`test_integration`). \
-        Metrics for workflows which are not exercised by the test are missing."
+        Metrics no test exercises are added with `cargo xtask check-metric-docs --fix`. \
+        NVLink partition monitor's metrics are documented in the manual: \
+        [NVLink Partitioning](../manuals/nvlink_partitioning.md#metrics)."
     )
     .unwrap();
     writeln!(&mut docs).unwrap();
@@ -261,6 +441,63 @@ fn generate_core_metric_docs(metrics_endpoints: &[SocketAddr]) {
     std::fs::write(path, docs).unwrap();
 }
 
+fn retain_existing_core_metric_infos(infos: &mut Vec<metrics::MetricInfo>) {
+    let mut infos_by_name = infos
+        .drain(..)
+        .map(|info| (info.name.clone(), info))
+        .collect::<HashMap<_, _>>();
+
+    for line in std::fs::read_to_string(METRIC_DOC_PATH)
+        .unwrap_or_default()
+        .lines()
+    {
+        if let Some(info) = metrics::MetricInfo::parse_from_docs_line(line) {
+            infos_by_name.entry(info.name.clone()).or_insert(info);
+        }
+    }
+
+    infos.extend(infos_by_name.into_values());
+}
+
+trait ParseFromHtmlDocs {
+    fn parse_from_docs_line(line: &str) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl ParseFromHtmlDocs for metrics::MetricInfo {
+    fn parse_from_docs_line(line: &str) -> Option<Self> {
+        let row = line.strip_prefix("<tr><td>")?.strip_suffix("</td></tr>")?;
+        let cells = row.split("</td><td>").collect::<Vec<_>>();
+        let [name, ty, help] = cells.as_slice() else {
+            return None;
+        };
+
+        if *name == "Name" {
+            return None;
+        }
+
+        let unescape_html_cell = |value: &str| -> String {
+            if value.contains('&') {
+                value
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&")
+            } else {
+                value.to_string()
+            }
+        };
+
+        Some(metrics::MetricInfo {
+            name: unescape_html_cell(name),
+            ty: unescape_html_cell(ty),
+            help: unescape_html_cell(help),
+        })
+    }
+}
+
 pub(crate) const METRIC_DOC_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/observability/core_metrics.md"
@@ -270,24 +507,12 @@ pub(crate) const METRIC_DOC_PATH: &str = concat!(
 /// test, to make the values in the metrics buckets predictable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn test_metrics_integration() -> eyre::Result<()> {
-    let Some(test_env) =
+    let Some(mut test_env) =
         IntegrationTestEnvironment::try_from_environment(1, "api_server_test_metrics_integration")
             .await?
     else {
         return Ok(());
     };
-
-    // Save typing...
-    let IntegrationTestEnvironment {
-        carbide_api_addrs,
-        root_dir: _,
-        carbide_metrics_addrs,
-        db_pool,
-        metrics: _,
-        db_url: _,
-        credential_config: _,
-        _vault_handle,
-    } = test_env.clone();
 
     let bmc_address_registry = BmcMockRegistry::default();
     let certs_dir = PathBuf::from(format!("{}/crates/bmc-mock", test_env.root_dir.display()));
@@ -312,30 +537,45 @@ async fn test_metrics_integration() -> eyre::Result<()> {
     // individual machine-a-tron-based tests, which can run in parallel against the same instance.
     let cancel_token = CancellationToken::new();
     let server_handle = utils::start_api_server(
-        test_env.clone(),
-        Some(HostPortPair::HostAndPort(
-            "127.0.0.1".to_string(),
-            bmc_mock_handle.address.port(),
-        )),
-        empty_firmware_dir.path().to_owned(),
-        0,
-        true,
+        &mut test_env,
+        TestApiServerArgs {
+            bmc_proxy: Some(HostPortPair::HostAndPort(
+                "127.0.0.1".to_string(),
+                bmc_mock_handle.address.port(),
+            )),
+            firmware_directory: empty_firmware_dir.path().to_owned(),
+            addr_index: 0,
+            put_dev_bin_in_path: true,
+            insecure_discovery: true,
+        },
         cancel_token.clone(),
     )
     .await?;
 
+    // Save typing after the server has replaced the port-zero placeholders.
+    let IntegrationTestEnvironment {
+        carbide_api_addrs,
+        root_dir: _,
+        carbide_metrics_addrs,
+        db_pool,
+        metrics: _,
+        db_url: _,
+        credential_config: _,
+        _vault_handle,
+    } = test_env.clone();
+
     // Before the initial host bootstrap, the dns_records view
     // should contain 0 entries.
-    assert_eq!(0i64, get_dns_record_count(&db_pool).await);
+    assert_eq!(0i64, db::test_support::dns::record_count(&db_pool).await);
 
-    run_machine_a_tron_test(
-        HostHardwareType::DellPowerEdgeR750,
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
         1,
         1,
         false,
         &test_env,
         &bmc_address_registry,
-        Ipv4Addr::new(172, 20, 0, 1),
+        UNDERLAY_DHCP_RELAY_ADDRESS,
         |machine_handle| {
             let db_pool = db_pool.clone();
             let carbide_api_addrs = carbide_api_addrs.to_vec();
@@ -349,7 +589,7 @@ async fn test_metrics_integration() -> eyre::Result<()> {
                 // - 2x "human friendly" (ADM) for Host + DPU.
                 // - 2x Machine ID (BMC) for Host + DPU.
                 // - 2x Machine ID (ADM) for Host + DPU.
-                assert_eq!(8i64, get_dns_record_count(&db_pool).await);
+                assert_eq!(8i64, db::test_support::dns::record_count(&db_pool).await);
 
                 // Metrics are only updated after the machine state controller run one more
                 // time since the emitted metrics are for states at the start of the iteration.
@@ -372,13 +612,16 @@ async fn test_metrics_integration() -> eyre::Result<()> {
                 let vpc_id = vpc::create(&carbide_api_addrs, tenant_org_id).await?;
                 let domain_id = domain::create(&carbide_api_addrs, "tenant-1.local").await?;
                 let segment_id = subnet::create(&carbide_api_addrs, &vpc_id, &domain_id, 10, false).await?;
-                let host_machine_id = machine_handle.observed_machine_id().expect("Should have gotten a machine ID by now");
+                let host_machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Should have gotten a machine ID by now")
+                    .try_into()?;
 
                 // Create instance with phone_home enabled
                 let instance_id = instance::create(
                     &carbide_api_addrs,
                     &host_machine_id,
-                    Some(&segment_id),
+                    &segment_id,
                     Some("test"),
                     true,
                     true,
@@ -468,36 +711,158 @@ async fn test_metrics_integration() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn test_machine_a_tron_multidpu(
-    hw_type: HostHardwareType,
+/// The opt-in RPC waits for a running simulated DPU to apply Admin networking.
+async fn test_force_delete_waits_for_instance_dpu(
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
     segment_id: &str,
-    admin_dhcp_relay_address: Ipv4Addr,
 ) -> eyre::Result<()> {
-    run_machine_a_tron_test(
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| async move {
+            machine_handle
+                .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+                .await?;
+            let machine_ids = [
+                machine_handle
+                    .observed_machine_id()
+                    .context("ready host has no observed machine ID")?,
+                machine_handle.dpus()[0]
+                    .observed_machine_id()
+                    .context("ready DPU has no observed machine ID")?,
+            ];
+            let host_id: StableHostMachineId = machine_ids[0].try_into()?;
+            let instance_id = instance::create(
+                &test_env.carbide_api_addrs,
+                &host_id,
+                segment_id,
+                None,
+                false,
+                true,
+                &[],
+            )
+            .await?;
+            let network_config =
+                db::machine::get_network_config(&test_env.db_pool, &machine_ids[0]).await?;
+            assert_eq!(network_config.value.use_admin_network, Some(false));
+
+            let request = rpc::forge::AdminForceDeleteMachineRequest {
+                host_query: host_id.to_string(),
+                delete_interfaces: true,
+                delete_bmc_interfaces: true,
+                wait_for_instance_dpu: true,
+                ..Default::default()
+            };
+            let response =
+                machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+            assert!(!response.all_done);
+            let instance_id = instance_id.parse()?;
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_some()
+            );
+
+            // Keep the actors running so the DPU acknowledges the Admin request.
+            tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let response =
+                        machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+                    if response.all_done {
+                        return Ok::<(), eyre::Report>(());
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                }
+            })
+            .await
+            .wrap_err("timed out waiting for force deletion after the DPU acknowledgement")??;
+
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_none(),
+                "force deletion must remove the assigned Instance",
+            );
+            for machine_id in machine_ids {
+                assert!(
+                    db::machine::find_one(&test_env.db_pool, &machine_id, Default::default())
+                        .await?
+                        .is_none(),
+                    "force deletion must remove machine {machine_id}",
+                );
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn test_machine_a_tron_multidpu(
+    hw_type: HardwareType,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    segment_id: &str,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<()> {
+    run_machine_a_tron_machine_test(
         hw_type,
         1,
         2,
         false,
         test_env,
         bmc_mock_registry,
-        admin_dhcp_relay_address,
+        underlay_dhcp_relay_address,
         |machine_handle| {
             let segment_id = segment_id.to_string();
             let carbide_api_addrs = &test_env.carbide_api_addrs;
+            let db_pool = test_env.db_pool.clone();
+            let expected_selection = (hw_type == HardwareType::WiwynnGB200Nvl).then(|| {
+                let dpu = machine_handle
+                    .host_info()
+                    .dpus
+                    .get(1)
+                    .expect("Wiwynn GB200 host should contain its DPU with the lower scout PCI slot");
+                (
+                    dpu.host_mac_address,
+                    BootInterfaceSelectionSource::ScoutReportPci,
+                )
+            });
             async move {
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
-                tracing::info!("Machine {machine_id} has made it to Ready, allocating instance");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                if let Some(expected_selection) = expected_selection {
+                    let selection: (MacAddress, BootInterfaceSelectionSource) = sqlx::query_as(
+                        "SELECT desired_mac_address, selection_source
+                         FROM machine_boot_interfaces
+                         WHERE machine_id = $1",
+                    )
+                    .bind(machine_id)
+                    .fetch_one(&db_pool)
+                    .await?;
+                    assert_eq!(
+                        selection, expected_selection,
+                        "the Wiwynn mock must replace its RedfishChassisId selection with the lower scout PCI slot",
+                    );
+                }
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready, allocating instance",
+                );
                 let instance_id = instance::create(
                     carbide_api_addrs,
                     &machine_id,
-                    Some(&segment_id),
+                    &segment_id,
                     None,
                     false,
                     false,
@@ -509,7 +874,7 @@ async fn test_machine_a_tron_multidpu(
                     .wait_until_machine_up_with_api_state("Assigned/Ready", Duration::from_secs(90))
                     .await?;
 
-                let instance_json = instance::get_instance_json_by_machine_id(
+                let instances = instance::get_by_machine_id(
                     carbide_api_addrs,
                     machine_handle
                         .observed_machine_id()
@@ -518,32 +883,29 @@ async fn test_machine_a_tron_multidpu(
                         .as_str(),
                 )
                 .await?;
-
-                let serde_json::Value::Object(interface) =
-                    &instance_json["instances"][0]["status"]["network"]["interfaces"][0]
-                else {
-                    panic!("Allocated instance does not have interface configuration")
-                };
-
-                let serde_json::Value::Array(addrs) = &interface["addresses"] else {
-                    panic!("Interface does not have addresses")
-                };
-                assert_eq!(addrs.len(), 1);
-
-                let serde_json::Value::Array(gateways) = &interface["gateways"] else {
-                    panic!("Interface does not have gateways set")
-                };
-                assert_eq!(gateways.len(), 1);
+                let interface = instances
+                    .instances
+                    .first()
+                    .and_then(|instance| instance.status.as_ref())
+                    .and_then(|status| status.network.as_ref())
+                    .and_then(|network| network.interfaces.first())
+                    .context("allocated instance has no network status interface")?;
+                assert_eq!(interface.addresses.len(), 1);
+                assert_eq!(interface.gateways.len(), 1);
 
                 tracing::info!(
-                    "Machine {machine_id} has made it to Assigned/Ready, releasing instance"
+                    machine_id = %machine_id,
+                    "Machine has made it to Assigned/Ready, releasing instance",
                 );
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
 
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                tracing::info!("Machine {machine_id} has made it to Ready again, all done");
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready again, all done",
+                );
                 Ok::<(), eyre::Report>(())
             }
         },
@@ -552,50 +914,49 @@ async fn test_machine_a_tron_multidpu(
 }
 
 async fn test_machine_a_tron_zerodpu(
-    hw_type: HostHardwareType,
+    hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
-    admin_dhcp_relay_address: Ipv4Addr,
+    flat_vpc_id: &str,
 ) -> eyre::Result<()> {
-    run_machine_a_tron_test(
+    run_machine_a_tron_machine_test(
         hw_type,
         1,
         0,
         false,
         test_env,
         bmc_mock_registry,
-        admin_dhcp_relay_address,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
         |machine_handle| {
             let carbide_api_addrs = &test_env.carbide_api_addrs;
+            let flat_vpc_id = flat_vpc_id.to_string();
             async move {
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
-                tracing::info!("Machine {machine_id} has made it to Ready, allocating instance");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready, allocating instance",
+                );
 
-                // Zero-DPU tenants pass `auto: true` with empty interfaces; the
-                // allocator resolves the host's HostInband segment(s) from the
-                // machine snapshot (which is also covered in unit tests as
-                // `test_zero_dpu_instance_allocation_auto`).
-                let instance_id = instance::create(
+                let instance_id = instance::create_with_auto_host_inband_networking(
                     carbide_api_addrs,
                     &machine_id,
-                    None,
-                    None,
-                    false,
-                    false,
-                    &[],
+                    &flat_vpc_id,
                 )
                 .await?;
 
                 machine_handle
                     .wait_until_machine_up_with_api_state("Assigned/Ready", Duration::from_secs(90))
                     .await?;
+                assert_auto_instance_network(carbide_api_addrs, &instance_id, &flat_vpc_id).await?;
                 tracing::info!(
-                    "Machine {machine_id} has made it to Assigned/Ready, releasing instance"
+                    machine_id = %machine_id,
+                    "Machine has made it to Assigned/Ready, releasing instance",
                 );
 
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
@@ -603,7 +964,10 @@ async fn test_machine_a_tron_zerodpu(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                tracing::info!("Machine {machine_id} has made it to Ready again, all done");
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready again, all done",
+                );
                 Ok::<(), eyre::Report>(())
             }
         },
@@ -611,52 +975,67 @@ async fn test_machine_a_tron_zerodpu(
     .await
 }
 
-async fn test_machine_a_tron_singledpu_nic_mode(
-    hw_type: HostHardwareType,
+async fn test_machine_a_tron_nic_mode(
+    hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
-    admin_dhcp_relay_address: Ipv4Addr,
+    flat_vpc_id: &str,
+    host_inband_segment_id: &str,
 ) -> eyre::Result<()> {
-    run_machine_a_tron_test(
+    run_machine_a_tron_machine_test(
         hw_type,
         1,
         1,
         true,
         test_env,
         bmc_mock_registry,
-        admin_dhcp_relay_address,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
         |machine_handle| {
             let carbide_api_addrs = &test_env.carbide_api_addrs;
+            let flat_vpc_id = flat_vpc_id.to_string();
+            let host_inband_segment_id = host_inband_segment_id.to_string();
+            let expected_host_mac = machine_handle
+                .host_info()
+                .dpus
+                .first()
+                .expect("NIC-mode host should contain at least one DPU NIC")
+                .host_mac_address
+                .to_string();
             async move {
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
-                tracing::info!("Machine {machine_id} has made it to Ready, allocating instance");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready, allocating instance",
+                );
 
-                // For a DPU in NIC-mode, the DPU is treated as a plain NIC, meaning
-                // allocation goes through HostInband the same way the zero-DPU path
-                // allocation does; the request carries `auto: true` with empty
-                // interfaces, and Carbide resolves from the host's HostInband
-                // segment(s).
-                let instance_id = instance::create(
+                assert_nic_mode_host(
                     carbide_api_addrs,
                     &machine_id,
-                    None,
-                    None,
-                    false,
-                    false,
-                    &[],
+                    &expected_host_mac,
+                    &host_inband_segment_id,
+                )
+                .await?;
+
+                let instance_id = instance::create_with_auto_host_inband_networking(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &flat_vpc_id,
                 )
                 .await?;
 
                 machine_handle
                     .wait_until_machine_up_with_api_state("Assigned/Ready", Duration::from_secs(90))
                     .await?;
+                assert_auto_instance_network(carbide_api_addrs, &instance_id, &flat_vpc_id).await?;
                 tracing::info!(
-                    "Machine {machine_id} has made it to Assigned/Ready, releasing instance"
+                    machine_id = %machine_id,
+                    "Machine has made it to Assigned/Ready, releasing instance",
                 );
 
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
@@ -664,7 +1043,10 @@ async fn test_machine_a_tron_singledpu_nic_mode(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                tracing::info!("Machine {machine_id} has made it to Ready again, all done");
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready again, all done",
+                );
                 Ok::<(), eyre::Report>(())
             }
         },
@@ -672,39 +1054,142 @@ async fn test_machine_a_tron_singledpu_nic_mode(
     .await
 }
 
+async fn assert_nic_mode_host(
+    carbide_api_addrs: &[SocketAddr],
+    machine_id: &carbide_uuid::machine::MachineId,
+    expected_host_mac: &str,
+    host_inband_segment_id: &str,
+) -> eyre::Result<()> {
+    let machine = machine::get_by_id(carbide_api_addrs, machine_id).await?;
+    let status = machine
+        .status
+        .context("NIC-mode host has no machine status")?;
+    let associated_dpus = &status.associated_dpu_machine_ids;
+    eyre::ensure!(
+        associated_dpus.is_empty(),
+        "NIC-mode host {machine_id} still has associated DPUs: {associated_dpus:?}"
+    );
+
+    let interfaces = &status.interfaces;
+    eyre::ensure!(
+        interfaces
+            .iter()
+            .all(|interface| interface.attached_dpu_machine_id.is_none()),
+        "NIC-mode host {machine_id} still has a DPU-backed interface: {interfaces:?}"
+    );
+
+    let has_expected_primary_host_inband_interface = interfaces.iter().any(|interface| {
+        interface
+            .mac_address
+            .eq_ignore_ascii_case(expected_host_mac)
+            && interface.primary_interface
+            && interface
+                .segment_id
+                .is_some_and(|id| id.to_string() == host_inband_segment_id)
+            && interface.interface_type != Some(rpc::forge::InterfaceType::Bmc as i32)
+    });
+    eyre::ensure!(
+        has_expected_primary_host_inband_interface,
+        "NIC-mode host {machine_id} did not promote DPU host-facing PF {expected_host_mac} as its primary HostInband interface"
+    );
+    Ok(())
+}
+
+async fn assert_auto_instance_network(
+    carbide_api_addrs: &[SocketAddr],
+    instance_id: &str,
+    flat_vpc_id: &str,
+) -> eyre::Result<()> {
+    let instance = instance::get_by_id(carbide_api_addrs, instance_id).await?;
+    let network = instance
+        .config
+        .as_ref()
+        .and_then(|config| config.network.as_ref())
+        .context("automatically-networked instance has no network config")?;
+    eyre::ensure!(
+        network.auto_config.is_some(),
+        "instance {instance_id} did not retain auto networking: {network:?}"
+    );
+    eyre::ensure!(
+        network.interfaces.is_empty(),
+        "instance {instance_id} exposed resolved interfaces in its external config: {network:?}"
+    );
+    eyre::ensure!(
+        network
+            .auto_config
+            .as_ref()
+            .and_then(|config| config.vpc_id)
+            .is_some_and(|id| id.to_string() == flat_vpc_id),
+        "instance {instance_id} did not retain flat VPC {flat_vpc_id}: {network:?}"
+    );
+
+    let network_status = instance
+        .status
+        .as_ref()
+        .and_then(|status| status.network.as_ref())
+        .context("automatically-networked instance has no network status")?;
+    let status_interfaces = &network_status.interfaces;
+    eyre::ensure!(
+        !status_interfaces.is_empty()
+            && status_interfaces.iter().all(|interface| {
+                interface
+                    .vpc_id
+                    .is_some_and(|id| id.to_string() == flat_vpc_id)
+                    && interface
+                        .mac_address
+                        .as_ref()
+                        .is_some_and(|mac| !mac.is_empty())
+                    && !interface.addresses.is_empty()
+                    && !interface.gateways.is_empty()
+                    && !interface.prefixes.is_empty()
+            }),
+        "instance {instance_id} status does not contain resolved flat VPC networking: {status_interfaces:?}"
+    );
+    eyre::ensure!(
+        network_status.configs_synced == rpc::forge::SyncState::Synced as i32,
+        "instance {instance_id} network status is not synced: {network_status:?}"
+    );
+    Ok(())
+}
+
 async fn test_machine_a_tron_dual_stack(
-    hw_type: HostHardwareType,
+    hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
+    tenant_organization_id: &str,
     v4_vpc_prefix_id: &str,
     v6_vpc_prefix_id: &str,
-    admin_dhcp_relay_address: Ipv4Addr,
+    underlay_dhcp_relay_address: Ipv4Addr,
 ) -> eyre::Result<()> {
-    run_machine_a_tron_test(
+    run_machine_a_tron_machine_test(
         hw_type,
         1,
         1,
         false,
         test_env,
         bmc_mock_registry,
-        admin_dhcp_relay_address,
+        underlay_dhcp_relay_address,
         |machine_handle| {
             let v4_prefix_id = v4_vpc_prefix_id.to_string();
             let v6_prefix_id = v6_vpc_prefix_id.to_string();
+            let tenant_organization_id = tenant_organization_id.to_string();
             let carbide_api_addrs = &test_env.carbide_api_addrs;
             async move {
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
-                    "Machine {machine_id} is Ready, allocating dual-stack instance via ipv6 config"
+                    machine_id = %machine_id,
+                    "Machine is Ready, allocating dual-stack instance via ipv6 config",
                 );
                 let instance_id = instance::create_with_vpc_prefixes(
                     carbide_api_addrs,
                     &machine_id,
+                    &tenant_organization_id,
                     &[&v4_prefix_id, &v6_prefix_id],
                 )
                 .await?;
@@ -722,25 +1207,27 @@ async fn test_machine_a_tron_dual_stack(
                 let machine_id_str = machine_id.to_string();
                 let mut addrs = vec![];
                 for _ in 0..30 {
-                    let instance_json = instance::get_instance_json_by_machine_id(
+                    let instances = instance::get_by_machine_id(
                         carbide_api_addrs,
                         &machine_id_str,
                     )
                     .await?;
-                    if let Some(iface) = instance_json["instances"][0]["status"]["network"]["interfaces"]
-                        .as_array()
-                        .and_then(|ifaces| ifaces.first())
-                        && let Some(a) = iface["addresses"].as_array()
-                        && !a.is_empty()
+                    if let Some(addresses) = instances
+                        .instances
+                        .first()
+                        .and_then(|instance| instance.status.as_ref())
+                        .and_then(|status| status.network.as_ref())
+                        .and_then(|network| network.interfaces.first())
+                        .map(|interface| &interface.addresses)
+                        && !addresses.is_empty()
                     {
-                        addrs = a.clone();
+                        addrs = addresses.clone();
                         break;
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                let addr_strings: Vec<&str> =
-                    addrs.iter().filter_map(|a| a.as_str()).collect();
+                let addr_strings: Vec<&str> = addrs.iter().map(String::as_str).collect();
                 let has_ipv4 = addr_strings.iter().any(|a| a.contains('.'));
                 let has_ipv6 = addr_strings.iter().any(|a| a.contains(':'));
                 assert!(
@@ -758,7 +1245,9 @@ async fn test_machine_a_tron_dual_stack(
                 );
 
                 tracing::info!(
-                    "Machine {machine_id} dual-stack allocation verified: addresses = {addr_strings:?}"
+                    machine_id = %machine_id,
+                    addresses = ?addr_strings,
+                    "Machine dual-stack allocation verified",
                 );
 
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false)
@@ -768,7 +1257,8 @@ async fn test_machine_a_tron_dual_stack(
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
                 tracing::info!(
-                    "Machine {machine_id} back to Ready after dual-stack release"
+                    machine_id = %machine_id,
+                    "Machine back to Ready after dual-stack release",
                 );
                 Ok::<(), eyre::Report>(())
             }
@@ -781,20 +1271,20 @@ async fn test_machine_a_tron_dual_stack(
 /// The segment is pre-created with both IPv4 and IPv6 prefixes, and the
 /// handler allocates SVI IPs for both. Instances get one IP per prefix.
 async fn test_machine_a_tron_dual_stack_l2(
-    hw_type: HostHardwareType,
+    hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
     dual_stack_segment_id: &str,
-    admin_dhcp_relay_address: Ipv4Addr,
+    underlay_dhcp_relay_address: Ipv4Addr,
 ) -> eyre::Result<()> {
-    run_machine_a_tron_test(
+    run_machine_a_tron_machine_test(
         hw_type,
         1,
         1,
         false,
         test_env,
         bmc_mock_registry,
-        admin_dhcp_relay_address,
+        underlay_dhcp_relay_address,
         |machine_handle| {
             let segment_id = dual_stack_segment_id.to_string();
             let carbide_api_addrs = &test_env.carbide_api_addrs;
@@ -802,16 +1292,18 @@ async fn test_machine_a_tron_dual_stack_l2(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
-                    "Machine {machine_id} is Ready, allocating dual-stack L2 instance"
+                    machine_id = %machine_id,
+                    "Machine is Ready, allocating dual-stack L2 instance",
                 );
                 let instance_id = instance::create(
                     carbide_api_addrs,
                     &machine_id,
-                    Some(&segment_id),
+                    &segment_id,
                     None,
                     false,
                     false,
@@ -827,17 +1319,18 @@ async fn test_machine_a_tron_dual_stack_l2(
                     .await?;
 
                 tracing::info!(
-                    "Machine {machine_id} dual-stack L2 instance allocated and reached Assigned/Ready"
+                    machine_id = %machine_id,
+                    "Machine dual-stack L2 instance allocated and reached Assigned/Ready",
                 );
 
-                instance::release(carbide_api_addrs, &machine_id, &instance_id, false)
-                    .await?;
+                instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
 
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
                 tracing::info!(
-                    "Machine {machine_id} back to Ready after dual-stack L2 release"
+                    machine_id = %machine_id,
+                    "Machine back to Ready after dual-stack L2 release",
                 );
                 Ok::<(), eyre::Report>(())
             }
@@ -846,65 +1339,144 @@ async fn test_machine_a_tron_dual_stack_l2(
     .await
 }
 
+async fn test_machine_a_tron_scout_stream(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<()> {
+    let scout_stream_api_addrs = vec![
+        *test_env
+            .carbide_api_addrs
+            .first()
+            .context("no carbide API addresses configured")?,
+    ];
+
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        2,
+        0,
+        false,
+        test_env,
+        bmc_mock_registry,
+        underlay_dhcp_relay_address,
+        move |machine_handle| {
+            let scout_stream_api_addrs = scout_stream_api_addrs.clone();
+            async move {
+                machine_handle
+                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+                    .await?;
+                let machine_id = machine_handle
+                    .observed_machine_id()
+                    .context("ready machine has no observed machine ID")?;
+
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, true)
+                    .await?;
+                let own_connection_count = scout_stream::connections(&scout_stream_api_addrs)
+                    .await?
+                    .iter()
+                    .filter(|connection| connection.machine_id == Some(machine_id))
+                    .count();
+                assert_eq!(own_connection_count, 1);
+                assert_eq!(
+                    scout_stream::ping(&scout_stream_api_addrs, machine_id).await?,
+                    format!("pong from {machine_id}")
+                );
+                scout_stream::check_unsupported_request(&scout_stream_api_addrs, machine_id)
+                    .await?;
+
+                assert!(scout_stream::disconnect(&scout_stream_api_addrs, machine_id).await?);
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
+                    .await?;
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, true)
+                    .await?;
+
+                machine_handle.abort_and_wait().await?;
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
+                    .await
+            }
+        },
+    )
+    .await
+}
+
+/// Simulates `host_count` hosts of `hw_type` with machine-a-tron against the
+/// integration test API and hands the ingested state to the caller's check.
 #[allow(clippy::too_many_arguments)]
-async fn run_machine_a_tron_test<F, O>(
-    hw_type: HostHardwareType,
+async fn run_machine_a_tron_machine_test<F, O>(
+    hw_type: HardwareType,
     host_count: u32,
     dpu_per_host_count: u32,
     dpus_in_nic_mode: bool,
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
-    admin_dhcp_relay_address: Ipv4Addr,
+    underlay_dhcp_relay_address: Ipv4Addr,
     run_assertions: F,
 ) -> eyre::Result<()>
 where
-    F: Fn(HostMachineHandle) -> O,
+    F: Fn(DeviceHandle) -> O,
     O: Future<Output = eyre::Result<()>>,
 {
     let api_addr = test_env
         .carbide_api_addrs
         .first()
         .copied()
-        .context("No carbide API addresses configured")?;
+        .context("no carbide API addresses configured")?;
     let additional_api_urls = test_env.carbide_api_addrs[1..]
         .iter()
         .map(|a| format!("https://{}:{}", a.ip(), a.port()))
         .collect();
     let mat_config = MachineATronConfig {
+        racks: BTreeMap::new(),
         machines: BTreeMap::from([(
             "config".to_string(),
             Arc::new(MachineConfig {
+                rack_id: None,
+                rack_placement: None,
                 hw_type,
                 host_count,
                 dpu_per_host_count,
                 dpu_reboot_delay: 1,
                 host_reboot_delay: 1,
-                template_dir: test_env
-                    .root_dir
-                    .join("crates/machine-a-tron/templates")
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-                admin_dhcp_relay_address,
-                oob_dhcp_relay_address: Ipv4Addr::new(172, 20, 1, 1),
-                vpc_count: 0,
-                subnets_per_vpc: 0,
+                timing_overrides: Some(LifecycleTimingOverrides {
+                    host: PartialLifecycleTimings {
+                        reboot: Some(Duration::from_secs(1)),
+                        // ZERO disables the BMC self-reset offline window entirely,
+                        // keeping ingestion at its pre-feature pace
+                        bmc_reset: Some(Duration::ZERO),
+                        ..Default::default()
+                    },
+                    dpu: PartialLifecycleTimings {
+                        reboot: Some(Duration::from_secs(1)),
+                        // ZERO disables the BMC self-reset offline window entirely,
+                        // keeping ingestion at its pre-feature pace
+                        bmc_reset: Some(Duration::ZERO),
+                        ..Default::default()
+                    },
+                }),
+                acceleration_factor: 1.0,
+                underlay_dhcp_relay_address,
+                // Keep this distinct from the DPU Underlay relay so NIC-mode tests fail if
+                // machine-a-tron sends direct host DHCP through the DPU network.
+                host_inband_dhcp_relay_address: Some(Ipv4Addr::new(10, 10, 11, 2)),
+                bmc_dhcp_relay_address: TEST_BMC_DHCP_RELAY_ADDRESS,
                 run_interval_idle: Duration::from_secs(1),
                 run_interval_working: Duration::from_millis(100),
                 network_status_run_interval: Duration::from_secs(1),
                 scout_run_interval: Duration::from_secs(1),
-                network_virtualization_type: None,
+                discovery_retry_interval: Duration::from_millis(100),
                 dpus_in_nic_mode,
+                dpf_enabled: true,
                 dpu_firmware_versions: None,
+                host_firmware_versions: None,
                 dpu_agent_version: None,
             }),
         )]),
         carbide_api_url: format!("https://{}:{}", api_addr.ip(), api_addr.port()),
+        dhcp: DhcpType::Api {},
         log_file: None,
+        log_format: LogFormat::Compact,
         bmc_mock_port: 0, // unused, we're using dynamic ports on localhost
-        interface: String::from("UNUSED"), // unused, we're using dynamic ports on localhost
-        tui_enabled: false,
-        use_single_bmc_mock: false, // unused, we're constructing machines ourselves
+        bmc_mock_certs_dir: None,
         configure_carbide_bmc_proxy_host: None,
         persist_dir: None,
         cleanup_on_quit: false,
@@ -912,36 +1484,78 @@ where
         host_bmc_password: None,
         dpu_bmc_password: None,
         api_refresh_interval: Duration::from_millis(500),
+        scout_stream_reconnect_interval: Duration::from_secs(1),
         mock_bmc_ssh_server: false,
-        mock_bmc_ssh_port: None,
+        enable_ipmi_simulation: false,
+        hw_mac_address_ranges: None,
+        mac_address_pool: None,
+        ufm_mock: Default::default(),
+        rms_mock: Default::default(),
+        nmxc_mock: Default::default(),
     };
 
-    let (machine_handles, _mat_handle) = api_test_helper::machine_a_tron::run_local(
+    let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(
         mat_config,
         additional_api_urls,
         &test_env.root_dir,
-        Some(bmc_mock_registry.clone()),
+        bmc_mock_registry.clone(),
+        TEST_MAC_POOL.clone(),
     )
     .await
     .unwrap();
 
-    let results = join_all(machine_handles.into_iter().map(run_assertions)).await;
-    assert_eq!(results.len(), host_count as usize);
+    let results = join_all(provisionable_handles.into_iter().map(|machine_handle| {
+        let relay_assertion_handle = machine_handle.clone();
+        let assertions = run_assertions(machine_handle);
+        async move {
+            assertions.await?;
+            assert_relay_selection(
+                &relay_assertion_handle,
+                dpus_in_nic_mode,
+                underlay_dhcp_relay_address,
+            )
+        }
+    }))
+    .await;
+    let result_count = results.len();
+    let assertion_result: eyre::Result<()> = results.into_iter().try_collect();
+    let shutdown_result = mat_handle.shutdown().await;
 
-    results.into_iter().try_collect()
+    assert_eq!(result_count, host_count as usize);
+    assertion_result?;
+    shutdown_result
 }
 
-// Get the current number of rows in the dns_records view,
-// which is expected to start at 0, and then progress, as
-// the test continues.
-//
-// TODO(chet): Find a common place for this and the same exact
-// function in api/tests/dns.rs to exist, instead of it being
-// in two places.
-pub async fn get_dns_record_count(pool: &sqlx::Pool<Postgres>) -> i64 {
-    let mut txn = pool.begin().await.unwrap();
-    let query = "SELECT COUNT(*) as row_cnt FROM dns_records";
-    let rows = sqlx::query::<_>(query).fetch_one(&mut *txn).await.unwrap();
-    txn.commit().await.unwrap();
-    rows.try_get("row_cnt").unwrap()
+fn assert_relay_selection(
+    machine_handle: &DeviceHandle,
+    dpus_in_nic_mode: bool,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<()> {
+    let host_bmc_ip = machine_handle
+        .bmc_ip()
+        .context("host BMC DHCP did not return an address")?;
+    eyre::ensure!(
+        TEST_BMC_NETWORK_PREFIX.contains(&host_bmc_ip),
+        "host BMC DHCP used the underlay relay: {host_bmc_ip}"
+    );
+
+    for dpu in machine_handle.dpus() {
+        let dpu_bmc_ip = dpu.bmc_ip().context("DPU doesn't have BMC IP")?;
+        eyre::ensure!(
+            TEST_BMC_NETWORK_PREFIX.contains(&dpu_bmc_ip),
+            "DPU BMC DHCP used the underlay relay: {dpu_bmc_ip}"
+        );
+
+        if !dpus_in_nic_mode {
+            let dpu_underlay_ip = dpu
+                .machine_ip()
+                .context("DPU doesn't have machine IP address")?;
+            eyre::ensure!(
+                dpu_underlay_ip.octets()[..3] == underlay_dhcp_relay_address.octets()[..3],
+                "DPU OOB boot DHCP used the BMC relay: {dpu_underlay_ip}"
+            );
+        }
+    }
+
+    Ok(())
 }

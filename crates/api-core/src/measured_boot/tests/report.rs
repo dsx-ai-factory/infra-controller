@@ -39,7 +39,7 @@ mod tests {
     use rpc::forge::forge_server::Forge;
 
     use crate::measured_boot::tests::common::{create_test_machine, load_topology_json};
-    use crate::tests::common::api_fixtures::create_test_env;
+    use crate::tests::create_test_env;
 
     // test_profile_crudl creates a new profile with 3 attributes,
     // another new profile with 4 attributes.
@@ -48,7 +48,7 @@ mod tests {
     // of records being inserted into the database, and also makes
     // sure the records themselves are correct.
     #[crate::sqlx_test]
-    pub async fn test_report_crudl(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_report_crudl(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine = create_test_machine(
             &mut txn,
@@ -225,7 +225,7 @@ mod tests {
     // test_report_journal creates a new profile and makes
     // sure the journal gets updated.
     #[crate::sqlx_test]
-    pub async fn test_report_journal(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_report_journal(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine = create_test_machine(
             &mut txn,
@@ -310,7 +310,7 @@ mod tests {
     // test_report_to_active_bundle promotes a report to an active
     // bundle and makes sure all is well.
     #[crate::sqlx_test]
-    pub async fn test_report_to_active_bundle(
+    async fn test_report_to_active_bundle(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
@@ -484,7 +484,7 @@ mod tests {
     // test_report_to_revoked_bundle "promotes" a report to a
     // revoked bundle and makes sure all is well.
     #[crate::sqlx_test]
-    pub async fn test_report_to_revoked_bundle(
+    async fn test_report_to_revoked_bundle(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
@@ -573,9 +573,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    pub async fn test_max_reports_limit(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_max_reports_limit(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let env = create_test_env(pool.clone()).await;
         let machine_1 = create_test_machine(

@@ -29,7 +29,7 @@ Show details for one rack:
     $ nico-admin-cli rack show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Rack ID to show (leave empty for all)")]
-    pub rack: Option<RackId>,
+    pub(super) rack: Option<RackId>,
 }

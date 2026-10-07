@@ -19,6 +19,6 @@ use carbide_uuid::machine::MachineInterfaceId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-pub struct BootOverride {
-    pub interface_id: MachineInterfaceId,
+pub(super) struct BootOverride {
+    pub(super) interface_id: MachineInterfaceId,
 }

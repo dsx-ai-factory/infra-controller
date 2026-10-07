@@ -77,7 +77,7 @@ data:
                 version: "{{ $.Values.elasticsearch.version }}"
                 url:
                     scheme: "{{ $.Values.elasticsearch.scheme }}"
-                    host: "{{ $.Values.elasticsearch.host }}:{{ $.Values.elasticsearch.port }}"
+                    host: "{{ include "temporal.elasticsearch.address" $ }}"
                 username: "{{ $.Values.elasticsearch.username }}"
                 password: "{{ $.Values.elasticsearch.password }}"
                 logLevel: "{{ $.Values.elasticsearch.logLevel }}"
@@ -198,7 +198,7 @@ data:
     {{- end }}
 
     publicClient:
-      hostPort: "{{ include "temporal.componentname" (list $ "frontend") }}:{{ $.Values.server.frontend.service.port }}"
+      hostPort: "{{ include "temporal.componentname" (list $ "frontend") }}.{{ $.Release.Namespace }}.svc.cluster.local.:{{ $.Values.server.frontend.service.port }}"
 
     dynamicConfigClient:
       filepath: "/etc/temporal/dynamic_config/dynamic_config.yaml"

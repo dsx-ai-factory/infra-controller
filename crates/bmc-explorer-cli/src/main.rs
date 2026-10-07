@@ -14,17 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::Credentials;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::BmcEndpointExplorer;
 use carbide_site_explorer::config::SiteExplorerExploreMode;
+use carbide_site_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 use clap::Parser;
 use mac_address::MacAddress;
 use tracing_subscriber::fmt;
@@ -62,7 +64,7 @@ struct Cli {
     #[arg(long, default_value_t = 443)]
     bmc_port: u16,
 
-    /// Boot MAC Address (e.g. 02:03:04:05:06:07)
+    /// Boot interface MAC address (e.g. 02:03:04:05:06:07)
     #[arg(long)]
     boot_mac: Option<MacAddress>,
 }
@@ -85,7 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy_address = Arc::new(ArcSwap::new(None.into()));
     let credential_provider = Arc::new(TestCredentialManager::new(fallback_credentials.clone()));
 
-    let redfish_client_pool = carbide_redfish::libredfish::new_pool(
+    // The explorer performs credential-lifecycle work, so it takes the
+    // credential-operations handle of the direct pool.
+    let (_, redfish_client_pool) = carbide_redfish::libredfish::new_pool_with_credential_ops(
         credential_provider.clone(),
         rf_pool,
         proxy_address.clone(),
@@ -103,18 +107,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rotate_switch_nvos_credentials = Default::default();
 
-    let explorer = BmcEndpointExplorer::new(
+    let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         redfish_client_pool,
         Arc::new(NvRedfishClientPool::new(proxy_address)),
+        // Debug tool: no [bmc_proxy]; everything dials the BMC directly.
+        None,
         carbide_ipmi::test_support(),
         credential_provider.clone(),
+    ));
+    let explorer = BmcEndpointExplorer::new(
+        bmc_client,
         rotate_switch_nvos_credentials,
         mode,
+        // Standalone debug tool: no database, so rotation bookkeeping is skipped.
+        None,
     );
 
     let ip = args.bmc_ip.parse()?;
     let port = args.bmc_port;
     let bmc_ip_address = SocketAddr::new(ip, port);
+    let boot_interface = args.boot_mac.map(BootInterfaceTarget::MacOnly);
 
     if let Some(iterations) = args.benchmark {
         let start = Instant::now();
@@ -122,8 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             explorer
                 .generate_exploration_report(
                     bmc_ip_address,
-                    fallback_credentials.clone(),
-                    args.boot_mac,
+                    carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
+                    boot_interface.as_ref(),
                     None,
                 )
                 .await?;
@@ -137,8 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &explorer
                     .generate_exploration_report(
                         bmc_ip_address,
-                        fallback_credentials.clone(),
-                        args.boot_mac,
+                        carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
+                        boot_interface.as_ref(),
                         None,
                     )
                     .await?,

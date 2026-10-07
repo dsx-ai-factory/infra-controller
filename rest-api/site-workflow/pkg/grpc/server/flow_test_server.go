@@ -17,8 +17,10 @@ import (
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 var (
@@ -716,6 +718,27 @@ func (r *FlowServerImpl) PowerResetRack(ctx context.Context, req *flowv1.PowerRe
 	}, nil
 }
 
+// ACPowerCycleRack implements interface FlowServer
+func (r *FlowServerImpl) ACPowerCycleRack(ctx context.Context, req *flowv1.ACPowerCycleRackRequest) (*flowv1.SubmitTaskResponse, error) {
+	if req == nil || req.TargetSpec == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
+	}
+
+	taskID := uuid.NewString()
+	task := &flowv1.Task{
+		Id:           &flowv1.UUID{Id: taskID},
+		Operation:    "ACPowerCycleRack",
+		Status:       flowv1.TaskStatus_TASK_STATUS_PENDING,
+		ExecutorType: flowv1.TaskExecutorType_TASK_EXECUTOR_TYPE_TEMPORAL,
+		Message:      "AC power cycle task created",
+	}
+	r.tasks[taskID] = task
+
+	return &flowv1.SubmitTaskResponse{
+		TaskIds: []*flowv1.UUID{{Id: taskID}},
+	}, nil
+}
+
 // BringUpRack implements interface FlowServer
 func (r *FlowServerImpl) BringUpRack(ctx context.Context, req *flowv1.BringUpRackRequest) (*flowv1.SubmitTaskResponse, error) {
 	if req == nil || req.TargetSpec == nil {
@@ -797,7 +820,11 @@ func FlowTest(secs int) {
 		panic(err)
 	}
 
-	s := grpc.NewServer()
+	var serverOpts []grpc.ServerOption
+	if cotel.TransportEnabled() {
+		serverOpts = append(serverOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	s := grpc.NewServer(serverOpts...)
 	reflection.Register(s)
 	flowv1.RegisterFlowServer(s, &FlowServerImpl{
 		racks:           make(map[string]*flowv1.Rack),

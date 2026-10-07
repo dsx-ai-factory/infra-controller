@@ -145,6 +145,32 @@ func requireBringUpStatusReader(
 	)
 }
 
+// requireDecommissioner returns the manager interface for decommission control
+// operations.
+func requireDecommissioner(
+	registry *componentmanager.Registry,
+	target common.Target,
+) (componentmanager.Decommissioner, error) {
+	return requireCapableManager[componentmanager.Decommissioner](
+		registry,
+		target,
+		capability.CapabilityDecommissionControl,
+	)
+}
+
+// requireDecommissionStatusReader returns the manager interface for decommission
+// status reads.
+func requireDecommissionStatusReader(
+	registry *componentmanager.Registry,
+	target common.Target,
+) (componentmanager.DecommissionStatusReader, error) {
+	return requireCapableManager[componentmanager.DecommissionStatusReader](
+		registry,
+		target,
+		capability.CapabilityDecommissionStatus,
+	)
+}
+
 // requireFirmwareConsistencyChecker returns the manager interface for firmware
 // consistency checks.
 func requireFirmwareConsistencyChecker(

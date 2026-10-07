@@ -153,41 +153,28 @@ func main() {
 	fmt.Printf("Updated ExpectedMachine: ID=%s, Chassis SN=%s, DPU count=%d\n",
 		updatedEM.ID, updatedEM.ChassisSerialNumber, len(updatedEM.FallbackDPUSerialNumbers))
 
-	// Example 5: Update BMC MAC address
-	fmt.Println("\nExample 5: Updating BMC MAC address...")
-	newBmcMacAddress := "00:1A:2B:3C:4D:FF"
-	updateMacRequest := simple.ExpectedMachineUpdateRequest{
-		BmcMacAddress: &newBmcMacAddress,
-	}
-	updatedEMWithNewMAC, apiErr := client.UpdateExpectedMachine(ctx, expectedMachineID, updateMacRequest)
-	if apiErr != nil {
-		fmt.Printf("Error updating ExpectedMachine MAC: %s\n", apiErr.Message)
-		os.Exit(1)
-	}
-	fmt.Printf("Updated ExpectedMachine BMC MAC from %s to %s\n",
-		expectedMachine.BmcMacAddress, updatedEMWithNewMAC.BmcMacAddress)
-
-	// Example 6: Delete an ExpectedMachine
-	fmt.Println("\nExample 6: Deleting an ExpectedMachine...")
+	// Example 5: Delete an ExpectedMachine
+	fmt.Println("\nExample 5: Deleting an ExpectedMachine...")
 	apiErr = client.DeleteExpectedMachine(ctx, expectedMachineID)
 	if apiErr != nil {
 		fmt.Printf("Error deleting ExpectedMachine: %s\n", apiErr.Message)
 		os.Exit(1)
 	}
-	fmt.Printf("Deleted ExpectedMachine with ID: %s\n", updatedEMWithNewMAC.ID)
+	fmt.Printf("Deleted ExpectedMachine with ID: %s\n", updatedEM.ID)
 
 	// Verify deletion
 	fmt.Println("\nVerifying deletion...")
 	_, apiErr = client.GetExpectedMachine(ctx, expectedMachineID)
 	if apiErr != nil {
 		if apiErr.Code == http.StatusNotFound {
-			fmt.Printf("ExpectedMachine with ID %s successfully deleted (no longer present)\n", updatedEMWithNewMAC.ID)
+			fmt.Printf("ExpectedMachine with ID %s successfully deleted (no longer present)\n", updatedEM.ID)
 		} else {
 			fmt.Printf("Error verifying ExpectedMachine deletion: %s\n", apiErr.Message)
 			os.Exit(1)
 		}
 	} else {
-		fmt.Println("Warning: ExpectedMachine still exists after deletion")
+		fmt.Println("Error: ExpectedMachine still exists after deletion")
+		os.Exit(1)
 	}
 	fmt.Println("\nAll examples completed successfully!")
 }

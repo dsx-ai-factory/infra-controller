@@ -11,16 +11,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/uptrace/bun"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const NetworkSecurityGroupInitialVersion = "V0-T0"
@@ -85,13 +85,13 @@ type NetworkSecurityGroup struct {
 	Rules          []*NetworkSecurityGroupRule `bun:"rules,type:jsonb"`
 }
 
-func (s *NetworkSecurityGroup) GetRulesAsProtoRefs() []*cwssaws.NetworkSecurityGroupRuleAttributes {
+func (s *NetworkSecurityGroup) GetRulesAsProtoRefs() []*corev1.NetworkSecurityGroupRuleAttributes {
 	if s.Rules == nil {
 		return nil
 	}
 
 	// Convert our list of wrappers to a list of proto messages
-	rules := make([]*cwssaws.NetworkSecurityGroupRuleAttributes, len(s.Rules))
+	rules := make([]*corev1.NetworkSecurityGroupRuleAttributes, len(s.Rules))
 	for i, rule := range s.Rules {
 		if rule == nil {
 			rules[i] = nil
@@ -109,8 +109,8 @@ func (s *NetworkSecurityGroup) GetRulesAsProtoRefs() []*cwssaws.NetworkSecurityG
 // match the previous inline handler behaviour. Labels conversion is
 // delegated to the typed `Labels.ToProto()` helper per the
 // "Named types own their proto behavior" convention.
-func (s *NetworkSecurityGroup) toMetadataProto() *cwssaws.Metadata {
-	md := &cwssaws.Metadata{
+func (s *NetworkSecurityGroup) toMetadataProto() *corev1.Metadata {
+	md := &corev1.Metadata{
 		Name:        s.Name,
 		Description: "",
 		Labels:      s.Labels.ToProto(),
@@ -129,13 +129,13 @@ func (s *NetworkSecurityGroup) toMetadataProto() *cwssaws.Metadata {
 //
 // The proto's Attributes carry the rule list rebuilt from the embedded
 // proto attributes on each persisted rule wrapper.
-func (s *NetworkSecurityGroup) ToProto() *cwssaws.NetworkSecurityGroup {
-	return &cwssaws.NetworkSecurityGroup{
+func (s *NetworkSecurityGroup) ToProto() *corev1.NetworkSecurityGroup {
+	return &corev1.NetworkSecurityGroup{
 		Id:                   s.ID,
 		TenantOrganizationId: s.TenantOrg,
 		Metadata:             s.toMetadataProto(),
 		Version:              s.Version,
-		Attributes: &cwssaws.NetworkSecurityGroupAttributes{
+		Attributes: &corev1.NetworkSecurityGroupAttributes{
 			StatefulEgress: s.StatefulEgress,
 			Rules:          s.GetRulesAsProtoRefs(),
 		},
@@ -146,7 +146,7 @@ func (s *NetworkSecurityGroup) ToProto() *cwssaws.NetworkSecurityGroup {
 // representation. A nil proto is a no-op. This is the inverse of
 // `ToProto` and exists for convention symmetry — currently no code
 // path on the cloud side reconstructs a full NSG entity from a
-// `cwssaws.NetworkSecurityGroup` (the site is the destination, not the
+// `corev1.NetworkSecurityGroup` (the site is the destination, not the
 // source), but the method is provided so future reconciliation flows
 // have a single canonical entry point.
 //
@@ -160,7 +160,7 @@ func (s *NetworkSecurityGroup) ToProto() *cwssaws.NetworkSecurityGroup {
 //     merge.
 //   - Rule attributes are rewrapped from `proto.Attributes.Rules`;
 //     a nil Attributes leaves the rule list nil.
-func (s *NetworkSecurityGroup) FromProto(proto *cwssaws.NetworkSecurityGroup) {
+func (s *NetworkSecurityGroup) FromProto(proto *corev1.NetworkSecurityGroup) {
 	if proto == nil {
 		return
 	}
@@ -212,8 +212,8 @@ func (s *NetworkSecurityGroup) FromProto(proto *cwssaws.NetworkSecurityGroup) {
 
 // ToDeletionRequestProto builds the workflow request that asks a Site
 // to delete this NetworkSecurityGroup.
-func (s *NetworkSecurityGroup) ToDeletionRequestProto() *cwssaws.DeleteNetworkSecurityGroupRequest {
-	return &cwssaws.DeleteNetworkSecurityGroupRequest{
+func (s *NetworkSecurityGroup) ToDeletionRequestProto() *corev1.DeleteNetworkSecurityGroupRequest {
+	return &corev1.DeleteNetworkSecurityGroupRequest{
 		Id:                   s.ID,
 		TenantOrganizationId: s.TenantOrg,
 	}
@@ -223,12 +223,12 @@ func (s *NetworkSecurityGroup) ToDeletionRequestProto() *cwssaws.DeleteNetworkSe
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages
 type NetworkSecurityGroupRule struct {
-	*cwssaws.NetworkSecurityGroupRuleAttributes
+	*corev1.NetworkSecurityGroupRuleAttributes
 }
 
 func (s *NetworkSecurityGroupRule) UnmarshalJSON(b []byte) error {
 	if s.NetworkSecurityGroupRuleAttributes == nil {
-		s.NetworkSecurityGroupRuleAttributes = &cwssaws.NetworkSecurityGroupRuleAttributes{}
+		s.NetworkSecurityGroupRuleAttributes = &corev1.NetworkSecurityGroupRuleAttributes{}
 	}
 
 	// protoJsonUnmarshalOptions is set to ignore unknown fields.
@@ -252,12 +252,12 @@ func (s *NetworkSecurityGroupRule) MarshalJSON() ([]byte, error) {
 // that understands how to work with protobuf messages
 type NetworkSecurityGroupPropagationDetails struct {
 	FriendlyStatus string `json:"friendlyStatus"`
-	*cwssaws.NetworkSecurityGroupPropagationObjectStatus
+	*corev1.NetworkSecurityGroupPropagationObjectStatus
 }
 
 func (s *NetworkSecurityGroupPropagationDetails) UnmarshalJSON(b []byte) error {
 	if s.NetworkSecurityGroupPropagationObjectStatus == nil {
-		s.NetworkSecurityGroupPropagationObjectStatus = &cwssaws.NetworkSecurityGroupPropagationObjectStatus{}
+		s.NetworkSecurityGroupPropagationObjectStatus = &corev1.NetworkSecurityGroupPropagationObjectStatus{}
 	}
 
 	return protoJsonUnmarshalOptions.Unmarshal(b, s)
@@ -386,21 +386,17 @@ type NetworkSecurityGroupDAO interface {
 type NetworkSecurityGroupSQLDAO struct {
 	dbSession *db.Session
 	NetworkSecurityGroupDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new NetworkSecurityGroup from the given parameters
 // The returned NetworkSecurityGroup will not have any related structs (InfrastructureProvider/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (sgsd NetworkSecurityGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupCreateInput) (*NetworkSecurityGroup, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupCreateInput) (_ *NetworkSecurityGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.Create")
-	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
-
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "name", input.Name)
-	}
+	ctx, networkSecurityGroupDAOSpan := cotel.StartSpan(ctx, "NetworkSecurityGroupDAO.Create")
+	defer func() { cotel.EndSpan(networkSecurityGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("name", input.Name))
 
 	for _, rule := range input.Rules {
 		if rule == nil {
@@ -450,14 +446,11 @@ func (sgsd NetworkSecurityGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 
 // GetByID returns a NetworkSecurityGroup by ID
 // Returns db.ErrDoesNotExist error if the record is not found
-func (sgsd NetworkSecurityGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string) (*NetworkSecurityGroup, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string) (_ *NetworkSecurityGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.GetByID")
-	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
-
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "id", id)
-	}
+	ctx, networkSecurityGroupDAOSpan := cotel.StartSpan(ctx, "NetworkSecurityGroupDAO.GetByID")
+	defer func() { cotel.EndSpan(networkSecurityGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("id", id))
 
 	it := &NetworkSecurityGroup{}
 
@@ -482,12 +475,10 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // If no records found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified
 // in NetworkSecurityGroupOrderByDefault in ascending order
-func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NetworkSecurityGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]NetworkSecurityGroup, int, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NetworkSecurityGroupFilterInput, page paginator.PageInput, includeRelations []string) (_ []NetworkSecurityGroup, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.GetAll")
-	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
-	}
+	ctx, networkSecurityGroupDAOSpan := cotel.StartSpan(ctx, "NetworkSecurityGroupDAO.GetAll")
+	defer func() { cotel.EndSpan(networkSecurityGroupDAOSpan, retErr) }()
 
 	sgs := []NetworkSecurityGroup{}
 
@@ -497,7 +488,6 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 
 	if filter.Name != nil {
 		query = query.Where("nsg.name = ?", *filter.Name)
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "name", filter.Name)
 	}
 
 	// Single-item lists with IN are optimized by the query planner
@@ -505,26 +495,21 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 
 	if filter.TenantOrgs != nil {
 		query = query.Where("nsg.tenant_org IN (?)", bun.In(filter.TenantOrgs))
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "tenant_organization_ids", filter.TenantOrgs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("nsg.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "tenant_organization_ids", filter.TenantIDs)
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("nsg.site_id IN (?)", bun.In(filter.SiteIDs))
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "site_ids", filter.SiteIDs)
 	}
 
 	if filter.NetworkSecurityGroupIDs != nil {
 		query = query.Where("nsg.id IN (?)", bun.In(filter.NetworkSecurityGroupIDs))
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "network_security_group_ids", filter.NetworkSecurityGroupIDs)
 	}
 
 	if filter.Statuses != nil {
 		query = query.Where("nsg.status IN (?)", bun.In(filter.Statuses))
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "tenant_organization_ids", filter.Statuses)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -537,7 +522,7 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 				WhereOr("nsg.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("nsg.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -567,14 +552,11 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 // For setting to null values, use: Clear
 // Since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction.
-func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupUpdateInput) (*NetworkSecurityGroup, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupUpdateInput) (_ *NetworkSecurityGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.Update")
-	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
-
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "id", input.NetworkSecurityGroupID)
-	}
+	ctx, networkSecurityGroupDAOSpan := cotel.StartSpan(ctx, "NetworkSecurityGroupDAO.Update")
+	defer func() { cotel.EndSpan(networkSecurityGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("id", input.NetworkSecurityGroupID))
 
 	for _, rule := range input.Rules {
 		if rule == nil {
@@ -591,43 +573,37 @@ func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Name != nil {
 		it.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		it.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.Status != nil {
 		it.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.Labels != nil {
 		it.Labels = input.Labels
 		updatedFields = append(updatedFields, "labels")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "labels", input.Labels)
 	}
 	if input.StatefulEgress != nil {
 		it.StatefulEgress = *input.StatefulEgress
 		updatedFields = append(updatedFields, "stateful_egress")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "stateful_egress", *input.StatefulEgress)
 	}
 	if input.Rules != nil {
 		it.Rules = input.Rules
 		updatedFields = append(updatedFields, "rules")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "rules", input.Rules)
 	}
 	if input.Version != nil {
 		it.Version = *input.Version
 		updatedFields = append(updatedFields, "version")
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "version", input.Version)
 	}
 
 	it.UpdatedBy = input.UpdatedByID
 	updatedFields = append(updatedFields, "updated_by")
-
-	sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "updated_by", input.UpdatedByID)
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
@@ -649,21 +625,17 @@ func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 // Delete deletes an NetworkSecurityGroup
 // If the object being deleted doesnt exist,
 // error is not returned (idempotent delete)
-func (sgsd NetworkSecurityGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupDeleteInput) error {
+func (sgsd NetworkSecurityGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupDeleteInput) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.DeleteByID")
-	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
-
-		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "id", input.NetworkSecurityGroupID)
-	}
+	ctx, networkSecurityGroupDAOSpan := cotel.StartSpan(ctx, "NetworkSecurityGroupDAO.DeleteByID")
+	defer func() { cotel.EndSpan(networkSecurityGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(networkSecurityGroupDAOSpan, attribute.String("id", input.NetworkSecurityGroupID))
 
 	it := &NetworkSecurityGroup{
 		ID: input.NetworkSecurityGroupID,
 	}
 
 	it.UpdatedBy = input.UpdatedByID
-	sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "updated_by", input.UpdatedByID)
 
 	_, err := db.GetIDB(tx, sgsd.dbSession).NewDelete().Model(it).Where("id = ?", input.NetworkSecurityGroupID).Exec(ctx)
 	if err != nil {
@@ -676,7 +648,6 @@ func (sgsd NetworkSecurityGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, in
 // NewNetworkSecurityGroupDAO returns a new NetworkSecurityGroupDAO
 func NewNetworkSecurityGroupDAO(dbSession *db.Session) NetworkSecurityGroupDAO {
 	return &NetworkSecurityGroupSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

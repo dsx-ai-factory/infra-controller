@@ -59,11 +59,7 @@ pub(crate) async fn update_power_option(
 
     let machine_id = req
         .machine_id
-        .ok_or_else(|| CarbideError::InvalidArgument("Machine ID is missing".to_string()))?;
-
-    if machine_id.machine_type().is_dpu() {
-        return Err(CarbideError::InvalidArgument("Only host id is expected!!".to_string()).into());
-    }
+        .ok_or_else(|| CarbideError::InvalidArgument("machine ID is missing".to_string()))?;
 
     log_machine_id(&machine_id);
 
@@ -73,7 +69,7 @@ pub(crate) async fn update_power_option(
 
     // This should never happen until machine is not forced-deleted or does not exist.
     let Some(current_power_options) = current_power_state.first() else {
-        return Err(CarbideError::InvalidArgument("Only host id is expected!!".to_string()).into());
+        return Err(CarbideError::InvalidArgument("only host id is expected!!".to_string()).into());
     };
 
     let desired_power_state = req.power_state();
@@ -107,7 +103,7 @@ pub(crate) async fn update_power_option(
                 .contains(&health_report::HealthAlertClassification::suppress_external_alerting())
         }) {
             return Err(CarbideError::InvalidArgument(
-                "Machine must have a 'Maintenance' Health Alert with 'SupressExternalAlerting' classification.".into(),
+                "machine must have a 'maintenance' health alert with 'SupressExternalAlerting' classification".into(),
             )
             .into());
         }
@@ -117,7 +113,7 @@ pub(crate) async fn update_power_option(
     let desired_power_state = desired_power_state.into();
     if desired_power_state == current_power_options.desired_power_state {
         return Err(CarbideError::InvalidArgument(format!(
-            "Power State is already set as {desired_power_state:?}. No change is performed."
+            "power state is already set as {desired_power_state:?}. no change is performed"
         ))
         .into());
     }
@@ -158,7 +154,7 @@ pub(crate) async fn determine_machine_ingestion_state(
     //.   Nope -> WaitingForIngestion
 
     let mac_address = MacAddress::from_str(&request.mac_address.clone().ok_or(
-        CarbideError::InvalidArgument("No MAC address suplied".to_string()),
+        CarbideError::InvalidArgument("no MAC address suplied".to_string()),
     )?)
     .map_err(CarbideError::MacAddressParseError)?;
 
@@ -220,7 +216,7 @@ pub(crate) async fn allow_ingestion_and_power_on(
 ) -> Result<tonic::Response<()>, tonic::Status> {
     // flip a flag in explored_endpoints and allow a power on
     let mac_address = MacAddress::from_str(&request.mac_address.clone().ok_or(
-        CarbideError::InvalidArgument("No MAC address suplied".to_string()),
+        CarbideError::InvalidArgument("no MAC address suplied".to_string()),
     )?)
     .map_err(CarbideError::MacAddressParseError)?;
 

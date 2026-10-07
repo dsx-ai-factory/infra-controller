@@ -193,7 +193,7 @@ impl From<forgerpc::MachineValidationExternalConfig> for ValidationExternalConfi
         }
     }
 }
-pub async fn results(
+pub(super) async fn results(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(validation_id): AxumPath<String>,
 ) -> Response {
@@ -212,7 +212,7 @@ pub async fn results(
         include_history: false,
         machine_id: None,
     });
-    tracing::info!(%validation_id, "results");
+    tracing::info!(machine_validation_id = %validation_id, "results");
 
     let validation_results = match state
         .get_machine_validation_results(request)
@@ -233,7 +233,7 @@ pub async fn results(
             })
             .collect(),
         Err(err) => {
-            tracing::error!(%err, %validation_id, "get_validation_results failed");
+            tracing::error!(error = %err, machine_validation_id = %validation_id, "get_validation_results failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get validation results",
@@ -251,7 +251,7 @@ pub async fn results(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn result_details(
+pub(super) async fn result_details(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath((validation_id, test_id)): AxumPath<(String, String)>,
 ) -> Response {
@@ -296,7 +296,7 @@ pub async fn result_details(
             )
             .collect(),
         Err(err) => {
-            tracing::error!(%err, %validation_id, "get_validation_results failed");
+            tracing::error!(error = %err, machine_validation_id = %validation_id, "get_validation_results failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get validation results",
@@ -314,14 +314,14 @@ pub async fn result_details(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_tests_html(
+pub(super) async fn show_tests_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<PaginationParams>,
 ) -> Response {
     let validate_tests = match fetch_validation_tests(state, None).await {
         Ok(tests) => tests,
         Err(err) => {
-            tracing::error!(%err, "fetch_validation_tests");
+            tracing::error!(error = %err, "fetch_validation_tests");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading validation tests",
@@ -341,14 +341,14 @@ pub async fn show_tests_html(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_tests_details_html(
+pub(super) async fn show_tests_details_html(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(test_id): AxumPath<String>,
 ) -> Response {
     let validate_tests = match fetch_validation_tests(state, Some(test_id)).await {
         Ok(tests) => tests,
         Err(err) => {
-            tracing::error!(%err, "fetch_validation_tests");
+            tracing::error!(error = %err, "fetch_validation_tests");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading validation tests",
@@ -382,7 +382,7 @@ async fn fetch_validation_tests(
         .map(|response| response.into_inner().tests)
 }
 
-pub async fn runs(
+pub(super) async fn runs(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<PaginationParams>,
 ) -> Response {
@@ -414,7 +414,7 @@ pub async fn runs(
             })
             .collect(),
         Err(err) => {
-            tracing::warn!(%err,"get_machine_validation_runs failed");
+            tracing::warn!(error = %err,"get_machine_validation_runs failed");
             Vec::new()
         }
     };
@@ -429,7 +429,7 @@ pub async fn runs(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn external_configs(
+pub(super) async fn external_configs(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<PaginationParams>,
 ) -> Response {
@@ -453,7 +453,7 @@ pub async fn external_configs(
             })
             .collect(),
         Err(err) => {
-            tracing::warn!(%err,"get_machine_validation_runs failed");
+            tracing::warn!(error = %err,"get_machine_validation_external_configs failed");
             Vec::new()
         }
     };

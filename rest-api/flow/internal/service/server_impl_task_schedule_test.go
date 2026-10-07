@@ -13,16 +13,218 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskschedule "github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/taskschedule"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
+
+func TestCreateTaskScheduleFirmwareAuthenticationData(t *testing.T) {
+	tests := []struct {
+		name               string
+		withCipher         bool
+		authenticationData string
+	}{
+		{
+			name:               "encrypts authentication data before persistence",
+			withCipher:         true,
+			authenticationData: "schedule-token",
+		},
+		{name: "missing cipher allows schedule without authentication data"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rackID := uuid.New()
+			componentID := uuid.New()
+			inventory := newMockManager()
+			inventory.components[componentID] = &component.Component{
+				Info:   deviceinfo.DeviceInfo{ID: componentID},
+				RackID: rackID,
+				Type:   devicetypes.ComponentTypeCompute,
+			}
+			store := &capturingScheduleStore{id: uuid.New()}
+			var cipher *secret.Cipher
+			if tt.withCipher {
+				cipher = newServiceTestCipher(t)
+			}
+			server := &FlowServerImpl{
+				inventoryManager:  inventory,
+				taskScheduleStore: store,
+				dataCipher:        cipher,
+			}
+			var authenticationData *pb.FirmwareAuthenticationData
+			if tt.authenticationData != "" {
+				authenticationData = sharedServiceAuthenticationData(
+					tt.authenticationData,
+				)
+			}
+
+			_, err := server.CreateTaskSchedule(
+				context.Background(),
+				firmwareScheduleRequest(componentID, authenticationData),
+			)
+
+			require.NoError(t, err)
+			if tt.authenticationData != "" {
+				require.NotContains(
+					t,
+					string(store.row.OperationTemplate),
+					tt.authenticationData,
+				)
+			}
+			wrapper, err := taskschedule.WrapperFromTemplate(store.row.OperationTemplate)
+			require.NoError(t, err)
+			var info operations.FirmwareControlTaskInfo
+			require.NoError(t, info.Unmarshal(wrapper.Info))
+			if tt.authenticationData == "" {
+				require.Nil(t, info.AuthenticationData)
+				return
+			}
+
+			got, err := firmwareauth.DecryptFor(
+				cipher,
+				info.AuthenticationData,
+				devicetypes.ComponentTypeCompute,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tt.authenticationData, got)
+		})
+	}
+}
+
+func TestCreateTaskScheduleAuthenticationDataStatusCodes(t *testing.T) {
+	componentID := uuid.New()
+	tests := []struct {
+		name               string
+		cipher             *secret.Cipher
+		authenticationData *pb.FirmwareAuthenticationData
+		subTargets         []string
+		wantCode           codes.Code
+	}{
+		{
+			name:               "invalid input",
+			cipher:             newServiceTestCipher(t),
+			authenticationData: &pb.FirmwareAuthenticationData{},
+			wantCode:           codes.InvalidArgument,
+		},
+		{
+			name:               "missing cipher",
+			authenticationData: sharedServiceAuthenticationData("token"),
+			wantCode:           codes.FailedPrecondition,
+		},
+		{
+			name:               "authentication with dpu-only subtargets",
+			cipher:             newServiceTestCipher(t),
+			authenticationData: sharedServiceAuthenticationData("token"),
+			subTargets:         []string{"dpu"},
+			wantCode:           codes.InvalidArgument,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &capturingScheduleStore{id: uuid.New()}
+			server := &FlowServerImpl{
+				dataCipher:        tt.cipher,
+				taskScheduleStore: store,
+			}
+			req := firmwareScheduleRequest(componentID, tt.authenticationData)
+			req.Operation.GetUpgradeFirmware().SubTargets = tt.subTargets
+			_, err := server.CreateTaskSchedule(
+				context.Background(),
+				req,
+			)
+			require.Equal(t, tt.wantCode, status.Code(err))
+			require.Nil(t, store.row)
+		})
+	}
+}
+
+func firmwareScheduleRequest(
+	componentID uuid.UUID,
+	authenticationData *pb.FirmwareAuthenticationData,
+) *pb.CreateTaskScheduleRequest {
+	return &pb.CreateTaskScheduleRequest{
+		Schedule: &pb.ScheduleConfig{
+			Name: "firmware-schedule",
+			Spec: &pb.ScheduleSpec{
+				Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
+				Spec: "1h",
+			},
+		},
+		Operation: &pb.ScheduledOperation{
+			Operation: &pb.ScheduledOperation_UpgradeFirmware{
+				UpgradeFirmware: &pb.UpgradeFirmwareRequest{
+					TargetSpec: &pb.OperationTargetSpec{
+						Targets: &pb.OperationTargetSpec_Components{
+							Components: &pb.ComponentTargets{
+								Targets: []*pb.ComponentTarget{
+									{
+										Identifier: &pb.ComponentTarget_Id{
+											Id: &pb.UUID{Id: componentID.String()},
+										},
+									},
+								},
+							},
+						},
+					},
+					AuthenticationData: authenticationData,
+				},
+			},
+		},
+	}
+}
+
+type capturingScheduleStore struct {
+	taskschedule.Store
+	id  uuid.UUID
+	row *dbmodel.TaskSchedule
+}
+
+func (s *capturingScheduleStore) RunInTransaction(
+	ctx context.Context,
+	fn func(context.Context) error,
+) error {
+	return fn(ctx)
+}
+
+func (s *capturingScheduleStore) Create(
+	_ context.Context,
+	row *dbmodel.TaskSchedule,
+) (uuid.UUID, error) {
+	s.row = row
+	s.row.ID = s.id
+	s.row.CreatedAt = time.Now()
+	s.row.UpdatedAt = s.row.CreatedAt
+	return s.id, nil
+}
+
+func (*capturingScheduleStore) CreateScopes(
+	context.Context,
+	[]*dbmodel.TaskScheduleScope,
+) error {
+	return nil
+}
+
+func (s *capturingScheduleStore) Get(
+	context.Context,
+	uuid.UUID,
+) (*dbmodel.TaskSchedule, error) {
+	return s.row, nil
+}
 
 // ─── enum converters ─────────────────────────────────────────────────────────
 
@@ -988,22 +1190,22 @@ func TestResolveComponentTarget_ExternalID(t *testing.T) {
 			ct: operation.ComponentTarget{
 				External: &operation.ExternalRef{ID: "ext-1", Type: devicetypes.ComponentTypeCompute},
 			},
-			wantErr: "no component found with external id ext-1 and type",
+			wantErr: "component identifier \"ext-1\" not found",
 		},
 		{
-			name: "ambiguous — two components share same external id and type",
+			name: "ambiguous — two component types share the external id",
 			setup: func(m *mockManager) {
 				c1 := makeComp(compID, devicetypes.ComponentTypeCompute)
 				c1.ComponentID = "ext-2"
 				m.components[compID] = c1
-				c2 := makeComp(comp2ID, devicetypes.ComponentTypeCompute)
+				c2 := makeComp(comp2ID, devicetypes.ComponentTypeNVSwitch)
 				c2.ComponentID = "ext-2"
 				m.components[comp2ID] = c2
 			},
 			ct: operation.ComponentTarget{
-				External: &operation.ExternalRef{ID: "ext-2", Type: devicetypes.ComponentTypeCompute},
+				External: &operation.ExternalRef{ID: "ext-2", Type: devicetypes.ComponentTypeUnknown},
 			},
-			wantErr: "ambiguous external component: 2 components share external id ext-2",
+			wantErr: "component identifier \"ext-2\" is ambiguous",
 		},
 		{
 			name: "exactly one match — success",
@@ -1039,5 +1241,39 @@ func TestResolveComponentTarget_ExternalID(t *testing.T) {
 			assert.Equal(t, tt.wantCompID, gotComp)
 			assert.Equal(t, tt.wantRackID, gotRack)
 		})
+	}
+}
+
+func TestResolveNVLDomainScopeMaterializesRackMembership(t *testing.T) {
+	mgr := newMockManager()
+	domainID := uuid.New()
+	rackIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	for _, rackID := range rackIDs {
+		mgr.racks[rackID] = &rack.Rack{
+			Info: deviceinfo.DeviceInfo{ID: rackID},
+		}
+		mgr.domainRacks[domainID] = append(mgr.domainRacks[domainID], mgr.racks[rackID])
+	}
+
+	scopes, err := (&FlowServerImpl{inventoryManager: mgr}).resolveNVLDomainScope(
+		context.Background(),
+		[]operation.NVLDomainTarget{
+			{
+				Identifier: identifier.Identifier{ID: domainID},
+				ComponentTypes: []devicetypes.ComponentType{
+					devicetypes.ComponentTypeCompute,
+				},
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, scopes, 2)
+	for index, scope := range scopes {
+		assert.Equal(t, rackIDs[index], scope.RackID)
+		filter, err := dbmodel.UnmarshalComponentFilter(scope.ComponentFilter)
+		require.NoError(t, err)
+		require.NotNil(t, filter)
+		assert.Equal(t, dbmodel.ComponentFilterKindTypes, filter.Kind)
+		assert.Equal(t, []string{"Compute"}, filter.Types)
 	}
 }

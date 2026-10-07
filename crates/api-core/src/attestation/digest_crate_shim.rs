@@ -23,7 +23,7 @@ use rsa::signature::digest::{Output, Reset};
 /// The main thing we have to do is convert between the `Output` representations in each crate,
 /// in this case by laundering it through a `&mut [u8;32]` to convert between the representations.
 #[derive(Clone)]
-pub struct Sha256LegacyDigestShim(sha2::Sha256);
+pub(super) struct Sha256LegacyDigestShim(sha2::Sha256);
 
 impl rsa::signature::digest::OutputSizeUser for Sha256LegacyDigestShim {
     type OutputSize = <sha2::Sha256 as sha2::digest::OutputSizeUser>::OutputSize;

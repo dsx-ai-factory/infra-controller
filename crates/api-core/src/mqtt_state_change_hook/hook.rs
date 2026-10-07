@@ -20,8 +20,8 @@
 use std::time::Duration;
 
 use carbide_mqtt_common::hook::{MqttPublisher, QueuedMessage, process_events};
-use carbide_mqtt_common::metrics::MqttHookMetrics;
-use carbide_uuid::machine::MachineId;
+use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
+use carbide_uuid::machine::HostMachineId;
 use model::machine::ManagedHostState;
 use opentelemetry::metrics::Meter;
 use state_controller::state_change_emitter::{StateChangeEvent, StateChangeHook};
@@ -30,7 +30,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::mqtt_state_change_hook::message::ManagedHostStateChangeMessage;
+use crate::mqtt_state_change_hook::message::ManagedHostStateMessage;
 
 /// MQTT hook that publishes `ManagedHostState` changes to the MQTT broker.
 ///
@@ -40,7 +40,7 @@ use crate::mqtt_state_change_hook::message::ManagedHostStateChangeMessage;
 ///
 /// This hook maintains an internal queue and processes events in a background task.
 /// If the queue is full, events are dropped and a warning is logged.
-pub struct MqttStateChangeHook {
+pub(crate) struct MqttStateChangeHook {
     sender: mpsc::Sender<QueuedMessage>,
     publish_timeout: Duration,
     topic_prefix: String,
@@ -48,13 +48,11 @@ pub struct MqttStateChangeHook {
 }
 
 impl MqttStateChangeHook {
-    /// Create a new MQTT state change hook.
-    ///
-    /// Spawns a background task to process queued events.
-    /// Emits metrics:
-    /// - `forge_dsx_event_bus_publish_count`: Total number of MQTT publish attempts
-    /// - `forge_dsx_event_bus_queue_depth`: Current queue depth
-    pub fn new<P: MqttPublisher>(
+    /// `MqttStateChangeHook::new` creates the bounded event queue and starts its
+    /// publisher task. Publish outcomes feed
+    /// `carbide_dsx_event_bus_publish_count_total`; queue occupancy remains in
+    /// `carbide_dsx_event_bus_queue_depth`.
+    pub(crate) fn new<P: MqttPublisher>(
         client: P,
         join_set: &mut JoinSet<()>,
         publish_timeout: Duration,
@@ -64,7 +62,8 @@ impl MqttStateChangeHook {
         cancel_token: CancellationToken,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(queue_capacity);
-        let metrics = MqttHookMetrics::new(meter, sender.downgrade(), "managed_host");
+        let metrics =
+            MqttHookMetrics::new(meter, sender.downgrade(), PublishComponent::ManagedHost);
         join_set.spawn(process_events(
             receiver,
             client,
@@ -78,42 +77,40 @@ impl MqttStateChangeHook {
             metrics,
         }
     }
-
-    fn build_topic(&self, machine_id: &MachineId) -> String {
-        format!("{}/{}/state", self.topic_prefix, machine_id)
-    }
 }
 
-impl StateChangeHook<MachineId, ManagedHostState> for MqttStateChangeHook {
-    fn on_state_changed(&self, event: &StateChangeEvent<'_, MachineId, ManagedHostState>) {
+impl StateChangeHook<HostMachineId, ManagedHostState> for MqttStateChangeHook {
+    fn on_state_changed(&self, event: &StateChangeEvent<'_, HostMachineId, ManagedHostState>) {
         // Serialize immediately to avoid cloning state
-        let message = ManagedHostStateChangeMessage {
+        let message = ManagedHostStateMessage {
             machine_id: event.object_id,
             managed_host_state: event.new_state,
             timestamp: event.timestamp,
         };
-        let topic = self.build_topic(event.object_id);
+        let topic = message.topic(&self.topic_prefix);
 
         match message.to_json_bytes() {
             Ok(payload) => {
                 let deadline = Instant::now() + self.publish_timeout;
                 let queued = QueuedMessage {
                     topic,
+                    machine_id: event.object_id.to_string(),
                     payload,
                     deadline,
                 };
-                if let Err(e) = self.sender.try_send(queued) {
-                    tracing::warn!("MQTT state change event dropped (queue full): {e}");
-                    self.metrics.record_overflow();
+                if let Err(error) = self.sender.try_send(queued) {
+                    let error_message = error.to_string();
+                    let queued = error.into_inner();
+                    self.metrics
+                        .record_overflow(queued.topic, queued.machine_id, error_message);
                 }
             }
-            Err(e) => {
-                tracing::error!(
-                    machine_id = %event.object_id,
-                    error = %e,
-                    "Failed to serialize state change message"
+            Err(error) => {
+                self.metrics.record_state_change_serialization_error(
+                    topic,
+                    event.object_id.to_string(),
+                    error.to_string(),
                 );
-                self.metrics.record_serialization_error();
             }
         }
     }
@@ -134,19 +131,21 @@ mod tests {
         global::meter("test")
     }
 
-    fn test_machine_id() -> MachineId {
+    fn test_machine_id() -> HostMachineId {
         use carbide_uuid::machine::{MachineIdSource, MachineType};
-        MachineId::new(
+        carbide_uuid::machine::MachineId::new(
             MachineIdSource::ProductBoardChassisSerial,
             [0; 32],
             MachineType::Host,
         )
+        .try_into()
+        .unwrap()
     }
 
     fn make_event<'a>(
-        id: &'a MachineId,
+        id: &'a HostMachineId,
         state: &'a ManagedHostState,
-    ) -> StateChangeEvent<'a, MachineId, ManagedHostState> {
+    ) -> StateChangeEvent<'a, HostMachineId, ManagedHostState> {
         StateChangeEvent {
             object_id: id,
             previous_state: None,

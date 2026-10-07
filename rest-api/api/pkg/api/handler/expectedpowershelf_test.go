@@ -16,16 +16,22 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // testExpectedPowerShelfInitDB initializes a test database session
@@ -284,7 +290,7 @@ func TestCreateExpectedPowerShelfHandler_Handle(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
 				assert.NotNil(t, response.Labels, "Labels should not be nil in response")
-				assert.Equal(t, tt.requestBody.Labels, response.Labels, "Labels in response should match request")
+				assert.Equal(t, tt.requestBody.Labels, map[string]string(response.Labels), "Labels in response should match request")
 			}
 		})
 	}
@@ -355,6 +361,27 @@ func TestGetAllExpectedPowerShelfHandler_Handle(t *testing.T) {
 			},
 		}
 	}
+	dualRoleTenant := &cdbm.Tenant{
+		ID:   uuid.New(),
+		Name: "dual-role-tenant",
+		Org:  org,
+	}
+	_, err = dbSession.DB.NewInsert().Model(dualRoleTenant).Exec(ctx)
+	assert.Nil(t, err)
+	createDualRoleUser := func(org string) *cdbm.User {
+		return &cdbm.User{
+			StarfleetID: cutil.GetPtr("dual-role-user"),
+			OrgData: cdbm.OrgData{
+				org: cdbm.Org{
+					ID:          124,
+					Name:        org,
+					DisplayName: org,
+					OrgType:     "ENTERPRISE",
+					Roles:       []string{authz.ProviderViewerRole, authz.TenantAdminRole},
+				},
+			},
+		}
+	}
 
 	tests := []struct {
 		name                 string
@@ -369,6 +396,24 @@ func TestGetAllExpectedPowerShelfHandler_Handle(t *testing.T) {
 			siteId: "",
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response []model.APIExpectedPowerShelf
+				err := json.Unmarshal(body, &response)
+				assert.Nil(t, err)
+				for _, eps := range response {
+					assert.NotEqual(t, unmanagedEPS.ID, eps.ID, "Unmanaged power shelf should not be in response")
+				}
+			},
+		},
+		{
+			name:   "dual-role caller without siteId uses provider-wide listing",
+			siteId: "",
+			setupContext: func(c echo.Context) {
+				c.Set("user", createDualRoleUser(org))
 				c.SetParamNames("orgName")
 				c.SetParamValues(org)
 			},
@@ -682,8 +727,17 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedPowerShelf", mock.Anything).Return(mockWorkflowRun, nil)
+	workflowResult := mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
+	var capturedPatch *corev1.PatchExpectedPowerShelfRequest
+	var capturedProxy grpcproxy.Request
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedPatch = &corev1.PatchExpectedPowerShelfRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedPatch)
+			capturedProxy = args.Get(3).(grpcproxy.Request)
+			assert.Equal(t, corev1.Forge_PatchExpectedPowerShelf_FullMethodName, capturedProxy.FullMethod)
+		}).
+		Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedPowerShelfHandler(dbSession, scp, cfg)
@@ -704,14 +758,52 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		id             string
-		requestBody    model.APIExpectedPowerShelfUpdateRequest
-		setupContext   func(c echo.Context)
-		expectedStatus int
+		name                 string
+		id                   string
+		requestBody          model.APIExpectedPowerShelfUpdateRequest
+		rawRequestBody       string
+		initialBmcIPAddress  *string
+		expectedBmcIPAddress *string
+		setupContext         func(c echo.Context)
+		expectedStatus       int
+		expectedBmcMac       string
+		expectedStoredBmcMac string
+		expectedErrorMsg     string
+		expectNoWorkflow     bool
+		expectedPaths        []string
+		rejectsCredentials   bool
+		coreError            error
 	}{
 		{
-			name: "successful update",
+			name: "password-only update reaches Core through encrypted transport",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr("patch-secret"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"bmc_password"},
+		},
+		{
+			name: "username-only update reaches Core through encrypted transport",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr("patch-admin"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"bmc_username"},
+		},
+		{
+			name: "metadata update excludes null BMC credentials",
 			id:   testEPS.ID.String(),
 			requestBody: model.APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber: cutil.GetPtr("UPDATED-SHELF-123"),
@@ -722,7 +814,121 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testEPS.ID.String())
 			},
-			expectedStatus: http.StatusOK,
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"metadata.labels", "shelf_serial_number"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "successful update with BmcIpAddress",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				BmcIpAddress: cutil.GetPtr("192.168.1.42"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"bmc_ip_address"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.42"),
+		},
+		{
+			name:           "omitted BMC IP address preserves the stored address",
+			id:             testEPS.ID.String(),
+			rawRequestBody: `{"labels":{"env":"omitted-bmc-ip"}}`,
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"metadata.labels"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "empty BMC IP address clears the stored address",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				BmcIpAddress: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:      http.StatusOK,
+			expectedPaths:       []string{"bmc_ip_address"},
+			initialBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "Core rejection rolls back clearing the BMC IP address",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				BmcIpAddress: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:       http.StatusBadRequest,
+			expectedPaths:        []string{"bmc_ip_address"},
+			expectedErrorMsg:     "BMC IP update rejected",
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+			coreError:            swe.WrapErr(status.Error(codes.InvalidArgument, "BMC IP update rejected")),
+		},
+		{
+			name: "empty BMC username rejects accompanying metadata before dispatch",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr(""),
+				Labels:             map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:     http.StatusBadRequest,
+			expectedErrorMsg:   "defaultBmcUsername",
+			expectNoWorkflow:   true,
+			rejectsCredentials: true,
+		},
+		{
+			name: "BMC MAC formatting difference preserves stored identity",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				BmcMacAddress: cutil.GetPtr("00-11-22-33-44-dd"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:       http.StatusOK,
+			expectedBmcMac:       testEPS.BmcMacAddress,
+			expectedStoredBmcMac: testEPS.BmcMacAddress,
+		},
+		{
+			name: "BMC MAC address cannot be changed",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				BmcMacAddress: cutil.GetPtr("AA:BB:CC:DD:EE:FF"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus:       http.StatusBadRequest,
+			expectedStoredBmcMac: testEPS.BmcMacAddress,
+			expectedErrorMsg:     "BMC MAC address cannot be changed after creation",
+			expectNoWorkflow:     true,
 		},
 		{
 			name: "body ID mismatch with URL should return 400",
@@ -758,7 +964,17 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.initialBmcIPAddress != nil {
+				_, err := epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
+					ExpectedPowerShelfID: testEPS.ID,
+					BmcIpAddress:         tt.initialBmcIPAddress,
+				})
+				require.NoError(t, err)
+			}
 			reqBody, _ := json.Marshal(tt.requestBody)
+			if tt.rawRequestBody != "" {
+				reqBody = []byte(tt.rawRequestBody)
+			}
 			url := "/v2/org/" + org + "/nico/expected-power-shelf/" + tt.id
 			req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader(reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -768,13 +984,83 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 			c := e.NewContext(req, rec)
 
 			tt.setupContext(c)
+			workflowResult.Return(tt.coreError)
 
+			workflowCallsBefore := len(mockTemporalClient.Calls)
+			var before *cdbm.ExpectedPowerShelf
+			if tt.rejectsCredentials {
+				before, err = epsDAO.Get(ctx, nil, testEPS.ID, nil, false)
+				require.NoError(t, err)
+			}
 			err := handler.Handle(c)
 
 			assert.Nil(t, err)
+			if rec.Code == http.StatusOK || tt.coreError != nil {
+				require.Len(t, mockTemporalClient.Calls, workflowCallsBefore+1)
+				require.NotNil(t, capturedPatch)
+				require.NotNil(t, capturedPatch.UpdateMask)
+				assert.Equal(t, tt.expectedPaths, capturedPatch.UpdateMask.Paths)
+				if tt.requestBody.BmcIpAddress != nil {
+					assert.Equal(t, *tt.requestBody.BmcIpAddress, capturedPatch.ExpectedPowerShelf.BmcIpAddress)
+				}
+				if tt.requestBody.DefaultBmcUsername != nil {
+					assert.Equal(t, *tt.requestBody.DefaultBmcUsername, capturedPatch.ExpectedPowerShelf.BmcUsername)
+					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcUsername)
+					assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcUsername)
+				} else {
+					assert.Empty(t, capturedPatch.ExpectedPowerShelf.BmcUsername)
+				}
+				if tt.requestBody.DefaultBmcPassword != nil {
+					assert.Equal(t, *tt.requestBody.DefaultBmcPassword, capturedPatch.ExpectedPowerShelf.BmcPassword)
+					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcPassword)
+					assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcPassword)
+				} else {
+					assert.Empty(t, capturedPatch.ExpectedPowerShelf.BmcPassword)
+				}
+				if tt.requestBody.DefaultBmcUsername == nil && tt.requestBody.DefaultBmcPassword == nil {
+					assert.Empty(t, capturedProxy.EncryptedSecrets)
+				}
+			}
+			if tt.rejectsCredentials {
+				after, readErr := epsDAO.Get(ctx, nil, testEPS.ID, nil, false)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after, "invalid credentials must not mutate the cloud row")
+			}
+
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
+			}
+			if tt.expectedErrorMsg != "" {
+				assert.Contains(t, rec.Body.String(), tt.expectedErrorMsg)
+			}
+			if tt.expectedBmcMac != "" {
+				var response model.APIExpectedPowerShelf
+				err := json.Unmarshal(rec.Body.Bytes(), &response)
+				assert.Nil(t, err)
+				assert.Equal(t, tt.expectedBmcMac, response.BmcMacAddress)
+			}
+			if tt.expectedStoredBmcMac != "" {
+				stored, err := epsDAO.Get(ctx, nil, testEPS.ID, nil, false)
+				assert.Nil(t, err)
+				assert.Equal(t, tt.expectedStoredBmcMac, stored.BmcMacAddress)
+			}
+			if tt.initialBmcIPAddress != nil {
+				stored, err := epsDAO.Get(ctx, nil, testEPS.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedBmcIPAddress, stored.BmcIpAddress)
+				if rec.Code == http.StatusOK {
+					var response map[string]json.RawMessage
+					err = json.Unmarshal(rec.Body.Bytes(), &response)
+					require.NoError(t, err)
+					require.Contains(t, response, "bmcIpAddress")
+					expectedJSON, err := json.Marshal(tt.expectedBmcIPAddress)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(expectedJSON), string(response["bmcIpAddress"]))
+				}
+			}
+			if tt.expectNoWorkflow {
+				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
 			}
 		})
 	}

@@ -17,4 +17,4 @@
 
 use super::super::common::CreateSkuOptions;
 
-pub type Args = CreateSkuOptions;
+pub(in crate::sku) type Args = CreateSkuOptions;

@@ -1,6 +1,5 @@
 asn = 777
 dhcp_servers = ["99.101.102.103"]
-rapid_iterations = true
 max_database_connections = 1333
 max_find_by_ids = 50
 dpu_network_monitor_pinger_type = "OobNetBind"
@@ -41,6 +40,7 @@ dpu_wait_time = "7m"
 power_down_wait = "17s"
 failure_retry_time = "70m"
 dpu_up_threshold = "77m"
+boot_interface_observation_interval = "2h"
 [machine_state_controller.controller]
 iteration_time = "3m"
 max_object_handling_time = "11s"

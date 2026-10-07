@@ -24,7 +24,7 @@ use std::process::ExitStatus;
 use eyre::Context;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
-use tracing::log::error;
+use tracing::error;
 
 use crate::dpu::Action;
 use crate::pretty_cmd;
@@ -94,7 +94,7 @@ impl Route {
             entry.extend(routes);
         }
 
-        tracing::trace!("Route plan: {:?}", plan);
+        tracing::trace!(route_plan = ?plan, "Route plan");
         Ok(plan)
     }
 
@@ -104,7 +104,7 @@ impl Route {
                 Action::Add => {
                     if !routes.is_empty() {
                         for r in routes {
-                            tracing::info!("Adding route to Dpu: {:?}", r);
+                            tracing::info!(route = ?r, "Adding route to Dpu");
                             Self::ip_route_add(r.dst, r.dev.as_deref(), r.prefsrc, r.gateway)
                                 .await?;
                         }
@@ -113,7 +113,7 @@ impl Route {
                 Action::Remove => {
                     if !routes.is_empty() {
                         for r in routes {
-                            tracing::info!("Removing route from Dpu: {:?}", r);
+                            tracing::info!(route = ?r, "Removing route from Dpu");
                             Self::ip_route_del(r.dst, r.dev.as_deref(), r.prefsrc, r.gateway)
                                 .await?;
                         }
@@ -129,8 +129,8 @@ impl Route {
             let test_data_dir = PathBuf::from(crate::dpu::ARMOS_TEST_DATA_DIR);
 
             std::fs::read_to_string(test_data_dir.join("iproute.json")).map_err(|e| {
-                error!("Could not read iproute.json: {e}");
-                eyre::eyre!("Could not read iproute.json: {}", e)
+                error!(error = %e, "Could not read iproute.json");
+                eyre::eyre!("could not read iproute.json: {}", e)
             })
         } else {
             let mut cmd = tokio::process::Command::new("bash");
@@ -141,7 +141,7 @@ impl Route {
 
             let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
                 .await
-                .wrap_err_with(|| format!("Timeout while running command: {cmd_str:?}"))??;
+                .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
             let fout = String::from_utf8_lossy(&output.stdout).to_string();
             Ok(fout)
@@ -173,17 +173,17 @@ impl Route {
         cmd.kill_on_drop(true);
 
         let cmd_str = pretty_cmd(cmd.as_std());
-        tracing::trace!("Running command: {:?}", cmd_str);
+        tracing::trace!(command = ?cmd_str, "Running command");
 
         let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
             .await
-            .wrap_err_with(|| format!("Timeout while running command: {cmd_str:?}"))??;
+            .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
         let fout = String::from_utf8_lossy(&output.stdout).to_string();
         if output.status.success() {
             Ok(true)
         } else {
-            tracing::error!("Failed to add route: {:?}", fout);
+            tracing::error!(command_output = ?fout, "Failed to add route");
             Ok(false)
         }
     }
@@ -212,24 +212,24 @@ impl Route {
         cmd.kill_on_drop(true);
 
         let cmd_str = pretty_cmd(cmd.as_std());
-        tracing::trace!("Running command: {:?}", cmd_str);
+        tracing::trace!(command = ?cmd_str, "Running command");
 
         let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
             .await
-            .wrap_err_with(|| format!("Timeout while running command: {cmd_str:?}"))??;
+            .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
         let fout = String::from_utf8_lossy(&output.stdout).to_string();
         if output.status == ExitStatus::from_raw(0) {
             Ok(true)
         } else {
-            tracing::error!("Failed to remove route: {:?}", fout);
+            tracing::error!(command_output = ?fout, "Failed to remove route");
             Ok(false)
         }
     }
 
     pub async fn current_routes(interface: &str) -> eyre::Result<Vec<IpRoute>> {
         let data = Self::ip_route(interface).await?;
-        tracing::trace!("route data from ip route show: {:?}", data);
+        tracing::trace!(route_data = ?data, "route data from ip route show");
         let mut data =
             serde_json::from_str::<Vec<IpRoute>>(&data).map_err(|err| eyre::eyre!(err))?;
 
@@ -362,6 +362,6 @@ mod tests {
         assert_eq!(add[0], new_proposed_route1);
         assert_eq!(remove[0], route_to_remove);
 
-        tracing::trace!("Full Plan: {:?}", plan);
+        tracing::trace!(route_plan = ?plan, "Full Plan");
     }
 }

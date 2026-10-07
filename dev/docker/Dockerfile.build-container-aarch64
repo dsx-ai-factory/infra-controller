@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.95.0-slim-bookworm
+FROM arm64v8/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+
+ARG KEA_VERSION
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
@@ -42,8 +44,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		iproute2 \
 		iputils-ping \
 		jq \
-		kea-dev \
-		kea-dhcp4-server \
+		kea-dev=${KEA_VERSION} \
+		kea-dhcp4-server=${KEA_VERSION} \
+		kea-dhcp6-server=${KEA_VERSION} \
 		libboost-dev \
 		libgrpc-dev \
 		libopenipmi-dev \
@@ -53,6 +56,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		libssl-dev \
 		libtss2-dev \
 		libudev-dev \
+		mold \
 		pandoc \
 		pkg-config \
 		tpm2-tools \
@@ -65,11 +69,19 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		git \
 	&& rm -rf /var/lib/apt/lists/*
 
-# make LLVM's linker lld the default, because ld crashes using too much memory
-RUN update-alternatives --install /usr/bin/ld ld /usr/bin/lld 50
+RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
+	kea-dhcp6 -V
+
+# Keep the system linker for non-Rust builds such as iPXE, whose linker script
+# is not accepted by mold. Cargo uses this wrapper even outside the repository.
+RUN printf '#!/bin/sh\nexec clang -fuse-ld=mold "$@"\n' \
+		>/usr/local/bin/clang-mold && \
+	chmod 0755 /usr/local/bin/clang-mold
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
 RUN rustup component add rustfmt
-RUN cargo install cargo-cache cargo-make sccache cargo-deny --locked && \
+RUN cargo install cargo-cache cargo-make sccache --locked && \
+	cargo install cargo-deny --version 0.20.2 --locked && \
 	cargo install mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 && \
 	cargo cache -r registry-index,registry-sources
 
@@ -79,7 +91,7 @@ RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.14.0/kind-linux-arm64  && chm
 RUN cd /tmp && curl -Lo ./grpcurl.tar.gz https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_arm64.tar.gz && tar xzf grpcurl.tar.gz && chmod +x ./grpcurl && mv grpcurl /usr/local/bin/ && rm LICENSE && rm grpcurl.tar.gz
 RUN cd /tmp && curl -Lo vault.zip https://releases.hashicorp.com/vault/1.14.1/vault_1.14.1_linux_arm64.zip && unzip vault.zip && chmod u+x vault && mv vault /usr/local/bin/ && rm vault.zip
 RUN cd /usr/local/bin && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" && chmod +x /usr/local/bin/kubectl
-RUN export GO_VERSION="1.22.0" && \
+RUN export GO_VERSION="1.26.4" && \
 	export PLATFORM=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') && \
 	export TARFILE=go${GO_VERSION}.linux-${PLATFORM}.tar.gz && \
 	export URL=https://golang.org/dl/${TARFILE} && \

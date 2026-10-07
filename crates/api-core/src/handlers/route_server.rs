@@ -62,9 +62,8 @@ pub(crate) async fn add(
     Ok(tonic::Response::new(()))
 }
 
-// remove will remove RouteServer entries. Since this comes in
-// via the API, this will be restricted to entries which have
-// the admin_api source type.
+// remove will remove RouteServer entries matching the given
+// addresses and source_type supplied in the request.
 pub(crate) async fn remove(
     api: &Api,
     request: tonic::Request<rpc::RouteServers>,
@@ -79,7 +78,14 @@ pub(crate) async fn remove(
         .map_err(|_| CarbideError::InvalidArgument("source_type".to_string()))?;
 
     let mut txn = api.txn_begin().await?;
-    db::route_servers::remove(&mut txn, &route_servers, source_type.into()).await?;
+    let deleted = db::route_servers::remove(&mut txn, &route_servers, source_type.into()).await?;
+    if !route_servers.is_empty() && deleted == 0 {
+        return Err(Status::not_found(
+            "no route servers found matching the given addresses for the requested \
+             source_type; config-file-sourced entries must be targeted with \
+             source_type config_file",
+        ));
+    }
     txn.commit().await?;
 
     Ok(tonic::Response::new(()))

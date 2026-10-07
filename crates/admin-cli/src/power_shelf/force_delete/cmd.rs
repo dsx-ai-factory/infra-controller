@@ -20,12 +20,13 @@ use rpc::forge::AdminForceDeletePowerShelfRequest;
 use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub async fn force_delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
+pub(super) async fn force_delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
     let response = api_client
         .0
         .admin_force_delete_power_shelf(AdminForceDeletePowerShelfRequest {
             power_shelf_id: Some(data.power_shelf_id),
             delete_interfaces: data.delete_interfaces,
+            delete_bmc_suppressions: data.delete_bmc_suppressions,
         })
         .await?;
 

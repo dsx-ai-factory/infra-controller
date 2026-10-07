@@ -35,22 +35,22 @@ Filter by label:
     $ nico-admin-cli vpc show --label-key env --label-value prod
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(None),
         help = "The VPC ID to query, leave empty for all (default)"
     )]
-    pub id: Option<VpcId>,
+    pub(crate) id: Option<VpcId>,
 
     #[clap(short, long, help = "The Tenant Org ID to query")]
-    pub tenant_org_id: Option<String>,
+    pub(crate) tenant_org_id: Option<String>,
 
     #[clap(short, long, help = "The VPC name to query")]
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
 
     #[clap(long, help = "The key of VPC label to query")]
-    pub label_key: Option<String>,
+    pub(crate) label_key: Option<String>,
 
     #[clap(long, help = "The value of VPC label to query")]
-    pub label_value: Option<String>,
+    pub(crate) label_value: Option<String>,
 }

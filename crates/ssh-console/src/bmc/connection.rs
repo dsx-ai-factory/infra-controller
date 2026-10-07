@@ -25,8 +25,9 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
 use rpc::forge;
 use rpc::forge_api_client::ForgeApiClient;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection_impl;
@@ -36,23 +37,28 @@ use crate::bmc::vendor::{BmcVendor, BmcVendorDetectionError, SshBmcVendor};
 use crate::config::{Config, ConfigError};
 use crate::shutdown_handle::ShutdownHandle;
 
-pub async fn spawn(
+pub(super) async fn spawn(
     connection_details: ConnectionDetails,
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
+    cancel_token: CancellationToken,
     metrics: Arc<BmcPoolMetrics>,
     config: Arc<Config>,
 ) -> Result<Handle, SpawnError> {
     let handle = match connection_details {
-        ConnectionDetails::Ssh(ssh_connection_details) => {
-            ssh::spawn(ssh_connection_details, broadcast_to_frontend_tx, metrics)
-                .await?
-                .into()
-        }
+        ConnectionDetails::Ssh(ssh_connection_details) => ssh::spawn(
+            ssh_connection_details,
+            broadcast_to_frontend_tx,
+            metrics,
+            cancel_token,
+        )
+        .await?
+        .into(),
         ConnectionDetails::Ipmi(ipmi_connection_details) => ipmi::spawn(
             ipmi_connection_details,
             broadcast_to_frontend_tx,
             config,
             metrics,
+            cancel_token,
         )
         .await?
         .into(),
@@ -62,18 +68,31 @@ pub async fn spawn(
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum SpawnError {
+pub(super) enum SpawnError {
     #[error(transparent)]
     Ssh(#[from] connection_impl::ssh::SpawnError),
     #[error(transparent)]
     Ipmi(#[from] connection_impl::ipmi::SpawnError),
 }
 
+impl SpawnError {
+    pub(crate) fn retry_immediately(&self) -> bool {
+        matches!(self, Self::Ipmi(error) if error.retry_immediately())
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            SpawnError::Ssh(e) => e.is_cancelled(),
+            SpawnError::Ipmi(e) => e.is_cancelled(),
+        }
+    }
+}
+
 /// Get the address and auth details to use for a connection to a given machine or instance ID.
 ///
 /// This information is normally gotten by calling GetBMCMetadData on carbide-api, but it can
 /// also obey overridden information from ssh-console's config.
-pub async fn lookup(
+pub(super) async fn lookup(
     machine_or_instance_id: &str,
     config: &Config,
     forge_api_client: &ForgeApiClient,
@@ -114,7 +133,10 @@ pub async fn lookup(
             })),
         };
         tracing::info!(
-            "Overriding bmc connection to {machine_or_instance_id} with {connection_details:?}"
+            %machine_or_instance_id,
+            bmc_address = %connection_details.addr(),
+            bmc_machine_id = %connection_details.machine_id(),
+            "Overriding BMC connection"
         );
         return Ok(connection_details);
     }
@@ -137,6 +159,7 @@ pub async fn lookup(
             .ok_or_else(|| LookupError::CouldNotFindInstance { instance_id })?
             .machine_id
             .ok_or_else(|| LookupError::InstanceHasNoMachineId { instance_id })?
+            .into()
     } else {
         return Err(LookupError::CouldNotParseId {
             machine_or_instance_id: machine_or_instance_id.to_owned(),
@@ -149,7 +172,8 @@ pub async fn lookup(
         password,
         mac: _,
         port: _,
-        ssh_port,
+        ssh_port: _,
+        serial_console_ssh_port,
         ipmi_port,
         vendor,
     } = forge_api_client
@@ -174,11 +198,9 @@ pub async fn lookup(
     })?;
 
     let port = match &bmc_vendor {
-        BmcVendor::Ssh(ssh_bmc_vendor) => ssh_port
-            .map(u16::try_from)
-            .transpose()
+        BmcVendor::Ssh(ssh_bmc_vendor) => nonzero_serial_console_ssh_port(serial_console_ssh_port)
             .map_err(|e| LookupError::InvalidBmcMetadata {
-                reason: format!("invalid ssh port: {e:?}"),
+                reason: format!("invalid SSH serial-console port: {e:?}"),
             })?
             .or(config.override_bmc_ssh_port)
             .unwrap_or(match ssh_bmc_vendor {
@@ -197,7 +219,9 @@ pub async fn lookup(
 
     let addr = if let Some(override_ssh_addr) = config.override_bmc_ssh_addr(port).await? {
         tracing::info!(
-            "Overriding bmc connection to {ip} with {override_ssh_addr} per configuration"
+            bmc_ip_address = %ip,
+            override_bmc_ssh_address = %override_ssh_addr,
+            "Overriding BMC connection per configuration"
         );
         override_ssh_addr
     } else {
@@ -226,27 +250,35 @@ pub async fn lookup(
     Ok(connection_details)
 }
 
+fn nonzero_serial_console_ssh_port(
+    port: Option<u32>,
+) -> Result<Option<u16>, std::num::TryFromIntError> {
+    port.filter(|port| *port != 0)
+        .map(u16::try_from)
+        .transpose()
+}
+
 #[derive(thiserror::Error, Debug)]
-pub enum LookupError {
-    #[error("Configuration error: {0}")]
+pub(super) enum LookupError {
+    #[error("configuration error: {0}")]
     Config(#[from] ConfigError),
-    #[error("Error looking up instance ID {instance_id}: {tonic_status}")]
+    #[error("error looking up instance ID {instance_id}: {tonic_status}")]
     InstanceIdLookup {
         instance_id: InstanceId,
         tonic_status: tonic::Status,
     },
-    #[error("Could not find instance with id {instance_id}")]
+    #[error("could not find instance with id {instance_id}")]
     CouldNotFindInstance { instance_id: InstanceId },
-    #[error("Instance {instance_id} has no machine_id")]
+    #[error("instance {instance_id} has no machine_id")]
     InstanceHasNoMachineId { instance_id: InstanceId },
-    #[error("Could not parse {machine_or_instance_id} into a machine ID or instance ID")]
+    #[error("could not parse {machine_or_instance_id} into a machine ID or instance ID")]
     CouldNotParseId { machine_or_instance_id: String },
-    #[error("Cannot detect BMC vendor for machine: {machine_id}: {error}")]
+    #[error("cannot detect BMC vendor for machine: {machine_id}: {error}")]
     BmcVendorDetection {
         machine_id: MachineId,
         error: BmcVendorDetectionError,
     },
-    #[error("Error calling forge.GetBmcMetaData for {machine_id}: {tonic_status}")]
+    #[error("error calling forge.GetBmcMetaData for {machine_id}: {tonic_status}")]
     BmcMetaDataLookup {
         machine_id: String,
         tonic_status: tonic::Status,
@@ -256,17 +288,17 @@ pub enum LookupError {
 }
 
 /// A handle to a BMC connection, which will shut down when dropped.
-pub struct Handle {
-    pub to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
-    pub shutdown_tx: oneshot::Sender<()>,
-    pub join_handle: JoinHandle<Result<(), SpawnError>>,
+pub(super) struct Handle {
+    pub(super) to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
+    pub(super) drop_guard: DropGuard,
+    pub(super) join_handle: JoinHandle<Result<(), SpawnError>>,
 }
 
 impl From<ipmi::Handle> for Handle {
     fn from(handle: ipmi::Handle) -> Self {
         Self {
             to_bmc_msg_tx: handle.to_bmc_msg_tx,
-            shutdown_tx: handle.shutdown_tx,
+            drop_guard: handle.drop_guard,
             join_handle: tokio::spawn(async move {
                 handle
                     .join_handle
@@ -282,7 +314,7 @@ impl From<ssh::Handle> for Handle {
     fn from(handle: ssh::Handle) -> Self {
         Self {
             to_bmc_msg_tx: handle.to_bmc_msg_tx,
-            shutdown_tx: handle.shutdown_tx,
+            drop_guard: handle.drop_guard,
             join_handle: tokio::spawn(async move {
                 handle
                     .join_handle
@@ -295,33 +327,33 @@ impl From<ssh::Handle> for Handle {
 }
 
 impl ShutdownHandle<Result<(), SpawnError>> for Handle {
-    fn into_parts(self) -> (oneshot::Sender<()>, JoinHandle<Result<(), SpawnError>>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<Result<(), SpawnError>>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum ConnectionDetails {
+pub(super) enum ConnectionDetails {
     Ssh(Arc<ssh::ConnectionDetails>),
     Ipmi(Arc<ipmi::ConnectionDetails>),
 }
 
 impl ConnectionDetails {
-    pub fn addr(&self) -> SocketAddr {
+    pub(super) fn addr(&self) -> SocketAddr {
         match self {
             ConnectionDetails::Ssh(s) => s.addr,
             ConnectionDetails::Ipmi(i) => i.addr,
         }
     }
 
-    pub fn machine_id(&self) -> MachineId {
+    pub(super) fn machine_id(&self) -> MachineId {
         match self {
             ConnectionDetails::Ssh(s) => s.machine_id,
             ConnectionDetails::Ipmi(i) => i.machine_id,
         }
     }
 
-    pub fn kind(&self) -> Kind {
+    pub(super) fn kind(&self) -> Kind {
         match self {
             ConnectionDetails::Ssh(_) => Kind::Ssh,
             ConnectionDetails::Ipmi(_) => Kind::Ipmi,
@@ -330,7 +362,7 @@ impl ConnectionDetails {
 }
 
 #[derive(Copy, Clone)]
-pub enum Kind {
+pub(crate) enum Kind {
     Ssh,
     Ipmi,
 }
@@ -338,7 +370,7 @@ pub enum Kind {
 /// Represents the state of a connection to a BMC
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
+pub(super) enum State {
     Disconnected = 0,
     Connecting = 1,
     Connected = 2,
@@ -368,21 +400,21 @@ impl TryFrom<u8> for State {
 /// Wrapper for an AtomicU8 representing a [`State`], so that the state can be shared
 /// between threads.
 #[derive(Debug)]
-pub struct AtomicConnectionState(AtomicU8);
+pub(super) struct AtomicConnectionState(AtomicU8);
 
 impl AtomicConnectionState {
     #[inline]
-    pub fn new(state: State) -> Self {
+    pub(super) fn new(state: State) -> Self {
         Self(AtomicU8::new(state.into()))
     }
 
     #[inline]
-    pub fn load(&self) -> State {
+    pub(super) fn load(&self) -> State {
         State::try_from(self.0.load(Ordering::SeqCst)).expect("BUG: connection state corrupted")
     }
 
     #[inline]
-    pub fn store(&self, state: State) {
+    pub(super) fn store(&self, state: State) {
         self.0.store(state.into(), Ordering::SeqCst);
     }
 }
@@ -390,5 +422,22 @@ impl AtomicConnectionState {
 impl Default for AtomicConnectionState {
     fn default() -> Self {
         AtomicConnectionState::new(State::Disconnected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nonzero_serial_console_ssh_port;
+
+    #[test]
+    fn validates_serial_console_ssh_port() {
+        assert_eq!(nonzero_serial_console_ssh_port(None).unwrap(), None);
+        assert_eq!(nonzero_serial_console_ssh_port(Some(0)).unwrap(), None);
+        assert_eq!(nonzero_serial_console_ssh_port(Some(1)).unwrap(), Some(1));
+        assert_eq!(
+            nonzero_serial_console_ssh_port(Some(u16::MAX.into())).unwrap(),
+            Some(u16::MAX)
+        );
+        assert!(nonzero_serial_console_ssh_port(Some(u32::from(u16::MAX) + 1)).is_err());
     }
 }

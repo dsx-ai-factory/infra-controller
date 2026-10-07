@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: REST API direct DPS configuration
+templates:
+  - configmap.yaml
+set:
+  config.keycloak.enabled: true
+tests:
+  - it: accepts DPS disabled by default
+    asserts:
+      - isKind:
+          of: ConfigMap
+
+  - it: rejects non-boolean DPS enablement
+    set:
+      config.powerProvisioning.dps.enabled: external
+    asserts:
+      - failedTemplate:
+          errorMessage: config.powerProvisioning.dps.enabled must be a boolean
+
+  - it: requires an endpoint when DPS is enabled
+    set:
+      config.powerProvisioning.dps.enabled: true
+      secrets.dpsCreds: nico-dps-client
+    asserts:
+      - failedTemplate:
+          errorMessage: config.powerProvisioning.dps.endpoint is required when direct DPS integration is enabled
+
+  - it: requires an existing credentials Secret when DPS is enabled
+    set:
+      config.powerProvisioning.dps.enabled: true
+      config.powerProvisioning.dps.endpoint: dps.example.test:443
+    asserts:
+      - failedTemplate:
+          errorMessage: secrets.dpsCreds is required when direct DPS integration is enabled
+
+  - it: requires the credentials Secret name to be a string
+    set:
+      config.powerProvisioning.dps.enabled: true
+      config.powerProvisioning.dps.endpoint: dps.example.test:443
+      secrets.dpsCreds:
+        name: nico-dps-client
+    asserts:
+      - failedTemplate:
+          errorMessage: secrets.dpsCreds must be a string

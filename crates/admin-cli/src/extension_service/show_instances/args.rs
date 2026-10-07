@@ -29,12 +29,12 @@ Show instances using a specific version of the service:
     --version 1.0
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "The extension service ID")]
-    pub service_id: String,
+    service_id: String,
 
     #[clap(short = 'v', long, help = "Version string to filter by (optional)")]
-    pub version: Option<String>,
+    version: Option<String>,
 }
 
 impl From<Args> for ::rpc::forge::FindInstancesByDpuExtensionServiceRequest {

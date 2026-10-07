@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Vault configuration job namespace propagation
+templates:
+  - templates/vault-config-job.yaml
+tests:
+  - it: configures the wait and configuration clients when set
+    documentIndex: 3
+    set:
+      vault.namespace: admin/nico
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: VAULT_NAMESPACE
+            value: admin/nico
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_NAMESPACE
+            value: admin/nico
+
+  - it: omits the optional namespace by default
+    documentIndex: 3
+    asserts:
+      - notContains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: VAULT_NAMESPACE
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_NAMESPACE

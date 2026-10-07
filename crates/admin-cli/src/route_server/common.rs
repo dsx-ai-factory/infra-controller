@@ -24,9 +24,9 @@ use rpc::forge::RouteServerSourceType;
 // changes against whatever was loaded up via the config
 // file at start.
 #[derive(Parser, Debug)]
-pub struct AddressArgs {
+pub(super) struct AddressArgs {
     #[arg(value_delimiter = ',', help = "Comma-separated list of IP addresses")]
-    pub ip: Vec<std::net::IpAddr>,
+    ip: Vec<std::net::IpAddr>,
 
     // The optional source_type to set. If unset, this
     // defaults to admin_api, which is what we'd expect.
@@ -39,7 +39,7 @@ pub struct AddressArgs {
         default_value = "admin_api",
         help = "The source_type to use for the target addresses. Defaults to admin_api."
     )]
-    pub source_type: RouteServerSourceType,
+    source_type: RouteServerSourceType,
 }
 
 impl From<AddressArgs> for ::rpc::forge::RouteServers {

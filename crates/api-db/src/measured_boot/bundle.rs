@@ -563,8 +563,8 @@ async fn find_closest_bundle(
 
     if active_bundles.is_empty() {
         tracing::info!(
-            "No Active or Obsolete bundles were found for profile_id {0}",
-            profile_id
+            measurement_system_profile_id = %profile_id,
+            "No active or obsolete measured boot bundles found",
         );
         return Ok(None);
     }

@@ -24,6 +24,7 @@ use byteorder::{BigEndian, ByteOrder};
 use carbide_machine_controller::{MeasuringOutcome, handle_measuring_state};
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::MeasurementReportId;
+use chrono::Utc;
 use db::db_read::DbReader;
 use model::machine::MeasuringState;
 use pkcs1::LineEnding;
@@ -38,15 +39,51 @@ use crate::{CarbideError, CarbideResult};
 /// the state of a verify_quote call, specifically as
 /// it relates to verifying the signature and PCR hash.
 /// It is used for appropriate logging and error handling.
-pub enum VerifyQuoteState {
+enum VerifyQuoteState {
     Success,
     SignatureInvalid,
     VerifyHashNoMatch,
     CompleteFailure,
 }
 
+/// Which check (or both) of a measured-boot quote failed verification.
+/// `VerificationError` covers a quote whose checks could not even run --
+/// malformed AK, signature, or attestation bytes, or an unsupported
+/// signature type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
+pub(crate) enum MeasuredBootVerificationFailureCause {
+    SignatureInvalid,
+    HashMismatch,
+    SignatureAndHashMismatch,
+    VerificationError,
+}
+
+/// A measured-boot quote failed verification: the PCR signature, the PCR
+/// hash, or both did not check out -- or the checks themselves errored --
+/// and the attestation was rejected. The full TPM event log rides the log
+/// line as context, as these warn lines always included it; `error` holds
+/// the underlying reason when the checks errored.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "measured_boot_verification_failed",
+    metric_name = "carbide_measured_boot_verification_failures_total",
+    component = "nico-api",
+    log = warn,
+    metric = counter,
+    message = "measured boot quote verification failed",
+    describe = "Number of measured boot verification failures, across quote verification and attestation handling, by cause"
+)]
+pub(crate) struct MeasuredBootVerificationFailed {
+    #[label]
+    pub(crate) cause: MeasuredBootVerificationFailureCause,
+    #[context]
+    pub(crate) event_log: String,
+    #[context]
+    pub(crate) error: String,
+}
+
 impl VerifyQuoteState {
-    pub fn from_results(signature_valid: bool, pcr_hash_matches: bool) -> Self {
+    fn from_results(signature_valid: bool, pcr_hash_matches: bool) -> Self {
         match (signature_valid, pcr_hash_matches) {
             (true, true) => Self::Success,
             (false, true) => Self::SignatureInvalid,
@@ -60,7 +97,7 @@ impl VerifyQuoteState {
 /// PCR hash matching result, and a reference to the event
 /// log, and will check to see if things are good (or if an
 /// error needs to be returned + the event log dumped to log).
-pub fn verify_quote_state(
+pub(crate) fn verify_quote_state(
     signature_valid: bool,
     pcr_hash_matches: bool,
     event_log: &Option<Vec<u8>>,
@@ -69,28 +106,31 @@ pub fn verify_quote_state(
     match quote_state {
         VerifyQuoteState::Success => Ok(()),
         VerifyQuoteState::SignatureInvalid => {
-            tracing::warn!(
-                "PCR signature invalid (event log: {}",
-                event_log_to_string(event_log)
-            );
+            carbide_instrument::emit(MeasuredBootVerificationFailed {
+                cause: MeasuredBootVerificationFailureCause::SignatureInvalid,
+                event_log: event_log_to_string(event_log),
+                error: String::new(),
+            });
             Err(CarbideError::AttestQuoteError(
                 "PCR signature invalid (see logs for full event log)".to_string(),
             ))
         }
         VerifyQuoteState::VerifyHashNoMatch => {
-            tracing::warn!(
-                "PCR hash mismatch (event log: {}",
-                event_log_to_string(event_log)
-            );
+            carbide_instrument::emit(MeasuredBootVerificationFailed {
+                cause: MeasuredBootVerificationFailureCause::HashMismatch,
+                event_log: event_log_to_string(event_log),
+                error: String::new(),
+            });
             Err(CarbideError::AttestQuoteError(
                 "PCR hash does not match (see logs for full event log)".to_string(),
             ))
         }
         VerifyQuoteState::CompleteFailure => {
-            tracing::warn!(
-                "PCR signature invalid and PCR hash mismatch (event log: {}",
-                event_log_to_string(event_log)
-            );
+            carbide_instrument::emit(MeasuredBootVerificationFailed {
+                cause: MeasuredBootVerificationFailureCause::SignatureAndHashMismatch,
+                event_log: event_log_to_string(event_log),
+                error: String::new(),
+            });
             Err(CarbideError::AttestQuoteError(
                 "PCR signature invalid and PCR hash mismatch (see logs for full event log)"
                     .to_string(),
@@ -99,30 +139,30 @@ pub fn verify_quote_state(
     }
 }
 
-pub fn cli_make_cred(
+pub(crate) fn cli_make_cred(
     pub_key: rsa::RsaPublicKey,
     ak_name_serialized: &Vec<u8>,
     session_key: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CarbideError> {
     // now construct the temp directory
     let tmp_dir = TempDir::with_prefix("make_cred")
-        .map_err(|e| CarbideError::AttestBindKeyError(format!("Could not create TempDir: {e}")))?;
+        .map_err(|e| CarbideError::AttestBindKeyError(format!("could not create TempDir: {e}")))?;
     let tmp_dir_path = tmp_dir.path();
 
     // create a file to write the EK key to
     let ek_file_path = tmp_dir_path.join("ek.dat");
     let mut ek_file = File::create(ek_file_path.clone())
-        .map_err(|e| CarbideError::AttestBindKeyError(format!("Could not create EK file: {e}")))?;
+        .map_err(|e| CarbideError::AttestBindKeyError(format!("could not create EK file: {e}")))?;
 
     // serialize the public key to a PEM format and write it to the file
     let pem_pub_key = pub_key.to_pkcs1_pem(LineEnding::default()).map_err(|e| {
         CarbideError::AttestBindKeyError(format!(
-            "Could not convert EK RsaPublicKey to PEM format: {e}"
+            "could not convert EK RsaPublicKey to PEM format: {e}"
         ))
     })?;
 
     ek_file.write_all(pem_pub_key.as_bytes()).map_err(|e| {
-        CarbideError::AttestBindKeyError(format!("Could not write EK Pub to PEM file: {e}"))
+        CarbideError::AttestBindKeyError(format!("could not write EK pub to PEM file: {e}"))
     })?;
 
     // now write AK name to the file in hexadecimal format
@@ -133,35 +173,38 @@ pub fn cli_make_cred(
         session_key_path
             .to_str()
             .ok_or(CarbideError::AttestBindKeyError(
-                "Could not join seession_key_path".to_string(),
+                "could not join seession_key_path".to_string(),
             ))?;
 
     let mut session_key_file = File::create(session_key_path.clone()).map_err(|e| {
-        CarbideError::AttestBindKeyError(format!("Could not create file for session key: {e}"))
+        CarbideError::AttestBindKeyError(format!("could not create file for session key: {e}"))
     })?;
     session_key_file.write_all(session_key).map_err(|e| {
-        CarbideError::AttestBindKeyError(format!("Could not write session key to file: {e}"))
+        CarbideError::AttestBindKeyError(format!("could not write session key to file: {e}"))
     })?;
 
     // construct the command to execute make_credential
     let ek_file_path_str = ek_file_path
         .to_str()
         .ok_or(CarbideError::AttestBindKeyError(
-            "Could not convert ek_file_path to str".to_string(),
+            "could not convert ek_file_path to str".to_string(),
         ))?;
 
     let cred_out_path = tmp_dir_path.join("mkcred.out");
     let cred_out_path_str = cred_out_path
         .to_str()
         .ok_or(CarbideError::AttestBindKeyError(
-            "Could not join cred_out_path".to_string(),
+            "could not join cred_out_path".to_string(),
         ))?;
 
     let cmd_str = format!(
         "tpm2 makecredential -u {ek_file_path_str} -s {session_key_path_str} -n {ak_name_hex} -o {cred_out_path_str} -G rsa -V --tcti=none"
     );
 
-    tracing::debug!("make credential command is {}", cmd_str);
+    tracing::debug!(
+        command = %cmd_str,
+        "make credential command",
+    );
     // execute the makecredential command
     let output = Command::new("sh")
         .arg("-c")
@@ -169,19 +212,19 @@ pub fn cli_make_cred(
         .output()
         .map_err(|e| {
             CarbideError::AttestBindKeyError(format!(
-                "Could not execute makecredential command: {e}"
+                "could not execute makecredential command: {e}"
             ))
         })?;
 
     if !output.stderr.is_empty() {
         tracing::error!(
-            "tpm2 makecredential returned error: {}",
-            String::from_utf8_lossy(output.stderr.as_slice())
+            error = %String::from_utf8_lossy(output.stderr.as_slice()),
+            "tpm2 makecredential returned error",
         );
     }
 
     let creds = fs::read(cred_out_path).map_err(|e| {
-        CarbideError::AttestBindKeyError(format!("Could not create creds file: {e}"))
+        CarbideError::AttestBindKeyError(format!("could not create creds file: {e}"))
     })?;
 
     let (cred_blob, encr_secret) = extract_cred_secret(&creds)?;
@@ -190,7 +233,7 @@ pub fn cli_make_cred(
 }
 
 #[cfg_attr(not(feature = "linux-build"), allow(unused_variables))]
-pub fn verify_signature(
+pub(crate) fn verify_signature(
     ak_pub: &[u8],
     attest_vec: &[u8],
     rsa_signature: &[u8],
@@ -201,11 +244,11 @@ pub fn verify_signature(
         use tss_esapi::traits::UnMarshall;
 
         let ak_pub = Public::unmarshall(ak_pub).map_err(|e| {
-            CarbideError::AttestQuoteError(format!("Could not unmarshal AK Pub: {e}"))
+            CarbideError::AttestQuoteError(format!("could not unmarshal AK pub: {e}"))
         })?;
 
         let signature = Signature::unmarshall(rsa_signature).map_err(|e| {
-            CarbideError::AttestQuoteError(format!("Could not unmarshall Signature struct: {e}"))
+            CarbideError::AttestQuoteError(format!("could not unmarshall signature struct: {e}"))
         })?;
 
         linux_build::verify_signature(&ak_pub, attest_vec, &signature)
@@ -217,13 +260,13 @@ pub fn verify_signature(
 }
 
 #[cfg_attr(not(feature = "linux-build"), allow(unused_variables))]
-pub fn verify_pcr_hash(attestation: &[u8], pcr_values: &[Vec<u8>]) -> CarbideResult<bool> {
+pub(crate) fn verify_pcr_hash(attestation: &[u8], pcr_values: &[Vec<u8>]) -> CarbideResult<bool> {
     #[cfg(feature = "linux-build")]
     {
         use tss_esapi::structures::Attest;
         use tss_esapi::traits::UnMarshall;
         let attest = Attest::unmarshall(attestation).map_err(|e| {
-            CarbideError::AttestQuoteError(format!("Could not unmarshall Attest struct: {e}"))
+            CarbideError::AttestQuoteError(format!("could not unmarshall attest struct: {e}"))
         })?;
         linux_build::verify_pcr_hash(&attest, pcr_values)
     }
@@ -243,7 +286,7 @@ fn extract_cred_secret(creds: &[u8]) -> CarbideResult<(Vec<u8>, Vec<u8>)> {
 
     if creds.len() < magic_header_offset + cred_blob_offset {
         return Err(CarbideError::AttestBindKeyError(format!(
-            "Creds file is too short: {0} bytes",
+            "creds file is too short: {0} bytes",
             creds.len()
         )));
     }
@@ -257,7 +300,7 @@ fn extract_cred_secret(creds: &[u8]) -> CarbideResult<(Vec<u8>, Vec<u8>)> {
 
     if creds.len() < cred_blob_end_idx + secret_offset - 1 {
         return Err(CarbideError::AttestBindKeyError(format!(
-            "Creds file is too short: {0} bytes",
+            "creds file is too short: {0} bytes",
             creds.len()
         )));
     }
@@ -275,7 +318,7 @@ fn extract_cred_secret(creds: &[u8]) -> CarbideResult<(Vec<u8>, Vec<u8>)> {
 ///
 /// since the event log is currently "best effort", we'll log a
 /// little "error" in <>'s if we notice there's no event log.
-pub fn event_log_to_string(event_log: &Option<Vec<u8>>) -> String {
+pub(crate) fn event_log_to_string(event_log: &Option<Vec<u8>>) -> String {
     event_log
         .as_ref()
         .map(|log_utf8| {
@@ -286,7 +329,7 @@ pub fn event_log_to_string(event_log: &Option<Vec<u8>>) -> String {
 }
 
 #[cfg_attr(not(feature = "linux-build"), allow(unused_variables))]
-pub async fn compare_pub_key_against_cert(
+pub(crate) async fn compare_pub_key_against_cert(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     ek_pub: &[u8],
@@ -302,7 +345,7 @@ pub async fn compare_pub_key_against_cert(
     }
 }
 
-pub async fn has_passed_attestation<DB>(
+pub(crate) async fn has_passed_attestation<DB>(
     db: &mut DB,
     machine_id: &MachineId,
     _report_id: &MeasurementReportId,
@@ -315,6 +358,8 @@ where
         machine_id,
         db,
         true,
+        Utc::now(),
+        chrono::Duration::MAX,
     )
     .await
     .map_err(|e| CarbideError::AttestQuoteError(e.to_string()))?;
@@ -324,11 +369,11 @@ where
 
 #[cfg(not(feature = "linux-build"))]
 fn attestation_unsupported_error() -> CarbideError {
-    CarbideError::AttestQuoteError("This server does not support attestation".to_string())
+    CarbideError::AttestQuoteError("this server does not support attestation".to_string())
 }
 
 #[cfg(feature = "linux-build")]
-pub mod linux_build {
+pub(crate) mod linux_build {
     use asn1_rs::FromDer;
     use model::hardware_info::TpmEkCertificate;
     use rsa::{BigUint, RsaPublicKey};
@@ -344,12 +389,12 @@ pub mod linux_build {
 
     const RSA_PUBKEY_EXPONENT: u32 = 65537u32;
 
-    pub fn verify_pcr_hash(attest: &Attest, pcr_values: &[Vec<u8>]) -> CarbideResult<bool> {
+    pub(super) fn verify_pcr_hash(attest: &Attest, pcr_values: &[Vec<u8>]) -> CarbideResult<bool> {
         let attest_digest = match attest.attested() {
             AttestInfo::Quote { info } => info.pcr_digest(),
             _other => {
                 return Err(CarbideError::AttestQuoteError(
-                    "Incorrect Attestation Type".into(),
+                    "incorrect attestation type".into(),
                 ));
             }
         };
@@ -369,7 +414,7 @@ pub mod linux_build {
         }
     }
 
-    pub fn do_compare_pub_key_against_cert(
+    pub(crate) fn do_compare_pub_key_against_cert(
         tpm_ek_cert: &TpmEkCertificate,
         ek_pub: &[u8],
     ) -> CarbideResult<(bool, rsa::RsaPublicKey)> {
@@ -377,12 +422,12 @@ pub mod linux_build {
 
         let cert = X509Certificate::from_der(tpm_ek_cert.as_bytes())
             .map_err(|e| {
-                CarbideError::AttestBindKeyError(format!("Could not unmarshall EK Cert: {e}"))
+                CarbideError::AttestBindKeyError(format!("could not unmarshall EK cert: {e}"))
             })?
             .1;
 
         let pub_key_cert_data = cert.public_key().parsed().map_err(|e| {
-            CarbideError::AttestBindKeyError(format!("Could not get EK Cert Data: {e}"))
+            CarbideError::AttestBindKeyError(format!("could not get EK cert data: {e}"))
         })?;
 
         let ek_cert_modulus = match pub_key_cert_data {
@@ -402,19 +447,19 @@ pub mod linux_build {
         // actually do coincide!
         let pub_key_cert = RsaPublicKey::new(modulus, exponent).map_err(|e| {
             CarbideError::AttestBindKeyError(format!(
-                "Could not create RsaPublicKey from EK Cert: {e}"
+                "could not create RsaPublicKey from EK cert: {e}"
             ))
         })?;
         // construct the Public structure and extract the PublicKeyRsa from it, which is really just the modulus
         let ek_pub = Public::unmarshall(ek_pub).map_err(|e| {
-            CarbideError::AttestBindKeyError(format!("Could not unmarshall EK: {e}"))
+            CarbideError::AttestBindKeyError(format!("could not unmarshall EK: {e}"))
         })?;
 
         let unique = match ek_pub {
             Public::Rsa { unique, .. } => unique,
             _ => {
                 return Err(CarbideError::AttestBindKeyError(
-                    "EK Pub is not in RSA format".to_string(),
+                    "EK pub is not in RSA format".to_string(),
                 ));
             }
         };
@@ -425,14 +470,14 @@ pub mod linux_build {
 
         let pub_key_ek = RsaPublicKey::new(modulus, exponent).map_err(|e| {
             CarbideError::AttestBindKeyError(format!(
-                "Could not create RsaPublicKey from TPM's EK Pub: {e}"
+                "could not create RsaPublicKey from TPM's EK pub: {e}"
             ))
         })?;
 
         Ok((pub_key_ek == pub_key_cert, pub_key_ek))
     }
 
-    pub fn verify_signature(
+    pub(super) fn verify_signature(
         ak_pub: &Public,
         attest_vec: &[u8],
         signature: &Signature,
@@ -446,7 +491,7 @@ pub mod linux_build {
             tss_esapi::structures::Public::Rsa { unique, .. } => unique,
             _ => {
                 return Err(CarbideError::AttestQuoteError(
-                    "AK Pub is not an RSA key".to_string(),
+                    "AK pub is not an RSA key".to_string(),
                 ));
             }
         };
@@ -456,7 +501,7 @@ pub mod linux_build {
         let exponent: BigUint = BigUint::from(RSA_PUBKEY_EXPONENT);
 
         let pub_key = RsaPublicKey::new(modulus, exponent).map_err(|e| {
-            CarbideError::AttestQuoteError(format!("Could not create RsaPublicKey: {e}"))
+            CarbideError::AttestQuoteError(format!("could not create RsaPublicKey: {e}"))
         })?;
 
         let rsa_signature = match signature {
@@ -480,6 +525,8 @@ pub mod linux_build {
 }
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+
     use super::*;
 
     #[test]
@@ -491,8 +538,67 @@ mod tests {
             Ok(..) => panic!("Failed: Should have received an error"),
             Err(e) => assert_eq!(
                 e.to_string(),
-                "Attest Bind Key Error: Creds file is too short: 3 bytes"
+                "attest bind key error: creds file is too short: 3 bytes"
             ),
+        }
+    }
+
+    /// Every failing verification writes one WARN line (the event log as a
+    /// field) AND moves the failure counter under its cause label; a passing
+    /// verification emits nothing. The `verification_error` cause -- the
+    /// checks themselves erroring in `attest_quote` -- rides the same event
+    /// with the underlying reason as the `error` field.
+    #[test]
+    fn verification_failure_logs_and_counts_by_cause() {
+        let event_log = Some(b"tpm event log".to_vec());
+
+        // The quote-failure DB tests each drive one cause once, from
+        // seconds-long flows that do not hold the capture lock -- the odds of
+        // one landing inside this capture window are negligible.
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            assert!(verify_quote_state(true, true, &event_log).is_ok());
+            assert!(verify_quote_state(false, true, &event_log).is_err());
+            assert!(verify_quote_state(true, false, &event_log).is_err());
+            assert!(verify_quote_state(false, false, &event_log).is_err());
+            carbide_instrument::emit(MeasuredBootVerificationFailed {
+                cause: MeasuredBootVerificationFailureCause::VerificationError,
+                event_log: event_log_to_string(&event_log),
+                error: "PCR signature verification failed: bad AK".to_string(),
+            });
+        });
+
+        assert_eq!(logs.len(), 4, "the success case must not log");
+        let field = |log: &carbide_instrument::testing::CapturedLog, name: &str| {
+            log.fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        for (log, cause_label, error) in [
+            (&logs[0], "signature_invalid", ""),
+            (&logs[1], "hash_mismatch", ""),
+            (&logs[2], "signature_and_hash_mismatch", ""),
+            (
+                &logs[3],
+                "verification_error",
+                "PCR signature verification failed: bad AK",
+            ),
+        ] {
+            assert_eq!(log.level, tracing::Level::WARN, "cause {cause_label}");
+            assert_eq!(log.message, "measured boot quote verification failed");
+            assert_eq!(field(log, "cause"), Some(cause_label.to_string()));
+            assert_eq!(field(log, "event_log"), Some("tpm event log".to_string()));
+            assert_eq!(field(log, "error"), Some(error.to_string()));
+
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_measured_boot_verification_failures_total",
+                    &[("cause", cause_label)],
+                ),
+                1.0,
+                "counter for cause={cause_label}"
+            );
         }
     }
 }

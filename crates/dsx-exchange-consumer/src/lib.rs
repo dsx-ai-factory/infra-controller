@@ -30,7 +30,6 @@ pub mod metrics;
 pub mod mqtt_consumer;
 
 pub use config::Config;
-pub use metrics::ConsumerMetrics;
 
 use crate::api_client::{ApiClientWrapper, ConsoleRackHealthSink};
 use crate::health_updater::HealthUpdater;
@@ -40,16 +39,16 @@ pub enum DsxConsumerError {
     #[error("API call failed: {0}")]
     Api(#[from] tonic::Status),
 
-    #[error("Configuration invalid: {0}")]
+    #[error("configuration invalid: {0}")]
     Config(String),
 
     #[error("MQTT operation failed: {0}")]
     Mqtt(String),
 
-    #[error("Metrics setup failed: {0}")]
+    #[error("metrics setup failed: {0}")]
     Metrics(String),
 
-    #[error("Secrets error: {0}")]
+    #[error("secrets error: {0}")]
     Secrets(String),
 }
 
@@ -58,40 +57,38 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
 
     // Set up OpenTelemetry + Prometheus metrics
     let metrics_setup =
-        metrics_endpoint::new_metrics_setup("carbide-dsx-exchange-consumer", "carbide", false)
+        metrics_endpoint::new_metrics_setup("carbide-dsx-exchange-consumer", "carbide", true)
             .map_err(|e| DsxConsumerError::Metrics(e.to_string()))?;
 
     let registry = metrics_setup.registry;
     let meter = metrics_setup.meter;
+    carbide_instrument::log_events::register(&meter);
 
     // Spawn metrics server
     let metrics_config = metrics_endpoint::MetricsEndpointConfig {
         address: metrics_endpoint,
         registry,
         health_controller: Some(metrics_setup.health_controller),
+        additional_prefix: None,
     };
     let join_listener =
         tokio::spawn(async move { metrics_endpoint::run_metrics_endpoint(&metrics_config).await });
 
-    // Create consumer metrics
-    let consumer_metrics = ConsumerMetrics::new(&meter);
+    let credential_manager =
+        carbide_secrets::create_credential_manager(&carbide_secrets::CredentialConfig::default())
+            .await
+            .map_err(|e| DsxConsumerError::Secrets(e.to_string()))?;
 
-    let credential_manager = carbide_secrets::create_credential_manager(
-        &carbide_secrets::CredentialConfig::default(),
-        meter.clone(),
-    )
-    .await
-    .map_err(|e| DsxConsumerError::Secrets(e.to_string()))?;
+    // Connect to MQTT and get the processing channel. mqttea tracks
+    // subscriptions and replays them after reconnect when the broker reports
+    // that the previous session was not resumed.
+    let (queue_tx, rx) =
+        mqtt_consumer::connect(&config.mqtt, &meter, credential_manager.clone()).await?;
 
-    // Connect to MQTT and get message receiver. mqttea tracks subscriptions
-    // and replays them after reconnect when the broker reports that the
-    // previous session was not resumed.
-    let rx = mqtt_consumer::connect(
-        &config.mqtt,
-        consumer_metrics.clone(),
-        credential_manager.clone(),
-    )
-    .await?;
+    // Expose the channel's pending depth so backpressure is visible before the
+    // drop counter starts moving. Hand the sender over by value: the gauge keeps
+    // only a weak handle, so the channel still closes when the real senders drop.
+    metrics::register_queue_pending_gauge(&meter, queue_tx);
 
     // Set up API client and create health updater
     let join_updater = if let Some(api_config) = config.carbide_api {
@@ -101,24 +98,14 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
             api_config.client_key,
             &api_config.api_url,
         ));
-        let health_updater = HealthUpdater::new(
-            config.mqtt.topic_prefix,
-            config.cache,
-            api_client,
-            consumer_metrics,
-            meter,
-        );
+        let health_updater =
+            HealthUpdater::new(config.mqtt.topic_prefix, config.cache, api_client, meter);
         tokio::spawn(async move { health_updater.run(rx).await })
     } else {
         tracing::warn!("Carbide API disabled, using console sink");
         let api_client = Arc::new(ConsoleRackHealthSink);
-        let health_updater = HealthUpdater::new(
-            config.mqtt.topic_prefix,
-            config.cache,
-            api_client,
-            consumer_metrics,
-            meter,
-        );
+        let health_updater =
+            HealthUpdater::new(config.mqtt.topic_prefix, config.cache, api_client, meter);
         tokio::spawn(async move { health_updater.run(rx).await })
     };
 

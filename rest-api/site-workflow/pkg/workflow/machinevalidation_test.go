@@ -7,9 +7,9 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/testsuite"
@@ -33,7 +33,7 @@ func (ts *EnableDisableMachineValidationTestTestSuite) AfterTest(suiteName, test
 func (ts *EnableDisableMachineValidationTestTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestEnableDisableTestRequest{
+	request := &corev1.MachineValidationTestEnableDisableTestRequest{
 		TestId:    "test-id-1",
 		Version:   "test-version-1",
 		IsEnabled: true,
@@ -52,7 +52,7 @@ func (ts *EnableDisableMachineValidationTestTestSuite) Test_Success() {
 func (ts *EnableDisableMachineValidationTestTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestEnableDisableTestRequest{
+	request := &corev1.MachineValidationTestEnableDisableTestRequest{
 		TestId:    "test-id-1",
 		Version:   "test-version-1",
 		IsEnabled: true,
@@ -92,8 +92,8 @@ func (ts *PersistValidationResultTestSuite) AfterTest(suiteName, testName string
 func (ts *PersistValidationResultTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationResultPostRequest{
-		Result: &cwssaws.MachineValidationResult{
+	request := &corev1.MachineValidationResultPostRequest{
+		Result: &corev1.MachineValidationResult{
 			Name: "test-1",
 		},
 	}
@@ -111,8 +111,8 @@ func (ts *PersistValidationResultTestSuite) Test_Success() {
 func (ts *PersistValidationResultTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationResultPostRequest{
-		Result: &cwssaws.MachineValidationResult{
+	request := &corev1.MachineValidationResultPostRequest{
+		Result: &corev1.MachineValidationResult{
 			Name: "test-1",
 		},
 	}
@@ -151,14 +151,14 @@ func (ts *GetMachineValidationResultsTestSuite) AfterTest(suiteName, testName st
 func (ts *GetMachineValidationResultsTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationGetRequest{
-		MachineId: &cwssaws.MachineId{
+	request := &corev1.MachineValidationGetRequest{
+		MachineId: &corev1.MachineId{
 			Id: "machine-id-1",
 		},
 	}
 
-	mockResponse := &cwssaws.MachineValidationResultList{
-		Results: []*cwssaws.MachineValidationResult{
+	mockResponse := &corev1.MachineValidationResultList{
+		Results: []*corev1.MachineValidationResult{
 			{
 				Name: "test-1",
 			},
@@ -175,7 +175,7 @@ func (ts *GetMachineValidationResultsTestSuite) Test_Success() {
 	ts.NoError(ts.env.GetWorkflowError())
 
 	// get actual response and validate
-	var actualResponse cwssaws.MachineValidationResultList
+	var actualResponse corev1.MachineValidationResultList
 	if err := ts.env.GetWorkflowResult(&actualResponse); err != nil {
 		ts.Fail(err.Error())
 	}
@@ -186,8 +186,8 @@ func (ts *GetMachineValidationResultsTestSuite) Test_Success() {
 func (ts *GetMachineValidationResultsTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationGetRequest{
-		MachineId: &cwssaws.MachineId{
+	request := &corev1.MachineValidationGetRequest{
+		MachineId: &corev1.MachineId{
 			Id: "machine-id-1",
 		},
 	}
@@ -226,14 +226,14 @@ func (ts *GetMachineValidationRunsTestSuite) AfterTest(suiteName, testName strin
 func (ts *GetMachineValidationRunsTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationRunListGetRequest{
-		MachineId: &cwssaws.MachineId{
+	request := &corev1.MachineValidationRunListGetRequest{
+		MachineId: &corev1.MachineId{
 			Id: "machine-id-1",
 		},
 	}
 
-	mockResponse := &cwssaws.MachineValidationRunList{
-		Runs: []*cwssaws.MachineValidationRun{
+	mockResponse := &corev1.MachineValidationRunList{
+		Runs: []*corev1.MachineValidationRun{
 			{
 				Name: "test-1",
 			},
@@ -250,7 +250,7 @@ func (ts *GetMachineValidationRunsTestSuite) Test_Success() {
 	ts.NoError(ts.env.GetWorkflowError())
 
 	// get actual response and validate
-	var actualResponse cwssaws.MachineValidationRunList
+	var actualResponse corev1.MachineValidationRunList
 	if err := ts.env.GetWorkflowResult(&actualResponse); err != nil {
 		ts.Fail(err.Error())
 	}
@@ -261,8 +261,8 @@ func (ts *GetMachineValidationRunsTestSuite) Test_Success() {
 func (ts *GetMachineValidationRunsTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationRunListGetRequest{
-		MachineId: &cwssaws.MachineId{
+	request := &corev1.MachineValidationRunListGetRequest{
+		MachineId: &corev1.MachineId{
 			Id: "machine-id-1",
 		},
 	}
@@ -301,10 +301,10 @@ func (ts *GetMachineValidationTestsTestSuite) AfterTest(suiteName, testName stri
 func (ts *GetMachineValidationTestsTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestsGetRequest{}
+	request := &corev1.MachineValidationTestsGetRequest{}
 
-	mockResponse := &cwssaws.MachineValidationTestsGetResponse{
-		Tests: []*cwssaws.MachineValidationTest{
+	mockResponse := &corev1.MachineValidationTestsGetResponse{
+		Tests: []*corev1.MachineValidationTest{
 			{
 				Name: "test-1",
 			},
@@ -321,7 +321,7 @@ func (ts *GetMachineValidationTestsTestSuite) Test_Success() {
 	ts.NoError(ts.env.GetWorkflowError())
 
 	// get actual response and validate
-	var actualResponse cwssaws.MachineValidationTestsGetResponse
+	var actualResponse corev1.MachineValidationTestsGetResponse
 	if err := ts.env.GetWorkflowResult(&actualResponse); err != nil {
 		ts.Fail(err.Error())
 	}
@@ -332,7 +332,7 @@ func (ts *GetMachineValidationTestsTestSuite) Test_Success() {
 func (ts *GetMachineValidationTestsTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestsGetRequest{}
+	request := &corev1.MachineValidationTestsGetRequest{}
 
 	errMsg := "site controller communication error"
 
@@ -368,13 +368,13 @@ func (ts *AddMachineValidationTestTestSuite) AfterTest(suiteName, testName strin
 func (ts *AddMachineValidationTestTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestAddRequest{
+	request := &corev1.MachineValidationTestAddRequest{
 		Name:    "test-1",
 		Command: "test-command",
 		Args:    "test-args",
 	}
 
-	mockResponse := &cwssaws.MachineValidationTestAddUpdateResponse{
+	mockResponse := &corev1.MachineValidationTestAddUpdateResponse{
 		TestId:  "test-id-1",
 		Version: "test-version-1",
 	}
@@ -389,7 +389,7 @@ func (ts *AddMachineValidationTestTestSuite) Test_Success() {
 	ts.NoError(ts.env.GetWorkflowError())
 
 	// get actual response and validate
-	var actualResponse cwssaws.MachineValidationTestAddUpdateResponse
+	var actualResponse corev1.MachineValidationTestAddUpdateResponse
 	if err := ts.env.GetWorkflowResult(&actualResponse); err != nil {
 		ts.Fail(err.Error())
 	}
@@ -400,7 +400,7 @@ func (ts *AddMachineValidationTestTestSuite) Test_Success() {
 func (ts *AddMachineValidationTestTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestAddRequest{
+	request := &corev1.MachineValidationTestAddRequest{
 		Name:    "test-1",
 		Command: "test-command",
 		Args:    "test-args",
@@ -440,10 +440,10 @@ func (ts *UpdateMachineValidationTestTestSuite) AfterTest(suiteName, testName st
 func (ts *UpdateMachineValidationTestTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestUpdateRequest{
+	request := &corev1.MachineValidationTestUpdateRequest{
 		TestId:  "test-1",
 		Version: "version-1",
-		Payload: &cwssaws.MachineValidationTestUpdateRequest_Payload{
+		Payload: &corev1.MachineValidationTestUpdateRequest_Payload{
 			Name: util.GetStrPtr("name-2"),
 		},
 	}
@@ -461,10 +461,10 @@ func (ts *UpdateMachineValidationTestTestSuite) Test_Success() {
 func (ts *UpdateMachineValidationTestTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.MachineValidationTestUpdateRequest{
+	request := &corev1.MachineValidationTestUpdateRequest{
 		TestId:  "test-1",
 		Version: "version-1",
-		Payload: &cwssaws.MachineValidationTestUpdateRequest_Payload{
+		Payload: &corev1.MachineValidationTestUpdateRequest_Payload{
 			Name: util.GetStrPtr("name-2"),
 		},
 	}
@@ -503,10 +503,10 @@ func (ts *GetMachineValidationExternalConfigsTestSuite) AfterTest(suiteName, tes
 func (ts *GetMachineValidationExternalConfigsTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.GetMachineValidationExternalConfigsRequest{}
+	request := &corev1.GetMachineValidationExternalConfigsRequest{}
 
-	mockResponse := &cwssaws.GetMachineValidationExternalConfigsResponse{
-		Configs: []*cwssaws.MachineValidationExternalConfig{
+	mockResponse := &corev1.GetMachineValidationExternalConfigsResponse{
+		Configs: []*corev1.MachineValidationExternalConfig{
 			{
 				Name:    "config-1",
 				Version: "version-1",
@@ -524,7 +524,7 @@ func (ts *GetMachineValidationExternalConfigsTestSuite) Test_Success() {
 	ts.NoError(ts.env.GetWorkflowError())
 
 	// get actual response and validate
-	var actualResponse cwssaws.GetMachineValidationExternalConfigsResponse
+	var actualResponse corev1.GetMachineValidationExternalConfigsResponse
 	if err := ts.env.GetWorkflowResult(&actualResponse); err != nil {
 		ts.Fail(err.Error())
 	}
@@ -535,7 +535,7 @@ func (ts *GetMachineValidationExternalConfigsTestSuite) Test_Success() {
 func (ts *GetMachineValidationExternalConfigsTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.GetMachineValidationExternalConfigsRequest{}
+	request := &corev1.GetMachineValidationExternalConfigsRequest{}
 
 	errMsg := "site controller communication error"
 
@@ -571,7 +571,7 @@ func (ts *AddUpdateMachineValidationExternalConfigTestSuite) AfterTest(suiteName
 func (ts *AddUpdateMachineValidationExternalConfigTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.AddUpdateMachineValidationExternalConfigRequest{
+	request := &corev1.AddUpdateMachineValidationExternalConfigRequest{
 		Name: "config-1",
 	}
 
@@ -588,7 +588,7 @@ func (ts *AddUpdateMachineValidationExternalConfigTestSuite) Test_Success() {
 func (ts *AddUpdateMachineValidationExternalConfigTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.AddUpdateMachineValidationExternalConfigRequest{
+	request := &corev1.AddUpdateMachineValidationExternalConfigRequest{
 		Name: "config-1",
 	}
 
@@ -626,7 +626,7 @@ func (ts *RemoveMachineValidationExternalConfigTestSuite) AfterTest(suiteName, t
 func (ts *RemoveMachineValidationExternalConfigTestSuite) Test_Success() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.RemoveMachineValidationExternalConfigRequest{
+	request := &corev1.RemoveMachineValidationExternalConfigRequest{
 		Name: "config-1",
 	}
 
@@ -643,7 +643,7 @@ func (ts *RemoveMachineValidationExternalConfigTestSuite) Test_Success() {
 func (ts *RemoveMachineValidationExternalConfigTestSuite) Test_Failure() {
 	var manager iActivity.ManageMachineValidation
 
-	request := &cwssaws.RemoveMachineValidationExternalConfigRequest{
+	request := &corev1.RemoveMachineValidationExternalConfigRequest{
 		Name: "config-1",
 	}
 

@@ -1,0 +1,66 @@
+suite: packaged Grafana dashboards
+templates:
+  - templates/grafana-dashboards.yaml
+release:
+  name: test-nico
+  namespace: nico-system
+tests:
+  - it: does not install dashboards by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: packages all dashboards for the default Grafana sidecar
+    set:
+      grafanaDashboards.enabled: true
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: nico-system-test-nico-grafana-dashboards
+      - equal:
+          path: metadata.namespace
+          value: nico-system
+      - equal:
+          path: metadata.labels["grafana_dashboard"]
+          value: "1"
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: observability
+      - equal:
+          path: metadata.annotations["grafana_folder"]
+          value: NICo
+      - isNotEmpty:
+          path: data["nico-overview.json"]
+      - isNotEmpty:
+          path: data["nico-lifecycle.json"]
+      - isNotEmpty:
+          path: data["nico-api-performance.json"]
+
+  - it: supports a Grafana namespace and sidecar-specific metadata
+    values:
+      - fixtures/grafana-custom-values.yaml
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+      - equal:
+          path: metadata.labels["sidecar.example.com/dashboard"]
+          value: "true"
+      - notExists:
+          path: metadata.labels["grafana_dashboard"]
+      - equal:
+          path: metadata.annotations["sidecar.example.com/folder"]
+          value: Infrastructure/NICo
+      - equal:
+          path: metadata.annotations["example.com/owner"]
+          value: sre
+
+  - it: can omit the folder annotation
+    set:
+      grafanaDashboards.enabled: true
+      grafanaDashboards.folderAnnotation: ""
+    asserts:
+      - notExists:
+          path: metadata.annotations

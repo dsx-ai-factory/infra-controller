@@ -19,13 +19,13 @@ Insert a chassis serial to NMX-C endpoint mapping:
     --endpoint https://192.0.2.10:50051
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, value_name = "SERIAL")]
-    pub chassis_serial: String,
+    chassis_serial: String,
 
     /// NMX-C gRPC base URL (e.g. https://host:50051)
     #[clap(long)]
-    pub endpoint: String,
+    endpoint: String,
 }
 
 impl Run for Args {

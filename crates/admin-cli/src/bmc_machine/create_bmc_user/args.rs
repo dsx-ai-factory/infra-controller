@@ -41,29 +41,29 @@ Create a read-only user by setting an explicit role:
     --role-id readonly
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, short, help = "IP of the BMC where we want to create a new user")]
-    pub ip_address: Option<String>,
+    ip_address: Option<String>,
     #[clap(long, help = "MAC of the BMC where we want to create a new user")]
-    pub mac_address: Option<MacAddress>,
+    mac_address: Option<MacAddress>,
     #[clap(
         long,
         short,
         help = "ID of the machine where we want to create a new user"
     )]
-    pub machine: Option<String>,
+    machine: Option<String>,
 
     #[clap(long, short, help = "Username of new BMC account")]
-    pub username: String,
+    username: String,
     #[clap(long, short, help = "Password of new BMC account")]
-    pub password: String,
+    password: String,
     #[clap(
         long,
         short,
         value_enum,
         help = "Role of new BMC account (default: administrator)"
     )]
-    pub role_id: Option<crate::bmc_role::BmcRole>,
+    role_id: Option<crate::bmc_role::BmcRole>,
 }
 
 impl From<Args> for forgerpc::CreateBmcUserRequest {

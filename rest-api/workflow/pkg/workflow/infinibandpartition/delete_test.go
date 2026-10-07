@@ -14,8 +14,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 type DeleteInfiniBandPartitionTestSuite struct {
@@ -37,8 +37,8 @@ func (s *DeleteInfiniBandPartitionTestSuite) Test_DeleteInfiniBandPartitionWorkf
 	var ibpManager ibpActivity.ManageInfiniBandPartition
 
 	ibpID := uuid.New()
-	request := &cwssaws.IBPartitionDeletionRequest{
-		Id: &cwssaws.IBPartitionId{Value: ibpID.String()},
+	request := &corev1.IBPartitionDeletionRequest{
+		Id: &corev1.IBPartitionId{Value: ibpID.String()},
 	}
 
 	// Mock DeleteInfiniBandPartitionOnSite activity
@@ -55,8 +55,8 @@ func (s *DeleteInfiniBandPartitionTestSuite) Test_DeleteInfiniBandPartitionWorkf
 	var ibpManager ibpActivity.ManageInfiniBandPartition
 
 	ibpID := uuid.New()
-	request := &cwssaws.IBPartitionDeletionRequest{
-		Id: &cwssaws.IBPartitionId{Value: ibpID.String()},
+	request := &corev1.IBPartitionDeletionRequest{
+		Id: &corev1.IBPartitionId{Value: ibpID.String()},
 	}
 
 	// Mock DeleteInfiniBandPartitionOnSite activity failure

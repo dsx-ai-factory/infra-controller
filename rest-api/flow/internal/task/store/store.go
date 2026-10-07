@@ -29,6 +29,21 @@ type Store interface {
 	// CreateTask creates a new task record.
 	CreateTask(ctx context.Context, task *taskdef.Task) error
 
+	// LockRack takes a transaction-scoped lock for rack-level task admission.
+	// Callers must invoke it inside RunInTransaction before conflict checks.
+	LockRack(ctx context.Context, rackID uuid.UUID) error
+
+	// LockIdempotencyKey takes a transaction-scoped lock for stable submission
+	// lookup and resume. Callers must invoke it inside RunInTransaction.
+	LockIdempotencyKey(ctx context.Context, key string) error
+
+	// GetTaskByIdempotencyKey retrieves the existing task for a stable
+	// submission key. It returns nil when no task exists for the key.
+	GetTaskByIdempotencyKey(
+		ctx context.Context,
+		key string,
+	) (*taskdef.Task, error)
+
 	// GetTask retrieves a single task by its ID.
 	// Returns an error if the task is not found.
 	GetTask(ctx context.Context, id uuid.UUID) (*taskdef.Task, error)
@@ -39,10 +54,21 @@ type Store interface {
 	// ListTasks lists tasks matching the given criteria.
 	ListTasks(ctx context.Context, options *taskcommon.TaskListOptions, pagination *dbquery.Pagination) ([]*taskdef.Task, int32, error)
 
+	// ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks
+	// for the requested racks.
+	ListNonTerminalTasksForRacks(ctx context.Context, rackIDs []uuid.UUID) ([]*taskdef.Task, error)
+
+	// LatestLeakageShutdownTaskStatuses returns the newest leakage-triggered
+	// forced-shutdown Task status for each requested component that has one.
+	LatestLeakageShutdownTaskStatuses(
+		ctx context.Context,
+		componentIDs []uuid.UUID,
+	) (map[uuid.UUID]taskcommon.TaskStatus, error)
+
 	// UpdateScheduledTask updates task scheduling information (execution ID, executor type).
 	UpdateScheduledTask(ctx context.Context, task *taskdef.Task) error
 
-	// UpdateTaskStatus updates the status and message of a task.
+	// UpdateTaskStatus updates status and message, plus an optional queue deadline.
 	UpdateTaskStatus(ctx context.Context, arg *taskdef.TaskStatusUpdate) error
 
 	// UpdateTaskReport merges a report snapshot without a status change.

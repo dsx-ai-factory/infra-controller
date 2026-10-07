@@ -34,11 +34,11 @@ struct DomainShow {
 }
 
 /// List domains
-pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let domains = match fetch_domains(state).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "find_domains");
+            tracing::error!(error = %err, "find_domains");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading domains").into_response();
         }
     };
@@ -48,11 +48,11 @@ pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let domains = match fetch_domains(state).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "find_domains");
+            tracing::error!(error = %err, "find_domains");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading domains").into_response();
         }
     };

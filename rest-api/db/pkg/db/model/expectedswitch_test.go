@@ -14,8 +14,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 )
 
@@ -38,8 +37,8 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 
 	t.Run("invalid id leaves es.ID unchanged", func(t *testing.T) {
 		es := &ExpectedSwitch{ID: id}
-		es.FromProto(&cwssaws.ExpectedSwitch{
-			ExpectedSwitchId: &cwssaws.UUID{Value: "not-a-uuid"},
+		es.FromProto(&corev1.ExpectedSwitch{
+			ExpectedSwitchId: &corev1.UUID{Value: "not-a-uuid"},
 			BmcMacAddress:    "aa:bb",
 		})
 
@@ -49,12 +48,13 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 
 	t.Run("populates all proto fields", func(t *testing.T) {
 		es := &ExpectedSwitch{}
-		es.FromProto(&cwssaws.ExpectedSwitch{
-			ExpectedSwitchId:   &cwssaws.UUID{Value: id.String()},
+		es.FromProto(&corev1.ExpectedSwitch{
+			ExpectedSwitchId:   &corev1.UUID{Value: id.String()},
 			BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
 			SwitchSerialNumber: "SSN-1",
 			BmcIpAddress:       "10.0.0.1",
-			RackId:             &cwssaws.RackId{Id: rackID},
+			NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+			RackId:             &corev1.RackId{Id: rackID},
 			Name:               &name,
 			Manufacturer:       &manufacturer,
 			Model:              &model,
@@ -62,8 +62,8 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 			SlotId:             &slot,
 			TrayIdx:            &trayIdx,
 			HostId:             &host,
-			Metadata: &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{
+			Metadata: &corev1.Metadata{
+				Labels: []*corev1.Label{
 					{Key: "env", Value: cutil.GetPtr("prod")},
 				},
 			},
@@ -75,6 +75,7 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 		if assert.NotNil(t, es.BmcIpAddress) {
 			assert.Equal(t, "10.0.0.1", *es.BmcIpAddress)
 		}
+		assert.Equal(t, []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}, es.NvosMacAddresses)
 		if assert.NotNil(t, es.RackID) {
 			assert.Equal(t, rackID, *es.RackID)
 		}
@@ -90,8 +91,8 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 
 	t.Run("empty BmcIpAddress yields nil pointer", func(t *testing.T) {
 		es := &ExpectedSwitch{BmcIpAddress: cutil.GetPtr("stale")}
-		es.FromProto(&cwssaws.ExpectedSwitch{
-			ExpectedSwitchId: &cwssaws.UUID{Value: id.String()},
+		es.FromProto(&corev1.ExpectedSwitch{
+			ExpectedSwitchId: &corev1.UUID{Value: id.String()},
 			BmcIpAddress:     "",
 		})
 
@@ -101,13 +102,30 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 	t.Run("nil RackId clears es.RackID", func(t *testing.T) {
 		stale := "stale-rack"
 		es := &ExpectedSwitch{RackID: &stale}
-		es.FromProto(&cwssaws.ExpectedSwitch{
-			ExpectedSwitchId: &cwssaws.UUID{Value: id.String()},
+		es.FromProto(&corev1.ExpectedSwitch{
+			ExpectedSwitchId: &corev1.UUID{Value: id.String()},
 			BmcMacAddress:    "aa:bb",
 		})
 
 		assert.Nil(t, es.RackID)
 	})
+}
+
+func TestExpectedSwitch_ToProto(t *testing.T) {
+	id := uuid.New()
+	es := &ExpectedSwitch{
+		ID:                 id,
+		BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
+		SwitchSerialNumber: "SSN-1",
+		NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+	}
+
+	proto := es.ToProto(ExpectedSwitchCredentials{})
+
+	assert.Equal(t, id.String(), proto.ExpectedSwitchId.GetValue())
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", proto.BmcMacAddress)
+	assert.Equal(t, "SSN-1", proto.SwitchSerialNumber)
+	assert.Equal(t, []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}, proto.NvosMacAddresses)
 }
 
 // reset the tables needed for ExpectedSwitch tests
@@ -159,6 +177,7 @@ func TestExpectedSwitchSQLDAO_Create(t *testing.T) {
 					BmcMacAddress:      "00:1B:44:11:3A:B7",
 					SwitchSerialNumber: "SWITCH123",
 					BmcIpAddress:       cutil.GetPtr("192.168.1.10"),
+					NvosMacAddresses:   []string{"00:1B:44:11:3A:C1", "00:1B:44:11:3A:C2"},
 					Labels: map[string]string{
 						"environment": "test",
 						"location":    "datacenter1",
@@ -224,14 +243,13 @@ func TestExpectedSwitchSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, input.BmcMacAddress, es.BmcMacAddress)
 					assert.Equal(t, input.SwitchSerialNumber, es.SwitchSerialNumber)
 					assert.Equal(t, input.BmcIpAddress, es.BmcIpAddress)
+					assert.Equal(t, input.NvosMacAddresses, es.NvosMacAddresses)
 					assert.Equal(t, Labels(input.Labels), es.Labels)
 				}
 
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -257,6 +275,7 @@ func testExpectedSwitchSQLDAOCreateExpectedSwitches(ctx context.Context, t *test
 			SiteID:             site.ID,
 			BmcMacAddress:      "00:1B:44:11:3A:B7",
 			SwitchSerialNumber: "SWITCH123",
+			NvosMacAddresses:   []string{"00:1B:44:11:3A:D1"},
 			Labels: map[string]string{
 				"environment": "test",
 				"location":    "datacenter1",
@@ -357,8 +376,6 @@ func TestExpectedSwitchSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -450,6 +467,31 @@ func TestExpectedSwitchSQLDAO_GetAll(t *testing.T) {
 			expectedError: false,
 		},
 		{
+			desc: "GetAll with NvosMacAddresses filter matches across separator and case",
+			filter: ExpectedSwitchFilterInput{
+				NvosMacAddresses: []string{"00-1b-44-11-3a-D1"},
+			},
+			expectedCount: 1,
+			expectedError: false,
+		},
+		{
+			desc: "GetAll with NvosMacAddresses filter returns nothing for an unclaimed MAC",
+			filter: ExpectedSwitchFilterInput{
+				NvosMacAddresses: []string{"00:1B:44:11:3A:99"},
+			},
+			expectedCount: 0,
+			expectedError: false,
+		},
+		{
+			desc: "GetAll with ExcludeExpectedSwitchIDs drops the excluded switch",
+			filter: ExpectedSwitchFilterInput{
+				NvosMacAddresses:         []string{"00:1B:44:11:3A:D1"},
+				ExcludeExpectedSwitchIDs: []uuid.UUID{created[0].ID},
+			},
+			expectedCount: 0,
+			expectedError: false,
+		},
+		{
 			desc: "GetAll with limit returns objects",
 			pageInput: paginator.PageInput{
 				Offset: cutil.GetPtr(0),
@@ -502,8 +544,6 @@ func TestExpectedSwitchSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -574,6 +614,14 @@ func TestExpectedSwitchSQLDAO_Update(t *testing.T) {
 			},
 			expectedError: false,
 		},
+		{
+			desc: "Update NVOS MAC addresses",
+			input: ExpectedSwitchUpdateInput{
+				ExpectedSwitchID: essExp[1].ID,
+				NvosMacAddresses: []string{"00:1B:44:11:3A:D2", "00:1B:44:11:3A:D3"},
+			},
+			expectedError: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -591,6 +639,9 @@ func TestExpectedSwitchSQLDAO_Update(t *testing.T) {
 				if tc.input.SwitchSerialNumber != nil {
 					assert.Equal(t, *tc.input.SwitchSerialNumber, got.SwitchSerialNumber)
 				}
+				if tc.input.NvosMacAddresses != nil {
+					assert.Equal(t, tc.input.NvosMacAddresses, got.NvosMacAddresses)
+				}
 				if tc.input.Labels != nil {
 					assert.Equal(t, Labels(tc.input.Labels), got.Labels)
 				}
@@ -598,8 +649,6 @@ func TestExpectedSwitchSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -627,8 +676,17 @@ func TestExpectedSwitchSQLDAO_Clear(t *testing.T) {
 		verifyChildSpanner bool
 	}{
 		{
-			desc: "can clear Labels",
+			desc: "can clear Labels and NVOS MAC addresses",
 			es:   essExp[0],
+			input: ExpectedSwitchClearInput{
+				Labels:           true,
+				NvosMacAddresses: true,
+			},
+			expectedUpdate: true,
+		},
+		{
+			desc: "can clear Labels only",
+			es:   essExp[1],
 			input: ExpectedSwitchClearInput{
 				Labels: true,
 			},
@@ -650,6 +708,9 @@ func TestExpectedSwitchSQLDAO_Clear(t *testing.T) {
 			if tc.input.Labels {
 				assert.Nil(t, tmp.Labels)
 			}
+			if tc.input.NvosMacAddresses {
+				assert.Nil(t, tmp.NvosMacAddresses)
+			}
 
 			if tc.expectedUpdate {
 				assert.True(t, tmp.Updated.After(tc.es.Updated))
@@ -658,8 +719,6 @@ func TestExpectedSwitchSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -713,9 +772,45 @@ func TestExpectedSwitchSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+}
+
+func TestExpectedSwitchSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedSwitchSetupSchema(t, dbSession)
+
+	existing := testExpectedSwitchSQLDAOCreateExpectedSwitches(ctx, t, dbSession)
+	dao := NewExpectedSwitchDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	assert.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedSwitchCreateInput{ExpectedSwitchID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:22:ee:01", SwitchSerialNumber: "other-site", CreatedBy: user.ID})
+	assert.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedSwitchCreateInput{
+		{ExpectedSwitchID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:22:ff:01", SwitchSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedSwitchID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:22:ff:02", SwitchSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	assert.NoError(t, err)
+	if assert.Len(t, result, 2) {
+		assert.Equal(t, "replacement-1", result[0].SwitchSerialNumber)
+	}
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	assert.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	assert.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedSwitchFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
 }

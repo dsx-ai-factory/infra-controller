@@ -21,7 +21,7 @@ use color_eyre::Result;
 
 use crate::rpc::ApiClient;
 
-pub async fn list_managed_switches(api_client: &ApiClient) -> Result<()> {
+pub(super) async fn list_managed_switches(api_client: &ApiClient) -> Result<()> {
     let linked = api_client
         .0
         .get_all_expected_switches_linked()

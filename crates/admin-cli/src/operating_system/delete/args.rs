@@ -25,7 +25,7 @@ Delete an operating system definition by ID:
     $ nico-admin-cli operating-system delete 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "UUID of the operating system definition to delete.")]
-    pub id: String,
+    pub(super) id: String,
 }

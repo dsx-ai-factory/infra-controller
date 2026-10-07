@@ -291,7 +291,7 @@ struct JournalData {
 }
 
 impl JournalData {
-    pub async fn new_from_values(
+    async fn new_from_values(
         txn: &mut PgTransaction<'_>,
         machine_id: MachineId,
         values: &[PcrRegisterValue],

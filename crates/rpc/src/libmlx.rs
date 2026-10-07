@@ -18,12 +18,25 @@
 use std::str::FromStr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_libmlx_model::firmware::FirmwareSpec;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use mac_address::MacAddress;
 
+use crate::forge::DpuNvConfigProfile as DpuNvConfigProfilePb;
 use crate::protos::mlx_device::{
-    FirmwareFlashReport as FirmwareFlashReportPb, MlxDeviceInfo as MlxDeviceInfoPb,
+    FirmwareFlashReport as FirmwareFlashReportPb, FirmwareSpec as FirmwareSpecPb,
+    MlxDeviceInfo as MlxDeviceInfoPb,
 };
+
+impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
+    fn from(profile: DpuNvConfigProfile) -> Self {
+        match profile {
+            DpuNvConfigProfile::Gb200B3240V1 => Self::Gb200B3240V1,
+        }
+    }
+}
 
 // Implement conversion from Rust MlxDeviceInfo to protobuf.
 impl From<MlxDeviceInfo> for MlxDeviceInfoPb {
@@ -44,6 +57,7 @@ impl From<MlxDeviceInfo> for MlxDeviceInfoPb {
                 .uefi_version_virtio_net_current
                 .unwrap_or_default(),
             base_mac: info.base_mac.map(|mac| mac.to_string()).unwrap_or_default(),
+            base_guid: info.base_guid,
             status: info.status.unwrap_or_default(),
         }
     }
@@ -63,28 +77,41 @@ impl TryFrom<MlxDeviceInfoPb> for MlxDeviceInfo {
             )
         };
 
-        // Similar to parse_optional_xml_field, have a little helper
-        // for handling it with Rust <-> proto type conversion as well.
-        let parse_optional_field = |s: String| if s.is_empty() { None } else { Some(s) };
-
         Ok(MlxDeviceInfo {
             pci_name: proto.pci_name,
             device_type: proto.device_type,
-            psid: parse_optional_field(proto.psid),
-            device_description: parse_optional_field(proto.device_description),
-            part_number: parse_optional_field(proto.part_number),
-            fw_version_current: parse_optional_field(proto.fw_version_current),
-            pxe_version_current: parse_optional_field(proto.pxe_version_current),
-            uefi_version_current: parse_optional_field(proto.uefi_version_current),
-            uefi_version_virtio_blk_current: parse_optional_field(
-                proto.uefi_version_virtio_blk_current,
-            ),
-            uefi_version_virtio_net_current: parse_optional_field(
-                proto.uefi_version_virtio_net_current,
-            ),
-            status: parse_optional_field(proto.status),
+            psid: proto.psid.none_if_empty(),
+            device_description: proto.device_description.none_if_empty(),
+            part_number: proto.part_number.none_if_empty(),
+            fw_version_current: proto.fw_version_current.none_if_empty(),
+            pxe_version_current: proto.pxe_version_current.none_if_empty(),
+            uefi_version_current: proto.uefi_version_current.none_if_empty(),
+            uefi_version_virtio_blk_current: proto.uefi_version_virtio_blk_current.none_if_empty(),
+            uefi_version_virtio_net_current: proto.uefi_version_virtio_net_current.none_if_empty(),
+            status: proto.status.none_if_empty(),
             base_mac,
+            base_guid: proto.base_guid,
         })
+    }
+}
+
+impl From<FirmwareSpec> for FirmwareSpecPb {
+    fn from(spec: FirmwareSpec) -> Self {
+        FirmwareSpecPb {
+            part_number: spec.part_number,
+            psid: spec.psid,
+            version: spec.version,
+        }
+    }
+}
+
+impl From<FirmwareSpecPb> for FirmwareSpec {
+    fn from(proto: FirmwareSpecPb) -> Self {
+        FirmwareSpec {
+            part_number: proto.part_number,
+            psid: proto.psid,
+            version: proto.version,
+        }
     }
 }
 
@@ -123,6 +150,18 @@ mod test {
 
     use super::*;
 
+    #[test]
+    fn test_firmware_spec_roundtrip() {
+        let original = FirmwareSpec {
+            part_number: "900-9D3B4-00CV-TA0".to_string(),
+            psid: "MT_0000000884".to_string(),
+            version: "32.43.1014".to_string(),
+        };
+        let proto: FirmwareSpecPb = original.clone().into();
+        let converted: FirmwareSpec = proto.into();
+        assert_eq!(original, converted);
+    }
+
     // Proto -> model `TryFrom`: every input proto should convert back to the
     // expected `MlxDeviceInfo`, with empty proto strings (and an empty MAC)
     // becoming `None`. The roundtrip rows feed a model through its own
@@ -152,6 +191,7 @@ mod test {
                     uefi_version_virtio_blk_current: "".to_string(),
                     uefi_version_virtio_net_current: "".to_string(),
                     base_mac: "".to_string(), // Empty MAC becomes None
+                    base_guid: None,
                     status: "".to_string(),
                 } => Yields(MlxDeviceInfo {
                     pci_name: "01:00.0".to_string(),
@@ -165,6 +205,7 @@ mod test {
                     uefi_version_virtio_blk_current: None,
                     uefi_version_virtio_net_current: None,
                     base_mac: None,
+                    base_guid: None,
                     status: None,
                 }),
             }

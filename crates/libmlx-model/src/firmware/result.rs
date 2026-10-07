@@ -40,9 +40,10 @@ pub struct FirmwareFlashReport {
     // Whether the firmware version on the device matches the expected
     // version. None if config.verify_version was false (not requested).
     pub verified_version: Option<bool>,
-    // The firmware version observed on the device after flashing,
-    // queried via mlxfwmanager. None if the device could not be
-    // queried or if the step was not performed.
+    // The firmware version observed after flashing. Live runs query it through
+    // `mlxfwmanager`; dry runs use the configured target to describe the
+    // simulated lifecycle. None means a live query failed, returned no current
+    // version, or the step was not requested.
     pub observed_version: Option<String>,
     // The expected firmware version from the config, if one was set.
     pub expected_version: Option<String>,

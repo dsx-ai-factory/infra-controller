@@ -16,10 +16,6 @@
         ip:
           address:
             169.254.169.253/30: {}
-      pf0dpu5_if:
-        ip:
-          address:
-            10.255.255.2/29: {}
       p0_if:
         type: swp
       p1_if:
@@ -99,11 +95,6 @@
             ipv4:
               resolved-via-default: on
           static:
-            10.2.2.1/32:
-              address-family: ipv4-unicast
-              via:
-                10.255.255.1:
-                  type: ipv4-address
             192.168.0.12/32:
               address-family: ipv4-unicast
               via:
@@ -113,7 +104,6 @@
             address-family:
               ipv4-unicast:
                 network:
-                  10.2.2.1/32: {}
                   127.0.0.1/32: {}
                   192.168.0.12/32: {}
                 enable: on
@@ -132,10 +122,6 @@
               p1_if:
                 peer-group: underlay
                 type: unnumbered
-              10.255.255.3:
-                passive-mode: on
-                peer-group: tenant
-                type: numbered
             path-selection:
               multipath:
                 aspath-ignore: on

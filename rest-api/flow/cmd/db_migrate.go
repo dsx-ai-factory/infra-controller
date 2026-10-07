@@ -16,6 +16,10 @@ import (
 
 var (
 	rollBack string
+	// ignoreSignatureChanges is a hidden, temporary recovery option. It accepts
+	// changed signatures for installed migrations by updating their table rows
+	// without re-running their SQL.
+	ignoreSignatureChanges bool
 
 	// migrateCmd is the subcommand that runs database migrations.
 	migrateCmd = &cobra.Command{
@@ -32,6 +36,8 @@ func init() {
 	dbCmd.AddCommand(migrateCmd)
 
 	migrateCmd.Flags().StringVarP(&rollBack, "rollback", "r", "", "Roll back the schema to the way it was at the specified time.  This is the application time, not from the ID.  Format 2006-01-02T15:04:05")
+	migrateCmd.Flags().BoolVar(&ignoreSignatureChanges, "ignore-signature-changes", false, "Accept changed signatures for installed migrations without re-applying them")
+	_ = migrateCmd.Flags().MarkHidden("ignore-signature-changes")
 }
 
 // doMigration connects to the database and runs pending migrations. If the
@@ -60,7 +66,8 @@ func doMigration() {
 			log.Fatal().Msgf("Failed to roll back migrations: %v", err)
 		}
 	} else {
-		if err := migrations.MigrateWithDB(ctx, session.DB); err != nil {
+		options := migrations.MigrateOptions{IgnoreSignatureChanges: ignoreSignatureChanges}
+		if err := migrations.MigrateWithDB(ctx, session.DB, options); err != nil {
 			log.Fatal().Msgf("Failed to run migrations: %v", err)
 		}
 	}

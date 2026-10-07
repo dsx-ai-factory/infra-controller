@@ -24,7 +24,7 @@ pub async fn create_forge_client(
     match ForgeTlsClient::retry_build(&ApiConfig::new(forge_api, client_config)).await {
         Ok(client) => Ok(client),
         Err(err) => Err(eyre::eyre!(
-            "Could not connect to Forge API server at {}: {err}",
+            "could not connect to forge API server at {}: {err}",
             forge_api
         )),
     }

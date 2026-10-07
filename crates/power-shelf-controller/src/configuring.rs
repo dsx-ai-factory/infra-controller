@@ -36,8 +36,8 @@ pub async fn handle_configuring(
     _ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(
-        "Configuring PowerShelf {}, transitioning to Ready",
-        power_shelf_id
+        %power_shelf_id,
+        "Configuring PowerShelf; transitioning to Ready"
     );
     Ok(StateHandlerOutcome::transition(
         PowerShelfControllerState::Ready,

@@ -1,11 +1,1 @@
 **
-!.dockerignore
-!Cargo.toml
-!Cargo.lock
-!rust-toolchain.toml
-!.cargo
-!.cargo/
-!.cargo/**
-!crates
-!crates/
-!crates/**

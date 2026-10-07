@@ -26,12 +26,48 @@ use tokio_util::sync::CancellationToken;
 use crate::CarbideResult;
 use crate::cfg::file::MeasuredBootMetricsCollectorConfig;
 
-pub(crate) mod metrics;
+pub(in crate::measured_boot) mod metrics;
 use carbide_uuid::measured_boot::MeasurementBundleId;
 use metrics::MeasuredBootMetricsCollectorMetrics;
 
+/// `MeasuredBootCollectorIteration` records one full collector pass over
+/// profiles, bundles, and machines. Its histogram preserves both latency and
+/// the per-outcome iteration count. Successful passes stay metric-only; a
+/// failed pass also writes the collector warning with its error context.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "measured_boot_collector_iteration",
+    metric_name = "carbide_measured_boot_collector_iteration_latency_milliseconds",
+    component = "nico-api",
+    log = dynamic,
+    metric = histogram,
+    message = "MeasuredBootMetricsCollector error",
+    describe = "Number of milliseconds a full measured boot metrics collector iteration took, by outcome"
+)]
+struct MeasuredBootCollectorIteration {
+    #[label]
+    outcome: carbide_instrument::Outcome,
+    #[observation]
+    took: std::time::Duration,
+    /// `error` carries failure detail. Successful passes use `""` because
+    /// their generated log is disabled while the histogram still records them.
+    #[context]
+    error: String,
+}
+
+impl carbide_instrument::DynamicLog for MeasuredBootCollectorIteration {
+    fn log_at(&self) -> carbide_instrument::LogAt {
+        match self.outcome {
+            carbide_instrument::Outcome::Ok => carbide_instrument::LogAt::Off,
+            carbide_instrument::Outcome::Error => {
+                carbide_instrument::LogAt::Level(tracing::Level::WARN)
+            }
+        }
+    }
+}
+
 /// `MeasuredBootMetricsCollector` monitors the state of all measured boot data.
-pub struct MeasuredBootMetricsCollector {
+pub(crate) struct MeasuredBootMetricsCollector {
     database_connection: sqlx::PgPool,
     config: MeasuredBootMetricsCollectorConfig,
     metric_holder: Arc<metrics::MetricHolder>,
@@ -39,7 +75,7 @@ pub struct MeasuredBootMetricsCollector {
 
 impl MeasuredBootMetricsCollector {
     /// Create a MeasuredBootMetricsCollector
-    pub fn new(
+    pub(crate) fn new(
         database_connection: sqlx::PgPool,
         config: MeasuredBootMetricsCollectorConfig,
         meter: opentelemetry::metrics::Meter,
@@ -62,7 +98,7 @@ impl MeasuredBootMetricsCollector {
 
     /// Start the MeasuredBootMetricsCollector and return a [sending channel](tokio::sync::oneshot::Sender)
     /// that will stop the MeasuredBootMetricsCollector when dropped.
-    pub fn start(
+    pub(crate) fn start(
         self,
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
@@ -79,9 +115,10 @@ impl MeasuredBootMetricsCollector {
 
     async fn run(&self, cancel_token: CancellationToken) {
         loop {
-            if let Err(e) = self.run_single_iteration().await {
-                tracing::warn!("MeasuredBootMetricsCollector error: {}", e);
-            }
+            // `run_single_iteration` emits a failure before returning it, so
+            // this loop can discard the result and keep scheduling later
+            // passes.
+            let _ = self.run_single_iteration().await;
 
             tokio::select! {
                 _ = tokio::time::sleep(self.config.run_interval) => {},
@@ -93,7 +130,21 @@ impl MeasuredBootMetricsCollector {
         }
     }
 
-    pub async fn run_single_iteration(&self) -> CarbideResult<()> {
+    pub(in crate::measured_boot) async fn run_single_iteration(&self) -> CarbideResult<()> {
+        let started = std::time::Instant::now();
+        let result = self.collect_metrics().await;
+        carbide_instrument::emit(MeasuredBootCollectorIteration {
+            outcome: carbide_instrument::Outcome::from(&result),
+            took: started.elapsed(),
+            error: match &result {
+                Ok(()) => String::new(),
+                Err(error) => error.to_string(),
+            },
+        });
+        result
+    }
+
+    async fn collect_metrics(&self) -> CarbideResult<()> {
         let mut metrics = MeasuredBootMetricsCollectorMetrics::new();
 
         let mut txn = db::Transaction::begin(&self.database_connection).await?;
@@ -183,5 +234,123 @@ fn get_bundle_state(
         }
     } else {
         MeasurementBundleState::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    /// `MeasuredBootCollectorIteration` always records latency under its
+    /// existing `outcome` label. Successful passes stay silent; a failure also
+    /// writes the collector's WARN record with `error` context.
+    #[test]
+    fn collector_iteration_logs_failures_and_records_latency() {
+        struct IterationCase {
+            outcome: carbide_instrument::Outcome,
+            outcome_label: &'static str,
+            milliseconds: u64,
+            error: &'static str,
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct LogObservation {
+            level: tracing::Level,
+            metadata_name: String,
+            message: String,
+            event_name: Option<String>,
+            metric_name: Option<String>,
+            outcome: Option<String>,
+            error: Option<String>,
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct Observation {
+            log_count: usize,
+            log: Option<LogObservation>,
+            histogram_count_delta: u64,
+            histogram_sum_delta: ApproxHistogramSum,
+        }
+
+        const METRIC_NAME: &str = "carbide_measured_boot_collector_iteration_latency_milliseconds";
+
+        check_values(
+            [
+                Check {
+                    scenario: "successful iteration",
+                    input: IterationCase {
+                        outcome: carbide_instrument::Outcome::Ok,
+                        outcome_label: "ok",
+                        milliseconds: 1500,
+                        error: "",
+                    },
+                    expect: Observation {
+                        log_count: 0,
+                        log: None,
+                        histogram_count_delta: 1,
+                        histogram_sum_delta: ApproxHistogramSum(1500.0),
+                    },
+                },
+                Check {
+                    scenario: "failed iteration",
+                    input: IterationCase {
+                        outcome: carbide_instrument::Outcome::Error,
+                        outcome_label: "error",
+                        milliseconds: 250,
+                        error: "database unavailable",
+                    },
+                    expect: Observation {
+                        log_count: 1,
+                        log: Some(LogObservation {
+                            level: tracing::Level::WARN,
+                            metadata_name: "measured_boot_collector_iteration".to_string(),
+                            message: "MeasuredBootMetricsCollector error".to_string(),
+                            event_name: Some("measured_boot_collector_iteration".to_string()),
+                            metric_name: Some(METRIC_NAME.to_string()),
+                            outcome: Some("error".to_string()),
+                            error: Some("database unavailable".to_string()),
+                        }),
+                        histogram_count_delta: 1,
+                        histogram_sum_delta: ApproxHistogramSum(250.0),
+                    },
+                },
+            ],
+            |IterationCase {
+                 outcome,
+                 outcome_label,
+                 milliseconds,
+                 error,
+             }| {
+                let metrics = MetricsCapture::start();
+                let logs = capture_logs(|| {
+                    carbide_instrument::emit(MeasuredBootCollectorIteration {
+                        outcome,
+                        took: std::time::Duration::from_millis(milliseconds),
+                        error: error.to_string(),
+                    });
+                });
+                let log = logs.first().map(|log| LogObservation {
+                    level: log.level,
+                    metadata_name: log.metadata_name.clone(),
+                    message: log.message.clone(),
+                    event_name: log.field("event_name").map(str::to_string),
+                    metric_name: log.field("metric_name").map(str::to_string),
+                    outcome: log.field("outcome").map(str::to_string),
+                    error: log.field("error").map(str::to_string),
+                });
+
+                Observation {
+                    log_count: logs.len(),
+                    log,
+                    histogram_count_delta: metrics
+                        .histogram_count_delta(METRIC_NAME, &[("outcome", outcome_label)]),
+                    histogram_sum_delta: metrics
+                        .histogram_sum_delta(METRIC_NAME, &[("outcome", outcome_label)]),
+                }
+            },
+        );
     }
 }

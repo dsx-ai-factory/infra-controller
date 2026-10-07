@@ -181,13 +181,13 @@ impl From<ShowLogicalPartition> for LogicalPartitionDetail {
 }
 
 /// List logical partitions
-pub async fn show_nvlink_logical_partitions_html(
+pub(super) async fn show_nvlink_logical_partitions_html(
     AxumState(state): AxumState<Arc<Api>>,
 ) -> Response {
     let partitions = match fetch_logical_partitions(state.clone(), false, None).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "fetch_logical_partitions");
+            tracing::error!(error = %err, "fetch_logical_partitions");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading logical partitions",
@@ -202,13 +202,13 @@ pub async fn show_nvlink_logical_partitions_html(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_nvlink_logical_partitions_json(
+pub(super) async fn show_nvlink_logical_partitions_json(
     AxumState(state): AxumState<Arc<Api>>,
 ) -> impl IntoResponse {
     let partitions = match fetch_logical_partitions(state, false, None).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "fetch_logical_partitions");
+            tracing::error!(error = %err, "fetch_logical_partitions");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json("Error loading logical_partitions".to_string()),
@@ -220,7 +220,7 @@ pub async fn show_nvlink_logical_partitions_json(
 }
 
 /// List NVLink domains with health reports.
-pub async fn show_nvlink_domain_health_html(
+pub(super) async fn show_nvlink_domain_health_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<NvLinkDomainHealthParams>,
     uri: OriginalUri,
@@ -228,7 +228,7 @@ pub async fn show_nvlink_domain_health_html(
     let rows = match fetch_nvlink_domain_health_rows(&state).await {
         Ok(rows) => rows,
         Err(err) => {
-            tracing::error!(%err, "fetch_nvlink_domain_health_rows");
+            tracing::error!(error = %err, "fetch_nvlink_domain_health_rows");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading NVLink domain health",
@@ -253,7 +253,7 @@ pub async fn show_nvlink_domain_health_html(
     match tmpl.render() {
         Ok(html) => (StatusCode::OK, Html(html)).into_response(),
         Err(err) => {
-            tracing::error!(%err, "render_nvlink_domain_health");
+            tracing::error!(error = %err, "render_nvlink_domain_health");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error rendering NVLink domain health",
@@ -264,11 +264,13 @@ pub async fn show_nvlink_domain_health_html(
 }
 
 /// List NVLink domains with health reports as JSON.
-pub async fn show_nvlink_domain_health_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_nvlink_domain_health_json(
+    AxumState(state): AxumState<Arc<Api>>,
+) -> Response {
     let rows = match fetch_nvlink_domain_health_rows(&state).await {
         Ok(rows) => rows,
         Err(err) => {
-            tracing::error!(%err, "fetch_nvlink_domain_health_rows");
+            tracing::error!(error = %err, "fetch_nvlink_domain_health_rows");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json("Error loading NVLink domain health".to_string()),
@@ -281,7 +283,7 @@ pub async fn show_nvlink_domain_health_json(AxumState(state): AxumState<Arc<Api>
 }
 
 /// View Logical Partition details
-pub async fn detail(
+pub(super) async fn detail(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(partition_id): AxumPath<String>,
 ) -> Response {
@@ -305,7 +307,7 @@ pub async fn detail(
     let partitions = match fetch_logical_partitions(state.clone(), true, Some(partitionid)).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "fetch_logical_partitions");
+            tracing::error!(error = %err, "fetch_logical_partitions");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading logical partitions",
@@ -465,7 +467,7 @@ async fn fetch_logical_partitions(
             }
 
             for m in machines {
-                if let Some(status) = m.nvlink_status_observation {
+                if let Some(status) = m.status.and_then(|status| status.nvlink) {
                     for gpu in &status.gpu_status {
                         if let Some(partition_id) = &gpu.partition_id {
                             member_map.entry(*partition_id).or_default().push(

@@ -12,55 +12,40 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGetSearchQuery(t *testing.T) {
+func TestParseOptionalBoolQueryParam(t *testing.T) {
 	tests := []struct {
-		name  string
-		path  string
-		want  string
-		isNil bool
+		name      string
+		rawQuery  string
+		wantNil   bool
+		want      bool
+		expectErr bool
 	}{
-		{
-			name:  "absent query",
-			path:  "/test",
-			isNil: true,
-		},
-		{
-			name:  "empty query",
-			path:  "/test?query=",
-			isNil: true,
-		},
-		{
-			name:  "whitespace only",
-			path:  "/test?query=%20%20%20",
-			isNil: true,
-		},
-		{
-			name: "normal query",
-			path: "/test?query=abc",
-			want: "abc",
-		},
-		{
-			name: "leading and trailing whitespace",
-			path: "/test?query=%20abc%20",
-			want: "abc",
-		},
+		{name: "absent param returns nil", rawQuery: "", wantNil: true},
+		{name: "true", rawQuery: "flag=true", want: true},
+		{name: "false", rawQuery: "flag=false", want: false},
+		{name: "1 is true", rawQuery: "flag=1", want: true},
+		{name: "0 is false", rawQuery: "flag=0", want: false},
+		{name: "invalid value errors", rawQuery: "flag=notabool", expectErr: true},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req := httptest.NewRequest(http.MethodGet, "/?"+tc.rawQuery, nil)
 			rec := httptest.NewRecorder()
 			c := e.NewContext(req, rec)
 
-			got := GetSearchQuery(c)
-			if tt.isNil {
+			got, err := ParseOptionalBoolQueryParam(c, "flag")
+			assert.Equal(t, tc.expectErr, err != nil)
+			if tc.expectErr {
+				return
+			}
+			if tc.wantNil {
 				assert.Nil(t, got)
 				return
 			}
-
-			if assert.NotNil(t, got) {
-				assert.Equal(t, tt.want, *got)
-			}
+			assert.NotNil(t, got)
+			assert.Equal(t, tc.want, *got)
 		})
 	}
 }

@@ -1,0 +1,60 @@
+// Minimal stub for buf/validate so that vpc.proto compiles with protoc.
+// The actual buf-validate annotations are proto field/message options that
+// prost/tonic does not interpret — only the message shapes matter for Rust
+// codegen.
+syntax = "proto3";
+
+package buf.validate;
+
+import "google/protobuf/descriptor.proto";
+
+message FieldConstraints {
+  StringRules string = 1;
+  UInt32Rules uint32 = 2;
+  EnumRules enum = 3;
+  MapRules map = 4;
+  bool required = 5;
+}
+
+message StringRules {
+  uint64 min_len = 1;
+  uint64 max_len = 2;
+  string pattern = 3;
+  bool ipv4 = 4;
+  bool ipv6 = 5;
+  bool ipv4_prefix = 6;
+  bool ipv6_prefix = 7;
+}
+
+message UInt32Rules {
+  uint32 gte = 1;
+  uint32 lte = 2;
+}
+
+message EnumRules {
+  repeated int32 in = 1;
+}
+
+message MapRules {
+  uint64 max_pairs = 1;
+  FieldConstraints keys = 2;
+  FieldConstraints values = 3;
+}
+
+message MessageConstraints {
+  repeated Violation cel = 1;
+}
+
+message Violation {
+  string id = 1;
+  string message = 2;
+  string expression = 3;
+}
+
+extend google.protobuf.FieldOptions {
+  FieldConstraints field = 1159;
+}
+
+extend google.protobuf.MessageOptions {
+  MessageConstraints message = 1159;
+}

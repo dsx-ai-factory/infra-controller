@@ -7,16 +7,18 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"time"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ManageSku is an activity wrapper for managing SKU inventory that allows injecting DB access
@@ -25,9 +27,9 @@ type ManageSku struct {
 	siteClientPool *sc.ClientPool
 }
 
-// UpdateSkusInDB is a Temporal activity that takes a collection of SKU data pushed by Site Agent and updates the DB
-// NOTE: Initial implementation validates inputs and site existence; DB synchronization will be added iteratively.
-func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInventory *cwssaws.SkuInventory) error {
+// UpdateSkusInDB is a Temporal activity that reconciles SKU inventory pushed by
+// the Site Agent into the REST database.
+func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInventory *corev1.SkuInventory) error {
 	logger := log.With().Str("Activity", "UpdateSkusInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -37,14 +39,14 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 		return errors.New("UpdateSkusInDB called with nil inventory")
 	}
 
-	if skuInventory.InventoryStatus == cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if skuInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(ms.dbSession)
-	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -102,10 +104,17 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 		// Create a new SKU if it doesn't already exist in DB
 		cur, found := existingByID[reportedSku.Id]
 		if !found {
+			var created *time.Time
+			if !reported.Created.IsZero() {
+				created = &reported.Created
+			}
 			// Create new SKU with SiteID
 			sku := cdbm.SkuCreateInput{
 				SkuID:                reported.ID,
 				SiteID:               reported.SiteID,
+				Created:              created,
+				Description:          reported.Description,
+				SchemaVersion:        reported.SchemaVersion,
 				DeviceType:           reported.DeviceType,
 				Components:           reported.Components,
 				AssociatedMachineIds: reported.AssociatedMachineIds,
@@ -117,8 +126,19 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			continue
 		}
 
+		// Updated is the row's own write time, so a SKU written since the Site collected this
+		// inventory carries changes the snapshot cannot know about, including any made through
+		// the API. Writing the reported values over them would lose those edits.
+		if site.IsTimeWithinStaleInventoryThreshold(cur.Updated) {
+			logger.Info().Str("SkuId", cur.ID).Msg("not updating SKU yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		// Update existing SKU data in DB
-		if !cur.Components.Equal(reported.Components) || cur.DeviceType != reported.DeviceType ||
+		createdChanged := !reported.Created.IsZero() && !cur.Created.Equal(reported.Created)
+		if createdChanged || cur.Description != reported.Description || cur.SchemaVersion != reported.SchemaVersion ||
+			!cur.Components.Equal(reported.Components) || cur.DeviceType != reported.DeviceType ||
 			!reflect.DeepEqual(cur.AssociatedMachineIds, reported.AssociatedMachineIds) {
 			// nil AssociatedMachineIds in nico can mean we need to clear out existing AssociatedMachineIds in DB
 			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
@@ -131,10 +151,17 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			// but the DAO skips nil fields, so substitute a non-nil empty wrapper.
 			components := reported.Components
 			if cur.Components != nil && components == nil {
-				components = &cdbm.SkuComponents{SkuComponents: &cwssaws.SkuComponents{}}
+				components = &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{}}
+			}
+			var created *time.Time
+			if createdChanged {
+				created = &reported.Created
 			}
 			sku := cdbm.SkuUpdateInput{
 				SkuID:                reported.ID,
+				Created:              created,
+				Description:          &reported.Description,
+				SchemaVersion:        &reported.SchemaVersion,
 				Components:           components,
 				DeviceType:           reported.DeviceType,
 				AssociatedMachineIds: associated,
@@ -147,15 +174,25 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 	}
 
 	// Delete any SKU present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
+	// We only act if this is the last page (or paging disabled).
 	// The source of truth for NICo is reportedIDs.
-	if skuInventory.InventoryPage == nil || skuInventory.InventoryPage.TotalPages == 0 || (skuInventory.InventoryPage.CurrentPage == skuInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(skuInventory.GetInventoryPage()) {
 		for _, sk := range existingSkus {
 			if _, keep := reportedIDs[sk.ID]; keep {
 				continue
 			}
+			// Updated tracks when this row was last written, unlike Created which carries Core's
+			// timestamp and stays old for a SKU that Cloud only just learned about. A SKU
+			// written since the Site collected this inventory may be absent from it only because
+			// the snapshot predates the row, so deleting would drop a SKU that just arrived.
+			if site.IsTimeWithinStaleInventoryThreshold(sk.Updated) {
+				logger.Info().Str("SkuId", sk.ID).Msg("not deleting SKU yet because it is newer than the inventory interval")
+
+				continue
+			}
 			logger.Info().Str("SkuId", sk.ID).Msg("deleting SKU from DB since it was no longer reported in inventory from Site")
-			if derr := skuDAO.Delete(ctx, nil, sk.ID); derr != nil {
+			derr := skuDAO.Delete(ctx, nil, sk.ID)
+			if derr != nil {
 				logger.Error().Err(derr).Str("SkuID", sk.ID).Msg("failed to delete SKU from DB")
 			}
 		}

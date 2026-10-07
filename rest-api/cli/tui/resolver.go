@@ -29,6 +29,16 @@ func (r *Resolver) RegisterFetcher(resourceType string, fn FetchFunc) {
 	r.fetchers[resourceType] = fn
 }
 
+// HasFetcher reports whether resourceType supports interactive name/ID
+// resolution in this session.
+func (r *Resolver) HasFetcher(resourceType string) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.fetchers[resourceType]
+	return ok
+}
+
 func (r *Resolver) Fetch(ctx context.Context, resourceType string) ([]NamedItem, error) {
 	if items := r.cache.Get(resourceType); items != nil {
 		return items, nil

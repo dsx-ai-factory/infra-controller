@@ -4,8 +4,10 @@
 package util
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,10 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestNewAPIErrorResponse(t *testing.T) {
@@ -53,6 +59,78 @@ func TestNewAPIErrorResponse(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), `"source":"test"`)
 		})
 	}
+}
+
+// TestAPIErrorUnwrapAndDiagnosis pins the split between the two accessors:
+// Unwrap reports a missing cause as nil, because the errors package walks it
+// without detecting a cycle, and Diagnosis is where the fallback to the
+// APIError itself belongs.
+func TestAPIErrorUnwrapAndDiagnosis(t *testing.T) {
+	cause := errors.New("flow rejected the request")
+
+	tests := []struct {
+		name            string
+		apiError        *APIError
+		expectedUnwrap  error
+		expectedLogged  string
+		expectedMatches bool
+	}{
+		{
+			name:            "cause recorded",
+			apiError:        NewAPIError(http.StatusInternalServerError, "Failed to get Rack details", cause),
+			expectedUnwrap:  cause,
+			expectedLogged:  "flow rejected the request",
+			expectedMatches: true,
+		},
+		{
+			name:           "cause folded into the message",
+			apiError:       NewAPIError(http.StatusNotFound, "Rack not found", nil),
+			expectedUnwrap: nil,
+			expectedLogged: "Rack not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expectedUnwrap, tt.apiError.Unwrap())
+			assert.Equal(t, tt.expectedLogged, tt.apiError.Diagnosis().Error())
+			assert.Equal(t, tt.expectedMatches, errors.Is(tt.apiError, cause))
+		})
+	}
+}
+
+func TestNewAPIErrorResponseDoesNotExportErrorDetails(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	ctx, span := provider.Tracer("test").Start(context.Background(), "request")
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	ec := e.NewContext(req, rec)
+
+	const secret = "authorization=top-secret"
+	require.NoError(t, NewAPIErrorResponse(
+		ec,
+		http.StatusInternalServerError,
+		APIErrorInternalServer,
+		errors.New(secret),
+	))
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	assert.Equal(t, codes.Error, ended[0].Status().Code)
+	assert.Empty(t, ended[0].Status().Description)
+	assert.Empty(t, ended[0].Events())
+
+	var attributes []string
+	for _, attr := range ended[0].Attributes() {
+		attributes = append(attributes, fmt.Sprintf("%s=%v", attr.Key, attr.Value.AsInterface()))
+	}
+	joined := strings.Join(attributes, ",")
+	assert.Contains(t, joined, "error.type=api.internal")
+	assert.Contains(t, joined, "http.response.status_code=500")
+	assert.NotContains(t, joined, secret)
 }
 
 func TestDefaultHTTPErrorHandler(t *testing.T) {
@@ -105,6 +183,28 @@ func TestDefaultHTTPErrorHandler(t *testing.T) {
 
 			assert.Equal(t, "test", rst.Source)
 			assert.Equal(t, tt.expectedMessage, rst.Message)
+		})
+	}
+}
+
+func TestAPIError_Send(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		apiErr *APIError
+		body   string
+	}{
+		{"unclassified body unchanged", NewAPIError(400, "rejected", nil), `{"source":"nico","message":"rejected","data":null}`},
+		{"retry permitted", NewAPIError(400, "rejected", nil).WithRetryable(true), `{"source":"nico","message":"rejected","data":null,"retryable":true}`},
+		{"conflict", NewAPIError(400, "rejected", nil).WithRetryable(false), `{"source":"nico","message":"rejected","data":null,"retryable":false}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			c.Set(APINameContextKey, "nico")
+			assert.NoError(t, tt.apiErr.Send(c))
+			assert.Equal(t, tt.apiErr.Code, rec.Code)
+			assert.Equal(t, tt.body+"\n", rec.Body.String())
+			assert.Empty(t, tt.apiErr.Source, "sending must not mutate the original error")
 		})
 	}
 }

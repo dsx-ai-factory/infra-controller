@@ -10,6 +10,7 @@
 # matches a real command.
 
 hardware:
+  - backend
   - machine
   - managed-host
   - host
@@ -20,6 +21,7 @@ hardware:
   - dpf
   - dpa
   - bmc-machine
+  - boot-interface
   - boot-override
   - credential
   - power-shelf
@@ -46,6 +48,7 @@ network:
   - vpc
   - vpc-peering
   - vpc-prefix
+  - site-prefix
   - network-segment
   - network-device
   - network-security-group
@@ -67,6 +70,7 @@ tenant:
   - expected-machine
   - expected-power-shelf
   - expected-rack
+  - expected-rack-group
   - expected-switch
   - operating-system
   - os-image
@@ -81,3 +85,4 @@ admin:
   - dev-env
   - ssh
   - jump
+  - secrets

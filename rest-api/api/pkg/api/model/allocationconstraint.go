@@ -22,7 +22,7 @@ const (
 
 var (
 	// resourceTypeIDDeprecationTime is the time when the ResourceTypeID attribute will be no longer be available in the API
-	resourceTypeIDDeprecationTime, _ = time.Parse(time.RFC1123, "Thu, 09 Jul 2026 00:00:00 UTC")
+	resourceTypeIDDeprecationTime = time.Date(2026, time.September, 10, 0, 0, 0, 0, time.UTC)
 
 	// resourceTypeIDDeprecations is a list of deprecated entities for the ResourceTypeID attribute
 	allocationConstraintDeprecations = []DeprecatedEntity{

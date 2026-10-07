@@ -15,24 +15,20 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
+mod args;
+mod cmd;
 
-pub use args::Cmd;
+pub(crate) use args::Cmd;
 
-use crate::cfg::dispatch::Dispatch;
+use crate::cfg::dispatch::dispatch_via_run;
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
 impl Run for Cmd {
     async fn run(self, _ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmds::generate(&self.out_dir)
+        cmd::generate(&self.out_dir)
     }
 }
 
-impl Dispatch for Cmd {
-    async fn dispatch(self, mut ctx: RuntimeContext) -> CarbideCliResult<()> {
-        self.run(&mut ctx).await
-    }
-}
+dispatch_via_run!(Cmd);

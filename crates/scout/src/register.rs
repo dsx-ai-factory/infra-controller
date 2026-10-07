@@ -24,9 +24,30 @@ use tracing::info;
 use tss_esapi::Context;
 use tss_esapi::handles::KeyHandle;
 
-use crate::{CarbideClientError, attestation as attest};
+use crate::{CarbideClientError, attestation as attest, platform, tpm};
 
-pub async fn run(
+// Sentinel MAC reported by udev for Mellanox SFs and VFs that have no real MAC
+// address. Mirrors carbide_network::MELLANOX_SF_VF_MAC_ADDRESS_IN without
+// adding that crate as a dependency.
+const MELLANOX_SF_VF_MAC_ADDRESS_IN: &str = "ch:64";
+
+// Mellanox SFs and VFs that have no real MAC address report the sentinel above from udev.
+// VFs additionally appear under a "virtfn" sysfs path segment.
+// Neither is useful to the host inventory model.
+fn is_auxiliary_interface(nic: &::rpc::machine_discovery::NetworkInterface) -> bool {
+    let is_sf_or_vf_mac = nic.mac_address == MELLANOX_SF_VF_MAC_ADDRESS_IN;
+    let is_vf_path = nic
+        .pci_properties
+        .as_ref()
+        .map(|p| {
+            let pci_portion = p.path.split("/net/").next().unwrap_or("");
+            pci_portion.contains("virtfn")
+        })
+        .unwrap_or(false);
+    is_sf_or_vf_mac || is_vf_path
+}
+
+pub(super) async fn run(
     forge_api: &str,
     root_ca: String,
     machine_interface_id: Option<uuid::Uuid>,
@@ -34,9 +55,14 @@ pub async fn run(
     tpm_path: &str,
 ) -> Result<(MachineId, Option<uuid::Uuid>), CarbideClientError> {
     let mut hardware_info = enumerate_hardware()?;
+    hardware_info
+        .network_interfaces
+        .retain(|nic| !is_auxiliary_interface(nic));
     info!("Successfully enumerated hardware");
 
-    let is_dpu = hardware_info.tpm_ek_certificate.is_none();
+    // Missing TPM EK material must not be treated as DPU detection. DPUs are
+    // identified from platform SMBIOS data, not from TPM availability.
+    let is_dpu = !platform::is_host();
 
     if machine_interface_id.is_none() && !is_dpu {
         return Err(CarbideClientError::GenericError(
@@ -49,7 +75,17 @@ pub async fn run(
     let mut att_key_handle_opt: Option<KeyHandle> = None;
     let mut tss_ctx_opt: Option<Context> = None;
 
-    if !is_dpu {
+    // A host with no TPM cannot attest, so gate on actual TPM presence (not just is_dpu) and skip
+    // the flow rather than hard failing in create_context_from_path.
+    let do_attestation = !is_dpu && tpm::tpm_present(tpm_path);
+    if !is_dpu && !do_attestation {
+        tracing::warn!(
+            tpm_path = ?tpm_path,
+            "Host has no TPM device; skipping attestation key setup"
+        );
+    }
+
+    if do_attestation {
         // set the max auth fail to 256 as a stop gap measure to prevent machines from failing during
         // repeated reingestion cycle
         crate::tpm::set_tpm_max_auth_fail()?;
@@ -61,9 +97,17 @@ pub async fn run(
         // CHANGETO - supply context externally
         hardware_info.tpm_description = attest::get_tpm_description(&mut tss_ctx);
 
-        let result = attest::create_attest_key_info(&mut tss_ctx).map_err(|e| {
-            CarbideClientError::TpmError(format!("Could not create AttestKeyInfo: {e}"))
-        })?;
+        let result = match attest::create_attest_key_info(&mut tss_ctx) {
+            Ok(result) => result,
+            Err(e) => {
+                if tpm::should_attempt_tpm_recovery_for_attest_key_failure(&*e) {
+                    tpm::recover_tpm_and_reboot(tpm_path)?;
+                }
+                return Err(CarbideClientError::TpmError(format!(
+                    "Could not create AttestKeyInfo: {e}"
+                )));
+            }
+        };
 
         hardware_info.attest_key_info = Some(result.0);
         endorsement_key_handle_opt = Some(result.1);
@@ -86,11 +130,15 @@ pub async fn run(
         )
         .await?;
     let machine_id = registration_data.machine_id;
-    info!("successfully discovered machine {machine_id} for interface {machine_interface_id:?}");
+    info!(
+        %machine_id,
+        ?machine_interface_id,
+        "successfully discovered machine",
+    );
 
     // If we are not on a DPU and have some post-registration things to do,
     // we do them here.
-    if !is_dpu {
+    if do_attestation {
         // If we have received back an attestation key challenge, this means
         // that Carbide has requested an attestation, so do it!
         //
@@ -104,9 +152,9 @@ pub async fn run(
                 "Sent AttestKeyInfo and received AttestKeyBindChallenge, starting measurements ..."
             );
             tracing::info!(
-                "cred_blob - {} bytes long, secret - {} bytes long",
-                attest_key_challenge.cred_blob.len(),
-                attest_key_challenge.encrypted_secret.len()
+                credential_blob_bytes = attest_key_challenge.cred_blob.len(),
+                encrypted_secret_bytes = attest_key_challenge.encrypted_secret.len(),
+                "Received attestation key challenge credential sizes",
             );
 
             let Some(ek_handle) = endorsement_key_handle_opt else {
@@ -177,4 +225,147 @@ pub async fn run(
     }
 
     Ok((machine_id, interface_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use ::rpc::machine_discovery::{NetworkInterface, PciDeviceProperties};
+
+    use super::*;
+
+    fn pci(path: &str) -> Option<PciDeviceProperties> {
+        Some(PciDeviceProperties {
+            vendor: "Mellanox Technologies".to_string(),
+            device: "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller".to_string(),
+            path: path.to_string(),
+            numa_node: 0,
+            description: None,
+            slot: Some("0000:08:00.0".to_string()),
+        })
+    }
+
+    fn nic(mac: &str, path: &str) -> NetworkInterface {
+        NetworkInterface {
+            mac_address: mac.to_string(),
+            pci_properties: pci(path),
+        }
+    }
+
+    // DPU physical functions exposed to the host have real MACs and a direct sysfs
+    // path (no "virtfn" segment). They must survive the filter so the inventory model
+    // retains evidence that the machine has a DPU.
+    #[test]
+    fn dpu_pf_is_kept() {
+        let iface = nic(
+            "a0:88:c2:00:11:22",
+            "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/net/enp8s0f0np0",
+        );
+        assert!(!is_auxiliary_interface(&iface));
+    }
+
+    #[test]
+    fn second_dpu_pf_port_is_kept() {
+        let iface = nic(
+            "a0:88:c2:00:11:23",
+            "/devices/pci0000:00/0000:00:1c.4/0000:08:00.1/net/enp8s0f1np1",
+        );
+        assert!(!is_auxiliary_interface(&iface));
+    }
+
+    // Regular host NICs (non-DPU Ethernet controllers) must also be kept.
+    #[test]
+    fn regular_host_nic_is_kept() {
+        let iface = nic(
+            "b4:96:91:aa:bb:cc",
+            "/devices/pci0000:00/0000:00:01.0/0000:01:00.0/net/eth0",
+        );
+        assert!(!is_auxiliary_interface(&iface));
+    }
+
+    // SFs (scalable functions) report the sentinel MAC from udev when they have no real MAC.
+    #[test]
+    fn sf_with_sentinel_mac_is_filtered() {
+        let iface = nic(
+            MELLANOX_SF_VF_MAC_ADDRESS_IN,
+            "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/net/en_sf0",
+        );
+        assert!(is_auxiliary_interface(&iface));
+    }
+
+    // VFs appear under a "virtfn" sysfs path segment regardless of their MAC.
+    #[test]
+    fn vf_with_virtfn_path_is_filtered() {
+        let iface = nic(
+            "a0:88:c2:00:11:30",
+            "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/virtfn0/net/eth1",
+        );
+        assert!(is_auxiliary_interface(&iface));
+    }
+
+    // VFs that also carry the sentinel MAC are caught by either predicate.
+    #[test]
+    fn vf_with_sentinel_mac_and_virtfn_path_is_filtered() {
+        let iface = nic(
+            MELLANOX_SF_VF_MAC_ADDRESS_IN,
+            "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/virtfn3/net/eth3",
+        );
+        assert!(is_auxiliary_interface(&iface));
+    }
+
+    // An interface whose name happens to contain "virtfn" (after /net/) is not a VF
+    // and must not be filtered — only a "virtfn" sysfs segment before /net/ indicates a VF.
+    #[test]
+    fn interface_named_virtfn_with_real_mac_is_kept() {
+        let iface = nic(
+            "b4:96:91:aa:bb:cc",
+            "/devices/pci0000:00/0000:00:01.0/0000:01:00.0/net/virtfn0",
+        );
+        assert!(!is_auxiliary_interface(&iface));
+    }
+
+    // Exercises the unwrap_or(false) in the virtfn path check: absent pci_properties
+    // does not cause a false positive when the interface does not also carry
+    // the sentinel MAC.
+    #[test]
+    fn no_pci_properties_with_real_mac_is_kept() {
+        let iface = NetworkInterface {
+            mac_address: "de:ad:be:ef:00:01".to_string(),
+            pci_properties: None,
+        };
+        assert!(!is_auxiliary_interface(&iface));
+    }
+
+    // Verify end-to-end that retain keeps exactly the expected interfaces when a
+    // mixed list is filtered — DPU PFs survive, SFs and VFs are removed.
+    #[test]
+    fn retain_keeps_pfs_removes_sfs_and_vfs() {
+        let mut nics = vec![
+            nic(
+                "a0:88:c2:00:11:22",
+                "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/net/enp8s0f0np0",
+            ),
+            nic(
+                MELLANOX_SF_VF_MAC_ADDRESS_IN,
+                "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/net/en_sf0",
+            ),
+            nic(
+                MELLANOX_SF_VF_MAC_ADDRESS_IN,
+                "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/net/en_sf1",
+            ),
+            nic(
+                "a0:88:c2:00:11:23",
+                "/devices/pci0000:00/0000:00:1c.4/0000:08:00.0/virtfn0/net/eth1",
+            ),
+            nic(
+                "a0:88:c2:00:11:24",
+                "/devices/pci0000:00/0000:00:1c.4/0000:08:00.1/net/enp8s0f1np1",
+            ),
+        ];
+
+        nics.retain(|nic| !is_auxiliary_interface(nic));
+
+        assert_eq!(nics.len(), 2);
+        assert_eq!(nics[0].mac_address, "a0:88:c2:00:11:22");
+        assert_eq!(nics[1].mac_address, "a0:88:c2:00:11:24");
+    }
 }

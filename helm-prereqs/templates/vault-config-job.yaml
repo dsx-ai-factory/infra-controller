@@ -94,6 +94,10 @@ spec:
           env:
             - name: VAULT_ADDR
               value: {{ .Values.vault.address | quote }}
+            {{- with .Values.vault.namespace }}
+            - name: VAULT_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
             - name: VAULT_SKIP_VERIFY
               value: "true"
           command:
@@ -126,6 +130,10 @@ spec:
           env:
             - name: VAULT_ADDR
               value: {{ .Values.vault.address | quote }}
+            {{- with .Values.vault.namespace }}
+            - name: VAULT_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
             - name: VAULT_SKIP_VERIFY
               value: "true"
             - name: VAULT_TOKEN
@@ -143,7 +151,12 @@ spec:
               set -e
 
               # Use env-var based API server address — avoids cluster DNS (broken on this cluster)
-              APISERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+              # Kubernetes supplies a bare service IP; IPv6 needs brackets in a URL.
+              APISERVER_HOST="${KUBERNETES_SERVICE_HOST}"
+              case "${APISERVER_HOST}" in
+                *:*) APISERVER_HOST="[${APISERVER_HOST}]" ;;
+              esac
+              APISERVER="https://${APISERVER_HOST}:${KUBERNETES_SERVICE_PORT}"
               SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
               OPERATORS_NS="{{ .Values.certManagerNamespace }}"
 
@@ -208,7 +221,7 @@ spec:
               echo "Configuring Kubernetes auth..."
               vault auth enable kubernetes 2>/dev/null || true
               vault write auth/kubernetes/config \
-                kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+                kubernetes_host="${APISERVER}"
 
               # ---- Policies ----
               echo "Writing cert-manager-nico-policy..."
@@ -233,6 +246,9 @@ spec:
               path "{{ .Values.vault.kvMount }}/data/*" {
                 capabilities = ["read", "list"]
               }
+              path "{{ .Values.vault.kvMount }}/metadata/*" {
+                capabilities = ["list"]
+              }
               path "{{ .Values.vault.kvMount }}/data/machines*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
@@ -240,7 +256,7 @@ spec:
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
               path "{{ .Values.vault.kvMount }}/metadata/machines/*" {
-                capabilities = ["delete"]
+                capabilities = ["list", "delete"]
               }
               path "{{ .Values.vault.kvMount }}/destroy/machines/*" {
                 capabilities = ["delete"]
@@ -253,6 +269,27 @@ spec:
               }
               path "{{ .Values.vault.kvMount }}/data/bgp/*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/firmware_artifacts/+/access-token" {
+                capabilities = ["create", "read", "update"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/firmware_artifacts/+/access-token" {
+                capabilities = ["delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/switch_nvos/*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/switch_nvos/*" {
+                capabilities = ["read", "list", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/destroy/switch_nvos/*" {
+                capabilities = ["update"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/racks/+/maintenance/access-token" {
+                capabilities = ["create", "update", "read"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/racks/+/maintenance/access-token" {
+                capabilities = ["delete", "read"]
               }
               POLICY
 
@@ -268,8 +305,9 @@ spec:
               # ---- K8s auth role for nico-api ----
               # nico-api authenticates to in-cluster Vault via its SA JWT
               # (vault SDK auto-detects /var/run/secrets/kubernetes.io/serviceaccount/token)
-              # and manages machine credentials in the KV mount (nico-vault-policy
-              # grants read/list plus scoped writes for machine, UFM, and NMXM secrets).
+              # and manages credentials in the KV mount (nico-vault-policy grants
+              # read/list everywhere plus scoped writes under each credential prefix
+              # nico-api owns; see CredentialPrefix in crates/secrets).
               echo "Creating K8s auth role for nico-api..."
               vault write auth/kubernetes/role/{{ .Values.vault.nicoApiK8sAuth.serviceAccountName }} \
                 bound_service_account_names={{ .Values.vault.nicoApiK8sAuth.serviceAccountName }} \

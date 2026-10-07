@@ -10,3 +10,10 @@ pxe/mkiso/
 **/.mkosi*
 pxe/static/blobs/internal/*/.mkosi*
 **/.mkosi*
+
+# mkosi staging inputs and the extracted extras tree. No Dockerfile reads these,
+# but the boot/ephemeral jobs fill them with multi-GB payloads that would
+# otherwise be shipped to BuildKit as build context. pxe/static/blobs/ is
+# deliberately NOT excluded -- it is what the release-artifacts images COPY.
+pxe/mkosi.profiles/
+pxe/.scout-extras/

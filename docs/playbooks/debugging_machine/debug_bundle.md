@@ -73,14 +73,14 @@ export https_proxy=socks5://127.0.0.1:8888
 ### Command Syntax
 
 ```bash
-nico-admin-cli -c <API_URL> mh debug-bundle <MACHINE_ID> --start-time <TIME> [--grafana-url <URL>] [--end-time <TIME>] [--output-path <PATH>] [--batch-size <SIZE>] [--utc]
+nico-admin-cli -a <API_URL> mh debug-bundle <MACHINE_ID> --start-time <TIME> [--grafana-url <URL>] [--end-time <TIME>] [--output-path <PATH>] [--batch-size <SIZE>] [--utc]
 ```
 
 ### Parameters
 
 **Required:**
 
-- `-c <API_URL>`: NICo API endpoint
+- `-a <API_URL>`: NICo API endpoint
   - From outside cluster: `https://<your-nico-api-url>/`
   - From inside cluster: `https://127.0.0.1:1079`
 - `<MACHINE_ID>`: The machine ID to collect debug information for
@@ -101,7 +101,7 @@ nico-admin-cli -c <API_URL> mh debug-bundle <MACHINE_ID> --start-time <TIME> [--
 ```bash
 GRAFANA_AUTH_TOKEN=<your-token> \
 https_proxy=socks5://127.0.0.1:8888 \
-nico-admin-cli -c https://<your-nico-api-url>/ mh debug-bundle \
+nico-admin-cli -a https://<your-nico-api-url>/ mh debug-bundle \
   <machine-id> \
   --start-time 06:00:00 \
   --grafana-url https://grafana.example.com
@@ -112,7 +112,7 @@ nico-admin-cli -c https://<your-nico-api-url>/ mh debug-bundle \
 ```bash
 GRAFANA_AUTH_TOKEN=<your-token> \
 https_proxy=socks5://127.0.0.1:8888 \
-nico-admin-cli -c https://<your-nico-api-url>/ mh debug-bundle \
+nico-admin-cli -a https://<your-nico-api-url>/ mh debug-bundle \
   <machine-id> \
   --start-time 06:00:00 \
   --end-time 18:00:00 \
@@ -123,7 +123,7 @@ nico-admin-cli -c https://<your-nico-api-url>/ mh debug-bundle \
 **Without Grafana (metadata only):**
 
 ```bash
-nico-admin-cli -c https://<your-nico-api-url>/ mh debug-bundle \
+nico-admin-cli -a https://<your-nico-api-url>/ mh debug-bundle \
   <machine-id> \
   --start-time 06:00:00
 ```

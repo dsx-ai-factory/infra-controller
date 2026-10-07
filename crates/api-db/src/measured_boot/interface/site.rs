@@ -20,7 +20,6 @@
  *  tables in the database, leveraging the site-specific record types.
  */
 
-use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{
     MeasurementApprovedMachineId, MeasurementApprovedProfileId, MeasurementSystemProfileId,
     TrustedMachineId,
@@ -67,7 +66,7 @@ pub async fn remove_from_approved_machines_by_approval_id(
 
 pub async fn remove_from_approved_machines_by_machine_id(
     txn: &mut PgConnection,
-    machine_id: MachineId,
+    machine_id: TrustedMachineId,
 ) -> Result<MeasurementApprovedMachineRecord, DatabaseError> {
     let query = "delete from measurement_approved_machines where machine_id = $1 returning *";
     sqlx::query_as(query)

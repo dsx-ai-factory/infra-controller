@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use trace_propagation::TraceInjectService;
 
 use crate::config::BackendTlsConfig;
 use crate::error::ComponentManagerError;
 
-/// Build a tonic `Channel` to `url`, optionally configured with mTLS.
+/// Build a tonic `Channel` to `url`, optionally configured with mTLS, wrapped so every request it
+/// sends carries the current span's W3C trace context (issue #2438). Because the wrap lives here,
+/// any backend built on top of `build_channel` gets trace propagation automatically.
 ///
 /// When `tls` is `None`, a plain-text channel is returned (suitable for
 /// local development or in-cluster plaintext).  When `Some`, the channel
@@ -17,7 +20,7 @@ pub async fn build_channel(
     url: &str,
     tls: Option<&BackendTlsConfig>,
     service_label: &str,
-) -> Result<Channel, ComponentManagerError> {
+) -> Result<TraceInjectService<Channel>, ComponentManagerError> {
     let endpoint = Channel::from_shared(url.to_owned()).map_err(|e| {
         ComponentManagerError::InvalidArgument(format!("invalid {service_label} URL: {e}"))
     })?;
@@ -68,5 +71,5 @@ pub async fn build_channel(
         None => endpoint.connect().await?,
     };
 
-    Ok(channel)
+    Ok(TraceInjectService::new(channel))
 }

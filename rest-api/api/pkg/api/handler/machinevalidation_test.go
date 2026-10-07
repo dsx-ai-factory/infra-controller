@@ -16,9 +16,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -51,7 +50,7 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	testID := "test-id-1"
@@ -73,8 +72,8 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 
 	createWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationTestAddUpdateResponse)
-			*response = &cwssaws.MachineValidationTestAddUpdateResponse{
+			response := value.(**corev1.MachineValidationTestAddUpdateResponse)
+			*response = &corev1.MachineValidationTestAddUpdateResponse{
 				TestId:  testID,
 				Version: testVersion,
 			}
@@ -92,9 +91,9 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 
 	getWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationTestsGetResponse)
-			*response = &cwssaws.MachineValidationTestsGetResponse{
-				Tests: []*cwssaws.MachineValidationTest{
+			response := value.(**corev1.MachineValidationTestsGetResponse)
+			*response = &corev1.MachineValidationTestsGetResponse{
+				Tests: []*corev1.MachineValidationTest{
 					{
 						TestId:  testID,
 						Version: testVersion,
@@ -243,7 +242,6 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateMachineValidationTestHandler{
@@ -292,7 +290,7 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	testID := "test-id-1"
@@ -314,8 +312,8 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 
 	updateWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationTestAddUpdateResponse)
-			*response = &cwssaws.MachineValidationTestAddUpdateResponse{
+			response := value.(**corev1.MachineValidationTestAddUpdateResponse)
+			*response = &corev1.MachineValidationTestAddUpdateResponse{
 				TestId:  testID,
 				Version: testVersion,
 			}
@@ -333,9 +331,9 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 
 	getWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationTestsGetResponse)
-			*response = &cwssaws.MachineValidationTestsGetResponse{
-				Tests: []*cwssaws.MachineValidationTest{
+			response := value.(**corev1.MachineValidationTestsGetResponse)
+			*response = &corev1.MachineValidationTestsGetResponse{
+				Tests: []*corev1.MachineValidationTest{
 					{
 						TestId:  testID,
 						Version: testVersion,
@@ -440,7 +438,6 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := UpdateMachineValidationTestHandler{
@@ -489,12 +486,12 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
-	var workflowResponse []*cwssaws.MachineValidationTest
+	var workflowResponse []*corev1.MachineValidationTest
 	for i := 0; i < 20; i++ {
-		workflowResponse = append(workflowResponse, &cwssaws.MachineValidationTest{
+		workflowResponse = append(workflowResponse, &corev1.MachineValidationTest{
 			TestId:  fmt.Sprintf("test-id-%d", i),
 			Version: "version-1",
 		})
@@ -513,8 +510,8 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 
 	updateWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationTestsGetResponse)
-			*response = &cwssaws.MachineValidationTestsGetResponse{
+			response := value.(**corev1.MachineValidationTestsGetResponse)
+			*response = &corev1.MachineValidationTestsGetResponse{
 				Tests: workflowResponse,
 			}
 			return nil
@@ -596,7 +593,6 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationTestHandler{
@@ -648,7 +644,7 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Prepare client pool for sync calls to site(s).
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -666,9 +662,9 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 
 	updateWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationTestsGetResponse)
-			*response = &cwssaws.MachineValidationTestsGetResponse{
-				Tests: []*cwssaws.MachineValidationTest{
+			response := value.(**corev1.MachineValidationTestsGetResponse)
+			*response = &corev1.MachineValidationTestsGetResponse{
+				Tests: []*corev1.MachineValidationTest{
 					{
 						TestId:  testID,
 						Version: testVersion,
@@ -754,7 +750,6 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationTestHandler{
@@ -798,17 +793,22 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 
 	site := testMachineBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered)
 	assert.NotNil(t, site)
+	machine := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil, false, false, cdbm.MachineStatusReady)
+
+	otherIP := testMachineBuildInfrastructureProvider(t, dbSession, "test-ip-org-2", "infra-provider-2")
+	otherSite := testMachineBuildSite(t, dbSession, otherIP, "test-site-2", cdbm.SiteStatusRegistered)
+	otherMachine := testMachineBuildMachine(t, dbSession, otherIP.ID, otherSite.ID, nil, nil, false, false, cdbm.MachineStatusReady)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
-	var workflowResponse []*cwssaws.MachineValidationResult
+	var workflowResponse []*corev1.MachineValidationResult
 	for i := 0; i < 20; i++ {
-		workflowResponse = append(workflowResponse, &cwssaws.MachineValidationResult{
+		workflowResponse = append(workflowResponse, &corev1.MachineValidationResult{
 			Name: fmt.Sprintf("test-result-%d", i),
 		})
 	}
@@ -826,8 +826,8 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 
 	updateWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationResultList)
-			*response = &cwssaws.MachineValidationResultList{
+			response := value.(**corev1.MachineValidationResultList)
+			*response = &corev1.MachineValidationResultList{
 				Results: workflowResponse,
 			}
 			return nil
@@ -853,14 +853,19 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 	tests := []struct {
 		name           string
 		reqOrgName     string
+		machineID      string
+		siteID         string
+		legacyRoute    bool
 		user           *cdbm.User
 		expectedErr    bool
 		expectedStatus int
 		scpClient      *tmocks.Client
+		emptyResponse  bool
 	}{
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -869,30 +874,100 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
+			machineID:      machine.ID,
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
 			scpClient:      scpClient,
 		},
 		{
+			name:           "error when machine is not found",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "error when machine belongs to another provider",
+			reqOrgName:     ipOrg1,
+			machineID:      otherMachine.ID,
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "error when legacy site belongs to another provider",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			siteID:         otherSite.ID.String(),
+			legacyRoute:    true,
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			scpClient:      scpClient,
+		},
+		{
 			name:           "error when workflow times out",
 			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
 			scpClient:      scpClientWithTimeout,
 		},
 		{
-			name:           "no error",
+			name:           "no error for machine route",
 			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
 			user:           pvu,
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			scpClient:      scpClient,
 		},
+		{
+			name:           "no error for legacy route without central machine record",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			siteID:         site.ID.String(),
+			legacyRoute:    true,
+			user:           pvu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "empty response is an array for machine route",
+			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
+			user:           pvu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+			emptyResponse:  true,
+		},
+		{
+			name:           "empty response is an array for legacy route",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			siteID:         site.ID.String(),
+			legacyRoute:    true,
+			user:           pvu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+			emptyResponse:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.emptyResponse {
+				previousResponse := workflowResponse
+				workflowResponse = nil
+				defer func() { workflowResponse = previousResponse }()
+			}
 			assert.NotEqual(t, tc.name, "")
 			// init temporal client
 			scp.IDClientMap[site.ID.String()] = tc.scpClient
@@ -903,13 +978,17 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 			rec := httptest.NewRecorder()
 
 			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "siteID", "machineID")
-			ec.SetParamValues(tc.reqOrgName, site.ID.String(), uuid.NewString())
+			if tc.legacyRoute {
+				ec.SetParamNames("orgName", "siteID", "machineID")
+				ec.SetParamValues(tc.reqOrgName, tc.siteID, tc.machineID)
+			} else {
+				ec.SetParamNames("orgName", "id")
+				ec.SetParamValues(tc.reqOrgName, tc.machineID)
+			}
 			if tc.user != nil {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationResultsHandler{
@@ -924,6 +1003,9 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
 			if !tc.expectedErr {
+				if tc.emptyResponse {
+					assert.JSONEq(t, "[]", rec.Body.String())
+				}
 				var apiResponse []*model.APIMachineValidationResult
 				err := json.Unmarshal(rec.Body.Bytes(), &apiResponse)
 				assert.Nil(t, err)
@@ -955,17 +1037,22 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 
 	site := testMachineBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered)
 	assert.NotNil(t, site)
+	machine := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil, false, false, cdbm.MachineStatusReady)
+
+	otherIP := testMachineBuildInfrastructureProvider(t, dbSession, "test-ip-org-2", "infra-provider-2")
+	otherSite := testMachineBuildSite(t, dbSession, otherIP, "test-site-2", cdbm.SiteStatusRegistered)
+	otherMachine := testMachineBuildMachine(t, dbSession, otherIP.ID, otherSite.ID, nil, nil, false, false, cdbm.MachineStatusReady)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
-	var workflowResponse []*cwssaws.MachineValidationRun
+	var workflowResponse []*corev1.MachineValidationRun
 	for i := 0; i < 20; i++ {
-		workflowResponse = append(workflowResponse, &cwssaws.MachineValidationRun{
+		workflowResponse = append(workflowResponse, &corev1.MachineValidationRun{
 			Name: fmt.Sprintf("test-run-%d", i),
 		})
 	}
@@ -983,8 +1070,8 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 
 	updateWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.MachineValidationRunList)
-			*response = &cwssaws.MachineValidationRunList{
+			response := value.(**corev1.MachineValidationRunList)
+			*response = &corev1.MachineValidationRunList{
 				Runs: workflowResponse,
 			}
 			return nil
@@ -1010,14 +1097,19 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 	tests := []struct {
 		name           string
 		reqOrgName     string
+		machineID      string
+		siteID         string
+		legacyRoute    bool
 		user           *cdbm.User
 		expectedErr    bool
 		expectedStatus int
 		scpClient      *tmocks.Client
+		emptyResponse  bool
 	}{
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -1026,30 +1118,100 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
+			machineID:      machine.ID,
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
 			scpClient:      scpClient,
 		},
 		{
+			name:           "error when machine is not found",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "error when machine belongs to another provider",
+			reqOrgName:     ipOrg1,
+			machineID:      otherMachine.ID,
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "error when legacy site belongs to another provider",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			siteID:         otherSite.ID.String(),
+			legacyRoute:    true,
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			scpClient:      scpClient,
+		},
+		{
 			name:           "error when workflow times out",
 			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
 			scpClient:      scpClientWithTimeout,
 		},
 		{
-			name:           "no error",
+			name:           "no error for machine route",
 			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
 			user:           pvu,
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			scpClient:      scpClient,
 		},
+		{
+			name:           "no error for legacy route without central machine record",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			siteID:         site.ID.String(),
+			legacyRoute:    true,
+			user:           pvu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "empty response is an array for machine route",
+			reqOrgName:     ipOrg1,
+			machineID:      machine.ID,
+			user:           pvu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+			emptyResponse:  true,
+		},
+		{
+			name:           "empty response is an array for legacy route",
+			reqOrgName:     ipOrg1,
+			machineID:      uuid.NewString(),
+			siteID:         site.ID.String(),
+			legacyRoute:    true,
+			user:           pvu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+			emptyResponse:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.emptyResponse {
+				previousResponse := workflowResponse
+				workflowResponse = nil
+				defer func() { workflowResponse = previousResponse }()
+			}
 			assert.NotEqual(t, tc.name, "")
 			// init temporal client
 			scp.IDClientMap[site.ID.String()] = tc.scpClient
@@ -1060,13 +1222,17 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 			rec := httptest.NewRecorder()
 
 			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "siteID", "machineID")
-			ec.SetParamValues(tc.reqOrgName, site.ID.String(), uuid.NewString())
+			if tc.legacyRoute {
+				ec.SetParamNames("orgName", "siteID", "machineID")
+				ec.SetParamValues(tc.reqOrgName, tc.siteID, tc.machineID)
+			} else {
+				ec.SetParamNames("orgName", "id")
+				ec.SetParamValues(tc.reqOrgName, tc.machineID)
+			}
 			if tc.user != nil {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationRunHandler{
@@ -1081,6 +1247,9 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
 			if !tc.expectedErr {
+				if tc.emptyResponse {
+					assert.JSONEq(t, "[]", rec.Body.String())
+				}
 				var apiResponse []*model.APIMachineValidationRun
 				err := json.Unmarshal(rec.Body.Bytes(), &apiResponse)
 				assert.Nil(t, err)
@@ -1117,12 +1286,12 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
-	var workflowResponse []*cwssaws.MachineValidationExternalConfig
+	var workflowResponse []*corev1.MachineValidationExternalConfig
 	for i := 0; i < 20; i++ {
-		workflowResponse = append(workflowResponse, &cwssaws.MachineValidationExternalConfig{
+		workflowResponse = append(workflowResponse, &corev1.MachineValidationExternalConfig{
 			Name: fmt.Sprintf("test-ext-cfg-%d", i),
 		})
 	}
@@ -1140,8 +1309,8 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 
 	getWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.GetMachineValidationExternalConfigsResponse)
-			*response = &cwssaws.GetMachineValidationExternalConfigsResponse{
+			response := value.(**corev1.GetMachineValidationExternalConfigsResponse)
+			*response = &corev1.GetMachineValidationExternalConfigsResponse{
 				Configs: workflowResponse,
 			}
 			return nil
@@ -1223,7 +1392,6 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationExternalConfigHandler{
@@ -1274,12 +1442,12 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	expCfgName := "test-ext-cfg-13"
 	// tests
-	var workflowResponse []*cwssaws.MachineValidationExternalConfig
-	workflowResponse = append(workflowResponse, &cwssaws.MachineValidationExternalConfig{
+	var workflowResponse []*corev1.MachineValidationExternalConfig
+	workflowResponse = append(workflowResponse, &corev1.MachineValidationExternalConfig{
 		Name: expCfgName,
 	})
 
@@ -1296,8 +1464,8 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 
 	getWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.GetMachineValidationExternalConfigsResponse)
-			*response = &cwssaws.GetMachineValidationExternalConfigsResponse{
+			response := value.(**corev1.GetMachineValidationExternalConfigsResponse)
+			*response = &corev1.GetMachineValidationExternalConfigsResponse{
 				Configs: workflowResponse,
 			}
 			return nil
@@ -1316,8 +1484,8 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 
 	emptyWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.GetMachineValidationExternalConfigsResponse)
-			*response = &cwssaws.GetMachineValidationExternalConfigsResponse{}
+			response := value.(**corev1.GetMachineValidationExternalConfigsResponse)
+			*response = &corev1.GetMachineValidationExternalConfigsResponse{}
 			return nil
 		},
 	)
@@ -1405,7 +1573,6 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationExternalConfigHandler{
@@ -1453,7 +1620,7 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// identity
 	extCfgName := "ext-cfg-1"
@@ -1482,9 +1649,9 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 
 	getWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
-			response := value.(**cwssaws.GetMachineValidationExternalConfigsResponse)
-			*response = &cwssaws.GetMachineValidationExternalConfigsResponse{
-				Configs: []*cwssaws.MachineValidationExternalConfig{
+			response := value.(**corev1.GetMachineValidationExternalConfigsResponse)
+			*response = &corev1.GetMachineValidationExternalConfigsResponse{
+				Configs: []*corev1.MachineValidationExternalConfig{
 					{
 						Name:   extCfgName,
 						Config: extCfgRaw,
@@ -1612,7 +1779,6 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateMachineValidationExternalConfigHandler{
@@ -1660,7 +1826,7 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	extCfgName := "ext-cfg-1"
@@ -1692,9 +1858,9 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 	getWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(
 		func(ctx context.Context, value interface{}) error {
 			if beforeUpdate {
-				response := value.(**cwssaws.GetMachineValidationExternalConfigsResponse)
-				*response = &cwssaws.GetMachineValidationExternalConfigsResponse{
-					Configs: []*cwssaws.MachineValidationExternalConfig{
+				response := value.(**corev1.GetMachineValidationExternalConfigsResponse)
+				*response = &corev1.GetMachineValidationExternalConfigsResponse{
+					Configs: []*corev1.MachineValidationExternalConfig{
 						{
 							Name:   extCfgName,
 							Config: extCfgRaw,
@@ -1703,9 +1869,9 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 				}
 				beforeUpdate = false
 			} else {
-				response := value.(**cwssaws.GetMachineValidationExternalConfigsResponse)
-				*response = &cwssaws.GetMachineValidationExternalConfigsResponse{
-					Configs: []*cwssaws.MachineValidationExternalConfig{
+				response := value.(**corev1.GetMachineValidationExternalConfigsResponse)
+				*response = &corev1.GetMachineValidationExternalConfigsResponse{
+					Configs: []*corev1.MachineValidationExternalConfig{
 						{
 							Name:        extCfgName,
 							Config:      extCfgRaw,
@@ -1788,7 +1954,6 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := UpdateMachineValidationExternalConfigHandler{
@@ -1837,7 +2002,7 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// identity
 	extCfgName := "ext-cfg-1"
@@ -1930,7 +2095,6 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := DeleteMachineValidationExternalConfigHandler{

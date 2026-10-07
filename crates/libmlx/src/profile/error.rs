@@ -29,13 +29,13 @@ use crate::variables::value::MlxValueError;
 pub enum MlxProfileError {
     // RegistryNotFound is returned when a registry configured
     // to be used with the profile is not found.
-    #[error("Registry '{registry_name}' not found in available registries")]
+    #[error("registry '{registry_name}' not found in available registries")]
     RegistryNotFound { registry_name: String },
 
     // VariableNotFound is returned when a mapped
     // variable for the profile is not found in
     // the configured registry.
-    #[error("Variable '{variable_name}' not found in registry '{registry_name}'")]
+    #[error("variable '{variable_name}' not found in registry '{registry_name}'")]
     VariableNotFound {
         variable_name: String,
         registry_name: String,
@@ -45,7 +45,7 @@ pub enum MlxProfileError {
     // fails validation. Generally speaking this shouldn't really
     // happen, unless someone hand-creates a value outside of
     // the constructor.
-    #[error("Value validation failed for variable '{variable_name}': {error}")]
+    #[error("value validation failed for variable '{variable_name}': {error}")]
     ValueValidation {
         variable_name: String,
         error: MlxValueError,
@@ -55,13 +55,13 @@ pub enum MlxProfileError {
     // profile fails, which is likely when validation of
     // a value within the profile fails. Again, it shouldn't
     // really happen, but it's good to check just incase!
-    #[error("Profile validation failed: {message}")]
+    #[error("profile validation failed: {message}")]
     ProfileValidation { message: String },
 
     // Serialization is returned when there is a serialization
     // error while attempting to serialize the profile out to
     // JSON or YAML.
-    #[error("Serialization error: {error}")]
+    #[error("serialization error: {error}")]
     Serialization { error: String },
 
     // YamlParsing is returned when there is an error parsing
@@ -236,11 +236,11 @@ mod coverage_tests {
         value_scenarios!(
             run = |error| error.to_string();
             "RegistryNotFound Display" {
-                MlxProfileError::registry_not_found("my_registry") => "Registry 'my_registry' not found in available registries".to_string(),
+                MlxProfileError::registry_not_found("my_registry") => "registry 'my_registry' not found in available registries".to_string(),
             }
 
             "VariableNotFound Display" {
-                MlxProfileError::variable_not_found("my_var", "my_registry") => "Variable 'my_var' not found in registry 'my_registry'".to_string(),
+                MlxProfileError::variable_not_found("my_var", "my_registry") => "variable 'my_var' not found in registry 'my_registry'".to_string(),
             }
 
             "ValueValidation Display nests the MlxValueError" {
@@ -250,17 +250,17 @@ mod coverage_tests {
                         expected: "Integer".to_string(),
                         got: "bool".to_string(),
                     },
-                ) => "Value validation failed for variable 'my_var': \
+                ) => "value validation failed for variable 'my_var': \
                      Type mismatch: expected Integer, got bool"
                 .to_string(),
             }
 
             "ProfileValidation Display" {
-                MlxProfileError::profile_validation("something went wrong") => "Profile validation failed: something went wrong".to_string(),
+                MlxProfileError::profile_validation("something went wrong") => "profile validation failed: something went wrong".to_string(),
             }
 
             "Serialization Display" {
-                MlxProfileError::serialization("could not serialize") => "Serialization error: could not serialize".to_string(),
+                MlxProfileError::serialization("could not serialize") => "serialization error: could not serialize".to_string(),
             }
         );
     }
@@ -272,15 +272,15 @@ mod coverage_tests {
         value_scenarios!(
             run = |error| error.to_string();
             "registry_not_found from &str" {
-                MlxProfileError::registry_not_found("a") => "Registry 'a' not found in available registries".to_string(),
+                MlxProfileError::registry_not_found("a") => "registry 'a' not found in available registries".to_string(),
             }
 
             "registry_not_found from String" {
-                MlxProfileError::registry_not_found("b".to_string()) => "Registry 'b' not found in available registries".to_string(),
+                MlxProfileError::registry_not_found("b".to_string()) => "registry 'b' not found in available registries".to_string(),
             }
 
             "profile_validation from String" {
-                MlxProfileError::profile_validation("msg".to_string()) => "Profile validation failed: msg".to_string(),
+                MlxProfileError::profile_validation("msg".to_string()) => "profile validation failed: msg".to_string(),
             }
         );
     }
@@ -337,7 +337,7 @@ mod coverage_tests {
                 value: 9,
                 max_allowed: 5,
             }),
-            expect: "Value validation failed for variable 'unknown': \
+            expect: "value validation failed for variable 'unknown': \
                      Preset value 9 exceeds maximum 5"
                 .to_string(),
         }

@@ -44,14 +44,15 @@ use clap::Parser;
 use crate::attestation::measured_boot::global::cmds::{
     IdNameIdentifier, IdentifierType, get_identifier,
 };
+use crate::cfg::dispatch::Dispatch;
 use crate::cfg::measurement::{KvPair as CfgKvPair, parse_colon_pairs};
 use crate::errors::CarbideCliError;
 
 // CmdProfile provides a container for the `profile`
 // subcommand, which itself contains other subcommands
 // for working with profiles.
-#[derive(Parser, Debug)]
-pub enum CmdProfile {
+#[derive(Parser, Debug, Dispatch)]
+pub(crate) enum CmdProfile {
     #[clap(
         about = "Create a new profile with a given config.",
         visible_alias = "c"
@@ -72,6 +73,7 @@ pub enum CmdProfile {
         about = "List profiles by various ways.",
         visible_alias = "l"
     )]
+    #[dispatch]
     List(List),
 }
 
@@ -89,15 +91,15 @@ Create a profile with extra attributes:
     poweredge_r750 --extra-attrs region:us-west,rack:r1
 
 ")]
-pub struct Create {
+pub(crate) struct Create {
     #[clap(required = true, help = "Every profile gets a name.")]
-    pub name: String,
+    name: String,
 
     #[clap(required = true, help = "The hardware vendor (e.g. dell).")]
-    pub vendor: String,
+    vendor: String,
 
     #[clap(required = true, help = "The hardware product (e.g. poweredge_r750).")]
-    pub product: String,
+    product: String,
 
     /// extra_attrs are extra k:v,... attributes to be
     /// assigned to the profile. Currently the only
@@ -110,7 +112,7 @@ pub struct Create {
         help = "A comma-separated list of additional k:v,k:v,... attributes to set."
     )]
     #[arg(value_parser = parse_colon_pairs)]
-    pub extra_attrs: Vec<CfgKvPair>,
+    extra_attrs: Vec<CfgKvPair>,
 }
 
 /// Delete a profile by ID or name.
@@ -126,15 +128,15 @@ Delete a profile selected explicitly by ID:
     12345678-1234-5678-90ab-cdef01234567 --is-id
 
 ")]
-pub struct Delete {
+pub(crate) struct Delete {
     #[clap(help = "The profile ID or name.")]
-    pub identifier: String,
+    identifier: String,
 
     #[clap(long, help = "Explicitly say the identifier is profile ID.")]
-    pub is_id: bool,
+    is_id: bool,
 
     #[clap(long, help = "Explicitly say the identifier is a profile name.")]
-    pub is_name: bool,
+    is_name: bool,
 }
 
 impl IdNameIdentifier for Delete {
@@ -162,18 +164,18 @@ Rename a profile selected explicitly by ID:
     12345678-1234-5678-90ab-cdef01234567 new-name --is-id
 
 ")]
-pub struct Rename {
+pub(crate) struct Rename {
     #[clap(help = "The existing profile ID or name.")]
-    pub identifier: String,
+    identifier: String,
 
     #[clap(help = "The new profile name.")]
-    pub new_profile_name: String,
+    new_profile_name: String,
 
     #[clap(long, help = "Explicitly say the identifier is profile ID.")]
-    pub is_id: bool,
+    is_id: bool,
 
     #[clap(long, help = "Explicitly say the identifier is a profile name.")]
-    pub is_name: bool,
+    is_name: bool,
 }
 
 impl IdNameIdentifier for Rename {
@@ -203,15 +205,15 @@ Show one profile by name:
     $ nico-admin-cli attestation measured-boot profile show my-profile --is-name
 
 ")]
-pub struct Show {
+pub(crate) struct Show {
     #[clap(help = "The optional profile ID or name.")]
-    pub identifier: Option<String>,
+    pub(super) identifier: Option<String>,
 
     #[clap(long, help = "Explicitly say the identifier is profile ID.")]
-    pub is_id: bool,
+    is_id: bool,
 
     #[clap(long, help = "Explicitly say the identifier is a profile name.")]
-    pub is_name: bool,
+    is_name: bool,
 }
 
 impl IdNameIdentifier for Show {
@@ -225,7 +227,7 @@ impl IdNameIdentifier for Show {
 }
 
 /// List provides a few ways to list things.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Dispatch)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -239,7 +241,7 @@ List all machines for a profile:
     $ nico-admin-cli attestation measured-boot profile list machines my-profile
 
 ")]
-pub enum List {
+pub(crate) enum List {
     #[clap(about = "List all profiles", visible_alias = "a")]
     All(ListAll),
 
@@ -265,7 +267,7 @@ List all profiles:
     $ nico-admin-cli attestation measured-boot profile list all
 
 ")]
-pub struct ListAll {}
+pub(crate) struct ListAll {}
 
 /// List all bundles for a given profile (by profile name or ID).
 #[derive(Parser, Debug)]
@@ -280,15 +282,15 @@ List all bundles for a profile selected explicitly by ID:
     12345678-1234-5678-90ab-cdef01234567 --is-id
 
 ")]
-pub struct ListBundles {
+pub(crate) struct ListBundles {
     #[clap(help = "The profile ID or name.")]
-    pub identifier: String,
+    identifier: String,
 
     #[clap(long, help = "Explicitly say the identifier is profile ID.")]
-    pub is_id: bool,
+    is_id: bool,
 
     #[clap(long, help = "Explicitly say the identifier is a profile name.")]
-    pub is_name: bool,
+    is_name: bool,
 }
 
 impl IdNameIdentifier for ListBundles {
@@ -314,15 +316,15 @@ List all machines for a profile selected explicitly by ID:
     12345678-1234-5678-90ab-cdef01234567 --is-id
 
 ")]
-pub struct ListMachines {
+pub(crate) struct ListMachines {
     #[clap(help = "The profile ID or name.")]
-    pub identifier: String,
+    identifier: String,
 
     #[clap(long, help = "Explicitly say the identifier is profile ID.")]
-    pub is_id: bool,
+    is_id: bool,
 
     #[clap(long, help = "Explicitly say the identifier is a profile name.")]
-    pub is_name: bool,
+    is_name: bool,
 }
 
 impl IdNameIdentifier for ListMachines {

@@ -21,22 +21,22 @@ use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialW
 use carbide_uuid::machine::MachineId;
 use mac_address::MacAddress;
 
-pub mod bmc_session_manager;
+mod bmc_session_manager;
 
-pub use bmc_session_manager::{
+pub(crate) use bmc_session_manager::{
     BmcAuthMaterial, BmcSessionError, BmcSessionManager, BmcSessionStore, PgBmcSessionStore,
 };
 
 use crate::{CarbideError, CarbideResult};
 
-pub struct UpdateCredentials {
-    pub machine_id: MachineId,
-    pub mac_address: Option<MacAddress>,
-    pub credentials: Vec<Credentials>,
+pub(crate) struct UpdateCredentials {
+    pub(crate) machine_id: MachineId,
+    pub(crate) mac_address: Option<MacAddress>,
+    pub(crate) credentials: Vec<Credentials>,
 }
 
 impl UpdateCredentials {
-    pub async fn execute(
+    pub(crate) async fn execute(
         &self,
         credential_writer: &dyn CredentialWriter,
     ) -> CarbideResult<MachineCredentialsUpdateResponse> {
@@ -44,7 +44,7 @@ impl UpdateCredentials {
             let credential_purpose = CredentialPurpose::try_from(credential.credential_purpose)
                 .map_err(|error| {
                     CarbideError::internal(format!(
-                        "invalid discriminant {error:?} for Credential Purpose from grpc?"
+                        "invalid discriminant {error:?} for credential purpose from grpc?"
                     ))
                 })?;
 
@@ -56,7 +56,7 @@ impl UpdateCredentials {
                     credential_type: BmcCredentialType::BmcRoot {
                         bmc_mac_address: self
                             .mac_address
-                            .ok_or_else(|| CarbideError::MissingArgument("MAC Address"))?,
+                            .ok_or_else(|| CarbideError::MissingArgument("MAC address"))?,
                     },
                 },
             };

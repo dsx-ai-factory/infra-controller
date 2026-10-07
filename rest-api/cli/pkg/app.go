@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	cli "github.com/urfave/cli/v2"
@@ -31,6 +32,7 @@ func NewApp(specData []byte) (*cli.App, error) {
 	}
 
 	commands := BuildCommands(spec)
+	commands = addSiteBootstrapCommand(commands, spec)
 	commands = append(commands, LoginCommand())
 	commands = append(commands, InitCommand())
 	commands = append(commands, completionCommand())
@@ -76,7 +78,7 @@ func NewApp(specData []byte) (*cli.App, error) {
 			},
 			&cli.BoolFlag{
 				Name:  "debug",
-				Usage: "Enable debug logging (full HTTP request/response, plus the NICO_* env vars in use)",
+				Usage: "Enable debug logging (HTTP request/response details and NICO_* env vars, with recognized secrets redacted)",
 			},
 			&cli.StringFlag{
 				Name:    "token-url",
@@ -121,17 +123,16 @@ func NewApp(specData []byte) (*cli.App, error) {
 // listing reflects what nicocli will pull from the environment when it
 // applies overrides on top of the loaded config; flag-only env vars
 // (NICO_KEYCLOAK_URL, NICO_KEYCLOAK_REALM, NICO_CONFIG) are included so
-// users can see every NICO_* knob the CLI reads. Sensitive values are
-// printed in full because --debug is opt-in and is documented as logging
-// the full HTTP request and response, including the bearer token.
-func printEnvOverridesForDebug(w *os.File) {
+// users can see every NICO_* knob the CLI reads. Sensitive values are masked
+// because debug output is commonly captured in terminal transcripts and logs.
+func printEnvOverridesForDebug(w io.Writer) {
 	overrides := EnvOverridesFromEnvironment()
 	if len(overrides) == 0 {
 		fmt.Fprintln(w, "[debug] env: no NICO_* environment variables set")
 		return
 	}
 	fmt.Fprintf(w, "[debug] env: %d NICO_* variable(s) in use\n", len(overrides))
-	for _, line := range splitLines(FormatEnvOverrides(overrides, false)) {
+	for _, line := range splitLines(FormatEnvOverrides(overrides, true)) {
 		if line == "" {
 			continue
 		}

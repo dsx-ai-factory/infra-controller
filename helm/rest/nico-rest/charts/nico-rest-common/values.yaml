@@ -16,8 +16,12 @@ secrets:
     # -- Keycloak client secret. Replace in production.
     value: "nico-local-secret"
   temporalEncryptionKey:
-    # -- Temporal payload encryption key. Replace in production.
-    value: "local-dev"
+    # -- Temporal payload encryption key. Default is empty. When Secret creation
+    # is enabled, an explicit value takes precedence over an existing Secret. An
+    # empty value reuses the existing Secret, generates 32 random bytes on a fresh
+    # install, or fails an upgrade when no existing key is available. Setting
+    # secrets.create to false disables this resolution.
+    value: ""
   imagePullSecret:
     # -- base64-encoded docker config JSON. Default is valid empty auth placeholder ({"auths":{}}).
     # Replace with real credentials for private registries.

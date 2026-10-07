@@ -19,7 +19,6 @@ import (
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -124,7 +123,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -169,12 +168,22 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		reqBodyModel                  *model.APIOperatingSystemCreateRequest
 		user                          *cdbm.User
 		expectedErr                   bool
+		expectedUserDataError         string
 		expectedStatus                int
 		expectedOperatingSystemStatus string
 		expectedStatusHistoryCount    int
 		expectedImageURL              bool
 		verifyChildSpanner            bool
 	}{
+		{
+			name:                  "malformed autoinstall user-data returns mapping detail without persistence",
+			reqOrgName:            tnOrg1,
+			reqBody:               `{"name":"invalid-autoinstall-os","ipxeScript":"ipxe","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall:\n  user-data: private-value\n"}`,
+			user:                  tnu,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+			expectedUserDataError: "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
@@ -313,7 +322,6 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateOperatingSystemHandler{
@@ -327,6 +335,18 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusCreated)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedUserDataError != "" {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, map[string]string{"userData": tc.expectedUserDataError}, response.Data)
+				assert.NotContains(t, rec.Body.String(), "private-value")
+				osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+				_, count, queryErr := osDAO.GetAll(ctx, nil, cdbm.OperatingSystemFilterInput{Names: []string{"invalid-autoinstall-os"}}, paginator.PageInput{}, nil)
+				require.NoError(t, queryErr)
+				assert.Zero(t, count)
+			}
 			if !tc.expectedErr {
 				rsp := &model.APIOperatingSystem{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
@@ -439,7 +459,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 					ImageDisk:          cutil.GetPtr("/dev/nvme1n3"),
 					RootFsId:           cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e"),
 					UserData:           cutil.GetPtr(cdmu.TestCommonCloudInit),
-					IsCloudInit:        true,
 					AllowOverride:      false,
 					EnableBlockStorage: false,
 					PhoneHomeEnabled:   false,
@@ -462,7 +481,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 					TenantID:           &tenant1.ID,
 					OsType:             cdbm.OperatingSystemTypeIPXE,
 					IpxeScript:         cutil.GetPtr("ipxe"),
-					IsCloudInit:        true,
 					AllowOverride:      false,
 					EnableBlockStorage: false,
 					PhoneHomeEnabled:   false,
@@ -509,7 +527,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 					ImageDisk:          cutil.GetPtr("/dev/nvme1n3"),
 					RootFsId:           cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e"),
 					UserData:           cutil.GetPtr(cdmu.TestCommonCloudInit),
-					IsCloudInit:        true,
 					AllowOverride:      false,
 					EnableBlockStorage: false,
 					PhoneHomeEnabled:   false,
@@ -538,7 +555,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 					TenantID:           &tenant4.ID,
 					OsType:             cdbm.OperatingSystemTypeIPXE,
 					IpxeScript:         cutil.GetPtr("ipxe"),
-					IsCloudInit:        true,
 					AllowOverride:      false,
 					EnableBlockStorage: false,
 					PhoneHomeEnabled:   false,
@@ -556,7 +572,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -787,7 +803,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetAllOperatingSystemHandler{
@@ -891,7 +906,6 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 			TenantID:           &tenant1.ID,
 			OsType:             cdbm.OperatingSystemTypeIPXE,
 			IpxeScript:         cutil.GetPtr("ipxe"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -912,7 +926,6 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 			TenantID:           &tenant2.ID,
 			OsType:             cdbm.OperatingSystemTypeIPXE,
 			IpxeScript:         cutil.GetPtr("ipxe"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -932,7 +945,6 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 			Org:                ipOrg2,
 			TenantID:           &tenant2.ID,
 			OsType:             cdbm.OperatingSystemTypeImage,
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -956,7 +968,7 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 	)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1073,7 +1085,6 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetOperatingSystemHandler{
@@ -1177,7 +1188,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			TenantID:           &tenant1.ID,
 			OsType:             cdbm.OperatingSystemTypeIPXE,
 			IpxeScript:         cutil.GetPtr("ipxe"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1198,7 +1208,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			TenantID:           &tenant2.ID,
 			OsType:             cdbm.OperatingSystemTypeIPXE,
 			IpxeScript:         cutil.GetPtr("ipxe"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1219,7 +1228,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			TenantID:           &tenant1.ID,
 			OsType:             cdbm.OperatingSystemTypeIPXE,
 			IpxeScript:         cutil.GetPtr("ipxe"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1240,7 +1248,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			TenantID:           &tenant1.ID,
 			OsType:             cdbm.OperatingSystemTypeIPXE,
 			IpxeScript:         cutil.GetPtr("ipxe"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1261,7 +1268,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			TenantID:           &tenant1.ID,
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
-			IsCloudInit:        true,
+			ImageSHA:           cutil.GetPtr("10886660c5b2746ff48224646c5094ebcf88c889"),
 			AllowOverride:      false,
 			EnableBlockStorage: true,
 			PhoneHomeEnabled:   false,
@@ -1295,7 +1302,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsId:           cutil.GetPtr("fsID"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: true,
 			PhoneHomeEnabled:   false,
@@ -1317,7 +1323,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsLabel:        cutil.GetPtr("fs-label"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1339,7 +1344,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsLabel:        cutil.GetPtr("fs-label"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1360,7 +1364,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			TenantID:           &tenant2.ID,
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
-			IsCloudInit:        true,
+			ImageSHA:           cutil.GetPtr("10886660c5b2746ff48224646c5094ebcf88c889"),
 			AllowOverride:      false,
 			EnableBlockStorage: true,
 			PhoneHomeEnabled:   false,
@@ -1394,7 +1398,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsLabel:        cutil.GetPtr("fs-label"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1417,7 +1420,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsLabel:        cutil.GetPtr("fs-label"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1440,7 +1442,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsLabel:        cutil.GetPtr("fs-label"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1466,7 +1467,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
 			RootFsLabel:        cutil.GetPtr("fs-label"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: false,
 			PhoneHomeEnabled:   false,
@@ -1496,8 +1496,18 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	errBodyImageUrlIpxe, err := json.Marshal(updReqImageUrl)
 	assert.Nil(t, err)
 
-	updReqValidImageUrl := model.APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("test-os-updated-3"), Description: cutil.GetPtr("Updated Description"), ImageURL: cutil.GetPtr("http://newimagepath.iso"), ImageSHA: cutil.GetPtr("10886660c5b2746ff48224646c5094ebcf88c889"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e"), ImageDisk: cutil.GetPtr("/dev/nvme2n1")}
+	// imageUrl/imageSha are immutable, so a valid update re-sends the
+	// existing imageUrl (matching the os5/os9 fixtures) unchanged while
+	// updating mutable image attributes such as the root filesystem and
+	// image disk.
+	updReqValidImageUrl := model.APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("test-os-updated-3"), Description: cutil.GetPtr("Updated Description"), ImageURL: cutil.GetPtr("https://oldimagepath.iso"), ImageSHA: cutil.GetPtr("10886660c5b2746ff48224646c5094ebcf88c889"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e"), ImageDisk: cutil.GetPtr("/dev/nvme2n1")}
 	okBodyImageUrl, err := json.Marshal(updReqValidImageUrl)
+	assert.Nil(t, err)
+
+	// Changing imageUrl is rejected up front because the underlying image
+	// content is immutable after creation.
+	updReqChangeImageUrl := model.APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("test-os-updated-change-url"), ImageURL: cutil.GetPtr("http://newimagepath.iso"), ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980")}
+	errBodyChangeImageUrl, err := json.Marshal(updReqChangeImageUrl)
 	assert.Nil(t, err)
 
 	updReqDeactivate := model.APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("test-os-updated-deactivate"), Description: cutil.GetPtr("Updated Description for deactivation"), IsActive: cutil.GetPtr(false), DeactivationNote: cutil.GetPtr("Deactivated for a valid reason")}
@@ -1520,7 +1530,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -1559,14 +1569,15 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	tsc1.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		user           *cdbm.User
-		reqBody        string
-		reqUpdateModel *model.APIOperatingSystemUpdateRequest
-		osID           string
-		expectedErr    bool
-		expectedStatus int
+		name                  string
+		reqOrgName            string
+		user                  *cdbm.User
+		reqBody               string
+		reqUpdateModel        *model.APIOperatingSystemUpdateRequest
+		osID                  string
+		expectedErr           bool
+		expectedUserDataError string
+		expectedStatus        int
 
 		expectedName             *string
 		expectedDesc             *string
@@ -1580,6 +1591,16 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 		expectedDeactivationNote *string
 		verifyChildSpanner       bool
 	}{
+		{
+			name:                  "malformed autoinstall update returns mapping detail without mutation",
+			reqOrgName:            ipOrg1,
+			user:                  user,
+			reqBody:               `{"name":"rejected-rename","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall: private-value\n"}`,
+			osID:                  os1.ID.String(),
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+			expectedUserDataError: "autoinstall must be a mapping to insert phone-home",
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
@@ -1615,7 +1636,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			user:           user,
 			osID:           os2.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusForbidden,
 		},
 		{
 			name:           "error when req body doesnt bind",
@@ -1677,7 +1698,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			expectedDesc:             cutil.GetPtr("Updated Description"),
 			expectedIpxeScript:       cutil.GetPtr("updatedIpxe"),
 			expectedUserData:         cutil.GetPtr(cdmu.TestCommonPhoneHomeCloudInit),
-			expectedIsCloudInit:      cutil.GetPtr(false),
+			expectedIsCloudInit:      cutil.GetPtr(true),
 			expectedAllowOverride:    cutil.GetPtr(true),
 			expectedPhoneHomeEnabled: cutil.GetPtr(true),
 			verifyChildSpanner:       true,
@@ -1748,22 +1769,31 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 			expectedDeactivationNote: nil,
 		},
 		{
-			name:             "success when updated with required valid imageURL attribute",
+			name:             "success when image OS updated with unchanged imageURL and mutable attributes",
 			reqOrgName:       ipOrg1,
 			user:             user,
 			reqBody:          string(okBodyImageUrl),
-			reqUpdateModel:   &updReqImageUrl,
+			reqUpdateModel:   &updReqValidImageUrl,
 			osID:             os5.ID.String(),
 			expectedErr:      false,
 			expectedStatus:   http.StatusOK,
-			expectedImageURL: cutil.GetPtr("http://newimagepath.iso"),
+			expectedImageURL: cutil.GetPtr("https://oldimagepath.iso"),
 		},
 		{
-			name:           "error when updated with required valid imageURL attribute failed with context deadline error",
+			name:           "error when image OS update tries to change imageURL",
+			reqOrgName:     ipOrg1,
+			user:           user,
+			reqBody:        string(errBodyChangeImageUrl),
+			osID:           os5.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when image OS update workflow fails with context deadline error",
 			reqOrgName:     ipOrg2,
 			user:           user,
 			reqBody:        string(okBodyImageUrl),
-			reqUpdateModel: &updReqImageUrl,
+			reqUpdateModel: &updReqValidImageUrl,
 			osID:           os9.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -1789,7 +1819,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateOperatingSystemHandler{
@@ -1798,10 +1827,28 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 				cfg:       cfg,
 				scp:       scp,
 			}
+			var before *cdbm.OperatingSystem
+			if tc.expectedUserDataError != "" {
+				var readErr error
+				before, readErr = osDAO.GetByID(ctx, nil, uuid.MustParse(tc.osID), nil)
+				require.NoError(t, readErr)
+			}
+
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedUserDataError != "" {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, map[string]string{"userData": tc.expectedUserDataError}, response.Data)
+				assert.NotContains(t, rec.Body.String(), "private-value")
+				after, readErr := osDAO.GetByID(ctx, nil, before.ID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after)
+			}
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 
 			if !tc.expectedErr {
@@ -1921,7 +1968,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 		TenantID:           &tenant1.ID,
 		OsType:             cdbm.OperatingSystemTypeIPXE,
 		IpxeScript:         cutil.GetPtr("ipxe"),
-		IsCloudInit:        true,
 		AllowOverride:      false,
 		EnableBlockStorage: false,
 		PhoneHomeEnabled:   false,
@@ -1937,7 +1983,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 		TenantID:           &tenant3.ID,
 		OsType:             cdbm.OperatingSystemTypeIPXE,
 		IpxeScript:         cutil.GetPtr("ipxe"),
-		IsCloudInit:        true,
 		AllowOverride:      false,
 		EnableBlockStorage: false,
 		PhoneHomeEnabled:   false,
@@ -1990,7 +2035,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 			TenantID:           &tenant1.ID,
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: true,
 			PhoneHomeEnabled:   false,
@@ -2025,7 +2069,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 			TenantID:           &tenant3.ID,
 			OsType:             cdbm.OperatingSystemTypeImage,
 			ImageURL:           cutil.GetPtr("https://oldimagepath.iso"),
-			IsCloudInit:        true,
 			AllowOverride:      false,
 			EnableBlockStorage: true,
 			PhoneHomeEnabled:   false,
@@ -2050,7 +2093,7 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 	)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Prepare client pool for sync calls
 	// to site(s).
@@ -2161,7 +2204,7 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 			user:           tnu,
 			osID:           os3.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusForbidden,
 		},
 		{
 			name:           "error when instance present for os",
@@ -2234,7 +2277,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tClient := tempClient
@@ -2277,6 +2319,608 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
 				assert.True(t, span.SpanContext().IsValid())
+			}
+		})
+	}
+}
+
+// buildRawIpxeProviderOS creates a provider-owned raw iPXE OS (no site
+// associations) via the DAO. Raw iPXE avoids any post-commit site sync, so the
+// write handlers exercise ownership enforcement without Temporal/proxy mocks.
+func buildRawIpxeProviderOS(t *testing.T, ctx context.Context, osDAO cdbm.OperatingSystemDAO, org string, providerID uuid.UUID, name string, createdBy uuid.UUID) *cdbm.OperatingSystem {
+	os, err := osDAO.Create(ctx, nil, cdbm.OperatingSystemCreateInput{
+		Name:                     name,
+		Description:              cutil.GetPtr("test"),
+		Org:                      org,
+		InfrastructureProviderID: &providerID,
+		OsType:                   cdbm.OperatingSystemTypeIPXE,
+		IpxeScript:               cutil.GetPtr("ipxe"),
+		Status:                   cdbm.OperatingSystemStatusReady,
+		CreatedBy:                createdBy,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, os)
+	return os
+}
+
+func buildRawIpxeTenantOS(t *testing.T, ctx context.Context, osDAO cdbm.OperatingSystemDAO, org string, tenantID uuid.UUID, name string, createdBy uuid.UUID) *cdbm.OperatingSystem {
+	os, err := osDAO.Create(ctx, nil, cdbm.OperatingSystemCreateInput{
+		Name:        name,
+		Description: cutil.GetPtr("test"),
+		Org:         org,
+		TenantID:    &tenantID,
+		OsType:      cdbm.OperatingSystemTypeIPXE,
+		IpxeScript:  cutil.GetPtr("ipxe"),
+		Status:      cdbm.OperatingSystemStatusReady,
+		CreatedBy:   createdBy,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, os)
+	return os
+}
+
+// TestOperatingSystemHandler_Create_Ownership asserts that a Provider Admin may
+// only create iPXE Template-based Operating Systems.
+func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	common.TestSetupSchema(t, dbSession)
+
+	cfg := common.GetTestConfig()
+	tcfg, _ := cfg.GetTemporalConfig()
+	scp := sc.NewClientPool(tcfg)
+	tempClient := &tmocks.Client{}
+
+	provOrg := "own-provider-org"
+	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
+	testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "own-ip")
+
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		name           string
+		reqBody        model.APIOperatingSystemCreateRequest
+		expectedStatus int
+	}{
+		{
+			name:           "provider admin cannot create image OS",
+			reqBody:        model.APIOperatingSystemCreateRequest{Name: "prov-image", Description: cutil.GetPtr("test"), ImageURL: cutil.GetPtr("https://example.com/img.iso")},
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "provider admin cannot create raw ipxe OS",
+			reqBody:        model.APIOperatingSystemCreateRequest{Name: "prov-ipxe", Description: cutil.GetPtr("test"), IpxeScript: cutil.GetPtr("ipxe")},
+			expectedStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(tc.reqBody)
+			require.NoError(t, err)
+
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+
+			ec := e.NewContext(req, rec)
+			ec.SetParamNames("orgName")
+			ec.SetParamValues(provOrg)
+			ec.Set("user", provUser)
+			ec.SetRequest(ec.Request().WithContext(ctx))
+
+			ch := CreateOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
+			require.NoError(t, ch.Handle(ec))
+			require.Equal(t, tc.expectedStatus, rec.Code)
+		})
+	}
+}
+
+// TestOperatingSystemHandler_Update_Ownership asserts ownership enforcement for
+// updates across provider and tenant roles.
+func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	common.TestSetupSchema(t, dbSession)
+
+	cfg := common.GetTestConfig()
+	tcfg, _ := cfg.GetTemporalConfig()
+	scp := sc.NewClientPool(tcfg)
+	tempClient := &tmocks.Client{}
+	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+
+	provOrg := "own-provider-org"
+	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "own-ip")
+	provOS := buildRawIpxeProviderOS(t, ctx, osDAO, provOrg, ip.ID, "prov-os-update", provUser.ID)
+
+	sharedOrg := "own-shared-org"
+	tnUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{sharedOrg}, []string{authz.TenantAdminRole})
+	sharedProvUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{sharedOrg}, []string{authz.ProviderAdminRole})
+	ip2 := testMachineBuildInfrastructureProvider(t, dbSession, sharedOrg, "own-ip-2")
+	tn := testMachineBuildTenant(t, dbSession, sharedOrg, "own-tenant")
+	provOSShared := buildRawIpxeProviderOS(t, ctx, osDAO, sharedOrg, ip2.ID, "prov-os-shared-update", sharedProvUser.ID)
+	tnOS := buildRawIpxeTenantOS(t, ctx, osDAO, sharedOrg, tn.ID, "tenant-os-update", tnUser.ID)
+
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		name           string
+		reqOrgName     string
+		user           *cdbm.User
+		os             *cdbm.OperatingSystem
+		expectedStatus int
+	}{
+		{
+			name:           "provider admin updates own provider OS",
+			reqOrgName:     provOrg,
+			user:           provUser,
+			os:             provOS,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "tenant admin cannot update provider-owned OS",
+			reqOrgName:     sharedOrg,
+			user:           tnUser,
+			os:             provOSShared,
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "provider admin cannot update tenant-owned OS",
+			reqOrgName:     sharedOrg,
+			user:           sharedProvUser,
+			os:             tnOS,
+			expectedStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(model.APIOperatingSystemUpdateRequest{Description: cutil.GetPtr("updated description")})
+			require.NoError(t, err)
+
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(string(body)))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+
+			ec := e.NewContext(req, rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
+			ec.Set("user", tc.user)
+			ec.SetRequest(ec.Request().WithContext(ctx))
+
+			uh := UpdateOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
+			require.NoError(t, uh.Handle(ec))
+			require.Equal(t, tc.expectedStatus, rec.Code)
+		})
+	}
+}
+
+// TestOperatingSystemHandler_Delete_Ownership asserts ownership enforcement for
+// deletes across provider and tenant roles.
+func TestOperatingSystemHandler_Delete_Ownership(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	common.TestSetupSchema(t, dbSession)
+
+	cfg := common.GetTestConfig()
+	tcfg, _ := cfg.GetTemporalConfig()
+	scp := sc.NewClientPool(tcfg)
+	tempClient := &tmocks.Client{}
+	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+
+	provOrg := "own-provider-org"
+	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "own-ip")
+	provOS := buildRawIpxeProviderOS(t, ctx, osDAO, provOrg, ip.ID, "prov-os-delete", provUser.ID)
+
+	sharedOrg := "own-shared-org"
+	tnUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{sharedOrg}, []string{authz.TenantAdminRole})
+	sharedProvUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{sharedOrg}, []string{authz.ProviderAdminRole})
+	ip2 := testMachineBuildInfrastructureProvider(t, dbSession, sharedOrg, "own-ip-2")
+	tn := testMachineBuildTenant(t, dbSession, sharedOrg, "own-tenant")
+	provOSShared := buildRawIpxeProviderOS(t, ctx, osDAO, sharedOrg, ip2.ID, "prov-os-shared-delete", sharedProvUser.ID)
+	tnOS := buildRawIpxeTenantOS(t, ctx, osDAO, sharedOrg, tn.ID, "tenant-os-delete", tnUser.ID)
+
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		name           string
+		reqOrgName     string
+		user           *cdbm.User
+		os             *cdbm.OperatingSystem
+		expectedStatus int
+	}{
+		{
+			name:           "tenant admin cannot delete provider-owned OS",
+			reqOrgName:     sharedOrg,
+			user:           tnUser,
+			os:             provOSShared,
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "provider admin cannot delete tenant-owned OS",
+			reqOrgName:     sharedOrg,
+			user:           sharedProvUser,
+			os:             tnOS,
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "provider admin deletes own provider OS",
+			reqOrgName:     provOrg,
+			user:           provUser,
+			os:             provOS,
+			expectedStatus: http.StatusAccepted,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodDelete, "/", nil)
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+
+			ec := e.NewContext(req, rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
+			ec.Set("user", tc.user)
+			ec.SetRequest(ec.Request().WithContext(ctx))
+
+			dh := DeleteOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
+			require.NoError(t, dh.Handle(ec))
+			require.Equal(t, tc.expectedStatus, rec.Code)
+			assert.NotEqual(t, "", tc.name)
+		})
+	}
+}
+
+// buildProviderOS creates a provider-owned OS (no tenant) for the given provider.
+func buildProviderOS(t *testing.T, ctx context.Context, osDAO cdbm.OperatingSystemDAO, org string, providerID uuid.UUID, name string, createdBy uuid.UUID) *cdbm.OperatingSystem {
+	os, err := osDAO.Create(ctx, nil, cdbm.OperatingSystemCreateInput{
+		Name:                     name,
+		Description:              cutil.GetPtr("test"),
+		Org:                      org,
+		InfrastructureProviderID: &providerID,
+		OsType:                   cdbm.OperatingSystemTypeIPXE,
+		IpxeScript:               cutil.GetPtr("ipxe"),
+		Status:                   cdbm.OperatingSystemStatusReady,
+		CreatedBy:                createdBy,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, os)
+	return os
+}
+
+// buildTenantOS creates a tenant-owned OS for the given tenant.
+func buildTenantOS(t *testing.T, ctx context.Context, osDAO cdbm.OperatingSystemDAO, org string, tenantID uuid.UUID, name string, createdBy uuid.UUID) *cdbm.OperatingSystem {
+	os, err := osDAO.Create(ctx, nil, cdbm.OperatingSystemCreateInput{
+		Name:          name,
+		Description:   cutil.GetPtr("test"),
+		Org:           org,
+		TenantID:      &tenantID,
+		OsType:        cdbm.OperatingSystemTypeIPXE,
+		IpxeScript:    cutil.GetPtr("ipxe"),
+		Status:        cdbm.OperatingSystemStatusReady,
+		CreatedBy:     createdBy,
+		AllowOverride: false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, os)
+	return os
+}
+
+// TestOperatingSystemHandler_GetAll_Visibility exercises provider-admin listing
+// and tenant cross-visibility of provider-owned OSes at accessible sites.
+func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	common.TestSetupSchema(t, dbSession)
+
+	cfg := common.GetTestConfig()
+	tempClient := &tmocks.Client{}
+	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+
+	// Provider-only org.
+	provOrg := "vis-provider-org"
+	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "vis-ip")
+	siteA := testMachineBuildSite(t, dbSession, ip, "vis-site-a", cdbm.SiteStatusRegistered)
+	siteB := testMachineBuildSite(t, dbSession, ip, "vis-site-b", cdbm.SiteStatusRegistered)
+
+	provOSA := buildProviderOS(t, ctx, osDAO, provOrg, ip.ID, "prov-os-a", provUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provOSA.ID, siteA.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, provUser)
+	provOSB := buildProviderOS(t, ctx, osDAO, provOrg, ip.ID, "prov-os-b", provUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provOSB.ID, siteB.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, provUser)
+
+	// The tenant can see provider-owned entries from a different org only when
+	// they are associated with a Site the tenant can access.
+	tenantOrg := "vis-tenant-org"
+	servingProviderOrg := "vis-serving-provider-org"
+	tnUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{authz.TenantAdminRole})
+	ip2 := testMachineBuildInfrastructureProvider(t, dbSession, servingProviderOrg, "vis-ip-2")
+	siteC := testMachineBuildSite(t, dbSession, ip2, "vis-site-c", cdbm.SiteStatusRegistered)
+	siteD := testMachineBuildSite(t, dbSession, ip2, "vis-site-d", cdbm.SiteStatusRegistered)
+	tn := testMachineBuildTenant(t, dbSession, tenantOrg, "vis-tenant")
+	tsC := testBuildTenantSiteAssociation(t, dbSession, tenantOrg, tn.ID, siteC.ID, tnUser.ID)
+	assert.NotNil(t, tsC)
+
+	buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-1", tnUser.ID)
+	buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-2", tnUser.ID)
+	provC := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-c", tnUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteC.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	provD := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-d", tnUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provD.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-without-site", tnUser.ID)
+	privOrg := "vis-privileged-org"
+	privUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{privOrg}, []string{authz.TenantAdminRole})
+	privTenant := testMachineBuildTenant(t, dbSession, privOrg, "vis-privileged-tenant")
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &privTenant.ID, privOrg, cdbm.TenantAccountStatusReady, privUser)
+
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		name          string
+		reqOrgName    string
+		user          *cdbm.User
+		target        string
+		expectedNames []string
+		expectedSites map[string][]string
+	}{
+		{
+			name:          "provider admin sees only provider-owned OSes",
+			reqOrgName:    provOrg,
+			user:          provUser,
+			expectedNames: []string{"prov-os-a", "prov-os-b"},
+		},
+		{
+			name:          "tenant admin sees own OSes plus provider OSes at accessible sites",
+			reqOrgName:    tenantOrg,
+			user:          tnUser,
+			expectedNames: []string{"tenant-os-1", "tenant-os-2", "prov-os-c"},
+			expectedSites: map[string][]string{"prov-os-c": {siteC.ID.String()}},
+		},
+		{
+			name:          "tenant visibility union is paginated after merging",
+			reqOrgName:    tenantOrg,
+			user:          tnUser,
+			target:        "/?pageSize=2&orderBy=NAME_ASC",
+			expectedNames: []string{"prov-os-c", "tenant-os-1"},
+		},
+		{
+			name:          "privileged tenant lists only OSes at its provider sites without memberships",
+			reqOrgName:    privOrg,
+			user:          privUser,
+			expectedNames: []string{"prov-os-c", "prov-os-d"},
+			expectedSites: map[string][]string{"prov-os-c": {siteC.ID.String(), siteD.ID.String()}},
+		},
+		{
+			name:          "privileged tenant can filter by an implicitly authorized site",
+			reqOrgName:    privOrg,
+			user:          privUser,
+			target:        "/?siteId=" + siteC.ID.String(),
+			expectedNames: []string{"prov-os-c"},
+			expectedSites: map[string][]string{"prov-os-c": {siteC.ID.String()}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			target := tc.target
+			if target == "" {
+				target = "/"
+			}
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+
+			ec := e.NewContext(req, rec)
+			ec.SetParamNames("orgName")
+			ec.SetParamValues(tc.reqOrgName)
+			ec.Set("user", tc.user)
+
+			ec.SetRequest(ec.Request().WithContext(ctx))
+
+			mh := GetAllOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
+			err := mh.Handle(ec)
+			assert.Nil(t, err)
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			rsp := []model.APIOperatingSystem{}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rsp))
+			gotNames := make([]string, len(rsp))
+			for i, os := range rsp {
+				gotNames[i] = os.Name
+				wantSites, checkSites := tc.expectedSites[os.Name]
+				if checkSites {
+					gotSites := make([]string, 0, len(os.SiteAssociations))
+					for _, association := range os.SiteAssociations {
+						require.NotNil(t, association.Site)
+						gotSites = append(gotSites, association.Site.ID)
+					}
+					assert.ElementsMatch(t, wantSites, gotSites)
+				}
+			}
+			assert.ElementsMatch(t, tc.expectedNames, gotNames)
+		})
+	}
+}
+
+// TestOperatingSystemHandler_GetByID_Visibility exercises role-based access to a
+// single OS: provider admins may only read provider-owned entries, tenant admins
+// may read own entries plus provider entries at accessible sites.
+func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	common.TestSetupSchema(t, dbSession)
+
+	cfg := common.GetTestConfig()
+	tempClient := &tmocks.Client{}
+	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+
+	tenantOrg := "vis-tenant-org"
+	servingProviderOrg := "vis-serving-provider-org"
+	tnUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{authz.TenantAdminRole})
+	servingProviderUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{servingProviderOrg}, []string{authz.ProviderAdminRole})
+	ip2 := testMachineBuildInfrastructureProvider(t, dbSession, servingProviderOrg, "vis-ip-2")
+	siteC := testMachineBuildSite(t, dbSession, ip2, "vis-site-c", cdbm.SiteStatusRegistered)
+	siteD := testMachineBuildSite(t, dbSession, ip2, "vis-site-d", cdbm.SiteStatusRegistered)
+	tn := testMachineBuildTenant(t, dbSession, tenantOrg, "vis-tenant")
+	testBuildTenantSiteAssociation(t, dbSession, tenantOrg, tn.ID, siteC.ID, tnUser.ID)
+
+	tnOS := buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-1", tnUser.ID)
+	provC := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-c", tnUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteC.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	provD := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-d", tnUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provD.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	noSitesOrg := "vis-no-sites-org"
+	noSitesUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{noSitesOrg}, []string{authz.TenantAdminRole})
+	noSitesTenant := testMachineBuildTenant(t, dbSession, noSitesOrg, "vis-no-sites-tenant")
+	noSitesOS := buildTenantOS(t, ctx, osDAO, noSitesOrg, noSitesTenant.ID, "tenant-os-no-sites", noSitesUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, noSitesOS.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, noSitesUser)
+	otherProvider := testMachineBuildInfrastructureProvider(t, dbSession, "vis-other-provider-org", "vis-other-provider")
+	otherSite := testMachineBuildSite(t, dbSession, otherProvider, "vis-other-site", cdbm.SiteStatusRegistered)
+	otherOS := buildProviderOS(t, ctx, osDAO, otherProvider.Org, otherProvider.ID, "other-provider-os", servingProviderUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, otherOS.ID, otherSite.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, servingProviderUser)
+	for _, os := range []*cdbm.OperatingSystem{provC, provD, noSitesOS, otherOS} {
+		// Exercise the site-associated template-based definitions.
+		_, err := osDAO.Update(ctx, nil, cdbm.OperatingSystemUpdateInput{
+			OperatingSystemId: os.ID,
+			OsType:            cutil.GetPtr(cdbm.OperatingSystemTypeTemplatedIPXE),
+		})
+		require.NoError(t, err)
+	}
+	dualUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{servingProviderOrg}, []string{authz.ProviderAdminRole, authz.TenantAdminRole})
+	dualTenant := testMachineBuildTenant(t, dbSession, servingProviderOrg, "vis-dual-tenant")
+	testBuildTenantSiteAssociation(t, dbSession, servingProviderOrg, dualTenant.ID, siteC.ID, dualUser.ID)
+	privOrg := "vis-privileged-org"
+	privUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{privOrg}, []string{authz.TenantAdminRole})
+	privTenant := testMachineBuildTenant(t, dbSession, privOrg, "vis-privileged-tenant")
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &privTenant.ID, privOrg, cdbm.TenantAccountStatusReady, privUser)
+	// Disabling targeted creation at C does not revoke ordinary membership.
+	// D has no membership and is accessible only through the account default.
+	cdbm.TestBuildTenantSite(t, dbSession, privTenant, siteC, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, privUser)
+
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		name           string
+		reqOrgName     string
+		user           *cdbm.User
+		os             *cdbm.OperatingSystem
+		expectedStatus int
+		expectedSites  []string
+	}{
+		{
+			name:           "provider admin sees all associations of provider-owned OS",
+			reqOrgName:     servingProviderOrg,
+			user:           servingProviderUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
+		},
+		{
+			name:           "tenant admin sees only accessible associations of provider OS",
+			reqOrgName:     tenantOrg,
+			user:           tnUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String()},
+		},
+		{
+			name:           "dual-role admin retains provider access to all associations",
+			reqOrgName:     servingProviderOrg,
+			user:           dualUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
+		},
+		{
+			name:           "tenant admin cannot read provider OS at inaccessible site",
+			reqOrgName:     tenantOrg,
+			user:           tnUser,
+			os:             provD,
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "privileged tenant combines ordinary membership and implicit site access",
+			reqOrgName:     privOrg,
+			user:           privUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
+		},
+		{
+			name:           "privileged tenant can read OS only at an implicit site",
+			reqOrgName:     privOrg,
+			user:           privUser,
+			os:             provD,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteD.ID.String()},
+		},
+		{
+			name:           "privileged tenant cannot read OS at another provider",
+			reqOrgName:     privOrg,
+			user:           privUser,
+			os:             otherOS,
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "tenant admin can read own OS",
+			reqOrgName:     tenantOrg,
+			user:           tnUser,
+			os:             tnOS,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "tenant with no authorized sites sees no associations on own OS",
+			reqOrgName:     noSitesOrg,
+			user:           noSitesUser,
+			os:             noSitesOS,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "provider admin cannot read tenant-owned OS",
+			reqOrgName:     servingProviderOrg,
+			user:           servingProviderUser,
+			os:             tnOS,
+			expectedStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+
+			ec := e.NewContext(req, rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
+			ec.Set("user", tc.user)
+
+			ec.SetRequest(ec.Request().WithContext(ctx))
+
+			gh := GetOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
+			err := gh.Handle(ec)
+			assert.Nil(t, err)
+			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedStatus == http.StatusOK {
+				var response model.APIOperatingSystem
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				gotSites := make([]string, 0, len(response.SiteAssociations))
+				for _, association := range response.SiteAssociations {
+					require.NotNil(t, association.Site)
+					gotSites = append(gotSites, association.Site.ID)
+					assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, association.Status)
+				}
+				assert.ElementsMatch(t, tc.expectedSites, gotSites)
 			}
 		})
 	}

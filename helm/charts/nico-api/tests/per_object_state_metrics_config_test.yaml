@@ -1,0 +1,51 @@
+suite: Per-object state metrics application config
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: disables the listener by default
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?s)\[observability\.per_object_state_metrics\].*enabled = false.*listen_address = "\[::\]:9091"'
+
+  - it: renders all valid object types by default (pins the values.yaml list
+      to PerObjectStateMetricObjectType::ALL)
+    documentIndex: 0
+    set:
+      service:
+        perObjectStateMetrics:
+          enabled: true
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'object_types = \["machine","switch","power_shelf","rack","network_segment","vpc_prefix","spdm_attestation","ib_partition"\]'
+
+  - it: tolerates a null objectTypes override by rendering an empty list
+    documentIndex: 0
+    set:
+      service:
+        perObjectStateMetrics:
+          enabled: true
+          objectTypes: null
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'object_types = \[\]'
+
+  - it: enables the listener with configured object types
+    documentIndex: 0
+    set:
+      service:
+        perObjectStateMetrics:
+          enabled: true
+          port: 9191
+          objectTypes:
+            - machine
+            - rack
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?s)\[observability\.per_object_state_metrics\].*enabled = true.*listen_address = "\[::\]:9191".*object_types = \["machine","rack"\]'

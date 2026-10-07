@@ -34,19 +34,19 @@ List every OS image:
     $ nico-admin-cli os-image show
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "uuid of the OS image to show.")]
-    pub id: Option<String>,
+    id: Option<String>,
     #[clap(
         short = 't',
         long,
         help = "Tenant organization identifier to filter OS images listing."
     )]
-    pub tenant_org_id: Option<String>,
+    tenant_org_id: Option<String>,
 }
 
 /// Represents the parsed query for the show command.
-pub enum ShowQuery {
+pub(super) enum ShowQuery {
     /// Show a single OS image by its UUID.
     Single(::rpc::common::Uuid),
     /// List OS images, optionally filtered by tenant organization ID.

@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
+
+global-theme: nvidia
+
 instances:
   - url: nvidia-ncx-infra-controller.docs.buildwithfern.com/infra-controller
     custom-domain: docs.nvidia.com/infra-controller
@@ -8,86 +12,62 @@ instances:
 
 title: NVIDIA Infra Controller
 
+announcement:
+  message: "🔔 Infra Controller's GitHub repository has moved to [dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller). Existing links redirect; update integrations that reference NVIDIA/infra-controller."
+
 metadata:
   canonical-host: "docs.nvidia.com/infra-controller"
 
-ai-search:
-  location:
-    - docs
-
-global-theme: nvidia
-
-footer: ./components/CustomFooter.tsx
-
-layout:
-  searchbar-placement: header
-  page-width: 1376px
-  sidebar-width: 248px
-  content-width: 812px
-  tabs-placement: header
-  hide-feedback: true
-
-colors:
-  accentPrimary:
-    dark: "#76B900"
-    light: "#76B900"
-  background:
-    light: "#FFFFFF"
-    dark: "#000000"
-
-theme:
-  page-actions: toolbar
-  footer-nav: minimal
-
-typography:
-  bodyFont:
-    name: NVIDIA
-    paths:
-      - path: assets/fonts/NVIDIASans.woff2
-        style: normal
-      - path: assets/fonts/NVIDIASans_Italic.woff2
-        style: italic
-  codeFont:
-    name: RobotoMono
-    paths:
-      - path: assets/fonts/RobotoMono.woff2
-
-logo:
-  dark: ./assets/NVIDIA_dark.svg
-  light: ./assets/NVIDIA_light.svg
-  height: 20
-  href: /
-
-favicon: ./assets/NVIDIA_symbol.svg
-
-css:
-  - ./main.css
+check:
+  rules:
+    broken-links: error
 
 navbar-links:
-  - type: filled
-    text: GitHub
-    href: https://github.com/NVIDIA/infra-controller
+  - type: github
+    value: https://github.com/dsx-ai-factory/infra-controller
 
 products:
   - display-name: NVIDIA Infra Controller
     slug: /
     path: ../docs/index.yml
-    versions:
-      - display-name: v0.8
-        path: ../docs/index.yml
+    # versions:
+    #   - display-name: v2.0
+    #     path: ../docs/index.yml
 
 redirects:
+  - source: "/infra-controller/rest-api-reference/api-reference/bmc-reset/reset-machine-bmc"
+    destination: "/infra-controller/rest-api-reference/api-reference/machine/reset-machine-bmc"
+  - source: "/infra-controller/rest-api-reference/api-reference/dpu-reprovision/reprovision-machine-dpu"
+    destination: "/infra-controller/rest-api-reference/api-reference/machine/reprovision-machine-dpu"
+  - source: "/infra-controller/rest-api-reference/api-reference/machine-validation/get-all-machine-validation-runs"
+    destination: "/infra-controller/rest-api-reference/api-reference/machine/get-all-machine-validation-runs"
+  - source: "/infra-controller/rest-api-reference/api-reference/machine-validation/start-machine-validation"
+    destination: "/infra-controller/rest-api-reference/api-reference/machine/start-machine-validation"
+  - source: "/infra-controller/rest-api-reference/api-reference/machine-validation/get-all-machine-validation-results"
+    destination: "/infra-controller/rest-api-reference/api-reference/machine/get-all-machine-validation-results"
+  - source: "/infra-controller/documentation/reference/release-and-qa-process"
+    destination: "/infra-controller/documentation/reference/qa-process"
+  - source: "/infra-controller/documentation/operations-day-2/firmware-updates/flow-operation-rules"
+    destination: "/infra-controller/documentation/operations-day-2/flow-operations/operation-rules"
   - source: "/infra-controller/index.html"
     destination: "/infra-controller/"
   - source: "/infra-controller/dev/index.html"
     destination: "/infra-controller/dev/"
-  - source: "/infra-controller/documentation/introduction"
-    destination: "/infra-controller/documentation/overview/what-is-nico"
-  - source: "/infra-controller/documentation/getting-started/site-setup"
-    destination: "infra-controller/documentation/getting-started/quick-start-guide"
+  - source: "/infra-controller/documentation/architecture/state-machines/rack-state-machine"
+    destination: "/infra-controller/documentation/architecture/state-machines/on-demand-rack-maintenance"
+  - source: "/infra-controller/documentation/configuration-day-1/component-manager-rms-backends"
+    destination: "/infra-controller/documentation/configuration-day-1/rms-configuration"
   - source: "/infra-controller/documentation/getting-started/building-ni-co-containers"
     destination: "/infra-controller/documentation/getting-started/building-nico-containers"
-
-experimental:
-  mdx-components:
-    - ./components
+  - source: "/infra-controller/documentation/getting-started/site-setup"
+    destination: "/infra-controller/documentation/getting-started/quick-start-guide"
+  - source: "/infra-controller/documentation/introduction"
+    destination: "/infra-controller/documentation/overview/what-is-nico"
+  - source: "/infra-controller/documentation/operations-day-2/firmware-updates"
+    destination: "/infra-controller/documentation/operations-day-2/firmware-updates/overview"
+  - source: "/infra-controller/documentation/operations-day-2/observability/core-metrics"
+    destination: "/infra-controller/documentation/operations-day-2/observability/core-metrics-list"
+  - source: "/infra-controller/documentation/provisioning-day-0/boot-interfaces-and-dpu-modes"
+    destination: "/infra-controller/documentation/provisioning-day-0/boot-interfaces-and-dpu-policies"
+  - source: "/infra-controller/documentation/reference/release-notes"
+    destination: "/infra-controller/documentation/release-notes"

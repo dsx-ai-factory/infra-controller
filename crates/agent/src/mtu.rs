@@ -23,13 +23,16 @@ const CORRECT_MTU: usize = 9216;
 /// Ensures that p0 and p1 have expected MTU.
 ///
 /// HBN sets this but there is a race condition with interfaces being renamed on startup.
-/// https://nvbugswb.nvidia.com/NvBugs5/SWBug.aspx?bugid=4331317
-pub async fn ensure() -> eyre::Result<()> {
+/// https://github.com/NVIDIA/infra-controller/issues/5555
+pub(super) async fn ensure() -> eyre::Result<()> {
     for iface in ["p0", "p1"] {
         let current = get_mtu(iface).await?;
         if current != CORRECT_MTU {
             tracing::info!(
-                "Interface {iface} has incorrect MTU {current}. Setting to {CORRECT_MTU}."
+                interface_name = iface,
+                current_mtu = current,
+                target_mtu = CORRECT_MTU,
+                "Interface has incorrect MTU. Setting target MTU."
             );
             set_mtu(iface, CORRECT_MTU).await?;
         }
@@ -45,7 +48,7 @@ async fn get_mtu(iface: &str) -> eyre::Result<usize> {
         let o: Vec<LinkList> = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))?;
         if o.len() != 1 {
             eyre::bail!(
-                "Expected a single entry, got {}. Invalid output from: {}",
+                "expected a single entry, got {}. invalid output from: {}",
                 o.len(),
                 super::pretty_cmd(cmd.as_std())
             );
@@ -53,9 +56,9 @@ async fn get_mtu(iface: &str) -> eyre::Result<usize> {
         Ok(o[0].mtu)
     } else {
         tracing::debug!(
-            "STDERR {}: {}",
-            super::pretty_cmd(cmd.as_std()),
-            String::from_utf8_lossy(&out.stderr)
+            command = %super::pretty_cmd(cmd.as_std()),
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "MTU query command failed"
         );
         Err(eyre::eyre!(
             "{} for cmd '{}'",
@@ -73,9 +76,9 @@ async fn set_mtu(iface: &str, mtu: usize) -> eyre::Result<()> {
         Ok(())
     } else {
         tracing::debug!(
-            "STDERR {}: {}",
-            super::pretty_cmd(cmd.as_std()),
-            String::from_utf8_lossy(&out.stderr)
+            command = %super::pretty_cmd(cmd.as_std()),
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "MTU update command failed"
         );
         Err(eyre::eyre!(
             "{} for cmd '{}'",

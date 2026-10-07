@@ -29,6 +29,12 @@ pub const DPUINIT_NOTINIT: Duration = Duration::from_secs(30 * 60);
 // EnableIpmiOverLan WaitingForPlatformConfiguration PollingBiosSetup UefiSetup Discovered Lockdown PollingLockdownStatus MachineValidating
 pub const HOST_INIT: Duration = Duration::from_secs(30 * 60);
 
+// Ready-state boot-interface convergence may include vendor BIOS jobs,
+// controlled reboots, and final observation after lockdown is restored.
+pub const BOOT_CONFIGURING: Duration = Duration::from_secs(90 * 60);
+
+pub const CONFIGURE_ASTRA: Duration = Duration::from_secs(30 * 60);
+
 pub const WAITING_FOR_CLEANUP: Duration = Duration::from_secs(30 * 60);
 
 pub const CREATED: Duration = Duration::from_secs(30 * 60);
@@ -36,6 +42,10 @@ pub const CREATED: Duration = Duration::from_secs(30 * 60);
 pub const FORCE_DELETION: Duration = Duration::from_secs(30 * 60);
 
 pub const DPU_REPROVISION: Duration = Duration::from_secs(30 * 60);
+
+// Host reset: wait for Admin networking before deleting the Instance, then drain DPF CRs.
+// Applies per sub-state, since each sub-state transition restarts the clock.
+pub const RESET: Duration = Duration::from_secs(30 * 60);
 
 pub const HOST_REPROVISION: Duration = Duration::from_secs(40 * 60);
 
@@ -56,6 +66,72 @@ pub const ASSIGNED: Duration = Duration::from_secs(30 * 60);
 // ASSIGNED state, HostPlatformConfiguration substate
 pub const ASSIGNED_HOST_PLATFORM_CONFIGURATION: Duration = Duration::from_secs(90 * 60);
 pub const VALIDATION: Duration = Duration::from_secs(30 * 60);
+
+pub const MAINTENANCE: Duration = Duration::from_secs(5 * 60);
+
+// BMC credential rotation. A single synchronous Redfish password change
+// per device (host + each DPU); generous enough to absorb the up-to-5-minute
+// site-explorer pause handshake (its `SITE_EXPLORER_PAUSE_BUDGET`) that precedes
+// the change, a slow BMC, and the engine's short per-device backoff without
+// tripping the SLA on the first retry.
+pub const ROTATING_BMC: Duration = Duration::from_secs(15 * 60);
+
+// Host UEFI credential rotation. Applying a new UEFI password
+// requires a BIOS config job plus a full host power-cycle and job-completion
+// poll, so the budget is more generous than the synchronous BMC rotation: enough
+// to absorb a slow reboot plus the engine's short per-device backoff without
+// tripping the SLA on the first retry.
+pub const ROTATING_HOST_UEFI: Duration = Duration::from_secs(40 * 60);
+
+// DPU UEFI credential rotation. Applying a new DPU UEFI password
+// stages a Bios/Settings change and commits it with a DPU restart (scoped to the
+// DPU, not a full host power-cycle). One DPU is converged per cycle, so the
+// budget mirrors the host UEFI rotation: enough to absorb a slow DPU restart plus
+// the engine's short per-device backoff without tripping the SLA on the first
+// retry.
+pub const ROTATING_DPU_UEFI: Duration = Duration::from_secs(40 * 60);
+
+/// SLA for NIC lockdown key rotation
+pub const ROTATING_NIC_LOCKDOWN: Duration = Duration::from_secs(40 * 60);
+
+/// SLA for Site Explorer suppression acknowledgement during decommissioning.
+pub const DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER: Duration = Duration::from_secs(5 * 60);
+
+/// SLA for host deconfiguration during decommissioning (lockdown clear, UEFI
+/// password/job work, and UEFI settings reset).
+pub const DECOMMISSIONING_DECONFIGURING_HOST: Duration = Duration::from_secs(40 * 60);
+
+/// SLA for DPU deconfiguration during decommissioning (DPF delete and/or vanilla
+/// BFB install plus boot).
+pub const DECOMMISSIONING_DECONFIGURING_DPUS: Duration = Duration::from_secs(40 * 60);
+
+/// SLA for recording OOB DHCP suppression during decommissioning.
+pub const DECOMMISSIONING_SUPPRESSING_OOB_DHCP: Duration = Duration::from_secs(5 * 60);
+
+/// SLA for the host power cycle that forces OOB rediscovery during decommissioning.
+pub const DECOMMISSIONING_POWER_CYCLING_HOST: Duration = Duration::from_secs(5 * 60);
+
+/// SLA for powering the host back on after the decommissioning power cycle.
+pub const DECOMMISSIONING_POWERING_ON_HOST: Duration = Duration::from_secs(5 * 60);
+
+/// SLA for waiting for OOB DHCP suppression acknowledgement after the host power
+/// cycle.
+pub const DECOMMISSIONING_WAITING_FOR_OOB_DHCP_ACKNOWLEDGEMENT: Duration =
+    Duration::from_secs(15 * 60);
+
+/// SLA for recording BMC DHCP suppression during decommissioning.
+pub const DECOMMISSIONING_SUPPRESSING_BMC_DHCP: Duration = Duration::from_secs(5 * 60);
+
+/// SLA for BMC factory reset during decommissioning.
+pub const DECOMMISSIONING_FACTORY_RESETTING_BMCS: Duration = Duration::from_secs(5 * 60);
+
+/// SLA for waiting for BMC DHCP suppression acknowledgement after factory reset.
+pub const DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT: Duration =
+    Duration::from_secs(15 * 60);
+
+/// SLA for deleting managed per-device BMC and DPU credentials during
+/// decommissioning.
+pub const DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS: Duration = Duration::from_secs(5 * 60);
 
 /// Configuration for machine state SLA durations.
 #[derive(Clone, Debug, PartialEq)]

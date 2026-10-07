@@ -9,9 +9,11 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // APIVpcPeeringCreateRequest captures the request data for creating a new VPC peering
@@ -62,31 +64,35 @@ func (vpcr *APIVpcPeeringCreateRequest) Validate() error {
 // request-only data layered on top of the entity for the peering
 // create flow: the API request just carries the same VPC IDs that end
 // up on the entity, so this is a thin wrapper around `vp.ToProto()`.
-func (vpcr *APIVpcPeeringCreateRequest) ToProto(vp *cdbm.VpcPeering) *cwssaws.VpcPeeringCreationRequest {
+func (vpcr *APIVpcPeeringCreateRequest) ToProto(vp *cdbm.VpcPeering) *corev1.VpcPeeringCreationRequest {
 	vpProto := vp.ToProto()
-	return &cwssaws.VpcPeeringCreationRequest{
+	return &corev1.VpcPeeringCreationRequest{
 		Id:        vpProto.Id,
 		VpcId:     vpProto.VpcId,
 		PeerVpcId: vpProto.PeerVpcId,
 	}
 }
 
-// APIVpcPeering represents a VPC peering connection
+// APIVpcPeering represents a VPC Peering connection
 type APIVpcPeering struct {
-	// ID is the unique UUID v4 identifier of the VPC peering in NICo Cloud
+	// ID is the unique UUID v4 identifier of the VPC Peering
 	ID string `json:"id"`
-	// Vpc1ID is the ID of the first VPC in the peering
+	// Vpc1ID is the ID of the first VPC in the Peering
 	Vpc1ID string `json:"vpc1Id"`
-	// Vpc1 is the summary of the first VPC in the peering
-	Vpc1 *APIVpcSummary `json:"vpc1,omitempty"`
+	// Vpc1 is the summary of the first VPC in the Peering
+	Vpc1 *APIVpcPeeringVpcSummary `json:"vpc1,omitempty"`
 	// Vpc2ID is the ID of the second VPC in the peering
 	Vpc2ID string `json:"vpc2Id"`
-	// Vpc2 is the summary of the second VPC in the peering
-	Vpc2 *APIVpcSummary `json:"vpc2,omitempty"`
-	// SiteID is the ID of the Site where the peering exists
+	// Vpc2 is the summary of the second VPC in the Peering
+	Vpc2 *APIVpcPeeringVpcSummary `json:"vpc2,omitempty"`
+	// SiteID is the ID of the Site where the Peering resides
 	SiteID string `json:"siteId"`
-	// Site is the summary of the site
+	// Site is the summary of the Site
 	Site *APISiteSummary `json:"site,omitempty"`
+	// TenantID is the ID of the Tenant that created the VPC peering
+	TenantID *string `json:"tenantId,omitempty"`
+	// Tenant is the summary of the tenant that created the VPC peering
+	Tenant *APITenantSummary `json:"tenant,omitempty"`
 	// IsMultiTenant indicates if this is a multi-tenant peering
 	IsMultiTenant bool `json:"isMultiTenant"`
 	// Status is the status of the VPC peering
@@ -97,8 +103,64 @@ type APIVpcPeering struct {
 	Updated time.Time `json:"updated"`
 }
 
+// APIVpcPeeringVpcSummary is summarizes a VPC in context of a VPC Peering
+type APIVpcPeeringVpcSummary struct {
+	// ID is the unique UUID v4 identifier of the VPC
+	ID string `json:"id"`
+	// Name of the Vpc
+	Name string `json:"name"`
+	// TenantID is the ID of the Tenant that owns the VPC
+	TenantID string `json:"tenantId"`
+	// Tenant describes details of the Tenant that owns the VPC
+	Tenant *APIVpcPeeringTenantSummary `json:"tenant"`
+	// Network virtualization type describe the VPC's virtualization type
+	NetworkVirtualizationType *string `json:"networkVirtualizationType"`
+	// Status is the status of the VPC
+	Status string `json:"status"`
+}
+
+// APIVpcPeeringTenantSummary is summarizes a Tenant in context of a VPC Peering
+type APIVpcPeeringTenantSummary struct {
+	// ID of the Tenant
+	ID string `json:"id"`
+	// Org contains the org ID of the Tenant
+	Org string `json:"org"`
+	// OrgDisplayName contains the display name of Tenant's org
+	OrgDisplayName *string `json:"orgDisplayName"`
+}
+
+// NewAPIVpcPeeringTenantSummary creates a new APIVpcPeeringTenantSummary from a database Tenant model
+func NewAPIVpcPeeringTenantSummary(dbTenant *cdbm.Tenant) *APIVpcPeeringTenantSummary {
+	return &APIVpcPeeringTenantSummary{
+		ID:             dbTenant.ID.String(),
+		Org:            dbTenant.Org,
+		OrgDisplayName: dbTenant.OrgDisplayName,
+	}
+}
+
+// NewAPIVpcPeeringSummary creates a new APIVpcPeeringSummary from a database VPC peering model
+func NewAPIVpcPeeringVpcSummary(dbVpc *cdbm.Vpc, dbTenant *cdbm.Tenant) *APIVpcPeeringVpcSummary {
+	if dbVpc == nil {
+		return nil
+	}
+
+	apiVpcPeeringVpcSummary := APIVpcPeeringVpcSummary{
+		ID:                        dbVpc.ID.String(),
+		Name:                      dbVpc.Name,
+		TenantID:                  dbVpc.TenantID.String(),
+		NetworkVirtualizationType: dbVpc.NetworkVirtualizationType,
+		Status:                    dbVpc.Status,
+	}
+
+	if dbTenant != nil {
+		apiVpcPeeringVpcSummary.Tenant = NewAPIVpcPeeringTenantSummary(dbTenant)
+	}
+
+	return &apiVpcPeeringVpcSummary
+}
+
 // NewAPIVpcPeering creates a new APIVpcPeering from a database VPC peering model
-func NewAPIVpcPeering(dbVpcPeering cdbm.VpcPeering) APIVpcPeering {
+func NewAPIVpcPeering(dbVpcPeering cdbm.VpcPeering, dbMappedPeeringTenants map[uuid.UUID]*cdbm.Tenant) APIVpcPeering {
 	apiVpcPeering := APIVpcPeering{
 		ID:            dbVpcPeering.ID.String(),
 		Vpc1ID:        dbVpcPeering.Vpc1ID.String(),
@@ -112,42 +174,24 @@ func NewAPIVpcPeering(dbVpcPeering cdbm.VpcPeering) APIVpcPeering {
 
 	// Expand relations if available.
 	if dbVpcPeering.Vpc1 != nil {
-		apiVpcPeering.Vpc1 = NewAPIVpcSummary(dbVpcPeering.Vpc1)
+		apiVpcPeering.Vpc1 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc1, nil)
+		peerTenant1, _ := dbMappedPeeringTenants[dbVpcPeering.Vpc1.TenantID]
+		apiVpcPeering.Vpc1 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc1, peerTenant1)
 	}
+
 	if dbVpcPeering.Vpc2 != nil {
-		apiVpcPeering.Vpc2 = NewAPIVpcSummary(dbVpcPeering.Vpc2)
+		apiVpcPeering.Vpc2 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc2, nil)
+		peerTenant2, _ := dbMappedPeeringTenants[dbVpcPeering.Vpc2.TenantID]
+		apiVpcPeering.Vpc2 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc2, peerTenant2)
 	}
+
 	if dbVpcPeering.Site != nil {
 		apiVpcPeering.Site = NewAPISiteSummary(dbVpcPeering.Site)
 	}
 
+	if dbVpcPeering.Tenant != nil {
+		apiVpcPeering.TenantID = util.GetUUIDPtrToStrPtr(dbVpcPeering.TenantID)
+		apiVpcPeering.Tenant = NewAPITenantSummary(dbVpcPeering.Tenant)
+	}
 	return apiVpcPeering
-}
-
-// APIVpcPeeringSummary represents a summary of a VPC peering connection
-type APIVpcPeeringSummary struct {
-	// ID is the unique UUID v4 identifier of the VPC peering in NICo Cloud
-	ID string `json:"id"`
-	// Vpc1ID is the ID of the first VPC in the peering
-	Vpc1ID string `json:"vpc1Id"`
-	// Vpc2ID is the ID of the second VPC in the peering
-	Vpc2ID string `json:"vpc2Id"`
-	// IsMultiTenant indicates if this is a multi-tenant peering
-	IsMultiTenant bool `json:"isMultiTenant"`
-	// Status is the status of the VPC peering
-	Status string `json:"status"`
-}
-
-// NewAPIVpcPeeringSummary creates a new APIVpcPeeringSummary from a database VPC peering model
-func NewAPIVpcPeeringSummary(dbVpcPeering *cdbm.VpcPeering) *APIVpcPeeringSummary {
-	if dbVpcPeering == nil {
-		return nil
-	}
-	return &APIVpcPeeringSummary{
-		ID:            dbVpcPeering.ID.String(),
-		Vpc1ID:        dbVpcPeering.Vpc1ID.String(),
-		Vpc2ID:        dbVpcPeering.Vpc2ID.String(),
-		Status:        dbVpcPeering.Status,
-		IsMultiTenant: dbVpcPeering.IsMultiTenant,
-	}
 }

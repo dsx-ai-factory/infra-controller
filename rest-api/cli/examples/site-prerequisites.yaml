@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example input for `nicocli site bootstrap`. Each `request` object is passed
+# to the corresponding REST operation and must contain only attributes allowed
+# by that operation's OpenAPI request schema.
+
+provider:
+  org: provider-org
+tenant:
+  org: tenant-org
+
+# The Site must already exist. Bootstrap looks it up but never creates it.
+site:
+  request:
+    name: sjc4
+    description: San Jose site 4
+
+siteIpBlocks:
+  # Site IP Blocks are created automatically from fabric prefixes reported
+  # by the Site. This selector discovers the existing block; it never posts
+  # a Provider-created IP Block. Rerun bootstrap if inventory is not ready.
+  # routingType is DatacenterOnly for an RFC 1918 or RFC 4193 private range
+  # such as 10.40.0.0/16, and Public for any other range.
+  match:
+    siteId: "${site.id}"
+    routingType: DatacenterOnly
+    prefix: 10.40.0.0
+    prefixLength: 16
+
+instanceTypes:
+  compute:
+    request:
+      name: compute-large
+      description: Compute profile for SJC4
+      siteId: "${site.id}"
+      labels:
+        tier: compute
+      # Replace this with a capability reported by machines at the site.
+      machineCapabilities:
+        - type: CPU
+          name: x86-64
+          count: 1
+
+allocations:
+  network:
+    request:
+      name: tenant-network
+      description: Tenant network allocation for SJC4
+      tenantId: "${tenant.id}"
+      siteId: "${site.id}"
+      allocationConstraints:
+        - resourceType: IPBlock
+          resourceTypeId: "${siteIpBlocks.id}"
+          constraintType: OnDemand
+          constraintValue: 24
+  compute:
+    request:
+      name: tenant-compute
+      description: One reserved machine for the tenant
+      tenantId: "${tenant.id}"
+      siteId: "${site.id}"
+      allocationConstraints:
+        - resourceType: InstanceType
+          resourceTypeId: "${instanceTypes.compute.id}"
+          constraintType: Reserved
+          constraintValue: 1
+
+vpcs:
+  tenant:
+    request:
+      name: tenant-vpc
+      description: Tenant VPC at SJC4
+      siteId: "${site.id}"
+
+vpcPrefixes:
+  tenant:
+    request:
+      name: tenant-prefix
+      vpcId: "${vpcs.tenant.id}"
+      ipBlockId: "${allocations.network.allocationConstraints.0.derivedResourceId}"
+      prefixLength: 24
+
+# Instances are optional. Remove this section until machines assigned to the
+# instance type are ready and the compute allocation can be satisfied.
+instances:
+  worker:
+    request:
+      name: worker-1
+      description: First tenant worker
+      tenantId: "${tenant.id}"
+      instanceTypeId: "${instanceTypes.compute.id}"
+      vpcId: "${vpcs.tenant.id}"
+      interfaces:
+        - vpcPrefixId: "${vpcPrefixes.tenant.id}"
+          isPhysical: true

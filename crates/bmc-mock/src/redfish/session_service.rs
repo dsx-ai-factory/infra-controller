@@ -34,12 +34,12 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 const X_AUTH_TOKEN: HeaderName = HeaderName::from_static("x-auth-token");
 const SESSION_TOKEN_TTL: Duration = Duration::from_secs(120);
 
-pub fn service_resource() -> redfish::Resource<'static> {
+pub(super) fn service_resource() -> redfish::Resource<'static> {
     redfish::Resource {
         odata_id: Cow::Borrowed("/redfish/v1/SessionService"),
         odata_type: Cow::Borrowed("#SessionService.v1_1_9.SessionService"),
@@ -48,7 +48,7 @@ pub fn service_resource() -> redfish::Resource<'static> {
     }
 }
 
-pub fn sessions_collection() -> redfish::Collection<'static> {
+pub(crate) fn sessions_collection() -> redfish::Collection<'static> {
     redfish::Collection {
         odata_id: Cow::Borrowed("/redfish/v1/SessionService/Sessions"),
         odata_type: Cow::Borrowed("#SessionCollection.SessionCollection"),
@@ -56,7 +56,7 @@ pub fn sessions_collection() -> redfish::Collection<'static> {
     }
 }
 
-pub fn session_resource(id: impl Display) -> redfish::Resource<'static> {
+fn session_resource(id: impl Display) -> redfish::Resource<'static> {
     redfish::Resource {
         odata_id: Cow::Owned(format!("/redfish/v1/SessionService/Sessions/{id}")),
         odata_type: Cow::Borrowed("#Session.v1_7_0.Session"),
@@ -65,24 +65,24 @@ pub fn session_resource(id: impl Display) -> redfish::Resource<'static> {
     }
 }
 
-pub fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(&service_resource().odata_id, get(get_service))
         .route(
             &sessions_collection().odata_id,
-            get(get_sessions).post(post_session),
+            get(get_sessions::<C>).post(post_session::<C>),
         )
         .route(
             format!("{}/{{session_id}}", sessions_collection().odata_id).as_str(),
-            get(get_session).delete(delete_session),
+            get(get_session::<C>).delete(delete_session::<C>),
         )
 }
 
 #[derive(Clone, Debug)]
-pub struct SessionRecord {
-    pub id: String,
-    pub username: String,
-    pub token: String,
-    pub expires_at: Instant,
+pub(crate) struct SessionRecord {
+    pub(crate) id: String,
+    pub(crate) username: String,
+    pub(crate) token: String,
+    pub(crate) expires_at: Instant,
 }
 
 impl SessionRecord {
@@ -100,23 +100,23 @@ impl SessionRecord {
 }
 
 #[derive(Debug, Default)]
-pub struct SessionServiceState {
+pub(crate) struct SessionServiceState {
     next_id: Mutex<u64>,
     sessions: Mutex<HashMap<String, SessionRecord>>,
 }
 
 impl SessionServiceState {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn is_token_valid(&self, token: &str) -> bool {
+    pub(crate) fn is_token_valid(&self, token: &str) -> bool {
         let mut sessions = self.sessions.lock().expect("mutex poisoned");
         Self::prune_expired(&mut sessions, Instant::now());
         sessions.contains_key(token)
     }
 
-    pub fn create(&self, username: impl Into<String>) -> SessionRecord {
+    pub(crate) fn create(&self, username: impl Into<String>) -> SessionRecord {
         let id = {
             let mut next_id = self.next_id.lock().expect("mutex poisoned");
             *next_id += 1;
@@ -136,19 +136,19 @@ impl SessionServiceState {
         record
     }
 
-    pub fn list(&self) -> Vec<SessionRecord> {
+    pub(crate) fn list(&self) -> Vec<SessionRecord> {
         let mut sessions = self.sessions.lock().expect("mutex poisoned");
         Self::prune_expired(&mut sessions, Instant::now());
         sessions.values().cloned().collect()
     }
 
-    pub fn find_by_id(&self, id: &str) -> Option<SessionRecord> {
+    pub(crate) fn find_by_id(&self, id: &str) -> Option<SessionRecord> {
         let mut sessions = self.sessions.lock().expect("mutex poisoned");
         Self::prune_expired(&mut sessions, Instant::now());
         sessions.values().find(|rec| rec.id == id).cloned()
     }
 
-    pub fn delete_by_id(&self, id: &str) -> bool {
+    pub(crate) fn delete_by_id(&self, id: &str) -> bool {
         let mut sessions = self.sessions.lock().expect("mutex poisoned");
         Self::prune_expired(&mut sessions, Instant::now());
         let Some(token) = sessions
@@ -166,7 +166,8 @@ impl SessionServiceState {
     }
 }
 
-fn generate_token() -> String {
+/// 32 lowercase hex characters from 128 random bits.
+pub(super) fn generate_token() -> String {
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
     bytes.iter().fold(String::with_capacity(32), |mut acc, b| {
@@ -188,7 +189,7 @@ async fn get_service() -> Response {
     .into_ok_response()
 }
 
-async fn get_sessions(State(state): State<BmcState>) -> Response {
+async fn get_sessions<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let members = state
         .session_service_state
         .list()
@@ -200,7 +201,10 @@ async fn get_sessions(State(state): State<BmcState>) -> Response {
         .into_ok_response()
 }
 
-async fn get_session(State(state): State<BmcState>, Path(session_id): Path<String>) -> Response {
+async fn get_session<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(session_id): Path<String>,
+) -> Response {
     state
         .session_service_state
         .find_by_id(&session_id)
@@ -209,8 +213,8 @@ async fn get_session(State(state): State<BmcState>, Path(session_id): Path<Strin
 }
 
 /// `POST /redfish/v1/SessionService/Sessions`.
-async fn post_session(
-    State(state): State<BmcState>,
+async fn post_session<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     authorization: Option<TypedHeader<Authorization<Basic>>>,
     body: Option<Json<serde_json::Value>>,
 ) -> Response {
@@ -254,7 +258,10 @@ async fn post_session(
     response
 }
 
-async fn delete_session(State(state): State<BmcState>, Path(session_id): Path<String>) -> Response {
+async fn delete_session<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(session_id): Path<String>,
+) -> Response {
     if state.session_service_state.delete_by_id(&session_id) {
         http::ok_no_content()
     } else {

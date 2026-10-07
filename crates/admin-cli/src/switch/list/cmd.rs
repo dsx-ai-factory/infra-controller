@@ -24,7 +24,7 @@ use super::args::Args;
 use crate::cfg::runtime::RuntimeConfig;
 use crate::rpc::ApiClient;
 
-pub async fn list_switches(
+pub(super) async fn list_switches(
     args: Args,
     api_client: &ApiClient,
     config: &RuntimeConfig,

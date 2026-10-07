@@ -13,7 +13,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	vpcPeeringActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpcpeering"
 )
@@ -37,10 +37,10 @@ func (s *UpdateVpcPeeringTestSuite) Test_UpdateVpcPeeringsInventory_Success() {
 	var VpcPeeringManager vpcPeeringActivity.ManageVpcPeering
 
 	siteID := uuid.New()
-	VpcPeeringInventory := &cwssaws.VPCPeeringInventory{
-		VpcPeerings: []*cwssaws.VpcPeering{
-			{Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()}},
-			{Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()}},
+	VpcPeeringInventory := &corev1.VPCPeeringInventory{
+		VpcPeerings: []*corev1.VpcPeering{
+			{Id: &corev1.VpcPeeringId{Value: uuid.NewString()}},
+			{Id: &corev1.VpcPeeringId{Value: uuid.NewString()}},
 		},
 	}
 
@@ -58,10 +58,10 @@ func (s *UpdateVpcPeeringTestSuite) Test_UpdateVpcPeeringsInventory_ActivityFail
 	var VpcPeeringManager vpcPeeringActivity.ManageVpcPeering
 
 	siteID := uuid.New()
-	VpcPeeringInventory := &cwssaws.VPCPeeringInventory{
-		VpcPeerings: []*cwssaws.VpcPeering{
-			{Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()}},
-			{Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()}},
+	VpcPeeringInventory := &corev1.VPCPeeringInventory{
+		VpcPeerings: []*corev1.VpcPeering{
+			{Id: &corev1.VpcPeeringId{Value: uuid.NewString()}},
+			{Id: &corev1.VpcPeeringId{Value: uuid.NewString()}},
 		},
 	}
 

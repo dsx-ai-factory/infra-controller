@@ -36,26 +36,26 @@ The --url, --root-ca, --client-cert and --client-key flags are global and
 may be given before or after the subcommand.
 
 ")]
-pub struct RmsAction {
+pub(crate) struct RmsAction {
     #[clap(subcommand)]
-    pub command: Cmd,
+    pub(super) command: Cmd,
 
     #[clap(long, global = true, help = "URL of RMS API endpoint (required).")]
-    pub url: Option<String>,
+    pub(super) url: Option<String>,
 
     #[clap(long, global = true, help = "Root CA path")]
-    pub root_ca: Option<String>,
+    pub(super) root_ca: Option<String>,
 
     #[clap(long, global = true, help = "Client certificate path")]
-    pub client_cert: Option<String>,
+    pub(super) client_cert: Option<String>,
 
     #[clap(long, global = true, help = "Client key path")]
-    pub client_key: Option<String>,
+    pub(super) client_key: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(super) enum Cmd {
     #[clap(about = "Get the full RMS inventory")]
     Inventory,
     #[clap(about = "Get the power on sequence")]
@@ -74,9 +74,9 @@ Get the power-on sequence for a rack:
     $ nico-admin-cli rms power-on-sequence rack-1
 
 ")]
-pub struct PowerOnSequence {
+pub(super) struct PowerOnSequence {
     #[clap(help = "Rack ID to get power sequence for")]
-    pub rack_id: String,
+    rack_id: String,
 }
 
 impl From<PowerOnSequence> for librms::protos::rack_manager::GetRackPowerOnSequenceRequest {
@@ -95,11 +95,11 @@ Get the power state of a node in a rack:
     $ nico-admin-cli rms power-state rack-1 node-1
 
 ")]
-pub struct PowerState {
+pub(super) struct PowerState {
     #[clap(help = "Rack ID to get power sequence for")]
-    pub rack_id: String,
+    rack_id: String,
     #[clap(help = "Node ID to get power state for")]
-    pub node_id: String,
+    node_id: String,
 }
 
 impl From<PowerState> for librms::protos::rack_manager::GetPowerStateRequest {
@@ -119,11 +119,11 @@ Get the firmware inventory for a node in a rack:
     $ nico-admin-cli rms firmware-inventory rack-1 node-1
 
 ")]
-pub struct FirmwareInventory {
+pub(super) struct FirmwareInventory {
     #[clap(help = "Rack ID to get power sequence for")]
-    pub rack_id: String,
+    rack_id: String,
     #[clap(help = "Node ID to get firmware inventory for")]
-    pub node_id: String,
+    node_id: String,
 }
 
 impl From<FirmwareInventory> for librms::protos::rack_manager::GetNodeFirmwareInventoryRequest {

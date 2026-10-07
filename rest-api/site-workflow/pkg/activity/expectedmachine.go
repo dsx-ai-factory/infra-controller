@@ -11,16 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"go.temporal.io/sdk/client"
 	tClient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 // ManageExpectedMachineInventory is an activity wrapper for Expected Machine inventory collection and publishing
@@ -33,8 +31,8 @@ type ManageExpectedMachineInventory struct {
 }
 
 type linkedExpectedMachineInfo struct {
-	expectedMachine       *cwssaws.ExpectedMachine
-	linkedExpectedMachine *cwssaws.LinkedExpectedMachine
+	expectedMachine       *corev1.ExpectedMachine
+	linkedExpectedMachine *corev1.LinkedExpectedMachine
 }
 
 // DiscoverExpectedMachineInventory is an activity to collect Expected Machine inventory and publish to Temporal queue
@@ -61,11 +59,11 @@ func (memi *ManageExpectedMachineInventory) DiscoverExpectedMachineInventory(ctx
 		logger.Warn().Err(err).Msg("Failed to retrieve ExpectedMachines using Core gRPC API")
 
 		// Error encountered before we've published anything, report inventory collection error to Cloud
-		inventory := &cwssaws.ExpectedMachineInventory{
+		inventory := &corev1.ExpectedMachineInventory{
 			Timestamp: &timestamppb.Timestamp{
 				Seconds: time.Now().Unix(),
 			},
-			InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED,
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 			StatusMsg:       err.Error(),
 		}
 
@@ -83,11 +81,11 @@ func (memi *ManageExpectedMachineInventory) DiscoverExpectedMachineInventory(ctx
 		logger.Warn().Err(lerr).Msg("Failed to retrieve linked Machine IDs using Core gRPC API")
 
 		// Fatal error - report inventory collection error to Cloud
-		inventory := &cwssaws.ExpectedMachineInventory{
+		inventory := &corev1.ExpectedMachineInventory{
 			Timestamp: &timestamppb.Timestamp{
 				Seconds: time.Now().Unix(),
 			},
-			InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED,
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 			StatusMsg:       lerr.Error(),
 		}
 
@@ -100,7 +98,7 @@ func (memi *ManageExpectedMachineInventory) DiscoverExpectedMachineInventory(ctx
 	}
 
 	// LinkedExpectedMachine data is missing ExpectedMachine ID so we build an intermediate map using MAC address
-	linkedMachinesByKey := make(map[string]*cwssaws.LinkedExpectedMachine)
+	linkedMachinesByKey := make(map[string]*corev1.LinkedExpectedMachine)
 	for _, linked := range linkedList.ExpectedMachines {
 		linkedMachinesByKey[linked.BmcMacAddress] = linked
 	}
@@ -127,7 +125,7 @@ func (memi *ManageExpectedMachineInventory) DiscoverExpectedMachineInventory(ctx
 	logger.Info().Int("ExpectedMachine Count", totalCount).Msg("Built ExpectedMachine list")
 
 	if totalCount == 0 {
-		inventoryPage := getPagedExpectedMachineInventory([]linkedExpectedMachineInfo{}, allExpectedMachineIDs, totalCount, 1, memi.cloudPageSize, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, "No ExpectedMachines reported by Site Controller")
+		inventoryPage := getPagedExpectedMachineInventory([]linkedExpectedMachineInfo{}, allExpectedMachineIDs, totalCount, 1, memi.cloudPageSize, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, "No ExpectedMachines reported by Site Controller")
 
 		_, serr := memi.temporalPublishClient.ExecuteWorkflow(context.Background(), workflowOptions, "UpdateExpectedMachineInventory", memi.siteID, inventoryPage)
 		if serr != nil {
@@ -151,7 +149,7 @@ func (memi *ManageExpectedMachineInventory) DiscoverExpectedMachineInventory(ctx
 			endIndex = totalCount
 		}
 
-		pagedWorkflowOptions := client.StartWorkflowOptions{
+		pagedWorkflowOptions := tClient.StartWorkflowOptions{
 			ID:        fmt.Sprintf("%v-%v", workflowOptions.ID, cloudPage),
 			TaskQueue: workflowOptions.TaskQueue,
 		}
@@ -165,7 +163,7 @@ func (memi *ManageExpectedMachineInventory) DiscoverExpectedMachineInventory(ctx
 			totalCount,
 			cloudPage,
 			memi.cloudPageSize,
-			cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 			"Successfully retrieved ExpectedMachines from Site Controller",
 		)
 
@@ -188,17 +186,17 @@ func getPagedExpectedMachineInventory(
 	totalCount int,
 	page int,
 	pageSize int,
-	status cwssaws.InventoryStatus,
+	status corev1.InventoryStatus,
 	statusMessage string,
-) *cwssaws.ExpectedMachineInventory {
+) *corev1.ExpectedMachineInventory {
 	totalPages := totalCount / pageSize
 	if totalCount%pageSize > 0 {
 		totalPages++
 	}
 
 	// Build lists for this page from the sliced info list
-	pagedExpectedMachines := make([]*cwssaws.ExpectedMachine, 0, len(pagedInfo))
-	pagedLinkedMachines := make([]*cwssaws.LinkedExpectedMachine, 0, len(pagedInfo))
+	pagedExpectedMachines := make([]*corev1.ExpectedMachine, 0, len(pagedInfo))
+	pagedLinkedMachines := make([]*corev1.LinkedExpectedMachine, 0, len(pagedInfo))
 
 	for _, info := range pagedInfo {
 		pagedExpectedMachines = append(pagedExpectedMachines, info.expectedMachine)
@@ -209,7 +207,7 @@ func getPagedExpectedMachineInventory(
 	}
 
 	// Create an inventory page with the subset of ExpectedMachines and matching LinkedMachines
-	inventoryPage := &cwssaws.ExpectedMachineInventory{
+	inventoryPage := &corev1.ExpectedMachineInventory{
 		ExpectedMachines: pagedExpectedMachines,
 		LinkedMachines:   pagedLinkedMachines,
 		Timestamp: &timestamppb.Timestamp{
@@ -217,12 +215,12 @@ func getPagedExpectedMachineInventory(
 		},
 		InventoryStatus: status,
 		StatusMsg:       statusMessage,
-		InventoryPage: &cwssaws.InventoryPage{
+		InventoryPage: &corev1.InventoryPage{
 			TotalPages:  int32(totalPages),
 			CurrentPage: int32(page),
 			PageSize:    int32(pageSize),
 			TotalItems:  int32(totalCount),
-			ItemIds:     allExpectedMachineIDs,
+			ItemIds:     itemIDsForPage(page, totalPages, allExpectedMachineIDs),
 		},
 	}
 
@@ -243,19 +241,17 @@ func NewManageExpectedMachineInventory(siteID uuid.UUID, coreGrpcAtomicClient *c
 // ManageExpectedMachine is an activity wrapper for Expected Machine management
 type ManageExpectedMachine struct {
 	coreGrpcAtomicClient *cclient.CoreGrpcAtomicClient
-	flowGrpcAtomicClient *cclient.FlowGrpcAtomicClient
 }
 
 // NewManageExpectedMachine returns a new ManageExpectedMachine client
-func NewManageExpectedMachine(coreGrpcAtomicClient *cclient.CoreGrpcAtomicClient, flowGrpcAtomicClient *cclient.FlowGrpcAtomicClient) ManageExpectedMachine {
+func NewManageExpectedMachine(coreGrpcAtomicClient *cclient.CoreGrpcAtomicClient) ManageExpectedMachine {
 	return ManageExpectedMachine{
 		coreGrpcAtomicClient: coreGrpcAtomicClient,
-		flowGrpcAtomicClient: flowGrpcAtomicClient,
 	}
 }
 
 // CreateExpectedMachineOnSite creates Expected Machine with NICo
-func (mem *ManageExpectedMachine) CreateExpectedMachineOnSite(ctx context.Context, request *cwssaws.ExpectedMachine) error {
+func (mem *ManageExpectedMachine) CreateExpectedMachineOnSite(ctx context.Context, request *corev1.ExpectedMachine) error {
 	logger := log.With().Str("Activity", "CreateExpectedMachineOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -283,19 +279,20 @@ func (mem *ManageExpectedMachine) CreateExpectedMachineOnSite(ctx context.Contex
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call Core gRPC endpoint
+	start := time.Now()
 	_, err = grpcServiceClient.AddExpectedMachine(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Expected Machine using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create Expected Machine using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // UpdateExpectedMachineOnSite updates Expected Machine on NICo
-func (mem *ManageExpectedMachine) UpdateExpectedMachineOnSite(ctx context.Context, request *cwssaws.ExpectedMachine) error {
+func (mem *ManageExpectedMachine) UpdateExpectedMachineOnSite(ctx context.Context, request *corev1.ExpectedMachine) error {
 	logger := log.With().Str("Activity", "UpdateExpectedMachineOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -322,19 +319,20 @@ func (mem *ManageExpectedMachine) UpdateExpectedMachineOnSite(ctx context.Contex
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateExpectedMachine(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update Expected Machine using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update Expected Machine using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // DeleteExpectedMachineOnSite deletes Expected Machine on NICo
-func (mem *ManageExpectedMachine) DeleteExpectedMachineOnSite(ctx context.Context, request *cwssaws.ExpectedMachineRequest) error {
+func (mem *ManageExpectedMachine) DeleteExpectedMachineOnSite(ctx context.Context, request *corev1.ExpectedMachineRequest) error {
 	logger := log.With().Str("Activity", "DeleteExpectedMachineOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -359,19 +357,20 @@ func (mem *ManageExpectedMachine) DeleteExpectedMachineOnSite(ctx context.Contex
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteExpectedMachine(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete Expected Machine using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete Expected Machine using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // CreateExpectedMachinesOnSite creates multiple Expected Machines with NICo using the nico batch endpoint
-func (mem *ManageExpectedMachine) CreateExpectedMachinesOnSite(ctx context.Context, request *cwssaws.BatchExpectedMachineOperationRequest) (*cwssaws.BatchExpectedMachineOperationResponse, error) {
+func (mem *ManageExpectedMachine) CreateExpectedMachinesOnSite(ctx context.Context, request *corev1.BatchExpectedMachineOperationRequest) (*corev1.BatchExpectedMachineOperationResponse, error) {
 	logger := log.With().Str("Activity", "CreateExpectedMachinesOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -397,9 +396,11 @@ func (mem *ManageExpectedMachine) CreateExpectedMachinesOnSite(ctx context.Conte
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call the batch CreateExpectedMachines endpoint
+	start := time.Now()
 	response, err := grpcServiceClient.CreateExpectedMachines(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Expected Machines using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create Expected Machines using Core gRPC API")
 		return nil, swe.WrapErr(err)
 	}
 
@@ -418,144 +419,30 @@ func (mem *ManageExpectedMachine) CreateExpectedMachinesOnSite(ctx context.Conte
 		Int("Total", len(request.GetExpectedMachines().GetExpectedMachines())).
 		Int("Succeeded", successes).
 		Int("Failed", failures).
+		Dur("grpc_duration", duration).
 		Msg("Completed activity")
 
 	return response, nil
 }
 
-// CreateExpectedMachineOnFlow creates an Expected Machine as a component in Flow via AddComponent
-func (mem *ManageExpectedMachine) CreateExpectedMachineOnFlow(ctx context.Context, request *cwssaws.ExpectedMachine) error {
-	logger := log.With().Str("Activity", "CreateExpectedMachineOnFlow").Logger()
-
-	logger.Info().Msg("Starting activity")
-
-	// Validate request
-	if request == nil {
-		return temporal.NewNonRetryableApplicationError("received empty create Expected Machine request for Flow", swe.ErrTypeInvalidRequest, errors.New("nil request"))
-	}
-
-	// If Flow client is not configured, skip gracefully
-	if mem.flowGrpcAtomicClient == nil {
-		logger.Warn().Msg("Flow client not configured, skipping Flow component creation")
-		return nil
-	}
-
-	flowClient := mem.flowGrpcAtomicClient.GetClient()
-	if flowClient == nil {
-		logger.Warn().Msg("Flow client not connected, skipping Flow component creation")
-		return nil
-	}
-
-	component := expectedMachineToFlowComponent(request)
-	_, err := flowClient.GrpcServiceClient().AddComponent(ctx, &flowv1.AddComponentRequest{Component: component})
-	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Expected Machine component on Flow")
-		return swe.WrapErr(err)
-	}
-
-	logger.Info().Msg("Completed activity")
+// CreateExpectedMachineOnFlow is retained as a no-op for compatibility with
+// workflow histories recorded before direct Flow writes were removed.
+// Remove it after the matching `GetVersion` branch is retired and those
+// histories can no longer be replayed.
+func (*ManageExpectedMachine) CreateExpectedMachineOnFlow(context.Context, *corev1.ExpectedMachine) error {
 	return nil
 }
 
-// CreateExpectedMachinesOnFlow creates multiple Expected Machines as components in Flow via AddComponent
-func (mem *ManageExpectedMachine) CreateExpectedMachinesOnFlow(ctx context.Context, request *cwssaws.BatchExpectedMachineOperationRequest) error {
-	logger := log.With().Str("Activity", "CreateExpectedMachinesOnFlow").Logger()
-
-	logger.Info().Msg("Starting activity")
-
-	// If Flow client is not configured, skip gracefully
-	if mem.flowGrpcAtomicClient == nil {
-		logger.Warn().Msg("Flow client not configured, skipping Flow component creation")
-		return nil
-	}
-
-	flowClient := mem.flowGrpcAtomicClient.GetClient()
-	if flowClient == nil {
-		logger.Warn().Msg("Flow client not connected, skipping Flow component creation")
-		return nil
-	}
-
-	grpcServiceClient := flowClient.GrpcServiceClient()
-	machines := request.GetExpectedMachines().GetExpectedMachines()
-	successes := 0
-	failures := 0
-
-	// TODO(chet): Work with Flow team to add batch support so we don't have to loop here.
-	for _, machine := range machines {
-		component := expectedMachineToFlowComponent(machine)
-		_, err := grpcServiceClient.AddComponent(ctx, &flowv1.AddComponentRequest{Component: component})
-		if err != nil {
-			logger.Warn().Err(err).Str("ID", machine.GetId().GetValue()).Msg("Failed to create Expected Machine component on Flow")
-			failures++
-		} else {
-			successes++
-		}
-	}
-
-	logger.Info().
-		Int("Total", len(machines)).
-		Int("Succeeded", successes).
-		Int("Failed", failures).
-		Msg("Completed activity")
-
+// CreateExpectedMachinesOnFlow is retained as a no-op for compatibility with
+// workflow histories recorded before direct Flow writes were removed.
+// Remove it after the matching `GetVersion` branch is retired and those
+// histories can no longer be replayed.
+func (*ManageExpectedMachine) CreateExpectedMachinesOnFlow(context.Context, *corev1.BatchExpectedMachineOperationRequest) error {
 	return nil
-}
-
-// expectedMachineToFlowComponent converts a NICo ExpectedMachine proto to an Flow Component proto
-func expectedMachineToFlowComponent(em *cwssaws.ExpectedMachine) *flowv1.Component {
-	component := &flowv1.Component{
-		Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
-		Info: &flowv1.DeviceInfo{
-			Id:           &flowv1.UUID{Id: em.GetId().GetValue()},
-			SerialNumber: em.GetChassisSerialNumber(),
-		},
-		Bmcs: []*flowv1.BMCInfo{
-			{
-				Type:       flowv1.BMCType_BMC_TYPE_HOST,
-				MacAddress: em.GetBmcMacAddress(),
-			},
-		},
-		ComponentId: em.GetId().GetValue(),
-	}
-
-	// DeviceInfo fields
-	if name := em.GetName(); name != "" {
-		component.Info.Name = name
-	}
-	if manufacturer := em.GetManufacturer(); manufacturer != "" {
-		component.Info.Manufacturer = manufacturer
-	}
-	if em.Model != nil {
-		component.Info.Model = em.Model
-	}
-	if em.Description != nil {
-		component.Info.Description = em.Description
-	}
-
-	// Rack position
-	if em.SlotId != nil || em.TrayIdx != nil || em.HostId != nil {
-		pos := &flowv1.RackPosition{}
-		if em.SlotId != nil {
-			pos.SlotId = *em.SlotId
-		}
-		if em.TrayIdx != nil {
-			pos.TrayIdx = *em.TrayIdx
-		}
-		if em.HostId != nil {
-			pos.HostId = *em.HostId
-		}
-		component.Position = pos
-	}
-
-	if rackID := em.GetRackId().GetId(); rackID != "" {
-		component.RackId = &flowv1.UUID{Id: rackID}
-	}
-
-	return component
 }
 
 // UpdateExpectedMachinesOnSite updates multiple Expected Machines on NICo using the batch endpoint
-func (mem *ManageExpectedMachine) UpdateExpectedMachinesOnSite(ctx context.Context, request *cwssaws.BatchExpectedMachineOperationRequest) (*cwssaws.BatchExpectedMachineOperationResponse, error) {
+func (mem *ManageExpectedMachine) UpdateExpectedMachinesOnSite(ctx context.Context, request *corev1.BatchExpectedMachineOperationRequest) (*corev1.BatchExpectedMachineOperationResponse, error) {
 	logger := log.With().Str("Activity", "UpdateExpectedMachinesOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -581,9 +468,11 @@ func (mem *ManageExpectedMachine) UpdateExpectedMachinesOnSite(ctx context.Conte
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call the batch UpdateExpectedMachines endpoint
+	start := time.Now()
 	response, err := grpcServiceClient.UpdateExpectedMachines(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update Expected Machines using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update Expected Machines using Core gRPC API")
 		return nil, swe.WrapErr(err)
 	}
 
@@ -602,6 +491,7 @@ func (mem *ManageExpectedMachine) UpdateExpectedMachinesOnSite(ctx context.Conte
 		Int("Total", len(request.GetExpectedMachines().GetExpectedMachines())).
 		Int("Succeeded", successes).
 		Int("Failed", failures).
+		Dur("grpc_duration", duration).
 		Msg("Completed activity")
 
 	return response, nil

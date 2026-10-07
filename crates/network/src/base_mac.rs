@@ -276,15 +276,15 @@ mod test {
                 Ok::<_, ()>(tokens.iter().all(|t| produced.contains(t)))
             };
             "too short reports invalid length" {
-                ("0102030405", &["Invalid stripped MAC length"][..]) => Yields(true),
+                ("0102030405", &["invalid stripped MAC length"][..]) => Yields(true),
             }
 
             "too long reports invalid length" {
-                ("0102030405060708", &["Invalid stripped MAC length"][..]) => Yields(true),
+                ("0102030405060708", &["invalid stripped MAC length"][..]) => Yields(true),
             }
 
             "empty reports invalid length" {
-                ("", &["Invalid stripped MAC length"][..]) => Yields(true),
+                ("", &["invalid stripped MAC length"][..]) => Yields(true),
             }
         );
     }
@@ -363,11 +363,11 @@ mod test {
                 Ok::<_, ()>(tokens.iter().all(|t| produced.contains(t)))
             };
             "invalid text reports length" {
-                ("\"invalid-mac\"", &["Invalid stripped MAC length"][..]) => Yields(true),
+                ("\"invalid-mac\"", &["invalid stripped MAC length"][..]) => Yields(true),
             }
 
             "short string reports length" {
-                ("\"0102030405\"", &["Invalid stripped MAC length"][..]) => Yields(true),
+                ("\"0102030405\"", &["invalid stripped MAC length"][..]) => Yields(true),
             }
         );
     }

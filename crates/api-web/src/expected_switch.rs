@@ -43,7 +43,7 @@ struct ExpectedSwitchRow {
 }
 
 /// Show all expected switches.
-pub async fn show_html(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(state: AxumState<Arc<Api>>) -> Response {
     let switches = match fetch_expected_switches(&state).await {
         Ok(switches) => switches,
         Err((code, msg)) => return (code, msg).into_response(),
@@ -53,7 +53,7 @@ pub async fn show_html(state: AxumState<Arc<Api>>) -> Response {
 }
 
 /// Show all expected switches as JSON.
-pub async fn show_json(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_json(state: AxumState<Arc<Api>>) -> Response {
     let switches = match fetch_expected_switches(&state).await {
         Ok(switches) => switches,
         Err((code, msg)) => return (code, msg).into_response(),
@@ -70,7 +70,7 @@ async fn fetch_expected_switches(
     {
         Ok(response) => response.into_inner(),
         Err(err) => {
-            tracing::error!(%err, "get_all_expected_switches_linked");
+            tracing::error!(error = %err, "get_all_expected_switches_linked");
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to list expected switches".to_string(),

@@ -1,0 +1,19 @@
+# kubebuilder PROJECT file — see https://book.kubebuilder.io/reference/project-config
+# This project does NOT define its own APIs; it reconciles the DPF CRs owned by
+# github.com/nvidia/doca-platform. Resources below are declared with
+# controller: true only, so `kubebuilder create api --controller` scaffolds a
+# reconciler against the imported types without generating new CRDs.
+domain: dpu.nvidia.com
+layout:
+- go.kubebuilder.io/v4
+projectName: dpf-sim-controller
+repo: github.com/nvidia/infra-controller/dev/k8s/dpf-sim-controller
+resources:
+- controller: true
+  external: true
+  domain: dpu.nvidia.com
+  group: provisioning
+  kind: DPUDevice
+  path: github.com/nvidia/doca-platform/api/provisioning/v1alpha1
+  version: v1alpha1
+version: "3"

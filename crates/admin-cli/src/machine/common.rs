@@ -15,21 +15,21 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-pub struct MachineQuery {
+pub(crate) struct MachineQuery {
     #[clap(
         short,
         long,
-        help = "ID, IPv4, MAC or hostnmame of the machine to query"
+        help = "ID, IPv4, MAC or hostname of the machine to query"
     )]
-    pub query: String,
+    pub(crate) query: String,
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct NetworkConfigQuery {
+pub(crate) struct NetworkConfigQuery {
     #[clap(long, required(true), help = "DPU machine id")]
-    pub machine_id: MachineId,
+    pub(crate) machine_id: DpuMachineId,
 }

@@ -1,6 +1,12 @@
 # HELP agent_start_time_seconds Timestamp of the agent process's last start
 # TYPE agent_start_time_seconds gauge
 agent_start_time_seconds 1740171801
+# HELP carbide_dpu_agent_fmds_external_connected Result of the DPU agent's latest connection attempt to its configured external FMDS (1 for success, 0 before success or after failure)
+# TYPE carbide_dpu_agent_fmds_external_connected gauge
+carbide_dpu_agent_fmds_external_connected 1
+# HELP client_cert_expiry_time_seconds Timestamp when the agent's TLS client certificate expires
+# TYPE client_cert_expiry_time_seconds gauge
+client_cert_expiry_time_seconds 1742763762
 # HELP forge_dpu_agent_network_communication_error_total Network monitor errors related to ping dpu
 # TYPE forge_dpu_agent_network_communication_error_total counter
 forge_dpu_agent_network_communication_error_total{dest_dpu_id="fm100dsm61jm8b3ltfj0vh1vnhqff6jak7dhmp429qen6jtr0njjt5iqeq0",error_type="PingError",source_dpu_id="fm100ds10jimoops3mvpb4udrtnp9031m8sif0846eqbu4i5o49n74ijnf0"} 1
@@ -43,7 +49,7 @@ forge_dpu_agent_network_loss_percentage_bucket{dest_dpu_id="fm100dsm61jm8b3ltfj0
 forge_dpu_agent_network_loss_percentage_bucket{dest_dpu_id="fm100dsm61jm8b3ltfj0vh1vnhqff6jak7dhmp429qen6jtr0njjt5iqeq0",source_dpu_id="fm100ds10jimoops3mvpb4udrtnp9031m8sif0846eqbu4i5o49n74ijnf0",le="+Inf"} 1
 forge_dpu_agent_network_loss_percentage_sum{dest_dpu_id="fm100dsm61jm8b3ltfj0vh1vnhqff6jak7dhmp429qen6jtr0njjt5iqeq0",source_dpu_id="fm100ds10jimoops3mvpb4udrtnp9031m8sif0846eqbu4i5o49n74ijnf0"} 0.5
 forge_dpu_agent_network_loss_percentage_count{dest_dpu_id="fm100dsm61jm8b3ltfj0vh1vnhqff6jak7dhmp429qen6jtr0njjt5iqeq0",source_dpu_id="fm100ds10jimoops3mvpb4udrtnp9031m8sif0846eqbu4i5o49n74ijnf0"} 1
-# HELP forge_dpu_agent_network_monitor_error_total Network monitor errors which are unrelated to network connectivity
+# HELP forge_dpu_agent_network_monitor_error_total Network monitor errors unrelated to network connectivity
 # TYPE forge_dpu_agent_network_monitor_error_total counter
 forge_dpu_agent_network_monitor_error_total{dpu_id="fm100ds10jimoops3mvpb4udrtnp9031m8sif0846eqbu4i5o49n74ijnf0",error_type="PingError"} 1
 # HELP forge_dpu_agent_network_reachable Network reachability status (1 for reachable, 0 for unreachable)

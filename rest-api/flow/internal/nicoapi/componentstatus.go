@@ -41,38 +41,45 @@ func mapComputeStatus(raw string) types.ComponentOperationStatus {
 	}
 
 	head := raw
-	if i := strings.IndexByte(raw, '/'); i >= 0 {
+	i := strings.IndexAny(raw, "/(")
+	if i >= 0 {
 		head = raw[:i]
 	}
 
-	switch head {
-	case "Ready", "StartAssignmentCycle":
-		return blockNoneIfReady(types.PhaseReady, "", types.ComponentTypeCompute)
-	case "Created",
-		"DPUDiscovering",
-		"DPUInitializing",
-		"HostInitializing",
-		"Measuring",
-		"PreAssignedMeasuring",
-		"PostAssignedMeasuring",
-		"BomValidating":
-		return blockAll(types.PhaseInitializing, raw, types.ComponentTypeCompute)
-	case "Assigned",
-		"WaitingForCleanup",
-		"Reprovisioning",
-		"HostReprovisioning":
-		return blockAll(types.PhaseInUse, raw, types.ComponentTypeCompute)
-	case "Failed":
-		return blockAll(types.PhaseError, raw, types.ComponentTypeCompute)
-	case "ForceDeletion":
-		return blockAll(types.PhaseDeleting, raw, types.ComponentTypeCompute)
+	phase, ok := computePhaseByState[head]
+	if ok {
+		return mappedStatus(phase, raw, types.ComponentTypeCompute)
 	}
 
 	// ManagedHostState::Validation Display delegates straight to its
-	// inner ValidationState, so there is no "Validation/" prefix to key
-	// on. Treat any unmatched value conservatively as Initializing —
-	// safer than Unknown for compute since core is doing work.
-	return blockAll(types.PhaseInitializing, raw, types.ComponentTypeCompute)
+	// inner ValidationState, whose only current variant renders with this
+	// prefix. Keep it explicit so a new top-level Core state fails closed
+	// until its Flow mapping is deliberately added.
+	if isKnownMachineValidationState(raw) {
+		return blockAll(types.PhaseInitializing, raw, types.ComponentTypeCompute)
+	}
+
+	return types.ComponentOperationStatus{Phase: types.PhaseUnknown, Reason: "unknown compute controller state: " + raw}
+}
+
+func isKnownMachineValidationState(raw string) bool {
+	const prefix = "MachineValidation { machine_validation: "
+	const suffix = " } }"
+
+	inner, ok := strings.CutPrefix(raw, prefix)
+	if !ok {
+		return false
+	}
+	inner, ok = strings.CutSuffix(inner, suffix)
+	if !ok {
+		return false
+	}
+	variant, fields, ok := strings.Cut(inner, " { ")
+	if !ok || fields == "" {
+		return false
+	}
+	_, ok = machineValidationStates[variant]
+	return ok
 }
 
 // switchStateEnvelope decodes the serde-tagged JSON emitted by core for
@@ -88,17 +95,9 @@ func mapSwitchStatus(raw string) types.ComponentOperationStatus {
 	if !ok {
 		return types.ComponentOperationStatus{Phase: types.PhaseUnknown, Reason: "undecodable switch state: " + raw}
 	}
-	switch tag {
-	case "ready":
-		return blockNoneIfReady(types.PhaseReady, "", types.ComponentTypeNVSwitch)
-	case "created", "initializing", "configuring", "validating", "bomvalidating":
-		return blockAll(types.PhaseInitializing, raw, types.ComponentTypeNVSwitch)
-	case "reprovisioning":
-		return blockAll(types.PhaseInUse, raw, types.ComponentTypeNVSwitch)
-	case "error":
-		return blockAll(types.PhaseError, raw, types.ComponentTypeNVSwitch)
-	case "deleting":
-		return blockAll(types.PhaseDeleting, raw, types.ComponentTypeNVSwitch)
+	phase, ok := switchPhaseByState[tag]
+	if ok {
+		return mappedStatus(phase, raw, types.ComponentTypeNVSwitch)
 	}
 	return types.ComponentOperationStatus{Phase: types.PhaseUnknown, Reason: "unknown switch state tag: " + tag}
 }
@@ -108,19 +107,83 @@ func mapPowerShelfStatus(raw string) types.ComponentOperationStatus {
 	if !ok {
 		return types.ComponentOperationStatus{Phase: types.PhaseUnknown, Reason: "undecodable power shelf state: " + raw}
 	}
-	switch tag {
-	case "ready":
-		return blockNoneIfReady(types.PhaseReady, "", types.ComponentTypePowerShelf)
-	case "initializing", "fetchingdata", "configuring":
-		return blockAll(types.PhaseInitializing, raw, types.ComponentTypePowerShelf)
-	case "maintenance":
-		return blockAll(types.PhaseInUse, raw, types.ComponentTypePowerShelf)
-	case "error":
-		return blockAll(types.PhaseError, raw, types.ComponentTypePowerShelf)
-	case "deleting":
-		return blockAll(types.PhaseDeleting, raw, types.ComponentTypePowerShelf)
+	phase, ok := powerShelfPhaseByState[tag]
+	if ok {
+		return mappedStatus(phase, raw, types.ComponentTypePowerShelf)
 	}
 	return types.ComponentOperationStatus{Phase: types.PhaseUnknown, Reason: "unknown power shelf state tag: " + tag}
+}
+
+// These maps are the compatibility boundary between each Core controller state
+// machine and Flow's shared operability phases. Keep each table aligned with
+// its corresponding Core enum when states are added or renamed.
+var computePhaseByState = map[string]types.Phase{
+	"Ready":                 types.PhaseReady,
+	"StartAssignmentCycle":  types.PhaseReady,
+	"Created":               types.PhaseInitializing,
+	"DPUDiscovering":        types.PhaseInitializing,
+	"DPUInitializing":       types.PhaseInitializing,
+	"HostInitializing":      types.PhaseInitializing,
+	"Measuring":             types.PhaseInitializing,
+	"PreAssignedMeasuring":  types.PhaseInitializing,
+	"PostAssignedMeasuring": types.PhaseInitializing,
+	"BomValidating":         types.PhaseInitializing,
+	"Assigned":              types.PhaseInUse,
+	"WaitingForCleanup":     types.PhaseInUse,
+	"Reprovisioning":        types.PhaseInUse,
+	"HostReprovisioning":    types.PhaseInUse,
+	"ConfigureAstra":        types.PhaseInUse,
+	"BootConfiguring":       types.PhaseInUse,
+	"Maintenance":           types.PhaseInUse,
+	"RotatingBmc":           types.PhaseInUse,
+	"RotatingHostUefi":      types.PhaseInUse,
+	"RotatingDpuUefi":       types.PhaseInUse,
+	"RotatingNicLockdown":   types.PhaseInUse,
+	"Failed":                types.PhaseError,
+	"Decommissioning":       types.PhaseDeleting,
+	"ForceDeletion":         types.PhaseDeleting,
+}
+
+var machineValidationStates = map[string]struct{}{
+	"RebootHost":               {},
+	"MachineValidating":        {},
+	"PrepareBootRepair":        {},
+	"UnlockForBootRepair":      {},
+	"CheckBootConfigForRepair": {},
+	"ConfigureBootBios":        {},
+	"WaitingForBootBiosJob":    {},
+	"PollingBootBiosSetup":     {},
+	"RepairBootConfig":         {},
+	"LockAfterBootRepair":      {},
+}
+
+var switchPhaseByState = map[string]types.Phase{
+	"created":         types.PhaseInitializing,
+	"initializing":    types.PhaseInitializing,
+	"configuring":     types.PhaseInitializing,
+	"fetchinfo":       types.PhaseInitializing,
+	"validating":      types.PhaseInitializing,
+	"bomvalidating":   types.PhaseInitializing,
+	"ready":           types.PhaseReady,
+	"rotatingbmc":     types.PhaseInUse,
+	"maintenance":     types.PhaseInUse,
+	"reprovisioning":  types.PhaseInUse,
+	"error":           types.PhaseError,
+	"decommissioning": types.PhaseDeleting,
+	"deleting":        types.PhaseDeleting,
+}
+
+var powerShelfPhaseByState = map[string]types.Phase{
+	"initializing":    types.PhaseInitializing,
+	"fetchingdata":    types.PhaseInitializing,
+	"configuring":     types.PhaseInitializing,
+	"ready":           types.PhaseReady,
+	"rotatingbmc":     types.PhaseInUse,
+	"maintenance":     types.PhaseInUse,
+	"reprovisioning":  types.PhaseInUse,
+	"error":           types.PhaseError,
+	"decommissioning": types.PhaseDeleting,
+	"deleting":        types.PhaseDeleting,
 }
 
 func decodeTaggedState(raw string) (string, bool) {
@@ -155,4 +218,11 @@ func blockAll(phase types.Phase, reason string, ct types.ComponentType) types.Co
 
 func blockNoneIfReady(phase types.Phase, reason string, _ types.ComponentType) types.ComponentOperationStatus {
 	return types.ComponentOperationStatus{Phase: phase, Reason: reason}
+}
+
+func mappedStatus(phase types.Phase, raw string, componentType types.ComponentType) types.ComponentOperationStatus {
+	if phase == types.PhaseReady {
+		return blockNoneIfReady(phase, "", componentType)
+	}
+	return blockAll(phase, raw, componentType)
 }

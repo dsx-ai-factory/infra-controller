@@ -19,5 +19,5 @@
 
 use std::time::Duration;
 
-pub const PROVISIONING: Duration = Duration::from_secs(15 * 60);
-pub const DELETING_DBDELETE: Duration = Duration::from_secs(15 * 60);
+pub(super) const PROVISIONING: Duration = Duration::from_secs(15 * 60);
+pub(super) const DELETING_DBDELETE: Duration = Duration::from_secs(15 * 60);

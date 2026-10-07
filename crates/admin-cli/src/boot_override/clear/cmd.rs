@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn clear(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn clear(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client.0.clear_machine_boot_override(args).await?;
     Ok(())
 }

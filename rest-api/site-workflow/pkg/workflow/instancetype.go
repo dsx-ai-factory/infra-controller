@@ -11,28 +11,29 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateInstanceType is a workflow to create new InstanceTypes using the CreateInstanceTypeOnSite activity
 // to speak to nico directly.
-func CreateInstanceType(ctx workflow.Context, request *cwssaws.CreateInstanceTypeRequest) error {
+func CreateInstanceType(ctx workflow.Context, request *corev1.CreateInstanceTypeRequest) error {
 	logger := log.With().Str("Workflow", "InstanceType").Str("Action", "Create").Str("InstanceType ID", request.GetId()).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -53,21 +54,20 @@ func CreateInstanceType(ctx workflow.Context, request *cwssaws.CreateInstanceTyp
 }
 
 // UpdateInstanceType is a workflow to update InstanceType data using then UpdateInstanceTypeOnSite activity
-func UpdateInstanceType(ctx workflow.Context, updateRequest *cwssaws.UpdateInstanceTypeRequest) error {
+func UpdateInstanceType(ctx workflow.Context, updateRequest *corev1.UpdateInstanceTypeRequest) error {
 	logger := log.With().Str("Workflow", "InstanceType").Str("Action", "Update").Str("InstanceType ID", updateRequest.GetId()).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -88,22 +88,21 @@ func UpdateInstanceType(ctx workflow.Context, updateRequest *cwssaws.UpdateInsta
 }
 
 // DeleteInstanceType is a workflow to delete new InstanceTypes using the DeleteInstanceTypeOnSite activity
-func DeleteInstanceType(ctx workflow.Context, request *cwssaws.DeleteInstanceTypeRequest) error {
+func DeleteInstanceType(ctx workflow.Context, request *corev1.DeleteInstanceTypeRequest) error {
 
 	logger := log.With().Str("Workflow", "InstanceType").Str("Action", "Delete").Str("Request", request.String()).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -124,22 +123,21 @@ func DeleteInstanceType(ctx workflow.Context, request *cwssaws.DeleteInstanceTyp
 }
 
 // AssociateMachinesWithInstanceType is a workflow to associate machines with an InstanceType
-func AssociateMachinesWithInstanceType(ctx workflow.Context, request *cwssaws.AssociateMachinesWithInstanceTypeRequest) error {
+func AssociateMachinesWithInstanceType(ctx workflow.Context, request *corev1.AssociateMachinesWithInstanceTypeRequest) error {
 
 	logger := log.With().Str("Workflow", "InstanceType").Str("Action", "AssociateMachinesWithInstanceType").Str("Request", request.String()).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -160,22 +158,21 @@ func AssociateMachinesWithInstanceType(ctx workflow.Context, request *cwssaws.As
 }
 
 // RemoveMachineInstanceTypeAssociation is a workflow to remove the relationship between a Machine and InstanceType
-func RemoveMachineInstanceTypeAssociation(ctx workflow.Context, request *cwssaws.RemoveMachineInstanceTypeAssociationRequest) error {
+func RemoveMachineInstanceTypeAssociation(ctx workflow.Context, request *corev1.RemoveMachineInstanceTypeAssociationRequest) error {
 
 	logger := log.With().Str("Workflow", "InstanceType").Str("Action", "RemoveMachineInstanceTypeAssociation").Str("Request", request.String()).Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

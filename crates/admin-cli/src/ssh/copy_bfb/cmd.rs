@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn copy_bfb(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
+pub(super) async fn copy_bfb(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
     let bmc_ip = args.ssh_args.credentials.bmc_ip_address.ip().to_string();
     let is_bf2 = match api_client.get_explored_endpoints_by_ids(&[bmc_ip]).await {
         Ok(list) => list

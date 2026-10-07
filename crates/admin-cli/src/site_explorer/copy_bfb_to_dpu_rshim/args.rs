@@ -31,20 +31,20 @@ Power-cycle the host first to release rshim control to the DPU BMC:
     --host-bmc-ip 192.0.2.20 --pre-copy-powercycle
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "BMC IP address or hostname with optional port")]
-    pub address: String,
+    pub(super) address: String,
     #[clap(long, help = "The MAC address the BMC sent DHCP from")]
-    pub mac: Option<MacAddress>,
+    pub(super) mac: Option<MacAddress>,
     #[clap(
         long,
         help = "Host BMC IP address. Required for the mandatory post-copy host power-cycle \
                 that applies the new BFB image to the DPU."
     )]
-    pub host_bmc_ip: String,
+    pub(super) host_bmc_ip: String,
     #[clap(
         long,
         help = "Power-cycle the host before the BFB copy to release rshim control to the DPU BMC."
     )]
-    pub pre_copy_powercycle: bool,
+    pub(super) pre_copy_powercycle: bool,
 }

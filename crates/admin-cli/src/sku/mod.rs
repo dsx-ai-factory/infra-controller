@@ -22,21 +22,18 @@ mod create;
 mod delete;
 mod generate;
 mod replace;
-pub mod show;
+mod show;
 mod show_machines;
 mod unassign;
 mod update_metadata;
 mod verify;
-
-#[cfg(test)]
-mod tests;
 
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Show SKU information", visible_alias = "s")]
     Show(show::Args),
     #[clap(about = "Show what machines are assigned a SKU")]

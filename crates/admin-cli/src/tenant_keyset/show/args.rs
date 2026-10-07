@@ -34,15 +34,15 @@ Filter by tenant org:
     $ nico-admin-cli tenant-key-set show --tenant-org-id fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(""),
         help = "The Tenant KeySet ID in the format of <tenant_org_id>/<keyset_id> to query, leave empty for all (default)"
     )]
-    pub id: String,
+    id: String,
 
     #[clap(short, long, help = "The Tenant Org ID to query")]
-    pub tenant_org_id: Option<String>,
+    pub(super) tenant_org_id: Option<String>,
 }
 
 impl TryFrom<&Args> for Option<forgerpc::TenantKeysetIdentifier> {

@@ -23,6 +23,7 @@ type Machine struct {
 	MachineCapabilities []MachineCapability     `json:"machineCapabilities"`
 	AdminInterfaces     []MachineAdminInterface `json:"adminInterfaces"`
 	MaintenanceMessage  *string                 `json:"maintenanceMessage"`
+	ScoutVersion        *string                 `json:"scoutVersion"`
 	Labels              map[string]string       `json:"labels"`
 	Status              string                  `json:"status"`
 	Created             time.Time               `json:"created"`
@@ -81,6 +82,9 @@ func machineFromStandard(api standard.Machine) Machine {
 	}
 	if api.MaintenanceMessage.IsSet() {
 		m.MaintenanceMessage = api.MaintenanceMessage.Get()
+	}
+	if api.ScoutVersion.IsSet() {
+		m.ScoutVersion = api.ScoutVersion.Get()
 	}
 	if api.Status != nil {
 		m.Status = string(*api.Status)
@@ -205,4 +209,19 @@ func (mm MachineManager) GetMachine(ctx context.Context, id string) (*Machine, *
 	}
 	m := machineFromStandard(*apiMachine)
 	return &m, nil
+}
+
+// GetDpuMachines returns the DPU machines attached to the host Machine by ID.
+// TODO: returns the generated standard.DpuMachine; add a simplified type if callers need one.
+func (mm MachineManager) GetDpuMachines(ctx context.Context, machineID string) ([]standard.DpuMachine, *ApiError) {
+	ctx = WithLogger(ctx, mm.client.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, mm.client.Config.Token)
+
+	dpuMachines, resp, err := mm.client.apiClient.MachineAPI.
+		GetDpuMachines(ctx, mm.client.apiMetadata.Organization, machineID).Execute()
+	apiErr := HandleResponseError(resp, err)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	return dpuMachines, nil
 }

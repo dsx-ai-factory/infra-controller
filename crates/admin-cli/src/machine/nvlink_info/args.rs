@@ -25,28 +25,41 @@ EXAMPLES:
 Show existing NVLink info for a machine:
     $ nico-admin-cli machine nvlink-info show 12345678-1234-5678-90ab-cdef01234567
 
-Build NVLink info from Redfish + NMX-C and persist it:
-    $ nico-admin-cli machine nvlink-info populate 12345678-1234-5678-90ab-cdef01234567 --update-db
-
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Show existing NVLink info")]
     Show(NvlinkInfoArgs),
-    #[clap(about = "Build NVLink info from Redfish + NMX-C and populate DB")]
+    #[clap(
+        about = "Deprecated compatibility command; NVLink info is populated automatically by NICo"
+    )]
     Populate(NvlinkInfoPopulateArgs),
 }
 
 #[derive(Parser, Debug)]
-pub struct NvlinkInfoArgs {
+pub(crate) struct NvlinkInfoArgs {
     #[clap(help = "Machine ID to query")]
-    pub machine_id: MachineId,
+    pub(super) machine_id: MachineId,
 }
 
 #[derive(Parser, Debug)]
-pub struct NvlinkInfoPopulateArgs {
-    #[clap(help = "Machine ID to populate")]
-    pub machine_id: MachineId,
+#[command(
+    long_about = "Deprecated compatibility command. The NICo NVLink partition manager populates and repairs the NVLink info of a managed machine automatically, so manual population is no longer required. This command always returns an unsupported-operation error and does not contact Redfish, NMX-C, or the database. MACHINE_ID, --update-db, --extended, and --sort-by are all ignored and retained only for command-line compatibility. Use `nico-admin-cli machine nvlink-info show` to inspect the current NVLink info.",
+    after_long_help = "\
+EXAMPLES:
 
-    #[clap(long, action, help = "Update the database with the nvlink_info")]
-    pub update_db: bool,
+Invoke the retained compatibility command (returns an unsupported error):
+    $ nico-admin-cli machine nvlink-info populate fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
+
+"
+)]
+pub(crate) struct NvlinkInfoPopulateArgs {
+    #[clap(help = "Machine ID (ignored)")]
+    pub(super) machine_id: MachineId,
+
+    #[clap(
+        long,
+        action,
+        help = "Ignored; retained for command-line compatibility"
+    )]
+    pub(super) update_db: bool,
 }

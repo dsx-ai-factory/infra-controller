@@ -5,6 +5,7 @@ edition.workspace = true
 description = "iPXE OS renderer for template-based iPXE script generation"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_ipxe_renderer"
@@ -15,3 +16,9 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
+
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

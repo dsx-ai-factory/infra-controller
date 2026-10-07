@@ -8,25 +8,39 @@ on:
   push:
     branches:
       - main
-      - release/*
       - 'pull-request/[0-9]+'
     tags:
       - "v[0-9]*.[0-9]*.[0-9]*"
       - "v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]*"
       - "v[0-9].[0-9].[0-9]-rc[0-9]*"
 
+concurrency:
+  group: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') && format('rest-pr-{0}', github.ref_name) || format('rest-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') }}
+
+# Runner sizes are chosen from measured job durations on a full REST run:
+# `cpu4` under `2m`, `cpu8` `2m`-`10m`. Nothing in this lane reaches `cpu16`.
+# See the note in `ci.yaml` for why each job names exactly one label.
 jobs:
   changes:
     name: Detect REST CI Gate
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     outputs:
       run_rest_ci: ${{ steps.gate.outputs.run_rest_ci }}
       rest_api_changed: ${{ steps.filter.outputs.rest_api }}
+      core_proto_changed: ${{ steps.filter.outputs.core_proto }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
+
+      - name: Check REST CI final-gate inventory
+        run: python3 -B .github/ci/check_ci_gate.py inventory --policy rest .github/workflows/rest-ci.yml
+
+      - name: Check REST CI concurrency policy
+        run: bash scripts/check-ci-concurrency.sh rest
 
       - name: Detect rest-api changes
         id: filter
@@ -37,8 +51,14 @@ jobs:
           filters: |
             rest_api:
               - 'rest-api/**'
+              - '.github/ci/rest-command-*'
+              - '.github/ci/rest_command_bundle.py'
+              - '.github/ci/test_rest_command_bundle.py'
+              - '.github/ci/prepare-rest-umbrella-chart.sh'
               - '.github/workflows/rest-*.yml'
               - 'helm/rest/**'
+            core_proto:
+              - 'crates/rpc/proto/**'
 
       - name: Decide whether REST CI should run
         id: gate
@@ -46,11 +66,15 @@ jobs:
           REF: ${{ github.ref }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
           REST_API_CHANGED: ${{ steps.filter.outputs.rest_api }}
+          CORE_PROTO_CHANGED: ${{ steps.filter.outputs.core_proto }}
         run: |
           run_rest_ci=true
 
           if [[ "${REF}" =~ ^refs/heads/pull-request/[0-9]+$ ]]; then
-            run_rest_ci="${REST_API_CHANGED:-false}"
+            run_rest_ci=false
+            if [[ "${REST_API_CHANGED:-false}" == "true" || "${CORE_PROTO_CHANGED:-false}" == "true" ]]; then
+              run_rest_ci=true
+            fi
           fi
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
@@ -67,6 +91,10 @@ jobs:
     if: ${{ needs.changes.outputs.run_rest_ci == 'true' }}
     uses: ./.github/workflows/rest-prepare-build-info.yml
     with:
+      # Was GitHub-hosted to dodge a measured `91s` enterprise queue wait for
+      # `24s` of work. That trade has inverted: hosted `ubuntu-latest` waits now
+      # reach `~8m` while the enterprise pool stays clear, and everything
+      # downstream waits on this job.
       runner: linux-amd64-cpu4
 
   lint-and-test:
@@ -74,13 +102,20 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/rest-lint-and-test.yml
 
+  # Not gated on lint-and-test: this job publishes nothing, it only uploads
+  # GitHub artifacts with a 7-day retention, so a test gate protects nothing.
+  # Gating it also made it the tail of the run — it started only once the
+  # slowest test finished and then ran for another four minutes.
   build-binaries:
     name: Build Go Binaries
     needs:
       - prepare
-      - lint-and-test
     with:
       upload_artifact: true
+      binary_version: ${{ needs.prepare.outputs.binary_version }}
+      build_timestamp: ${{ needs.prepare.outputs.build_timestamp }}
+      short_sha: ${{ needs.prepare.outputs.short_sha }}
+      full_sha: ${{ needs.prepare.outputs.full_sha }}
     uses: ./.github/workflows/rest-build-binaries.yml
 
   security-secret-scan:
@@ -96,23 +131,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
+      - name: Compute TruffleHog scan range
+        id: scan-range
+        if: startsWith(github.ref, 'refs/heads/pull-request/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/ci/resolve-secret-scan-range.sh >> "$GITHUB_OUTPUT"
       - name: Run TruffleHog Scan
-        uses: NVIDIA/dsx-github-actions/.github/actions/trufflehog-scan@f435aa6bf125fe6f9e5ac438f8cef75f90e29a2b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@f435aa6bf125fe6f9e5ac438f8cef75f90e29a2b
         with:
+          base: ${{ steps.scan-range.outputs.base }}
+          head: ${{ steps.scan-range.outputs.head }}
           extra-args: '--results=verified,unknown --only-verified'
           post-pr-comment: 'true'
           fail-on-findings: 'true'
 
+  # Push refs (main, tags, dispatch). Stays behind lint-and-test so a red test
+  # run cannot publish an image or move `latest`.
+  #
+  # Keep in sync with `build-and-push-pr` below, which is the same call for
+  # pull requests. The two exist because `needs` is unconditional — a job waits
+  # for every entry regardless of `if` — so a dependency that applies only to
+  # push refs has to be expressed as two mutually exclusive jobs.
   build-and-push:
     name: Build and Push Docker Images
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
     needs:
       - prepare
       - lint-and-test
     permissions:
       contents: read
       packages: write
-      pull-requests: write
       security-events: write
     uses: ./.github/workflows/rest-build-push-docker.yml
     with:
@@ -121,13 +172,57 @@ jobs:
       short_sha: ${{ needs.prepare.outputs.short_sha }}
       branch_sha_tag: ${{ needs.prepare.outputs.branch_sha_tag }}
       target_registry: ${{ needs.prepare.outputs.target_registry }}
+      ngc_path: ${{ needs.prepare.outputs.target_ngc_path }}
       branch_name: ${{ needs.prepare.outputs.branch_name }}
       is_main_branch: ${{ needs.prepare.outputs.is_main_branch }}
       push_enabled: ${{ github.event_name != 'workflow_dispatch' && !contains(github.ref, 'pull-request/') }}
       release_tag: ${{ needs.prepare.outputs.release_tag }}
+      helm_version: ${{ needs.prepare.outputs.helm_version }}
     secrets:
       NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
       NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  # Pull requests. Same build as `build-and-push` above — keep the two in sync —
+  # but it starts as soon as `prepare` is done instead of waiting for the tests.
+  # The images take about as long to build as the slowest test takes to run, so
+  # gating them was costing roughly six minutes of wall clock for a build whose
+  # result is discarded either way: a pull request never pushes.
+  #
+  # No secrets are passed. Every step that consumes them (registry login, the
+  # image push, the NGC resource uploads, and the whole `merge` job) is already
+  # gated on `push_enabled`, which is hard-coded false here.
+  #
+  # The write scopes below go unused for the same reason, but they cannot be
+  # dropped: the nested `build` job in rest-build-push-service.yml declares
+  # `packages` and `security-events` itself, and a called workflow requesting
+  # more than its caller grants fails validation before the run starts. The
+  # `permissions` key takes no expressions, so the callee cannot ask for less
+  # when `push_enabled` is false either.
+  build-and-push-pr:
+    name: Build Docker Images
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
+    needs:
+      - prepare
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    uses: ./.github/workflows/rest-build-push-docker.yml
+    with:
+      runner: linux-amd64-cpu4
+      semantic_version: ${{ needs.prepare.outputs.semantic_version }}
+      short_sha: ${{ needs.prepare.outputs.short_sha }}
+      branch_sha_tag: ${{ needs.prepare.outputs.branch_sha_tag }}
+      target_registry: ${{ needs.prepare.outputs.target_registry }}
+      ngc_path: ${{ needs.prepare.outputs.target_ngc_path }}
+      branch_name: ${{ needs.prepare.outputs.branch_name }}
+      is_main_branch: ${{ needs.prepare.outputs.is_main_branch }}
+      push_enabled: false
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+      helm_version: ${{ needs.prepare.outputs.helm_version }}
 
   helm:
     name: Helm Charts
@@ -136,22 +231,28 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     uses: ./.github/workflows/rest-helm-workflows.yml
     with:
+      ngc_path: ${{ needs.prepare.outputs.target_ngc_path }}
       app_version: ${{ needs.prepare.outputs.semantic_version }}
       chart_version: ${{ needs.prepare.outputs.helm_version }}
     secrets:
       NVCR_STG_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
 
   # ============================================================================
   # AGGREGATOR — single required check for branch protection
   # ============================================================================
-  # Fails iff any leaf job's result is `failure` or `cancelled`.
-  # `skipped` counts as pass — that's how core-only PRs unblock when the
-  # `changes` gate intentionally skips the REST pipeline.
-  # `changes` + `prepare` are in needs so a gate or prepare failure doesn't
-  # silently pass (downstream leaves become SKIPPED in those cases).
+  # This is the final required REST check. A skip passes only when `changes`
+  # says REST does not need to run, or when the ref chooses the other Docker
+  # job. Failures, cancellations, malformed decisions, and other skips fail.
+  # Every job that can determine REST CI health is listed so an upstream
+  # failure cannot be hidden when its downstream jobs become `skipped`.
+  # The checker in `changes` rejects every job that is neither gated nor
+  # exempted and protects `if: always()` so a failed dependency cannot skip
+  # this required check.
+  # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   rest-ci-pass:
     name: rest-ci-pass
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: always()
     needs:
       - changes
@@ -160,20 +261,17 @@ jobs:
       - build-binaries
       - security-secret-scan
       - build-and-push
+      - build-and-push-pr
       - helm
+    permissions:
+      contents: read
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Decide pass/fail
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
-        run: |
-          set -euo pipefail
-          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          if echo "$NEEDS_JSON" | jq -e '
-            to_entries
-            | map(select(.value.result == "failure" or .value.result == "cancelled"))
-            | length > 0
-          ' >/dev/null; then
-            echo "::error::One or more required jobs failed or were cancelled"
-            exit 1
-          fi
-          echo "All required jobs OK (success or skipped)"
+        run: python3 -B .github/ci/check_ci_gate.py results --workflow rest

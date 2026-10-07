@@ -15,7 +15,12 @@
  * limitations under the License.
  */
 
-#[allow(dead_code)]
 pub(crate) mod scout_firmware_upgrade {
+    #![allow(dead_code)]
+    #![allow(
+        unreachable_pub,
+        reason = "tonic_prost_build emits public items for this crate-internal protocol module"
+    )]
+
     include!(concat!(env!("OUT_DIR"), "/scout_firmware_upgrade.rs"));
 }

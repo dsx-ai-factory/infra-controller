@@ -28,13 +28,13 @@ Set a targeted filter that reverts after 30 minutes:
     $ nico-admin-cli set log-filter --filter carbide_api=trace,info --expiry 30min
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, help = "Set server's RUST_LOG.")]
-    pub filter: String,
+    pub(super) filter: String,
     #[clap(
         long,
         default_value("1h"),
         help = "Revert to startup RUST_LOG after this much time, friendly format e.g. '1h', '3min', https://docs.rs/duration-str/latest/duration_str/"
     )]
-    pub expiry: String,
+    pub(super) expiry: String,
 }

@@ -27,7 +27,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::Meter;
 
 mod per_object;
-pub use per_object::PerObjectMetricsRegistry;
+pub use per_object::{PerObjectGauge, PerObjectMetricsRegistry};
 
 pub trait HealthMetricDimension:
     Hash + Eq + Clone + Default + Debug + Send + Sync + 'static
@@ -151,7 +151,7 @@ pub fn register_health_gauges<T, D, F>(
         meter
             .u64_observable_gauge(format!("{metric_prefix}_health_status_count"))
             .with_description(
-                format!("The total number of {display_name_plural} in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts"),
+                format!("Number of {display_name_plural} in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts"),
             )
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -179,7 +179,7 @@ pub fn register_health_gauges<T, D, F>(
         let project = project.clone();
         meter
             .u64_observable_gauge(format!("{metric_prefix}_health_overrides_count"))
-            .with_description("The amount of health overrides that are configured in the site")
+            .with_description("Number of health overrides configured in the site")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     let health = project(metrics);
@@ -207,7 +207,7 @@ pub fn register_health_gauges<T, D, F>(
         let project = project.clone();
         meter
             .u64_observable_gauge(format!("{metric_prefix}_unhealthy_by_probe_id_count"))
-            .with_description("The amount of objects which reported a certain Health Probe Alert")
+            .with_description("Number of objects which reported a certain Health Probe Alert")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     let health = project(metrics);
@@ -231,7 +231,7 @@ pub fn register_health_gauges<T, D, F>(
         meter
             .u64_observable_gauge(format!("{metric_prefix}_unhealthy_by_classification_count"))
             .with_description(
-                "The amount of objects which are marked with a certain classification due to being unhealthy",
+                "Number of objects marked with a certain classification due to being unhealthy",
             )
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {

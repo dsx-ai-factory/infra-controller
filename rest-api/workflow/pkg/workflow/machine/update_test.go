@@ -15,7 +15,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	machineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/machine"
 )
@@ -40,15 +40,15 @@ func (s *UpdateMachineInventoryTestSuite) Test_UpdateMachineInventory_Success() 
 
 	siteID := uuid.New()
 
-	machineInfo := &cwssaws.MachineInfo{
-		Machine: &cwssaws.Machine{
-			Id:    &cwssaws.MachineId{Id: uuid.New().String()},
+	machineInfo := &corev1.MachineInfo{
+		Machine: &corev1.Machine{
+			Id:    &corev1.MachineId{Id: uuid.New().String()},
 			State: "Running",
 		},
 	}
 
-	machineInventory := &cwssaws.MachineInventory{
-		Machines:  []*cwssaws.MachineInfo{machineInfo},
+	machineInventory := &corev1.MachineInventory{
+		Machines:  []*corev1.MachineInfo{machineInfo},
 		Timestamp: timestamppb.Now(),
 	}
 
@@ -67,15 +67,15 @@ func (s *UpdateMachineInventoryTestSuite) Test_UpdateMachineInventory_ActivityFa
 
 	siteID := uuid.New()
 
-	machineInfo := &cwssaws.MachineInfo{
-		Machine: &cwssaws.Machine{
-			Id:    &cwssaws.MachineId{Id: uuid.New().String()},
+	machineInfo := &corev1.MachineInfo{
+		Machine: &corev1.Machine{
+			Id:    &corev1.MachineId{Id: uuid.New().String()},
 			State: "Running",
 		},
 	}
 
-	machineInventory := &cwssaws.MachineInventory{
-		Machines:  []*cwssaws.MachineInfo{machineInfo},
+	machineInventory := &corev1.MachineInventory{
+		Machines:  []*corev1.MachineInfo{machineInfo},
 		Timestamp: timestamppb.Now(),
 	}
 

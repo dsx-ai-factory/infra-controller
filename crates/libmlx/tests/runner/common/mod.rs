@@ -25,7 +25,7 @@ use libmlx::variables::variable::MlxConfigVariable;
 use serde_json::json;
 
 /// Creates a test registry with common variable types for testing
-pub fn create_test_registry() -> MlxVariableRegistry {
+pub(super) fn create_test_registry() -> MlxVariableRegistry {
     let variables = vec![
         // Boolean variable
         MlxConfigVariable::builder()
@@ -130,7 +130,7 @@ pub fn create_test_registry() -> MlxVariableRegistry {
 }
 
 /// Creates a simple registry with minimal variables for focused testing
-pub fn create_minimal_test_registry() -> MlxVariableRegistry {
+pub(super) fn create_minimal_test_registry() -> MlxVariableRegistry {
     let variables = vec![
         MlxConfigVariable::builder()
             .name("TEST_BOOL")
@@ -150,7 +150,7 @@ pub fn create_minimal_test_registry() -> MlxVariableRegistry {
 }
 
 /// Creates sample mlxconfig JSON response for testing
-pub fn create_sample_json_response(device: &str) -> serde_json::Value {
+pub(super) fn create_sample_json_response(device: &str) -> serde_json::Value {
     json!({
         "Device #1": {
             "description": "Test BlueField-3 Device",
@@ -198,148 +198,9 @@ pub fn create_sample_json_response(device: &str) -> serde_json::Value {
     })
 }
 
-/// Creates sample JSON response with array variables
-pub fn create_array_json_response(device: &str) -> serde_json::Value {
-    json!({
-        "Device #1": {
-            "description": "Test BlueField-3 Device with Arrays",
-            "device": device,
-            "device_type": "BlueField3",
-            "name": "900-9D3D4-00EN-HA0_Ax",
-            "tlv_configuration": {
-                "GPIO_ENABLED[0]": {
-                    "current_value": "True(1)",
-                    "default_value": "False(0)",
-                    "modified": true,
-                    "next_value": "True(1)",
-                    "read_only": false
-                },
-                "GPIO_ENABLED[1]": {
-                    "current_value": "False(0)",
-                    "default_value": "False(0)",
-                    "modified": false,
-                    "next_value": "False(0)",
-                    "read_only": false
-                },
-                "GPIO_ENABLED[2]": {
-                    "current_value": "True(1)",
-                    "default_value": "False(0)",
-                    "modified": true,
-                    "next_value": "True(1)",
-                    "read_only": false
-                },
-                "GPIO_ENABLED[3]": {
-                    "current_value": "False(0)",
-                    "default_value": "False(0)",
-                    "modified": false,
-                    "next_value": "False(0)",
-                    "read_only": false
-                },
-                "THERMAL_SENSORS[0]": {
-                    "current_value": 45,
-                    "default_value": 0,
-                    "modified": true,
-                    "next_value": 45,
-                    "read_only": true
-                },
-                "THERMAL_SENSORS[1]": {
-                    "current_value": 38,
-                    "default_value": 0,
-                    "modified": true,
-                    "next_value": 38,
-                    "read_only": true
-                },
-                "THERMAL_SENSORS[2]": {
-                    "current_value": 42,
-                    "default_value": 0,
-                    "modified": true,
-                    "next_value": 42,
-                    "read_only": true
-                },
-                "THERMAL_SENSORS[3]": {
-                    "current_value": 41,
-                    "default_value": 0,
-                    "modified": true,
-                    "next_value": 41,
-                    "read_only": true
-                },
-                "THERMAL_SENSORS[4]": {
-                    "current_value": 39,
-                    "default_value": 0,
-                    "modified": true,
-                    "next_value": 39,
-                    "read_only": true
-                },
-                "THERMAL_SENSORS[5]": {
-                    "current_value": 40,
-                    "default_value": 0,
-                    "modified": true,
-                    "next_value": 40,
-                    "read_only": true
-                },
-                "GPIO_MODES[0]": {
-                    "current_value": "input(0)",
-                    "default_value": "input(0)",
-                    "modified": false,
-                    "next_value": "input(0)",
-                    "read_only": false
-                },
-                "GPIO_MODES[1]": {
-                    "current_value": "output(1)",
-                    "default_value": "input(0)",
-                    "modified": true,
-                    "next_value": "output(1)",
-                    "read_only": false
-                },
-                "GPIO_MODES[2]": {
-                    "current_value": "bidirectional(2)",
-                    "default_value": "input(0)",
-                    "modified": true,
-                    "next_value": "bidirectional(2)",
-                    "read_only": false
-                },
-                "GPIO_MODES[3]": {
-                    "current_value": "input(0)",
-                    "default_value": "input(0)",
-                    "modified": false,
-                    "next_value": "input(0)",
-                    "read_only": false
-                },
-                "GPIO_MODES[4]": {
-                    "current_value": "output(1)",
-                    "default_value": "input(0)",
-                    "modified": true,
-                    "next_value": "output(1)",
-                    "read_only": false
-                },
-                "GPIO_MODES[5]": {
-                    "current_value": "input(0)",
-                    "default_value": "input(0)",
-                    "modified": false,
-                    "next_value": "input(0)",
-                    "read_only": false
-                },
-                "GPIO_MODES[6]": {
-                    "current_value": "input(0)",
-                    "default_value": "input(0)",
-                    "modified": false,
-                    "next_value": "input(0)",
-                    "read_only": false
-                },
-                "GPIO_MODES[7]": {
-                    "current_value": "input(0)",
-                    "default_value": "input(0)",
-                    "modified": false,
-                    "next_value": "input(0)",
-                    "read_only": false
-                }
-            }
-        }
-    })
-}
-
+#[allow(dead_code)]
 /// Creates test device info
-pub fn create_test_device_info() -> QueriedDeviceInfo {
+pub(super) fn create_test_device_info() -> QueriedDeviceInfo {
     QueriedDeviceInfo::new()
         .with_device_id("01:00.0")
         .with_device_type("BlueField3")

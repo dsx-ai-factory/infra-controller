@@ -30,18 +30,21 @@ use crate::errors::CarbideError;
 /// (even if that particular request doesn't actually persist the name, it's always at least logged)
 /// this is how we enforce that an actual human is doing this with their own certificates, rather than
 /// "something in the ether".  We do this so that we can always audit who did what to an env.
-pub fn external_user_name<T>(request: &Request<T>) -> Result<String, CarbideError> {
+fn external_user_name<T>(request: &Request<T>) -> Result<String, CarbideError> {
     if let Some(external_user_name) = request
         .extensions()
         .get::<auth::AuthContext>()
         .and_then(|auth_context| auth_context.get_external_user_name())
         .map(String::from)
     {
-        tracing::info!("remediation_rpc_name_from_cert: {}", external_user_name);
+        tracing::info!(
+            external_user_name = %external_user_name,
+            "Resolved remediation RPC user name from certificate",
+        );
         Ok(external_user_name)
     } else {
         Err(CarbideError::ClientCertificateMissingInformation(
-            "Client certificate is missing external user name.".to_string(),
+            "client certificate is missing external user name".to_string(),
         ))
     }
 }

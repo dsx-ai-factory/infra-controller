@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use mac_address::MacAddress;
 use model::expected_switch::{ExpectedSwitch, ExpectedSwitchRequest, LinkedExpectedSwitch};
 use model::metadata::Metadata;
@@ -84,7 +85,7 @@ impl TryFrom<rpc::forge::ExpectedSwitch> for ExpectedSwitch {
         let nvos_ip_address = rpc
             .nvos_ip_address
             .as_deref()
-            .filter(|s| !s.is_empty())
+            .none_if_empty()
             .map(|s| {
                 s.parse()
                     .map_err(|_| RpcDataConversionError::InvalidArgument(s.to_string()))

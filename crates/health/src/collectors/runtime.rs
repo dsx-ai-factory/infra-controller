@@ -76,6 +76,22 @@ pub trait PeriodicCollector<B: Bmc>: Send + 'static {
 
 pub type EventStream<'a> = BoxStream<'a, Result<CollectorEvent, HealthError>>;
 
+/// Result of opening a streaming collector connection.
+pub enum StreamingConnectResult<'a> {
+    /// The stream is accepted and should be treated as connected.
+    Connected(EventStream<'a>),
+
+    /// The connection failed before it should be marked connected, but the
+    /// collector produced events that still need to reach sinks.
+    Failed {
+        /// Events to emit before surfacing the connection failure.
+        events: Vec<CollectorEvent>,
+
+        /// Error that should drive reconnect/backoff behavior.
+        error: HealthError,
+    },
+}
+
 /// Trait for collectors that maintain a long-lived stream (SSE, gRPC, etc.)
 /// runtime.rs creates the BMC client and injects it, the collector opens the stream and maps payloads to events
 #[async_trait]
@@ -91,7 +107,7 @@ pub trait StreamingCollector<B: Bmc>: Send + 'static {
         Self: Sized;
 
     /// Open or reopen the streaming connection using the injected BMC.
-    async fn connect(&mut self) -> Result<EventStream<'_>, HealthError>;
+    async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError>;
 
     fn collector_type(&self) -> &'static str;
 }
@@ -137,7 +153,7 @@ impl ExponentialBackoff {
     }
 }
 
-pub type SseStream = Pin<
+type SseStream = Pin<
     Box<
         dyn futures::TryStream<
                 Ok = EventStreamPayload,
@@ -148,7 +164,9 @@ pub type SseStream = Pin<
 >;
 
 /// Open a Redfish SSE event stream from a BMC.
-pub async fn open_sse_stream<B: Bmc + 'static>(bmc: Arc<B>) -> Result<SseStream, HealthError> {
+pub(crate) async fn open_sse_stream<B: Bmc + 'static>(
+    bmc: Arc<B>,
+) -> Result<SseStream, HealthError> {
     let root = ServiceRoot::new(bmc)
         .await
         .map_err(|e| HealthError::BmcError(Box::new(e)))?;
@@ -229,6 +247,31 @@ impl StreamMetrics {
     }
 }
 
+/// Builds collector metric labels and includes `rack_id` only when available.
+/// A uniformly random duration shorter than `interval`, at millisecond
+/// resolution.
+fn random_phase(interval: Duration) -> Duration {
+    let millis = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(rand::rng().random_range(0..millis.max(1)))
+}
+
+pub(crate) fn collector_metric_labels(
+    collector_type: &str,
+    endpoint_key: String,
+    endpoint: &BmcEndpoint,
+) -> HashMap<String, String> {
+    let mut labels = HashMap::from([
+        ("collector_type".to_string(), collector_type.to_string()),
+        ("endpoint_key".to_string(), endpoint_key),
+    ]);
+
+    if let Some(rack_id) = endpoint.rack_id.as_ref() {
+        labels.insert("rack_id".to_string(), rack_id.to_string());
+    }
+
+    labels
+}
+
 /// RAII guard: increments the passed IntGauge on construction, decrements on drop.
 /// Ensures every exit path from a connected stream (cancel, error, end, reconnect) dec's.
 pub(crate) struct StreamingConnectionGuard(IntGauge);
@@ -282,14 +325,8 @@ impl Collector {
 
         let mut runner = C::new_runner(bmc, endpoint.clone(), config)?;
 
-        let endpoint_key = endpoint.key();
-        let const_labels = HashMap::from([
-            (
-                "collector_type".to_string(),
-                runner.collector_type().to_string(),
-            ),
-            ("endpoint_key".to_string(), endpoint_key),
-        ]);
+        let const_labels =
+            collector_metric_labels(runner.collector_type(), endpoint.key(), &endpoint);
 
         let registry = collector_registry.registry();
 
@@ -309,7 +346,7 @@ impl Collector {
         let refresh_counter = Counter::with_opts(
             Opts::new(
                 format!("{}_collector_refresh_total", collector_registry.prefix()),
-                "Count of collector refreshes",
+                "Number of collector refreshes",
             )
             .const_labels(const_labels.clone()),
         )?;
@@ -330,7 +367,7 @@ impl Collector {
                     "{}_collector_fetch_failures_total",
                     collector_registry.prefix()
                 ),
-                "Count of partial collector fetch failures",
+                "Number of partial collector fetch failures",
             )
             .const_labels(const_labels),
         )?;
@@ -341,10 +378,19 @@ impl Collector {
         let handle = tokio::spawn(async move {
             let collector_type = runner.collector_type();
             let _collector_registry = collector_registry;
+            // The first iteration runs at once; the sleep after it is a random
+            // part of the interval, so collectors started together do not keep
+            // iterating together.
+            let mut next_sleep = random_phase(iteration_interval);
             loop {
                 tokio::select! {
                     _ = cancel_token_clone.cancelled() => {
-                        tracing::info!(endpoint = ?endpoint.addr, "collector cancelled");
+                        tracing::info!(
+                            endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                            "collector cancelled"
+                        );
+
                         runner.stop().await;
                         break;
                     }
@@ -383,12 +429,14 @@ impl Collector {
                                     error = ?e,
                                     endpoint = ?endpoint.addr,
                                     collector_type = collector_type,
+                                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                     "Error during collector iteration"
                                 );
                             }
                         }
 
-                        tokio::time::sleep(iteration_interval).await;
+                        tokio::time::sleep(next_sleep).await;
+                        next_sleep = iteration_interval;
                     } => {
                     }
                 }
@@ -401,17 +449,23 @@ impl Collector {
         })
     }
 
+    /// Starts a streaming collector and reports failures to the caller.
+    ///
+    /// The callback receives `Err` when connection establishment fails and
+    /// `Ok(connected_for)` when an accepted stream ends or returns an error.
+    /// Cancellation does not invoke the callback. Returning `false` stops the
+    /// collector.
     pub fn start_streaming<S, F>(
         endpoint: Arc<BmcEndpoint>,
         bmc: Arc<BmcClient>,
         config: S::Config,
         data_sink: Arc<dyn DataSink>,
         start_context: StreamingCollectorStartContext,
-        mut on_connect_result: F,
+        mut on_stream_failure: F,
     ) -> Result<Self, HealthError>
     where
         S: StreamingCollector<BmcClient>,
-        F: FnMut(Result<(), &HealthError>) -> bool + Send + 'static,
+        F: FnMut(Result<Duration, &HealthError>) -> bool + Send + 'static,
     {
         let StreamingCollectorStartContext {
             backoff_config,
@@ -424,14 +478,8 @@ impl Collector {
         let mut collector = S::new_runner(Arc::clone(&bmc), endpoint.clone(), config)?;
         let event_context = EventContext::from_endpoint(&endpoint, collector.collector_type());
 
-        let endpoint_key = endpoint.key();
-        let const_labels = HashMap::from([
-            (
-                "collector_type".to_string(),
-                collector.collector_type().to_string(),
-            ),
-            ("endpoint_key".to_string(), endpoint_key),
-        ]);
+        let const_labels =
+            collector_metric_labels(collector.collector_type(), endpoint.key(), &endpoint);
 
         let registry = collector_registry.registry();
         let metrics = StreamMetrics::new(registry, collector_registry.prefix(), const_labels)?;
@@ -445,6 +493,7 @@ impl Collector {
                 tracing::info!(
                     collector_type,
                     endpoint = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "streaming collector connecting"
                 );
 
@@ -461,21 +510,45 @@ impl Collector {
                             error = ?e,
                             collector_type,
                             endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                             "streaming collector connection failed"
                         );
-                        if !on_connect_result(Err(&e)) {
+
+                        if !on_stream_failure(Err(&e)) {
                             return;
                         }
                     }
-                    Ok(mut stream) => {
+                    Ok(StreamingConnectResult::Failed { events, error }) => {
+                        metrics.reconnections_total.inc();
+
+                        for event in events {
+                            metrics.items_processed_total.inc();
+                            data_sink.handle_event(&event_context, &event);
+                        }
+
+                        tracing::error!(
+                            error = ?error,
+                            collector_type,
+                            endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                            "streaming collector connection failed"
+                        );
+
+                        if !on_stream_failure(Err(&error)) {
+                            return;
+                        }
+                    }
+                    Ok(StreamingConnectResult::Connected(mut stream)) => {
                         // the guard lives exactly as long as we hold an open stream; Drop
                         // handles dec for every exit path (shutdown, error, stream end).
                         let _conn_guard = StreamingConnectionGuard::inc(metrics.connected.clone());
+                        let connected_at = Instant::now();
+
                         backoff.reset();
-                        on_connect_result(Ok(()));
                         tracing::info!(
                             collector_type,
                             endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                             "streaming collector connected"
                         );
 
@@ -485,6 +558,7 @@ impl Collector {
                                 tracing::info!(
                                     collector_type,
                                     endpoint = ?endpoint.addr,
+                                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                     "streaming collector shutting down"
                                 );
                                 return;
@@ -502,16 +576,28 @@ impl Collector {
                                         error = ?e,
                                         collector_type,
                                         endpoint = ?endpoint.addr,
+                                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                         "streaming collector stream error, reconnecting"
                                     );
+
+                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
+                                        return;
+                                    }
+
                                     break;
                                 }
                                 None => {
                                     tracing::info!(
                                         collector_type,
                                         endpoint = ?endpoint.addr,
+                                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                         "streaming collector stream ended, reconnecting"
                                     );
+
+                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
+                                        return;
+                                    }
+
                                     break;
                                 }
                             }
@@ -553,6 +639,10 @@ impl Collector {
         }
     }
 
+    pub(crate) async fn finished(&mut self) {
+        let _ = (&mut self.handle).await;
+    }
+
     pub async fn stop(self) {
         self.cancel_token.cancel();
         let _ = self.handle.await;
@@ -560,5 +650,353 @@ impl Collector {
 
     pub fn is_finished(&self) -> bool {
         self.handle.is_finished()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use carbide_uuid::rack::RackId;
+
+    use super::*;
+    use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::metrics::MetricsManager;
+    use crate::sink::{LogRecord, LogSeverity};
+
+    #[derive(Default)]
+    struct CountingSink(AtomicUsize);
+
+    impl CountingSink {
+        fn log_count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl DataSink for CountingSink {
+        fn sink_type(&self) -> &'static str {
+            "counting_sink"
+        }
+
+        fn try_handle_event(
+            &self,
+            _context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), crate::HealthError> {
+            if matches!(event, CollectorEvent::Log(_)) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn collector_metric_labels_include_only_available_rack_id() {
+        struct TestCase {
+            name: &'static str,
+            rack_id: Option<RackId>,
+            expected_rack_id: Option<&'static str>,
+        }
+
+        let cases = [
+            TestCase {
+                name: "rack identity is available",
+                rack_id: Some(RackId::new("RACK_1")),
+                expected_rack_id: Some("RACK_1"),
+            },
+            TestCase {
+                name: "rack identity is unavailable",
+                rack_id: None,
+                expected_rack_id: None,
+            },
+        ];
+
+        for case in cases {
+            let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+            endpoint.rack_id = case.rack_id;
+
+            let labels = collector_metric_labels("test_collector", endpoint.key(), &endpoint);
+
+            assert_eq!(
+                labels.get("rack_id").map(String::as_str),
+                case.expected_rack_id,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    struct TestStreamingCollector;
+
+    #[async_trait]
+    impl StreamingCollector<BmcClient> for TestStreamingCollector {
+        type Config = ();
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            _config: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self)
+        }
+
+        async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            let event = CollectorEvent::Log(Box::new(LogRecord {
+                body: "pre-connected rejection".to_string(),
+                severity: LogSeverity::Error,
+                attributes: Vec::new(),
+                diagnostic_record: None,
+            }));
+
+            Ok(StreamingConnectResult::Failed {
+                events: vec![event],
+                error: HealthError::GenericError("pre-connected failure".to_string()),
+            })
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "test_streaming_collector"
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum StreamBehavior {
+        End,
+        Error,
+        Pending,
+    }
+
+    struct SessionStreamingCollector {
+        behaviors: VecDeque<StreamBehavior>,
+    }
+
+    #[async_trait]
+    impl StreamingCollector<BmcClient> for SessionStreamingCollector {
+        type Config = Vec<StreamBehavior>;
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            config: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self {
+                behaviors: config.into(),
+            })
+        }
+
+        async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            let behavior = self
+                .behaviors
+                .pop_front()
+                .unwrap_or(StreamBehavior::Pending);
+
+            let stream: EventStream<'_> = match behavior {
+                StreamBehavior::End => Box::pin(futures::stream::empty()),
+                StreamBehavior::Error => Box::pin(futures::stream::once(async {
+                    Err(HealthError::GenericError("stream failed".to_string()))
+                })),
+                StreamBehavior::Pending => Box::pin(futures::stream::pending()),
+            };
+
+            Ok(StreamingConnectResult::Connected(stream))
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "session_streaming_collector"
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_collector_emits_pre_connected_failure_events_without_connected_callback()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:66")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_preconnect_failure")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_preconnect_failure_test".to_string(),
+            "test_streaming_runtime_preconnect_failure",
+        )?);
+
+        let sink = Arc::new(CountingSink::default());
+        let data_sink: Arc<dyn DataSink> = sink.clone();
+        let (callback_tx, callback_rx) = tokio::sync::oneshot::channel();
+        let mut callback_tx = Some(callback_tx);
+
+        let collector = Collector::start_streaming::<TestStreamingCollector, _>(
+            endpoint,
+            bmc,
+            (),
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig::default(),
+                collector_registry,
+            },
+            move |result| {
+                if let Some(tx) = callback_tx.take() {
+                    let _ = tx.send(result.is_ok());
+                }
+
+                false
+            },
+        )?;
+
+        let connected_callback =
+            tokio::time::timeout(Duration::from_secs(1), callback_rx).await??;
+
+        collector.stop().await;
+
+        assert!(!connected_callback);
+        assert_eq!(sink.log_count(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_collector_reports_stream_end_and_error_but_not_cancellation()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:77")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_stream_lifetime")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_stream_lifetime_test".to_string(),
+            "test_streaming_runtime_stream_lifetime",
+        )?);
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+        let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+            endpoint,
+            bmc,
+            vec![
+                StreamBehavior::End,
+                StreamBehavior::Error,
+                StreamBehavior::Pending,
+            ],
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig {
+                    initial: Duration::ZERO,
+                    max: Duration::ZERO,
+                },
+                collector_registry,
+            },
+            move |result| callback_tx.send(result.is_ok()).is_ok(),
+        )?;
+
+        let callbacks = tokio::time::timeout(Duration::from_secs(1), async {
+            [callback_rx.recv().await, callback_rx.recv().await]
+        })
+        .await?;
+
+        collector.stop().await;
+
+        assert_eq!(callbacks, [Some(true), Some(true)]);
+        assert!(callback_rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    /// Records the time of every iteration.
+    struct TimedCollector {
+        runs: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    }
+
+    impl PeriodicCollector<BmcClient> for TimedCollector {
+        type Config = Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>;
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            runs: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self { runs })
+        }
+
+        async fn run_iteration(&mut self) -> Result<IterationResult, HealthError> {
+            self.runs.lock().unwrap().push(tokio::time::Instant::now());
+            Ok(IterationResult {
+                refresh_triggered: false,
+                entity_count: None,
+                fetch_failures: 0,
+            })
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "timed_test_collector"
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collectors_started_together_spread_after_their_first_iteration()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let interval = Duration::from_secs(60);
+        let metrics_manager = Arc::new(MetricsManager::new("test_periodic_phase")?);
+        let started = tokio::time::Instant::now();
+        let mut collectors = Vec::new();
+        let mut runs = Vec::new();
+        for index in 0..20_u8 {
+            let endpoint = Arc::new(test_endpoint(mac(&format!("00:11:22:33:44:{index:02x}"))));
+            let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+            collectors.push(Collector::start::<TimedCollector>(
+                endpoint.clone(),
+                Arc::clone(endpoint.bmc()),
+                times.clone(),
+                CollectorStartContext {
+                    limiter: Arc::new(crate::limiter::NoopLimiter),
+                    iteration_interval: interval,
+                    collector_registry: Arc::new(metrics_manager.create_collector_registry(
+                        format!("periodic_phase_test_{index}"),
+                        "test_periodic_phase",
+                    )?),
+                    metrics_manager: metrics_manager.clone(),
+                },
+            )?);
+            runs.push(times);
+        }
+
+        tokio::time::sleep(interval * 2).await;
+        for collector in collectors {
+            collector.stop().await;
+        }
+
+        let offsets: Vec<Vec<Duration>> = runs
+            .iter()
+            .map(|runs| {
+                runs.lock()
+                    .unwrap()
+                    .iter()
+                    .map(|run| *run - started)
+                    .collect()
+            })
+            .collect();
+        for runs in &offsets {
+            assert_eq!(
+                runs[0],
+                Duration::ZERO,
+                "first iteration runs at once: {runs:?}"
+            );
+            assert!(
+                runs[1] < interval,
+                "second iteration within the first interval: {runs:?}"
+            );
+            assert_eq!(
+                runs[2] - runs[1],
+                interval,
+                "later iterations keep the interval: {runs:?}"
+            );
+        }
+        let second_runs: std::collections::HashSet<Duration> =
+            offsets.iter().map(|runs| runs[1]).collect();
+        assert!(
+            second_runs.len() > 1,
+            "second iterations spread out: {second_runs:?}"
+        );
+
+        Ok(())
     }
 }

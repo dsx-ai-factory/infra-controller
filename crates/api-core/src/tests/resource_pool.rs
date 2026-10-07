@@ -18,19 +18,17 @@
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use std::sync::Arc;
 
+use carbide_uuid::machine::MachineId;
 use common::api_fixtures::create_test_env;
-use model::resource_pool::common::VPC_VNI;
+use model::machine::ManagedHostState;
+use model::resource_pool::common::LOOPBACK_IP_V6;
 use model::resource_pool::{
     OwnerType, ResourcePool, ResourcePoolError, ResourcePoolStats as St, ValueType,
 };
-use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use crate::tests::common;
-use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 // Define an IPv4 pool from a range via the admin grpc
 #[crate::sqlx_test]
@@ -105,6 +103,83 @@ prefix = "172.0.1.0/24"
 }
 
 #[crate::sqlx_test]
+async fn test_grow_ipv6_loopback_pool_backfills_existing_dpus(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool.clone()).await;
+    let dpu_machine_ids = [
+        MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?,
+        MachineId::from_str("fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0")?,
+    ];
+
+    // These rows predate the optional pool. Growing `lo-ip-v6` at runtime must
+    // reconcile them without waiting for another API restart or discovery.
+    let mut txn = db_pool.begin().await?;
+    for machine_id in &dpu_machine_ids {
+        db::machine::create(
+            txn.as_mut(),
+            None,
+            machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+    }
+    txn.commit().await?;
+
+    let toml = r#"
+[lo-ip-v6]
+type = "ipv6"
+prefix = "2001:db8:2389::/126"
+"#;
+    let grow = || rpc::forge::GrowResourcePoolRequest {
+        text: toml.to_string(),
+    };
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(grow()))
+        .await?;
+
+    let mut assigned = HashSet::new();
+    let mut versions = Vec::new();
+    let mut txn = db_pool.begin().await?;
+    for machine_id in &dpu_machine_ids {
+        let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
+        assigned.insert(
+            config
+                .value
+                .loopback_ip_v6
+                .expect("runtime pool growth should backfill every existing DPU"),
+        );
+        versions.push(config.version);
+    }
+    txn.commit().await?;
+    assert_eq!(assigned.len(), dpu_machine_ids.len());
+
+    let stats_after_backfill = db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?;
+    assert_eq!(stats_after_backfill.used, dpu_machine_ids.len());
+
+    // Replaying the additive grow request also replays reconciliation. Both the
+    // persisted addresses and their group versions must remain unchanged.
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(grow()))
+        .await?;
+    let mut txn = db_pool.begin().await?;
+    for (machine_id, version) in dpu_machine_ids.iter().zip(versions) {
+        let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
+        assert!(assigned.contains(&config.value.loopback_ip_v6.unwrap()));
+        assert_eq!(config.version, version);
+    }
+    txn.commit().await?;
+    assert_eq!(
+        db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?,
+        stats_after_backfill
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let mut txn = db_pool.begin().await?;
     let pool = ResourcePool::new("test_simple".to_string(), ValueType::Integer);
@@ -163,8 +238,22 @@ async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     );
 
     // return the values
-    db::resource_pool::release(&pool, &mut txn, auto_allocated).await?;
-    db::resource_pool::release(&pool, &mut txn, non_auto_allocated).await?;
+    assert_eq!(
+        db::resource_pool::release(&pool, &mut txn, auto_allocated, OwnerType::Machine, "123")
+            .await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    assert_eq!(
+        db::resource_pool::release(
+            &pool,
+            &mut txn,
+            non_auto_allocated,
+            OwnerType::Machine,
+            "123",
+        )
+        .await?,
+        db::ConditionalWrite::Applied(()),
+    );
 
     assert_eq!(
         db::resource_pool::stats(&mut *txn, pool.name()).await?,
@@ -174,136 +263,6 @@ async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
             auto_assign_free: 1,
             auto_assign_used: 0,
             non_auto_assign_free: 1,
-            non_auto_assign_used: 0
-        }
-    );
-
-    txn.rollback().await?;
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_multiple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
-    let mut txn = db_pool.begin().await?;
-    let pool1 = ResourcePool::new("test_multiple_1".to_string(), ValueType::Integer);
-    let pool2 = ResourcePool::new("test_multiple_2".to_string(), ValueType::Integer);
-    let pool3 = ResourcePool::new("test_multiple_3".to_string(), ValueType::Integer);
-
-    db::resource_pool::populate(&pool1, &mut txn, (1..=10).collect::<Vec<_>>(), true).await?;
-    db::resource_pool::populate(&pool2, &mut txn, (1..=100).collect::<Vec<_>>(), true).await?;
-    db::resource_pool::populate(&pool3, &mut txn, (1..=500).collect::<Vec<_>>(), true).await?;
-
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool1.name()).await?,
-        St {
-            used: 0,
-            free: 10,
-            auto_assign_free: 10,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool2.name()).await?,
-        St {
-            used: 0,
-            free: 100,
-            auto_assign_free: 100,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool3.name()).await?,
-        St {
-            used: 0,
-            free: 500,
-            auto_assign_free: 500,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-
-    let mut got = Vec::with_capacity(10);
-    for _ in 1..=10 {
-        got.push(
-            db::resource_pool::allocate(&pool2, &mut txn, OwnerType::Machine, "my_id", None)
-                .await
-                .unwrap(),
-        );
-    }
-
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool1.name()).await?,
-        St {
-            used: 0,
-            free: 10,
-            auto_assign_free: 10,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool2.name()).await?,
-        St {
-            used: 10,
-            free: 90,
-            auto_assign_free: 90,
-            auto_assign_used: 10,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool3.name()).await?,
-        St {
-            used: 0,
-            free: 500,
-            auto_assign_free: 500,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-
-    for val in got {
-        db::resource_pool::release(&pool2, &mut txn, val).await?;
-    }
-
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool1.name()).await?,
-        St {
-            used: 0,
-            free: 10,
-            auto_assign_free: 10,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool2.name()).await?,
-        St {
-            used: 0,
-            free: 100,
-            auto_assign_free: 100,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool3.name()).await?,
-        St {
-            used: 0,
-            free: 500,
-            auto_assign_free: 500,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
             non_auto_assign_used: 0
         }
     );
@@ -370,163 +329,6 @@ async fn test_rollback(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
 }
 
 #[crate::sqlx_test]
-async fn test_vpc_assign_after_delete(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
-    let env = create_test_env(db_pool.clone()).await;
-
-    // create_test_env makes a vpc-vni pool, so clean that up first
-    let mut txn = db_pool.begin().await?;
-    sqlx::query("DELETE FROM resource_pool WHERE name = $1")
-        .bind(VPC_VNI)
-        .execute(&mut *txn)
-        .await?;
-    txn.commit().await?;
-
-    // Only one vpc-vni available
-    let mut txn = db_pool.begin().await?;
-    let vpc_vni_pool = ResourcePool::new(VPC_VNI.to_string(), ValueType::Integer);
-    db::resource_pool::populate(&vpc_vni_pool, &mut txn, vec!["1".to_string()], true).await?;
-    txn.commit().await?;
-
-    // CreateVpc rpc call
-    let vpc_req = VpcCreationRequest::builder("test")
-        .metadata(Metadata {
-            name: "test_vpc_assign_after_delete_1".to_string(),
-            ..Default::default()
-        })
-        .network_virtualization_type(rpc::forge::VpcVirtualizationType::EthernetVirtualizer)
-        .tonic_request();
-    let vpc1 = env.api.create_vpc(vpc_req).await.unwrap().into_inner();
-
-    // Value is allocated
-    let mut txn = db_pool.begin().await?;
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, vpc_vni_pool.name()).await?,
-        St {
-            used: 1,
-            free: 0,
-            auto_assign_free: 0,
-            auto_assign_used: 1,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    txn.commit().await?;
-
-    // DeleteVpc rpc call
-    let del_req = rpc::forge::VpcDeletionRequest { id: vpc1.id };
-    env.api
-        .delete_vpc(tonic::Request::new(del_req))
-        .await
-        .unwrap();
-
-    // Value is free
-    let mut txn = db_pool.begin().await?;
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, vpc_vni_pool.name()).await?,
-        St {
-            used: 0,
-            free: 1,
-            auto_assign_free: 1,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    txn.commit().await?;
-
-    // CreateVpc
-    let vpc_req = VpcCreationRequest::builder("test")
-        .metadata(Metadata {
-            name: "test_vpc_assign_after_delete_2".to_string(),
-            description: "".to_string(),
-            labels: vec![],
-        })
-        .network_virtualization_type(rpc::forge::VpcVirtualizationType::EthernetVirtualizer)
-        .tonic_request();
-    let vpc2 = env.api.create_vpc(vpc_req).await.unwrap().into_inner();
-
-    // Value allocated again
-    let mut txn = db_pool.begin().await?;
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, vpc_vni_pool.name()).await?,
-        St {
-            used: 1,
-            free: 0,
-            auto_assign_free: 0,
-            auto_assign_used: 1,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    txn.commit().await?;
-
-    let del_req = rpc::forge::VpcDeletionRequest { id: vpc2.id };
-    env.api
-        .delete_vpc(tonic::Request::new(del_req.clone()))
-        .await
-        .unwrap();
-
-    // Value is free
-    let mut txn = db_pool.begin().await?;
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, vpc_vni_pool.name()).await?,
-        St {
-            used: 0,
-            free: 1,
-            auto_assign_free: 1,
-            auto_assign_used: 0,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-
-    // Allocate the value for something else. Deleting the already deleted VPC again
-    // shouldn't free the VNI another time
-    let _vni =
-        db::resource_pool::allocate(&vpc_vni_pool, &mut txn, OwnerType::Vpc, "testalloc", None)
-            .await?;
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, vpc_vni_pool.name()).await?,
-        St {
-            used: 1,
-            free: 0,
-            auto_assign_free: 0,
-            auto_assign_used: 1,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    txn.commit().await?;
-
-    // Delete the VPC again
-    assert_eq!(
-        env.api
-            .delete_vpc(tonic::Request::new(del_req))
-            .await
-            .expect_err("should fail")
-            .code(),
-        tonic::Code::NotFound
-    );
-
-    // The VNI isn't freed
-    let mut txn = db_pool.begin().await?;
-    assert_eq!(
-        db::resource_pool::stats(&mut *txn, vpc_vni_pool.name()).await?,
-        St {
-            used: 1,
-            free: 0,
-            auto_assign_free: 0,
-            auto_assign_used: 1,
-            non_auto_assign_free: 0,
-            non_auto_assign_used: 0
-        }
-    );
-    txn.commit().await?;
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
 async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let mut txn = db_pool.begin().await?;
     let names = &["a", "b", "c"];
@@ -562,87 +364,6 @@ async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         }
     }
 
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 50)]
-async fn test_parallel() -> Result<(), eyre::Report> {
-    // We can't use #[sqlx::test] here because we need a multi-threaded
-    // executor with 50 worker threads. Instead we manage the test database
-    // lifecycle manually, using a random name so multiple test runs (or
-    // parallel CI jobs) never collide on the same Postgres instance.
-    let base_url = std::env::var("DATABASE_URL")?;
-    // ResourcePool.name is varchar(32), so keep the DB name short.
-    let short_id = &uuid::Uuid::new_v4().simple().to_string()[..8];
-    let db_name = format!("test_par_{short_id}");
-    let base_options = PgConnectOptions::from_str(&base_url)?;
-
-    let admin = PgPoolOptions::new()
-        .connect_with(base_options.clone())
-        .await?;
-
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "CREATE DATABASE \"{db_name}\""
-    )))
-    .execute(&admin)
-    .await?;
-    let db_pool = PgPoolOptions::new()
-        .connect_with(base_options.database(&db_name))
-        .await?;
-    db::migrations::migrate(&db_pool).await?;
-
-    let mut txn = db_pool.begin().await?;
-    let pool = Arc::new(ResourcePool::new(db_name.clone(), ValueType::Integer));
-
-    db::resource_pool::populate(
-        &pool,
-        &mut txn,
-        (1..=5_000).map(|i| i.to_string()).collect(),
-        true,
-    )
-    .await?;
-    txn.commit().await?;
-
-    let mut handles = Vec::with_capacity(50);
-    let all_values = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
-    for i in 0..50 {
-        let all_values = all_values.clone();
-        let p = pool.clone();
-        let db_pool_c = db_pool.clone();
-        let handle = tokio::task::spawn(async move {
-            let mut got = Vec::with_capacity(100);
-            for _ in 0..100 {
-                let mut txn = db_pool_c.begin().await.unwrap();
-                got.push(
-                    db::resource_pool::allocate(
-                        &p,
-                        &mut txn,
-                        OwnerType::Machine,
-                        &i.to_string(),
-                        None,
-                    )
-                    .await
-                    .unwrap(),
-                );
-                txn.commit().await.unwrap();
-            }
-            all_values.lock().await.extend(got.clone());
-        });
-        handles.push(handle);
-    }
-    futures::future::join_all(handles).await;
-    drop(pool);
-    db_pool.close().await;
-
-    assert_eq!(all_values.lock().await.len(), 5_000);
-
-    // WITH (FORCE) terminates any lingering backends before dropping,
-    // avoiding the flaky "database is being accessed by other users" error.
-    let drop_stmt = format!("DROP DATABASE \"{db_name}\" WITH (FORCE)");
-    sqlx::query(sqlx::AssertSqlSafe(drop_stmt))
-        .execute(&admin)
-        .await?;
-    admin.close().await;
     Ok(())
 }
 

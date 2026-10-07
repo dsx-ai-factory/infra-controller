@@ -19,11 +19,11 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::redfish;
+use crate::{Callbacks, hw, redfish};
 
-pub struct LiteOnPowerShelf<'a> {
-    pub bmc_mac_address: MacAddress,
-    pub product_serial_number: Cow<'a, str>,
+pub(crate) struct LiteOnPowerShelf<'a> {
+    pub(crate) bmc_mac_address: MacAddress,
+    pub(crate) product_serial_number: Cow<'a, str>,
 }
 
 impl LiteOnPowerShelf<'_> {
@@ -37,7 +37,11 @@ impl LiteOnPowerShelf<'_> {
         }
     }
 
-    pub fn manager_config(&self) -> redfish::manager::Config {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
+    pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {
                 id: "bmc",
@@ -56,13 +60,14 @@ impl LiteOnPowerShelf<'_> {
                     .build(),
                 ]),
                 host_interfaces: None,
+                serial_interfaces: None,
                 firmware_version: Some("r1.3.9"),
                 oem: None,
             }],
         }
     }
 
-    pub fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         let system_id = "system";
 
         redfish::computer_system::Config {
@@ -70,6 +75,7 @@ impl LiteOnPowerShelf<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
+                bios_version: None,
                 eth_interfaces: None,
                 serial_number: None,
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,
@@ -81,15 +87,17 @@ impl LiteOnPowerShelf<'_> {
                 log_services: None,
                 storage: None,
                 processors: None,
+                memory: None,
                 base_bios: Some(
                     redfish::bios::builder(&redfish::bios::resource(system_id)).build(),
                 ),
+                serial_console: Some(hw::openbmc::enabled_serial_console()),
                 secure_boot_available: false,
             }],
         }
     }
 
-    pub fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
+    pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
         let chassis_id = "powershelf";
 
         redfish::chassis::ChassisConfig {
@@ -112,6 +120,7 @@ impl LiteOnPowerShelf<'_> {
                                 &idx.to_string(),
                             ))
                             .oem_liteon_power_state(true)
+                            .oem_liteon_capacity_watts("5500")
                             // libredfish requires status to be
                             // here...
                             .status(redfish::resource::Status::Ok)
@@ -124,9 +133,10 @@ impl LiteOnPowerShelf<'_> {
         }
     }
 
-    pub fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
+    pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
         redfish::update_service::UpdateServiceConfig {
             firmware_inventory: vec![],
+            ..Default::default()
         }
     }
 }

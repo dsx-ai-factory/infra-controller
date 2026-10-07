@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,9 +18,8 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
@@ -36,11 +36,8 @@ func testInstanceInitDB(t *testing.T) *db.Session {
 
 // reset the tables needed for Instance tests
 func testInstanceSetupSchema(t *testing.T, dbSession *db.Session) {
-	// create Allocation table
-	err := dbSession.DB.ResetModel(context.Background(), (*Allocation)(nil))
-	assert.Nil(t, err)
 	// create Tenant table
-	err = dbSession.DB.ResetModel(context.Background(), (*Tenant)(nil))
+	err := dbSession.DB.ResetModel(context.Background(), (*Tenant)(nil))
 	assert.Nil(t, err)
 	// create Infrastructure Provider table
 	err = dbSession.DB.ResetModel(context.Background(), (*InfrastructureProvider)(nil))
@@ -48,12 +45,17 @@ func testInstanceSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create Site table
 	err = dbSession.DB.ResetModel(context.Background(), (*Site)(nil))
 	assert.Nil(t, err)
+	// create Allocation table
+	err = dbSession.DB.ResetModel(context.Background(), (*Allocation)(nil))
+	assert.Nil(t, err)
 	// create InstanceType table
 	err = dbSession.DB.ResetModel(context.Background(), (*InstanceType)(nil))
 	assert.Nil(t, err)
 	// create NetworkSecurityGroup table
 	err = dbSession.DB.ResetModel(context.Background(), (*NetworkSecurityGroup)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*NVLinkLogicalPartition)(nil))
+	require.NoError(t, err)
 	// create Vpc table
 	err = dbSession.DB.ResetModel(context.Background(), (*Vpc)(nil))
 	assert.Nil(t, err)
@@ -78,6 +80,12 @@ func testInstanceSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create Instance table
 	err = dbSession.DB.ResetModel(context.Background(), (*Instance)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*Domain)(nil))
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*Subnet)(nil))
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*MachineInterface)(nil))
+	require.NoError(t, err)
 	// create Interface table
 	err = dbSession.DB.ResetModel(context.Background(), (*Interface)(nil))
 	assert.Nil(t, err)
@@ -185,9 +193,9 @@ func testInstanceBuildNetworkSecurityGroup(t *testing.T, dbSession *db.Session, 
 		Status:    InstanceTypeStatusReady,
 		Rules: []*NetworkSecurityGroupRule{
 			&NetworkSecurityGroupRule{
-				&cwssaws.NetworkSecurityGroupRuleAttributes{
+				&corev1.NetworkSecurityGroupRuleAttributes{
 					Id:     cutil.GetPtr(uuid.NewString()),
-					Action: cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_DENY,
+					Action: corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_DENY,
 				},
 			},
 		},
@@ -279,7 +287,7 @@ func TestInstanceSQLDAO_Create(t *testing.T) {
 					InstanceTypeID:           &instanceType.ID,
 					NetworkSecurityGroupID:   &networkSecurityGroup.ID,
 					NetworkSecurityGroupPropagationDetails: &NetworkSecurityGroupPropagationDetails{
-						NetworkSecurityGroupPropagationObjectStatus: &cwssaws.NetworkSecurityGroupPropagationObjectStatus{
+						NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{
 							Id:                      "",
 							RelatedInstanceIds:      []string{},
 							UnpropagatedInstanceIds: []string{},
@@ -431,8 +439,6 @@ func TestInstanceSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -588,8 +594,6 @@ func TestInstanceSQLDAO_GetByID(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -762,7 +766,7 @@ func TestInstanceSQLDAO_GetCountByStatus(t *testing.T) {
 		wantErr            error
 		wantEmpty          bool
 		wantCount          int
-		wantStatusMap      InstanceStatusCounts
+		wantStatusMap      InstanceCountByStatus
 		reqTenant          *uuid.UUID
 		reqSite            *uuid.UUID
 		verifyChildSpanner bool
@@ -778,7 +782,7 @@ func TestInstanceSQLDAO_GetCountByStatus(t *testing.T) {
 			wantErr:   nil,
 			wantEmpty: false,
 			wantCount: 5,
-			wantStatusMap: InstanceStatusCounts{
+			wantStatusMap: InstanceCountByStatus{
 				Total:        5,
 				Pending:      2,
 				Provisioning: 1,
@@ -811,7 +815,7 @@ func TestInstanceSQLDAO_GetCountByStatus(t *testing.T) {
 			wantErr:   nil,
 			wantEmpty: false,
 			wantCount: 5,
-			wantStatusMap: InstanceStatusCounts{
+			wantStatusMap: InstanceCountByStatus{
 				Total:        5,
 				Pending:      2,
 				Provisioning: 1,
@@ -842,8 +846,6 @@ func TestInstanceSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -883,7 +885,48 @@ func TestAggregatedInstanceStatus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AggregatedInstanceStatus(tt.status, tt.powerStatus)
+			inst := &Instance{Status: tt.status, PowerStatus: tt.powerStatus}
+			got := inst.GetAggregatedStatus(tt.status, tt.powerStatus)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestInstanceCountByStatus_FromQueryResults(t *testing.T) {
+	tests := []struct {
+		name string
+		rows []instanceStatusCountQueryResult
+		want InstanceCountByStatus
+	}{
+		{
+			name: "maps known statuses and accumulates total",
+			rows: []instanceStatusCountQueryResult{
+				{Status: InstanceStatusPending, TotalCount: 2},
+				{Status: InstanceStatusReady, TotalCount: 5},
+				{Status: InstancePowerStatusRebooting, TotalCount: 1},
+			},
+			want: InstanceCountByStatus{
+				Total:     8,
+				Pending:   2,
+				Ready:     5,
+				Rebooting: 1,
+			},
+		},
+		{
+			name: "unknown status rolls into unknown bucket",
+			rows: []instanceStatusCountQueryResult{
+				{Status: "unexpected", TotalCount: 3},
+			},
+			want: InstanceCountByStatus{
+				Total:   3,
+				Unknown: 3,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got InstanceCountByStatus
+			got.FromQueryResults(tt.rows)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -971,6 +1014,7 @@ func TestInstanceSQLDAO_GetAll(t *testing.T) {
 	tenant2 := testInstanceBuildTenant(t, dbSession, "testTenant2")
 	vpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
 	vpc2 := testInstanceBuildVpc(t, dbSession, ip, site2, tenant2, "testVpc2")
+	vpcSelection := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "testVpcSelection")
 	allocation := testInstanceBuildAllocation(t, dbSession, ip, tenant, site, "testAllocation")
 	allocation2 := testInstanceBuildAllocation(t, dbSession, ip, tenant2, site2, "testAllocation2")
 	instanceType := testInstanceBuildInstanceType(t, dbSession, ip, "testInstanceType")
@@ -1139,6 +1183,15 @@ func TestInstanceSQLDAO_GetAll(t *testing.T) {
 		CreatedBy:   user.ID,
 	})
 	assert.NoError(t, err)
+	_, err = ifcd.Create(ctx, nil, InterfaceCreateInput{
+		InstanceID:      instanceGroup1[1].ID,
+		VpcID:           &vpcSelection.ID,
+		VpcIPFamilyMode: cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+		Status:          InterfaceStatusPending,
+		IsPhysical:      true,
+		CreatedBy:       user.ID,
+	})
+	assert.NoError(t, err)
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -1293,6 +1346,14 @@ func TestInstanceSQLDAO_GetAll(t *testing.T) {
 				Limit: cutil.GetPtr(totalCount),
 			},
 			expectedCount: totalCount/2 + 1,
+			expectedError: false,
+		},
+		{
+			desc: "VPC filter includes an unresolved directly selected secondary VPC",
+			filter: InstanceFilterInput{
+				VpcIDs: []uuid.UUID{vpcSelection.ID},
+			},
+			expectedCount: 1,
 			expectedError: false,
 		},
 		{
@@ -1639,11 +1700,82 @@ func TestInstanceSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("result columns survive an added column", func(t *testing.T) {
+		dbSession.DB.SetMaxOpenConns(1)
+		dbSession.DB.SetMaxIdleConns(1)
+		hook := &testProjectionQueryHook{}
+		dbSession.DB.AddQueryHook(hook)
+		migration := util.GetTestDBSession(t, false)
+		defer migration.Close()
+
+		cases := []struct {
+			name     string
+			field    string
+			firstID  uuid.UUID
+			query    string
+			prepared testPreparedQuery
+		}{
+			{name: "default order", firstID: instanceGroup1[0].ID},
+			{name: "InfiniBand order", field: instanceOrderByHasInfiniBandExt, firstID: instanceGroup2[0].ID},
+		}
+		for _, afterColumnAddition := range []bool{false, true} {
+			if afterColumnAddition {
+				_, err := migration.DB.ExecContext(ctx, "ALTER TABLE instance ADD COLUMN test_added_column text")
+				require.NoError(t, err)
+			}
+			for i := range cases {
+				tc := &cases[i]
+				t.Run(fmt.Sprintf("%s/after_column_addition=%t", tc.name, afterColumnAddition), func(t *testing.T) {
+					page := paginator.PageInput{}
+					if tc.field != "" {
+						page.OrderBy = &paginator.OrderBy{Field: tc.field, Order: paginator.OrderDescending}
+					}
+					got, total, err := isd.GetAll(ctx, nil,
+						InstanceFilterInput{InstanceIDs: []uuid.UUID{instanceGroup1[0].ID, instanceGroup2[0].ID}},
+						page, []string{VpcRelationName, InstanceTypeRelationName})
+					require.NoError(t, err)
+					require.Len(t, got, 2)
+					assert.Equal(t, 2, total)
+					assert.Equal(t, tc.firstID, got[0].ID)
+					projection, _, found := strings.Cut(hook.query, " FROM ")
+					require.True(t, found)
+					testAssertNamedModelColumns(t, dbSession, Instance{}, projection)
+					if tc.field != "" {
+						assert.Contains(t, projection, "mc.type AS mc_type")
+					}
+					for _, instance := range got {
+						expected := instanceGroup1[0]
+						expectedVpc, expectedInstanceType := vpc, instanceType
+						if instance.ID == instanceGroup2[0].ID {
+							expected = instanceGroup2[0]
+							expectedVpc, expectedInstanceType = vpc2, instanceType2
+						} else if tc.field != "" {
+							expected.MCType = string(MachineCapabilityTypeInfiniBand)
+						}
+						require.NotNil(t, instance.Vpc)
+						require.NotNil(t, instance.InstanceType)
+						assert.Equal(t, expectedVpc.ID, instance.Vpc.ID)
+						assert.Equal(t, expectedVpc.Name, instance.Vpc.Name)
+						assert.Equal(t, expectedInstanceType.ID, instance.InstanceType.ID)
+						assert.Equal(t, expectedInstanceType.Name, instance.InstanceType.Name)
+						instance.Vpc, instance.InstanceType = nil, nil
+						assert.Equal(t, expected, instance)
+					}
+					prepared := testGetPreparedQuery(t, ctx, dbSession, hook.query)
+					if afterColumnAddition {
+						assert.Equal(t, tc.query, hook.query)
+						assert.Equal(t, tc.prepared, prepared)
+					} else {
+						tc.query, tc.prepared = hook.query, prepared
+					}
+				})
+			}
+		}
+	})
 }
 
 // TODO: Remove this once the migration to drop allocation_id and allocation_constraint_id columns is complete.
@@ -1687,6 +1819,7 @@ type InstanceWithAllocation struct {
 	TpmEkCertificate                       *string                                 `bun:"tpm_ek_certificate"`
 	Status                                 string                                  `bun:"status,notnull"`
 	PowerStatus                            *string                                 `bun:"power_status"`
+	PowerProfile                           *string                                 `bun:"power_profile"`
 	IsMissingOnSite                        bool                                    `bun:"is_missing_on_site,notnull"`
 	Created                                time.Time                               `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated                                time.Time                               `bun:"updated,nullzero,notnull,default:current_timestamp"`
@@ -1854,6 +1987,7 @@ func TestInstanceSQLDAO_GetCount(t *testing.T) {
 	tenant2 := testInstanceBuildTenant(t, dbSession, "testTenant2")
 	vpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
 	vpc2 := testInstanceBuildVpc(t, dbSession, ip, site2, tenant2, "testVpc2")
+	vpcSelection := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "testVpcSelection")
 	allocation := testInstanceBuildAllocation(t, dbSession, ip, tenant, site, "testAllocation")
 	allocation2 := testInstanceBuildAllocation(t, dbSession, ip, tenant2, site2, "testAllocation2")
 	instanceType := testInstanceBuildInstanceType(t, dbSession, ip, "testInstanceType")
@@ -2015,6 +2149,15 @@ func TestInstanceSQLDAO_GetCount(t *testing.T) {
 		CreatedBy:   user.ID,
 	})
 	assert.NoError(t, err)
+	_, err = ifcd.Create(ctx, nil, InterfaceCreateInput{
+		InstanceID:      instanceGroup1[1].ID,
+		VpcID:           &vpcSelection.ID,
+		VpcIPFamilyMode: cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+		Status:          InterfaceStatusPending,
+		IsPhysical:      true,
+		CreatedBy:       user.ID,
+	})
+	assert.NoError(t, err)
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -2119,6 +2262,14 @@ func TestInstanceSQLDAO_GetCount(t *testing.T) {
 				VpcIDs: []uuid.UUID{vpc2.ID},
 			},
 			expectedCount: totalCount/2 + 1,
+			expectedError: false,
+		},
+		{
+			desc: "VPC filter count includes an unresolved directly selected secondary VPC",
+			filter: InstanceFilterInput{
+				VpcIDs: []uuid.UUID{vpcSelection.ID},
+			},
+			expectedCount: 1,
 			expectedError: false,
 		},
 		{
@@ -2287,8 +2438,6 @@ func TestInstanceSQLDAO_GetCount(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2475,7 +2624,7 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 			paramControlledInstanceID:     &dummyUUID,
 			paramHostname:                 nil,
 			paramOperatingSystemID:        &operatingSystem2.ID,
-			paramNetworkSecurityGroupPropagationDetails: &NetworkSecurityGroupPropagationDetails{NetworkSecurityGroupPropagationObjectStatus: &cwssaws.NetworkSecurityGroupPropagationObjectStatus{}},
+			paramNetworkSecurityGroupPropagationDetails: &NetworkSecurityGroupPropagationDetails{NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{}},
 			paramAlwaysBootWithCustomIpxe:               cutil.GetPtr(true),
 			paramEnablePhoneHome:                        cutil.GetPtr(true),
 			paramIsUpdatePending:                        cutil.GetPtr(true),
@@ -2499,7 +2648,7 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 			expectedControllerInstanceID:                   &dummyUUID,
 			expectedHostname:                               cutil.GetPtr("updated.com"),
 			expectedOperatingSystemID:                      &operatingSystem2.ID,
-			expectedNetworkSecurityGroupPropagationDetails: &NetworkSecurityGroupPropagationDetails{NetworkSecurityGroupPropagationObjectStatus: &cwssaws.NetworkSecurityGroupPropagationObjectStatus{}},
+			expectedNetworkSecurityGroupPropagationDetails: &NetworkSecurityGroupPropagationDetails{NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{}},
 			expectedIpxeScript:                             cutil.GetPtr("updatedIpxe"),
 			expectAlwaysBootWithCustomIpxe:                 cutil.GetPtr(true),
 			expectEnablePhoneHome:                          cutil.GetPtr(true),
@@ -2712,8 +2861,6 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -2760,7 +2907,7 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 			Status:                   InstanceStatusPending,
 			CreatedBy:                user.ID,
 			NetworkSecurityGroupPropagationDetails: &NetworkSecurityGroupPropagationDetails{
-				NetworkSecurityGroupPropagationObjectStatus: &cwssaws.NetworkSecurityGroupPropagationObjectStatus{},
+				NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{},
 			},
 		},
 	)
@@ -2821,7 +2968,7 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 		expectedSiteID                                 *uuid.UUID
 		expectedInstanceTypeID                         *uuid.UUID
 		expectedNetworkSecurityGroupID                 *string
-		expectednetworkSecurityGroupPropagationDetails *cwssaws.NetworkSecurityGroupPropagationObjectStatus
+		expectednetworkSecurityGroupPropagationDetails *corev1.NetworkSecurityGroupPropagationObjectStatus
 		expectedVpcID                                  *uuid.UUID
 		expectedMachineID                              *string
 		expectedControllerInstanceID                   *uuid.UUID
@@ -3062,8 +3209,6 @@ func TestInstanceSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -3195,8 +3340,6 @@ func TestInstanceSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -3351,8 +3494,6 @@ func TestInstanceSQLDAO_UpdateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

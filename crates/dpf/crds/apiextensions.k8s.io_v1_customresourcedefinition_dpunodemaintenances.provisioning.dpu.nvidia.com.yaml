@@ -119,12 +119,13 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: only one of taint, noEffect, drain, customLabel, customAction,
-                    hold can be set
-                  rule: '(has(self.taint) ? 1 : 0) + (has(self.noEffect) ? 1 : 0)
-                    + (has(self.customLabel) ? 1 : 0) + (has(self.drain) ? 1 : 0)
-                    + (has(self.customAction) ? 1 : 0) + (has(self.hold) ? 1 : 0)
-                    == 1'
+                - message: exactly one of taint, noEffect=true, drain=true, non-empty
+                    customLabel, non-empty customAction, hold=true must be set
+                  rule: '(has(self.taint) ? 1 : 0) + ((has(self.noEffect) && self.noEffect)
+                    ? 1 : 0) + ((has(self.customLabel) && size(self.customLabel) >
+                    0) ? 1 : 0) + ((has(self.drain) && self.drain) ? 1 : 0) + ((has(self.customAction)
+                    && size(self.customAction) > 0) ? 1 : 0) + ((has(self.hold) &&
+                    self.hold) ? 1 : 0) == 1'
               requestor:
                 description: Requestor is the list of consumers for the maintenance.
                 items:

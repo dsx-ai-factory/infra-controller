@@ -17,12 +17,13 @@
 use std::ffi::{CStr, c_char};
 use std::net::{IpAddr, Ipv4Addr};
 
+use carbide_dhcp_common::VendorClass;
 use derive_builder::Builder;
 use mac_address::MacAddress;
+use rpc::forge as rpc;
 
 use crate::machine::Machine;
 use crate::metrics::set_service_healthy;
-use crate::vendor_class::VendorClass;
 use crate::{CONFIG, CarbideDhcpContext, cache, tls};
 
 /// Enumerates results of setting discovery options on the Builder
@@ -67,7 +68,7 @@ pub extern "C" fn discovery_builder_result_as_str(result: DiscoveryBuilderResult
 }
 
 #[derive(Debug, Clone, Builder)]
-pub struct Discovery {
+pub(super) struct Discovery {
     pub(crate) relay_address: Ipv4Addr,
     pub(crate) mac_address: MacAddress,
 
@@ -114,6 +115,8 @@ unsafe fn marshal_discovery_ffi<F>(
 where
     F: FnOnce(&mut DiscoveryBuilder) -> DiscoveryBuilderResult,
 {
+    // SAFETY: A non-null handle is the live, unreclaimed allocation returned by
+    // `discovery_builder_allocate` and is accessed exclusively for this call.
     unsafe {
         if builder.is_null() {
             return DiscoveryBuilderResult::InvalidDiscoveryBuilderPointer;
@@ -136,6 +139,8 @@ pub unsafe extern "C" fn discovery_set_client_system(
     ctx: *mut DiscoveryBuilderFFI,
     client_system: u16,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller supplies either null or the live, exclusively accessed
+    // builder handle required by `marshal_discovery_ffi`.
     unsafe {
         marshal_discovery_ffi(ctx, |builder| {
             builder.client_system(client_system);
@@ -155,6 +160,9 @@ pub unsafe extern "C" fn discovery_set_vendor_class(
     ctx: *mut DiscoveryBuilderFFI,
     vendor_class: *const libc::c_char,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller keeps `vendor_class` readable and NUL-terminated for
+    // this call. `ctx` is either null or a live builder accessed exclusively,
+    // and the string storage is disjoint from that builder.
     unsafe {
         let vendor_class = match CStr::from_ptr(vendor_class).to_str() {
             Ok(string) => string.to_owned(),
@@ -182,6 +190,8 @@ pub unsafe extern "C" fn discovery_set_link_select(
     ctx: *mut DiscoveryBuilderFFI,
     link_select: u32,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller supplies either null or the live, exclusively accessed
+    // builder handle required by `marshal_discovery_ffi`.
     unsafe {
         marshal_discovery_ffi(ctx, |builder| {
             builder.link_select_address(Ipv4Addr::from(link_select.to_be_bytes()));
@@ -195,6 +205,9 @@ pub unsafe extern "C" fn discovery_set_desired_address(
     ctx: *mut DiscoveryBuilderFFI,
     desired_address: *const libc::c_char,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller keeps `desired_address` readable and NUL-terminated
+    // for this call. `ctx` is either null or a live builder accessed
+    // exclusively, and the string storage is disjoint from that builder.
     unsafe {
         let desired_address = match CStr::from_ptr(desired_address).to_str() {
             Ok(string) => string.to_owned(),
@@ -230,6 +243,9 @@ pub unsafe extern "C" fn discovery_set_circuit_id(
     ctx: *mut DiscoveryBuilderFFI,
     circuit_id: *const libc::c_char,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller keeps `circuit_id` readable and NUL-terminated for
+    // this call. `ctx` is either null or a live builder accessed exclusively,
+    // and the string storage is disjoint from that builder.
     unsafe {
         let circuit_id = match CStr::from_ptr(circuit_id).to_str() {
             Ok(string) => string.to_owned(),
@@ -257,6 +273,9 @@ pub unsafe extern "C" fn discovery_set_remote_id(
     ctx: *mut DiscoveryBuilderFFI,
     remote_id: *const libc::c_char,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller keeps `remote_id` readable and NUL-terminated for this
+    // call. `ctx` is either null or a live builder accessed exclusively, and
+    // the string storage is disjoint from that builder.
     unsafe {
         let remote_id = match CStr::from_ptr(remote_id).to_str() {
             Ok(string) => string.to_owned(),
@@ -284,6 +303,8 @@ pub unsafe extern "C" fn discovery_set_relay(
     ctx: *mut DiscoveryBuilderFFI,
     relay: u32,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller supplies either null or the live, exclusively accessed
+    // builder handle required by `marshal_discovery_ffi`.
     unsafe {
         marshal_discovery_ffi(ctx, |builder| {
             builder.relay_address(Ipv4Addr::from(relay.to_be_bytes()));
@@ -292,32 +313,31 @@ pub unsafe extern "C" fn discovery_set_relay(
     }
 }
 
-/// Fill the `mac_address` portion of the Discovery object with an IP(v4) address
+/// Fill the `mac_address` portion of the discovery object with a MAC address.
 ///
 /// # Safety
 ///
-/// This function is only safe to be called on a `ctx` which is either a null pointer
-/// or a valid `DiscoveryBuilderFFI` object.
-///
-/// `raw_parts` and `size` must describe a valid memory holding 6 bytes which make
-/// up a MAC address.
+/// `ctx` must be null or a live `DiscoveryBuilderFFI` accessed exclusively for
+/// the call. Null pointers and lengths other than 6 are rejected. For a
+/// six-byte input, `mac_address_ptr` must identify readable storage that remains
+/// live for the call and does not overlap the builder.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn discovery_set_mac_address(
     ctx: *mut DiscoveryBuilderFFI,
     mac_address_ptr: *const u8,
     mac_address_len: usize,
 ) -> DiscoveryBuilderResult {
+    if mac_address_ptr.is_null() || mac_address_len != 6 {
+        return DiscoveryBuilderResult::InvalidMacAddress;
+    }
+
+    // SAFETY: The caller keeps the checked six-byte buffer readable for this
+    // call. `ctx` is either null or a live builder accessed exclusively, and
+    // the MAC storage is disjoint from that builder.
     unsafe {
-        // The contract of this function is that the pointer/length pairs fors a valid
-        // byte array, so we can use `slice_from_raw_parts` to convert.
-        // `.try_into()` will check the address is exactly 6 bytes long
-        let mac_address_bytes: [u8; 6] =
-            match std::slice::from_raw_parts(mac_address_ptr, mac_address_len).try_into() {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    return DiscoveryBuilderResult::InvalidMacAddress;
-                }
-            };
+        let mac_address_bytes: [u8; 6] = std::slice::from_raw_parts(mac_address_ptr, 6)
+            .try_into()
+            .expect("MAC address length checked above");
 
         let mac = MacAddress::new(mac_address_bytes);
         marshal_discovery_ffi(ctx, |builder| {
@@ -345,6 +365,9 @@ pub unsafe extern "C" fn discovery_fetch_machine(
         .unwrap() // TODO(ajf): don't unwrap
         .api_endpoint;
 
+    // SAFETY: The caller supplies `ctx` as null or a live builder accessed
+    // exclusively, and `machine_ptr_out` as null or a disjoint writable slot.
+    // The implementation handles both null cases before dereferencing them.
     unsafe { discovery_fetch_machine_at(ctx, machine_ptr_out, url) }
 }
 
@@ -353,6 +376,10 @@ unsafe fn discovery_fetch_machine_at(
     machine_ptr_out: *mut *mut Machine,
     url: &str,
 ) -> DiscoveryBuilderResult {
+    // SAFETY: The caller guarantees that every non-null pointer is live for the
+    // call, `ctx` is accessed exclusively, and the output slot is writable and
+    // disjoint from the builder. Success transfers Box ownership to the output
+    // slot's owner; `getpid` and SIGTERM are valid for the nested `kill` call.
     unsafe {
         if machine_ptr_out.is_null() {
             return DiscoveryBuilderResult::InvalidMachinePointer;
@@ -400,6 +427,7 @@ unsafe fn discovery_fetch_machine_at(
 
             let mut cache_entry_status = cache::CacheEntryStatus::DiscoveryFailing(0);
             if let Some(cache_entry) = cache::get(
+                rpc::AddressFamily::V4,
                 mac_address,
                 addr_for_dhcp,
                 &circuit_id,
@@ -451,7 +479,7 @@ unsafe fn discovery_fetch_machine_at(
                     // Since we don't have any API to invalidate the KEA cache we restart
                     // the process. This will happen very rarely, since Interface deletions
                     // in Forge are not common.
-                    // See https://nvbugspro.nvidia.com/bug/4792034 for details
+                    // See https://github.com/NVIDIA/infra-controller/issues/5557 for details
                     if let Some(last_invalidation) = machine.inner.last_invalidation_time.as_ref() {
                         let startup_time = CONFIG.read().unwrap().startup_time;
 
@@ -473,6 +501,7 @@ unsafe fn discovery_fetch_machine_at(
                     }
 
                     cache::put(
+                        rpc::AddressFamily::V4,
                         mac_address,
                         addr_for_dhcp,
                         circuit_id,
@@ -488,6 +517,7 @@ unsafe fn discovery_fetch_machine_at(
                         "Error getting info back from the machine discovery: mac={mac_address} addr={addr_for_dhcp} err={e_str} api_url={url}"
                     );
                     cache::put(
+                        rpc::AddressFamily::V4,
                         mac_address,
                         addr_for_dhcp,
                         circuit_id,
@@ -513,6 +543,8 @@ unsafe fn discovery_fetch_machine_at(
 /// unusable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn discovery_builder_free(ctx: *mut DiscoveryBuilderFFI) {
+    // SAFETY: The caller returns the still-owned allocation from
+    // `discovery_builder_allocate` exactly once after its final use.
     unsafe {
         drop(Box::from_raw(ctx as *mut DiscoveryBuilder));
     }
@@ -530,6 +562,8 @@ mod tests {
     // Basic test passing null pointers
     #[test]
     fn test_discovery_fetch_machine_handles_null() {
+        // SAFETY: Both null cases are explicitly supported; the second call's
+        // output points to a live, writable stack slot.
         unsafe {
             assert_eq!(
                 discovery_fetch_machine(null_mut(), null_mut()),
@@ -544,6 +578,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_discovery_set_mac_address_validates_input() {
+        let builder_ffi = discovery_builder_allocate();
+        let expected = [2, 66, 172, 20, 0, 42];
+
+        // SAFETY: The builder is a fresh allocation used exclusively by this
+        // test. Each non-null byte pointer refers to the live `expected` array.
+        let (null_result, wrong_length_result, valid_result) = unsafe {
+            (
+                discovery_set_mac_address(builder_ffi, std::ptr::null(), expected.len()),
+                discovery_set_mac_address(builder_ffi, expected.as_ptr(), expected.len() - 1),
+                discovery_set_mac_address(builder_ffi, expected.as_ptr(), expected.len()),
+            )
+        };
+
+        assert_eq!(null_result, DiscoveryBuilderResult::InvalidMacAddress);
+        assert_eq!(
+            wrong_length_result,
+            DiscoveryBuilderResult::InvalidMacAddress
+        );
+        assert_eq!(valid_result, DiscoveryBuilderResult::Success);
+
+        // SAFETY: The builder remains live and exclusively accessed. The
+        // closure supplies the required relay address, then verifies the MAC
+        // value written by the successful call.
+        let inspection_result = unsafe {
+            marshal_discovery_ffi(builder_ffi, |builder| {
+                builder.relay_address(Ipv4Addr::UNSPECIFIED);
+                assert_eq!(
+                    builder.build().unwrap().mac_address,
+                    MacAddress::new(expected)
+                );
+                DiscoveryBuilderResult::Success
+            })
+        };
+        assert_eq!(inspection_result, DiscoveryBuilderResult::Success);
+
+        // SAFETY: This is the original live builder allocation, freed exactly
+        // once after its last use.
+        unsafe {
+            discovery_builder_free(builder_ffi);
+        }
+    }
+
     // Test the success case of calling API server and test the cache.
     #[test]
     fn test_discovery_fetch_machine_success() {
@@ -554,6 +632,8 @@ mod tests {
 
         // Input packet, found by printing a real one
         let builder_ffi = discovery_builder_allocate();
+        // SAFETY: `builder_ffi` is a fresh, live allocation used exclusively by
+        // this test until its matching free.
         unsafe {
             marshal_discovery_ffi(builder_ffi, |builder| {
                 builder.relay_address([172, 20, 0, 11].into());
@@ -567,24 +647,33 @@ mod tests {
         let mut out = null_mut();
 
         // Test!
+        // SAFETY: The builder is live and `out` is a writable stack slot for the
+        // returned Machine pointer.
         let res = unsafe {
             discovery_fetch_machine_at(builder_ffi, &mut out, api_server.local_http_addr())
         };
         assert_eq!(res, DiscoveryBuilderResult::Success);
 
         // Check
+        // SAFETY: A successful fetch initialized `out` with a live Box-produced
+        // Machine pointer.
         let machine = unsafe { &*out };
         assert!(mock_api_server::matches_mock_response(machine));
         assert_eq!(
             api_server.calls_for(mock_api_server::ENDPOINT_DISCOVER_DHCP),
             1
         );
+        crate::machine::machine_free(out);
 
         // Call it again
+        // SAFETY: The builder remains live and `out` is again an empty, writable
+        // stack slot for the cached Machine pointer.
         let res = unsafe {
             discovery_fetch_machine_at(builder_ffi, &mut out, api_server.local_http_addr())
         };
         // .. still succeeds and is correct
+        // SAFETY: A successful cached fetch initialized `out` with a new, live
+        // Box-produced Machine pointer.
         let machine = unsafe { &*out };
         assert_eq!(res, DiscoveryBuilderResult::Success);
         assert!(mock_api_server::matches_mock_response(machine));
@@ -593,8 +682,11 @@ mod tests {
             api_server.calls_for(mock_api_server::ENDPOINT_DISCOVER_DHCP),
             1
         );
+        crate::machine::machine_free(out);
 
         // Cleanup
+        // SAFETY: This is the original live builder allocation and is freed
+        // exactly once after its last use.
         unsafe {
             discovery_builder_free(builder_ffi);
         }
@@ -631,6 +723,8 @@ mod tests {
 
     fn multi_threading_test_inner(last_mac: u8, url: &str) {
         let builder_ffi = discovery_builder_allocate();
+        // SAFETY: This thread owns its fresh builder exclusively through the
+        // matching free below.
         unsafe {
             marshal_discovery_ffi(builder_ffi, |builder| {
                 builder.relay_address([172, 20, 0, 13].into());
@@ -640,10 +734,17 @@ mod tests {
             });
         }
         let mut out = null_mut();
+        // SAFETY: The builder is live, `url` outlives the call, and `out` is a
+        // writable stack slot.
         let res = unsafe { discovery_fetch_machine_at(builder_ffi, &mut out, url) };
         assert_eq!(res, DiscoveryBuilderResult::Success);
+        // SAFETY: The successful fetch stored a live Box-produced Machine in
+        // `out`.
         let machine = unsafe { &*out };
         assert!(mock_api_server::matches_mock_response(machine));
+        crate::machine::machine_free(out);
+        // SAFETY: This is the original live builder allocation, freed once after
+        // its last use.
         unsafe {
             discovery_builder_free(builder_ffi);
         }
@@ -661,11 +762,15 @@ mod tests {
         let builder_ffi = discovery_builder_allocate();
         let desired_address = CString::new("not-an-ip").unwrap();
 
+        // SAFETY: The builder is live and the local CString remains valid and
+        // NUL-terminated for the call.
         let result =
             unsafe { discovery_set_desired_address(builder_ffi, desired_address.as_ptr()) };
 
         assert_eq!(result, DiscoveryBuilderResult::InvalidDesiredAddress);
 
+        // SAFETY: This is the original live builder allocation, freed exactly
+        // once after its last use.
         unsafe {
             discovery_builder_free(builder_ffi);
         }
@@ -679,6 +784,8 @@ mod tests {
 
         // Input packet, found by printing a real one
         let builder_ffi = discovery_builder_allocate();
+        // SAFETY: `builder_ffi` is a fresh, live allocation used exclusively by
+        // this test until its matching free.
         unsafe {
             marshal_discovery_ffi(builder_ffi, |builder| {
                 builder.relay_address([172, 20, 0, 12].into());
@@ -693,6 +800,8 @@ mod tests {
 
         // Test after introducing a failure in the API.
         api_server.set_inject_failure(true);
+        // SAFETY: The builder is live and `out` is a writable stack slot; this
+        // failure path leaves it null.
         let res = unsafe {
             discovery_fetch_machine_at(builder_ffi, &mut out, api_server.local_http_addr())
         };
@@ -709,6 +818,8 @@ mod tests {
 
         // If we fix the API, and call again, the cache entry should be reset.
         api_server.set_inject_failure(false);
+        // SAFETY: The builder remains live and `out` is a writable stack slot
+        // for the successful retry.
         let res = unsafe {
             discovery_fetch_machine_at(builder_ffi, &mut out, api_server.local_http_addr())
         };
@@ -717,13 +828,18 @@ mod tests {
         // TODO: again it would be good to verify the CacheEntryStatus of the CacheEntry
 
         // Check
+        // SAFETY: The successful retry stored a live Box-produced Machine in
+        // `out`.
         let machine = unsafe { &*out };
         assert!(mock_api_server::matches_mock_response(machine));
         assert_eq!(
             api_server.calls_for(mock_api_server::ENDPOINT_DISCOVER_DHCP),
             2,
         );
+        crate::machine::machine_free(out);
 
+        // SAFETY: This is the original live builder allocation, freed exactly
+        // once after its last use.
         unsafe {
             discovery_builder_free(builder_ffi);
         }
@@ -737,6 +853,8 @@ mod tests {
 
         // Input packet, found by printing a real one
         let builder_ffi = discovery_builder_allocate();
+        // SAFETY: `builder_ffi` is a fresh, live allocation used exclusively by
+        // this test until its matching free.
         unsafe {
             marshal_discovery_ffi(builder_ffi, |builder| {
                 builder.relay_address([172, 20, 0, 14].into());
@@ -752,6 +870,8 @@ mod tests {
         // Inject a failure to the API server, and test multiple discovery_fetch_machine_at calls.
         api_server.set_inject_failure(true);
         for attempt in 1..=cache::MAX_DISCOVERY_FAILS {
+            // SAFETY: The builder remains live and `out` is a writable stack
+            // slot; every injected failure leaves it null.
             let res = unsafe {
                 discovery_fetch_machine_at(builder_ffi, &mut out, api_server.local_http_addr())
             };
@@ -766,6 +886,8 @@ mod tests {
         }
 
         // Now there should be no more calls to the API, since we've reached the max allowed number of fails.
+        // SAFETY: The builder remains live and `out` is a writable stack slot;
+        // the terminal negative-cache result leaves it null.
         let res = unsafe {
             discovery_fetch_machine_at(builder_ffi, &mut out, api_server.local_http_addr())
         };
@@ -781,6 +903,8 @@ mod tests {
         // TODO: we should test that the cache entry is removed after 5 mins, but I don't want to add
         // a sleep for that long.
 
+        // SAFETY: This is the original live builder allocation, freed exactly
+        // once after its last use.
         unsafe {
             discovery_builder_free(builder_ffi);
         }

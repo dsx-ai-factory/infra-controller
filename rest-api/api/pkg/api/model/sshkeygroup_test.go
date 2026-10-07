@@ -96,7 +96,7 @@ func TestAPISSHKeyGroupNew(t *testing.T) {
 			TenantOrg:           dbskg.Org,
 			SiteID:              dbsgas[0].SiteID,
 			EnableSerialConsole: true,
-			Config:              map[string]interface{}{},
+			Config:              cdbm.TenantSiteConfig{},
 			Created:             cdb.GetCurTime(),
 			Updated:             cdb.GetCurTime(),
 		},

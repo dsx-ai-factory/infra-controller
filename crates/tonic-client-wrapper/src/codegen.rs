@@ -14,43 +14,58 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! Descriptor-driven code generation for tonic client wrappers.
+//!
+//! This module is a downstream code-generation backend: it does not parse
+//! `.proto` files or invoke `protoc`. [`CodeGenerator`] borrows a complete
+//! [`FileDescriptorSet`] so it can resolve request and response types across
+//! imports. [`Config::root_files`] independently selects the protobuf files
+//! whose services receive wrapper methods and convenience converters.
+
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use carbide_proto_compiler::ExternPathSearchIndex;
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::{LexError, TokenStream};
 use prost_types::field_descriptor_proto::Label;
-use prost_types::{FileDescriptorProto, MethodDescriptorProto};
+use prost_types::{FileDescriptorProto, FileDescriptorSet, MethodDescriptorProto};
 use quote::{TokenStreamExt, quote};
 
-use crate::utils::{base_types, field_is_optional, resolve_field_primitive_type};
+use crate::utils::{base_type, field_is_optional, resolve_field_primitive_type};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Invalid token for {target}: {error}")]
+    #[error("invalid token for {target}: {error}")]
     InvalidToken {
         target: String,
         error: proc_macro2::LexError,
     },
     #[error(transparent)]
     Lex(#[from] LexError),
-    #[error("Invalid protobuf type: {0}")]
+    #[error("invalid protobuf type: {0}")]
     InvalidProtobufType(String),
+    #[error("root protobuf file not found in descriptor set: {0}")]
+    MissingRootFile(String),
+    #[error("duplicate root protobuf file: {0}")]
+    DuplicateRootFile(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("Syntax error in generated code: {0}")]
+    #[error("syntax error in generated code: {0}")]
     Syntax(#[from] syn::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Configures code generation of the tonic client wrapper
-pub struct Config {
-    /// The name of the generated tonic client wrapper
+/// Configures code generation of a tonic client wrapper.
+pub struct Config<'a> {
+    /// The name of the generated tonic client wrapper.
     pub wrapper_name: String,
-    /// The fully qualified type of the tonic client this wrapper will be calling
+    /// The fully qualified type of the tonic client this wrapper will call.
     pub inner_rpc_client_type: String,
 
     /// The module path of the generated types within your crate, not including the service name,
@@ -61,30 +76,42 @@ pub struct Config {
     /// use `"rpc::protos"` here.
     pub generated_types_path_within_crate: String,
 
-    /// The input protobuf files to generate wrappers from
-    pub proto_files: Vec<String>,
+    /// Service-selection roots, not protobuf compilation inputs.
+    ///
+    /// Each value must exactly match a [`FileDescriptorProto::name`] in the
+    /// shared descriptor set, such as `forge.proto`. The generator uses the
+    /// complete descriptor set for cross-file type lookup, but emits services
+    /// and converters only for these files.
+    pub root_files: Vec<String>,
 
-    /// Include paths for types referenced by `proto_files`:w
-    pub include_paths: Vec<String>,
-
-    /// List of protobuf types to override with specific rust types. This should mirror any types you are customizing via [`tonic_prost_build::Builder::extern_path`] to make the generated code match.
-    pub extern_paths: Vec<(ProtobufType, RustType)>,
+    /// List of protobuf types to override with specific Rust types. This should mirror any types
+    /// customized through `tonic_prost_build::Builder::extern_path` so the generated code matches.
+    pub extern_paths: ExternPathSearchIndex<'a>,
 }
 
 pub type ProtobufType = &'static str;
-pub type RustType = &'static str;
+pub type RustType = syn::Type;
 
-pub struct CodeGenerator {
+/// A wrapper backend borrowing a complete protobuf schema.
+///
+/// The borrow keeps selected files and the cross-file message index tied to the
+/// source [`FileDescriptorSet`] for the generator's lifetime.
+pub struct CodeGenerator<'a> {
     inner_rpc_client_type: TokenStream,
     wrapper_name: TokenStream,
-    proto_fds: Vec<FileDescriptorProto>,
+    root_files: Vec<&'a FileDescriptorProto>,
     generated_types_path_within_crate: TokenStream,
-    message_types: HashMap<String, MessageWithPackage>,
-    extern_paths: HashMap<ProtobufType, RustType>,
+    message_types: HashMap<String, MessageWithPackage<'a>>,
+    extern_paths: ExternPathSearchIndex<'a>,
 }
 
-impl CodeGenerator {
-    pub fn new(config: Config) -> Result<Self> {
+impl<'a> CodeGenerator<'a> {
+    /// Creates a backend from wrapper settings and a complete descriptor set.
+    ///
+    /// [`Config::root_files`] chooses service roots within `descriptor_set`;
+    /// imported and otherwise unselected files remain available for resolving
+    /// method types.
+    pub fn new(config: Config<'a>, descriptor_set: &'a FileDescriptorSet) -> Result<Self> {
         let inner_rpc_client_type =
             config
                 .inner_rpc_client_type
@@ -108,49 +135,72 @@ impl CodeGenerator {
                 error,
             })?;
 
-        let proto_fds = tonic_prost_build::Config::new()
-            .protoc_arg("--experimental_allow_proto3_optional")
-            .load_fds(
-                config.proto_files.as_slice(),
-                config.include_paths.as_slice(),
-            )?
-            .file;
+        // Resolve service-selection roots by their logical descriptor names.
+        let mut selected_root_names = HashSet::new();
+        let root_files = config
+            .root_files
+            .iter()
+            .map(|root_file| {
+                if !selected_root_names.insert(root_file.as_str()) {
+                    return Err(Error::DuplicateRootFile(root_file.clone()));
+                }
 
-        // Make an index of the messages by fully-qualified name, so we can refer to them later
-        let message_types: HashMap<String, MessageWithPackage> = proto_fds
+                let mut matches = descriptor_set
+                    .file
+                    .iter()
+                    .filter(|file| file.name() == root_file.as_str());
+                let root = matches
+                    .next()
+                    .ok_or_else(|| Error::MissingRootFile(root_file.clone()))?;
+                if matches.next().is_some() {
+                    return Err(Error::DuplicateRootFile(root_file.clone()));
+                }
+                Ok(root)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Index messages from the complete descriptor set, not only the service
+        // roots, so methods may use types declared in imported files.
+        let message_types: HashMap<String, MessageWithPackage<'_>> = descriptor_set
+            .file
             .iter()
             .flat_map(|fd| {
                 fd.message_type.iter().map(|message| {
                     let message_with_package = MessageWithPackage {
-                        message: message.clone(),
-                        package: fd.package.clone(),
+                        message,
+                        package: fd.package.as_deref(),
                     };
                     (message_with_package.qualified_name(), message_with_package)
                 })
             })
             .collect();
 
-        let extern_paths = config.extern_paths.into_iter().collect();
-
         Ok(Self {
             inner_rpc_client_type,
             wrapper_name,
-            proto_fds,
+            root_files,
             generated_types_path_within_crate,
             message_types,
-            extern_paths,
+            extern_paths: config.extern_paths,
         })
     }
 
-    /// Write the tonic client wrapper out to a file.
+    /// Writes wrapper methods for services in the selected root files.
     pub fn write_rpc_client_wrapper<P: AsRef<Path>>(&self, out: P) -> Result<()> {
         let mut wrapper_methods = TokenStream::new();
 
-        self.proto_fds
+        let mut labeled_methods = Vec::new();
+        for fd in &self.root_files {
+            for svc in &fd.service {
+                let service_label = svc.name().to_snake_case();
+                for method in &svc.method {
+                    labeled_methods.push((service_label.clone(), method));
+                }
+            }
+        }
+        labeled_methods
             .iter()
-            .flat_map(|fd| &fd.service)
-            .flat_map(|svc| &svc.method)
-            .map(|m| self.make_rpc_wrapper_method(m))
+            .map(|(service_label, m)| self.make_rpc_wrapper_method(service_label, m))
             .collect::<Result<Vec<_>>>()? // fail if any of the wrappers failed
             .into_iter()
             .for_each(|m| wrapper_methods.append_all(m));
@@ -223,8 +273,8 @@ impl CodeGenerator {
         Ok(())
     }
 
-    /// Write convience `From<...>` implementations for each type referenced by a gRPC method in the
-    /// proto files.
+    /// Writes convenience `From<...>` implementations for request types used by
+    /// gRPC methods in the selected root files.
     ///
     /// A converter will be written for a type if:
     ///
@@ -234,12 +284,13 @@ impl CodeGenerator {
     /// If the type has zero fields, a converter will be generated from the empty tuple (`()`).
     ///
     /// If the type has one field, a converter will be generated from any type which is convertible
-    /// to that single field (ie. `From<T: Into<SomeField>>`)
+    /// to that single field (i.e., `From<T: Into<SomeField>>`).
     pub fn write_rpc_convenience_converters<P: AsRef<Path>>(&self, out: P) -> Result<()> {
-        // Grab the input type of every method from every service in every file. Use a HashSet so we
-        // don't create the same converter twice
+        // Collect inputs only from selected services, then resolve them through
+        // the complete message index. Deduplication avoids duplicate impls when
+        // several methods use the same request type.
         let method_inputs_type_strings: HashSet<&String> = self
-            .proto_fds
+            .root_files
             .iter()
             .flat_map(|fd| &fd.service)
             .flat_map(|service| &service.method)
@@ -268,7 +319,7 @@ impl CodeGenerator {
 
     fn make_convenience_converter(
         &self,
-        message_with_package: &MessageWithPackage,
+        message_with_package: &MessageWithPackage<'_>,
     ) -> Result<Option<TokenStream>> {
         let message = &message_with_package.message;
         let qualified_name = message_with_package.qualified_name();
@@ -278,7 +329,7 @@ impl CodeGenerator {
             return Ok(None);
         }
 
-        if base_types.contains_key(&qualified_name) {
+        if base_type(&qualified_name).is_some() {
             // Except we can't create convenience converters for primitives
             return Ok(None);
         }
@@ -301,9 +352,8 @@ impl CodeGenerator {
         // Define the template values used in the generated code...
 
         // The type of the message itself being converted *to*
-        let message_type: TokenStream = self
-            .convert_protobuf_type_to_rust_type(&message_with_package.qualified_name())?
-            .parse()?;
+        let message_type =
+            self.convert_protobuf_type_to_rust_type(&message_with_package.qualified_name())?;
 
         // The name of the single field we're going to be populating from the From<> type
         let field_name = if let Some(oneof_index) = field.oneof_index {
@@ -316,8 +366,8 @@ impl CodeGenerator {
 
         // The type of the single field
         let field_type: TokenStream = {
-            let type_str = if let Some(t) = resolve_field_primitive_type(field) {
-                t
+            let typename = if let Some(t) = resolve_field_primitive_type(field) {
+                Cow::Owned(t)
             } else if let Some(type_name) = &field.type_name {
                 self.convert_protobuf_type_to_rust_type(type_name)?
             } else {
@@ -326,42 +376,37 @@ impl CodeGenerator {
             };
 
             if is_repeated {
-                format!("Vec<{type_str}>").parse()?
+                quote! { Vec<#typename> }
             } else {
-                type_str.parse()?
+                quote! { #typename }
             }
         };
 
         // The value we're setting the single field to
-        let value: TokenStream =
-            if field.oneof_index.is_some() && field.proto3_optional.is_none_or(|o| !o) {
-                // If it's a `oneof`, it's going to be seen by rust as an Enum with an associated
-                // value. The enum package is going to be the message name in snake-case, the enum's
-                // type is the name of the oneof field, and each arm of the enum is going to be one
-                // of the oneof arms (which we've ensured there is only one.)
-                //
-                // Note about proto3_optional: If proto3_optional is set, it generally means that
-                // this is a "synthetic" oneof, which is a sort of hack used by prost-types to make
-                // the field show up as optional for proto3. We *don't* want to treat these cases as
-                // enums, because they don't show up in rust as real enums.
-                self.convert_protobuf_type_to_rust_type(&format!(
-                    "{}.{}",
-                    message_with_package.qualified_name(), // this will be snake_cased
-                    message.oneof_decl[field.oneof_index() as usize].name() // this will be CamelCased
-                ))
-                .map(|s| {
-                    format!(
-                        "Some({}::{}(t.into()))",
-                        s,
-                        field.name().to_upper_camel_case()
-                    )
-                })?
-                .parse()?
-            } else if is_optional {
-                "Some(t.into())".parse()?
-            } else {
-                "t.into()".parse()?
-            };
+        let value = if field.oneof_index.is_some() && field.proto3_optional.is_none_or(|o| !o) {
+            // If it's a `oneof`, it's going to be seen by rust as an Enum with an associated
+            // value. The enum package is going to be the message name in snake-case, the enum's
+            // type is the name of the oneof field, and each arm of the enum is going to be one
+            // of the oneof arms (which we've ensured there is only one.)
+            //
+            // Note about proto3_optional: If proto3_optional is set, it generally means that
+            // this is a "synthetic" oneof, which is a sort of hack used by prost-types to make
+            // the field show up as optional for proto3. We *don't* want to treat these cases as
+            // enums, because they don't show up in rust as real enums.
+            self.convert_protobuf_type_to_rust_type(&format!(
+                "{}.{}",
+                message_with_package.qualified_name(), // this will be snake_cased
+                message.oneof_decl[field.oneof_index() as usize].name()  // this will be CamelCased
+            ))
+            .and_then(|s| {
+                let name: syn::TypePath = syn::parse_str(&field.name().to_upper_camel_case())?;
+                Ok(quote! { Some(#s::#name(t.into())) })
+            })?
+        } else if is_optional {
+            quote! { Some(t.into()) }
+        } else {
+            quote! { t.into() }
+        };
 
         Ok(Some(quote! {
             impl<T: Into<#field_type>> From<T> for #message_type {
@@ -376,11 +421,10 @@ impl CodeGenerator {
 
     fn make_convenience_converter_from_void(
         &self,
-        message_with_package: &MessageWithPackage,
+        message_with_package: &MessageWithPackage<'_>,
     ) -> Result<TokenStream> {
-        let message_type: TokenStream = self
-            .convert_protobuf_type_to_rust_type(&message_with_package.qualified_name())?
-            .parse()?;
+        let message_type =
+            self.convert_protobuf_type_to_rust_type(&message_with_package.qualified_name())?;
 
         Ok(quote! {
             impl From<()> for #message_type {
@@ -391,13 +435,19 @@ impl CodeGenerator {
         })
     }
 
-    fn make_rpc_wrapper_method(&self, method: &MethodDescriptorProto) -> Result<TokenStream> {
+    fn make_rpc_wrapper_method(
+        &self,
+        service_label: &str,
+        method: &MethodDescriptorProto,
+    ) -> Result<TokenStream> {
         let method_name: TokenStream = method.name().to_snake_case().parse()?;
-        let input_type_str = self.convert_protobuf_type_to_rust_type(method.input_type())?;
-        let input_type: TokenStream = input_type_str.parse()?;
-        let output_type: TokenStream = self
-            .convert_protobuf_type_to_rust_type(method.output_type())?
-            .parse()?;
+        // Compile-time literals from the proto: the bounded `backend` and
+        // `operation` labels for the outbound-call RED metric.
+        let operation_label = method.name().to_snake_case();
+        let input_type = self.convert_protobuf_type_to_rust_type(method.input_type())?;
+        let output_type = self.convert_protobuf_type_to_rust_type(method.output_type())?;
+        let input_is_unit =
+            matches!(input_type.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty());
 
         let is_client_streaming = method.client_streaming.unwrap_or(false);
         let is_server_streaming = method.server_streaming.unwrap_or(false);
@@ -410,7 +460,9 @@ impl CodeGenerator {
                     where
                         S: tonic::IntoStreamingRequest<Message = #input_type>,
                     {
-                        self.connection().await?.#method_name(request).await
+                        ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                            self.connection().await?.#method_name(request).await
+                        }).await
                     }
                 })
             }
@@ -421,27 +473,31 @@ impl CodeGenerator {
                     where
                         S: tonic::IntoStreamingRequest<Message = #input_type>,
                     {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .#method_name(request)
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                            Ok(self
+                                .connection()
+                                .await?
+                                .#method_name(request)
+                                .await?
+                                .into_inner())
+                        }).await
                     }
                 })
             }
             (false, true) => {
                 // Server streaming.
-                let token_stream = if input_type_str == "()" {
+                let token_stream = if input_is_unit {
                     quote! {
                         pub async fn #method_name(&self) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
-                            Ok(self
-                                .connection()
-                                .await?
-                                .#method_name(tonic::Request::new(()))
-                                .await?
-                                .into_inner())
-                        }
+                                ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                    Ok(self
+                                        .connection()
+                                        .await?
+                                        .#method_name(tonic::Request::new(()))
+                                        .await?
+                                        .into_inner())
+                                }).await
+                            }
                     }
                 } else {
                     let has_zero_fields = method
@@ -453,24 +509,28 @@ impl CodeGenerator {
                     if has_zero_fields {
                         quote! {
                             pub async fn #method_name(&self) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
-                                Ok(self
-                                    .connection()
-                                    .await?
-                                    .#method_name(tonic::Request::new(#input_type {}))
-                                    .await?
-                                    .into_inner())
-                            }
+                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                        Ok(self
+                                            .connection()
+                                            .await?
+                                            .#method_name(tonic::Request::new(#input_type {}))
+                                            .await?
+                                            .into_inner())
+                                    }).await
+                                }
                         }
                     } else {
                         quote! {
                             pub async fn #method_name<T: Into<#input_type>>(&self, request: T) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
-                                Ok(self
-                                    .connection()
-                                    .await?
-                                    .#method_name(tonic::Request::new(request.into()))
-                                    .await?
-                                    .into_inner())
-                            }
+                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                        Ok(self
+                                            .connection()
+                                            .await?
+                                            .#method_name(tonic::Request::new(request.into()))
+                                            .await?
+                                            .into_inner())
+                                    }).await
+                                }
                         }
                     }
                 };
@@ -478,16 +538,18 @@ impl CodeGenerator {
             }
             (false, false) => {
                 // Unary - your existing code.
-                let token_stream = if input_type_str == "()" {
+                let token_stream = if input_is_unit {
                     quote! {
                         pub async fn #method_name(&self) -> Result<#output_type, tonic::Status> {
-                            Ok(self
-                                .connection()
-                                .await?
-                                .#method_name(tonic::Request::new(()))
-                                .await?
-                                .into_inner())
-                        }
+                                ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                    Ok(self
+                                        .connection()
+                                        .await?
+                                        .#method_name(tonic::Request::new(()))
+                                        .await?
+                                        .into_inner())
+                                }).await
+                            }
                     }
                 } else {
                     let has_zero_fields = method
@@ -499,24 +561,28 @@ impl CodeGenerator {
                     if has_zero_fields {
                         quote! {
                             pub async fn #method_name(&self) -> Result<#output_type, tonic::Status> {
-                                Ok(self
-                                    .connection()
-                                    .await?
-                                    .#method_name(tonic::Request::new(#input_type {}))
-                                    .await?
-                                    .into_inner())
-                            }
+                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                        Ok(self
+                                            .connection()
+                                            .await?
+                                            .#method_name(tonic::Request::new(#input_type {}))
+                                            .await?
+                                            .into_inner())
+                                    }).await
+                                }
                         }
                     } else {
                         quote! {
                             pub async fn #method_name<T: Into<#input_type>>(&self, request: T) -> Result<#output_type, tonic::Status> {
-                                Ok(self
-                                    .connection()
-                                    .await?
-                                    .#method_name(tonic::Request::new(request.into()))
-                                    .await?
-                                    .into_inner())
-                            }
+                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                        Ok(self
+                                            .connection()
+                                            .await?
+                                            .#method_name(tonic::Request::new(request.into()))
+                                            .await?
+                                            .into_inner())
+                                    }).await
+                                }
                         }
                     }
                 };
@@ -538,13 +604,16 @@ impl CodeGenerator {
     /// - Joining the components with `::` instead of `.`
     /// - Prefixing the type with `crate::<generated_types_path_within_crate>::`, to make it a fully
     ///   qualified path.
-    pub(crate) fn convert_protobuf_type_to_rust_type(&self, t: &str) -> Result<String> {
-        if let Some(base_type) = base_types.get(t) {
-            return Ok(base_type.to_owned());
+    pub(crate) fn convert_protobuf_type_to_rust_type(
+        &'a self,
+        t: &str,
+    ) -> Result<Cow<'a, syn::Type>> {
+        if let Some(base_type) = base_type(t) {
+            return Ok(Cow::Owned(base_type));
         }
 
         if let Some(extern_type) = self.extern_paths.get(t) {
-            return Ok(extern_type.to_string());
+            return Ok(Cow::Borrowed(extern_type));
         }
 
         let components = t
@@ -566,20 +635,20 @@ impl CodeGenerator {
             return Err(Error::InvalidProtobufType(t.to_string()));
         };
 
-        Ok(format!(
+        Ok(Cow::Owned(syn::parse_str(&format!(
             "crate::{}::{}",
             self.generated_types_path_within_crate, result
-        ))
+        ))?))
     }
 }
 
 #[derive(Debug)]
-struct MessageWithPackage {
-    package: Option<String>,
-    message: prost_types::DescriptorProto,
+struct MessageWithPackage<'a> {
+    package: Option<&'a str>,
+    message: &'a prost_types::DescriptorProto,
 }
 
-impl MessageWithPackage {
+impl MessageWithPackage<'_> {
     fn qualified_name(&self) -> String {
         if let Some(package) = &self.package {
             format!(".{}.{}", package, self.message.name())
@@ -611,34 +680,213 @@ fn write_token_stream_if_not_up_to_date<T: AsRef<Path>>(
 mod tests {
     use super::*;
 
-    fn test_generator(proto_file: &str) -> CodeGenerator {
+    struct TestExternPaths(Vec<(String, syn::Type)>);
+
+    impl TestExternPaths {
+        fn index(&self) -> ExternPathSearchIndex<'_> {
+            self.0
+                .iter()
+                .map(|(protobuf_type, rust_type)| (protobuf_type.as_str(), rust_type))
+                .collect()
+        }
+    }
+
+    fn descriptor_set(proto_files: &[(&str, &str)]) -> FileDescriptorSet {
         let proto_dir = temp_dir::TempDir::new().expect("Could not create temporary directory");
-        fs::write(proto_dir.path().join("test.proto"), proto_file)
-            .expect("Could not write test proto file");
-        let cfg = Config {
+        let proto_paths = proto_files
+            .iter()
+            .map(|(name, contents)| {
+                let path = proto_dir.path().join(name);
+                fs::write(&path, contents).expect("Could not write test proto file");
+                path
+            })
+            .collect::<Vec<_>>();
+
+        tonic_prost_build::Config::new()
+            .protoc_arg("--experimental_allow_proto3_optional")
+            .load_fds(proto_paths.as_slice(), &[proto_dir.path()])
+            .expect("Could not compile test descriptors")
+    }
+
+    fn extern_paths() -> TestExternPaths {
+        TestExternPaths(vec![(
+            ".ExternType".to_owned(),
+            syn::parse_quote!(crate::CustomExternType),
+        )])
+    }
+
+    fn test_config<'a>(root_files: Vec<String>, extern_paths: &'a TestExternPaths) -> Config<'a> {
+        Config {
             wrapper_name: "TestWrapper".to_string(),
             inner_rpc_client_type: "TestInnerClient".to_string(),
             generated_types_path_within_crate: "test".to_string(),
-            proto_files: vec![
-                proto_dir
-                    .path()
-                    .join("test.proto")
-                    .to_string_lossy()
-                    .to_string(),
-            ],
-            include_paths: vec![proto_dir.path().to_string_lossy().to_string()],
-            extern_paths: vec![(".ExternType", "crate::CustomExternType")],
-        };
+            root_files,
+            extern_paths: extern_paths.index(),
+        }
+    }
 
-        CodeGenerator::new(cfg).expect("Could not build CodeGenerator")
+    fn test_generator<'a>(
+        descriptor_set: &'a FileDescriptorSet,
+        extern_paths: &'a TestExternPaths,
+    ) -> CodeGenerator<'a> {
+        CodeGenerator::new(
+            test_config(vec!["test.proto".to_string()], extern_paths),
+            descriptor_set,
+        )
+        .expect("Could not build CodeGenerator")
+    }
+
+    #[test]
+    fn validates_root_files() {
+        let descriptor_set =
+            descriptor_set(&[("test.proto", include_str!("test_fixtures/test.proto"))]);
+
+        let extern_paths = extern_paths();
+        match CodeGenerator::new(
+            test_config(vec!["missing.proto".to_string()], &extern_paths),
+            &descriptor_set,
+        ) {
+            Err(Error::MissingRootFile(root_file)) => assert_eq!(root_file, "missing.proto"),
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("missing root file was accepted"),
+        }
+
+        match CodeGenerator::new(
+            test_config(
+                vec!["test.proto".to_string(), "test.proto".to_string()],
+                &extern_paths,
+            ),
+            &descriptor_set,
+        ) {
+            Err(Error::DuplicateRootFile(root_file)) => assert_eq!(root_file, "test.proto"),
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("duplicate configured root file was accepted"),
+        }
+
+        let mut duplicate_descriptor_set = descriptor_set.clone();
+        duplicate_descriptor_set
+            .file
+            .push(descriptor_set.file[0].clone());
+        match CodeGenerator::new(
+            test_config(vec!["test.proto".to_string()], &extern_paths),
+            &duplicate_descriptor_set,
+        ) {
+            Err(Error::DuplicateRootFile(root_file)) => assert_eq!(root_file, "test.proto"),
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("duplicate descriptor root file was accepted"),
+        }
+    }
+
+    #[test]
+    fn selected_roots_isolate_services_but_share_message_types() {
+        let descriptor_set = descriptor_set(&[
+            (
+                "selected.proto",
+                r#"
+                    syntax = "proto3";
+                    package selected;
+                    import "shared.proto";
+
+                    service SelectedService {
+                      rpc SelectedRpc(shared.SharedRequest) returns (SelectedResponse);
+                    }
+
+                    message SelectedResponse {}
+                "#,
+            ),
+            (
+                "shared.proto",
+                r#"
+                    syntax = "proto3";
+                    package shared;
+
+                    service ImportedService {
+                      rpc ImportedRpc(SharedRequest) returns (SharedResponse);
+                    }
+
+                    message SharedRequest { string value = 1; }
+                    message SharedResponse {}
+                "#,
+            ),
+            (
+                "unrelated.proto",
+                r#"
+                    syntax = "proto3";
+                    package unrelated;
+
+                    service UnrelatedService {
+                      rpc UnrelatedRpc(UnrelatedRequest) returns (UnrelatedResponse);
+                    }
+
+                    message UnrelatedRequest {}
+                    message UnrelatedResponse {}
+                "#,
+            ),
+        ]);
+        let extern_paths = extern_paths();
+        let generator = CodeGenerator::new(
+            test_config(vec!["selected.proto".to_string()], &extern_paths),
+            &descriptor_set,
+        )
+        .expect("Could not build CodeGenerator");
+        let output_dir = temp_dir::TempDir::new().expect("Could not create temporary directory");
+        let wrapper_path = output_dir.path().join("wrapper.rs");
+        let converters_path = output_dir.path().join("converters.rs");
+
+        generator
+            .write_rpc_client_wrapper(&wrapper_path)
+            .expect("Could not generate wrapper");
+        generator
+            .write_rpc_convenience_converters(&converters_path)
+            .expect("Could not generate converters");
+
+        let wrapper = fs::read_to_string(wrapper_path).expect("Could not read generated wrapper");
+        assert!(wrapper.contains("pub async fn selected_rpc"));
+        assert!(!wrapper.contains("pub async fn imported_rpc"));
+        assert!(!wrapper.contains("pub async fn unrelated_rpc"));
+
+        let converters =
+            fs::read_to_string(converters_path).expect("Could not read generated converters");
+        assert!(converters.contains("crate::test::shared::SharedRequest"));
+        assert!(!converters.contains("crate::test::unrelated::UnrelatedRequest"));
+    }
+
+    #[test]
+    fn generated_files_match_golden() {
+        let extern_paths = extern_paths();
+        let descriptor_set =
+            descriptor_set(&[("test.proto", include_str!("test_fixtures/golden.proto"))]);
+        let generator = test_generator(&descriptor_set, &extern_paths);
+        let output_dir = temp_dir::TempDir::new().expect("Could not create temporary directory");
+        let wrapper_path = output_dir.path().join("wrapper.rs");
+        let converters_path = output_dir.path().join("converters.rs");
+
+        generator
+            .write_rpc_client_wrapper(&wrapper_path)
+            .expect("Could not generate wrapper");
+        generator
+            .write_rpc_convenience_converters(&converters_path)
+            .expect("Could not generate converters");
+
+        assert_eq!(
+            fs::read_to_string(wrapper_path).expect("Could not read generated wrapper"),
+            include_str!("test_fixtures/golden_wrapper.rs")
+        );
+        assert_eq!(
+            fs::read_to_string(converters_path).expect("Could not read generated converters"),
+            include_str!("test_fixtures/golden_converters.rs")
+        );
     }
 
     #[test]
     fn test_rpc_wrapper_method() {
-        let generator = test_generator(include_str!("test_fixtures/test.proto"));
+        let descriptor_set =
+            descriptor_set(&[("test.proto", include_str!("test_fixtures/test.proto"))]);
+        let extern_paths = extern_paths();
+        let generator = test_generator(&descriptor_set, &extern_paths);
 
         let methods = generator
-            .proto_fds
+            .root_files
             .iter()
             .flat_map(|f| &f.service)
             .flat_map(|f| &f.method)
@@ -647,17 +895,16 @@ mod tests {
 
         {
             let rpc = methods.get("VoidRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn void_rpc(&self) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .void_rpc(tonic::Request::new(crate::test::VoidRequest {}))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "void_rpc", async move {
+                            Ok(self.connection().await?.void_rpc(tonic::Request::new(crate::test::VoidRequest {})).await?.into_inner())
+                        }).await
                     }
                 }
                     .to_string()
@@ -666,17 +913,16 @@ mod tests {
 
         {
             let rpc = methods.get("SingleMessageRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_message_rpc<T: Into<crate::test::SingleMessageRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .single_message_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "single_message_rpc", async move {
+                            Ok(self.connection().await?.single_message_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                 .to_string()
@@ -685,17 +931,16 @@ mod tests {
 
         {
             let rpc = methods.get("SinglePrimitiveRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_primitive_rpc<T: Into<crate::test::SinglePrimitiveRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .single_primitive_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "single_primitive_rpc", async move {
+                            Ok(self.connection().await?.single_primitive_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                     .to_string()
@@ -704,17 +949,16 @@ mod tests {
 
         {
             let rpc = methods.get("SingleOneOfMessageRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_one_of_message_rpc<T: Into<crate::test::SingleOneOfMessageRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .single_one_of_message_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "single_one_of_message_rpc", async move {
+                            Ok(self.connection().await?.single_one_of_message_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                     .to_string()
@@ -723,17 +967,16 @@ mod tests {
 
         {
             let rpc = methods.get("SingleOneOfPrimitiveRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_one_of_primitive_rpc<T: Into<crate::test::SingleOneOfPrimitiveRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .single_one_of_primitive_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "single_one_of_primitive_rpc", async move {
+                            Ok(self.connection().await?.single_one_of_primitive_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                     .to_string()
@@ -742,17 +985,16 @@ mod tests {
 
         {
             let rpc = methods.get("MultiRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn multi_rpc<T: Into<crate::test::MultiRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .multi_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "multi_rpc", async move {
+                            Ok(self.connection().await?.multi_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                     .to_string()
@@ -761,17 +1003,16 @@ mod tests {
 
         {
             let rpc = methods.get("ExternRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn extern_rpc<T: Into<crate::test::ExternRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        Ok(self
-                            .connection()
-                            .await?
-                            .extern_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "extern_rpc", async move {
+                            Ok(self.connection().await?.extern_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                     .to_string()
@@ -780,17 +1021,16 @@ mod tests {
 
         {
             let rpc = methods.get("SingleStreamingMessageRpc").unwrap();
-            let wrapper = generator.make_rpc_wrapper_method(rpc).unwrap();
+            let wrapper = generator
+                .make_rpc_wrapper_method("test_service", rpc)
+                .unwrap();
             assert_eq!(
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_streaming_message_rpc<T: Into<crate::test::SingleMessageRequest>>(&self, request: T) -> Result<tonic::codec::Streaming<crate::test::SomeResponse>, tonic::Status> {
-                       Ok(self
-                            .connection()
-                            .await?
-                            .single_streaming_message_rpc(tonic::Request::new(request.into()))
-                            .await?
-                            .into_inner())
+                        ::carbide_instrument::red::instrumented("test_service", "single_streaming_message_rpc", async move {
+                            Ok(self.connection().await?.single_streaming_message_rpc(tonic::Request::new(request.into())).await?.into_inner())
+                        }).await
                     }
                 }
                 .to_string()
@@ -800,7 +1040,10 @@ mod tests {
 
     #[test]
     fn test_convenience_wrapper_method() {
-        let generator = test_generator(include_str!("test_fixtures/test.proto"));
+        let descriptor_set =
+            descriptor_set(&[("test.proto", include_str!("test_fixtures/test.proto"))]);
+        let extern_paths = extern_paths();
+        let generator = test_generator(&descriptor_set, &extern_paths);
 
         {
             let message_with_package = generator.message_types.get(".VoidRequest").unwrap();

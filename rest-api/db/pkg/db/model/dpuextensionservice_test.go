@@ -11,15 +11,32 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+func TestDpuExtensionServiceDpuTargetFromProto(t *testing.T) {
+	allActive := corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE
+	target, err := DpuExtensionServiceDpuTargetFromProto(&allActive)
+	require.NoError(t, err)
+	require.NotNil(t, target)
+	assert.Equal(t, DpuExtensionServiceDpuTargetAllActive, *target)
+
+	target, err = DpuExtensionServiceDpuTargetFromProto(nil)
+	require.NoError(t, err)
+	assert.Nil(t, target)
+
+	unknown := corev1.DpuExtensionServiceDpuTarget(99)
+	target, err = DpuExtensionServiceDpuTargetFromProto(&unknown)
+	assert.Error(t, err)
+	assert.Nil(t, target)
+}
 
 func TestDpuExtensionServiceVersionInfo_FromProto(t *testing.T) {
 	fallbackTime := db.GetCurTime()
@@ -27,22 +44,22 @@ func TestDpuExtensionServiceVersionInfo_FromProto(t *testing.T) {
 
 	tests := []struct {
 		desc                string
-		protoVersionInfo    *cwssaws.DpuExtensionServiceVersionInfo
+		protoVersionInfo    *corev1.DpuExtensionServiceVersionInfo
 		expectedCreatedTime time.Time
 	}{
 		{
 			desc: "parses created timestamp and observability from proto",
-			protoVersionInfo: &cwssaws.DpuExtensionServiceVersionInfo{
+			protoVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
 				Version:       "V1-T1761856992374052",
 				Data:          "apiVersion: v1\nkind: Pod",
 				HasCredential: true,
 				Created:       "2026-03-31 12:34:56.123456 UTC",
-				Observability: &cwssaws.DpuExtensionServiceObservability{
-					Configs: []*cwssaws.DpuExtensionServiceObservabilityConfig{
+				Observability: &corev1.DpuExtensionServiceObservability{
+					Configs: []*corev1.DpuExtensionServiceObservabilityConfig{
 						{
 							Name: &obsName,
-							Config: &cwssaws.DpuExtensionServiceObservabilityConfig_Prometheus{
-								Prometheus: &cwssaws.DpuExtensionServiceObservabilityConfigPrometheus{
+							Config: &corev1.DpuExtensionServiceObservabilityConfig_Prometheus{
+								Prometheus: &corev1.DpuExtensionServiceObservabilityConfigPrometheus{
 									ScrapeIntervalSeconds: 30,
 									Endpoint:              "service:9090",
 								},
@@ -55,7 +72,7 @@ func TestDpuExtensionServiceVersionInfo_FromProto(t *testing.T) {
 		},
 		{
 			desc: "falls back to provided time when created timestamp is invalid",
-			protoVersionInfo: &cwssaws.DpuExtensionServiceVersionInfo{
+			protoVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
 				Version:       "V2-T1761856992374053",
 				Data:          "apiVersion: v1\nkind: Pod",
 				HasCredential: false,
@@ -89,6 +106,72 @@ func TestDpuExtensionServiceVersionInfo_FromProto(t *testing.T) {
 					got.Observability.Configs[0].GetPrometheus().GetEndpoint(),
 				)
 			}
+		})
+	}
+}
+
+func TestDpuExtensionServiceStatusFromLifecycleStatus(t *testing.T) {
+	tests := []struct {
+		name            string
+		lifecycleStatus *corev1.LifecycleStatus
+		expectedStatus  string
+		expectError     bool
+	}{
+		{
+			name:        "absent lifecycle status errors",
+			expectError: true,
+		},
+		{
+			name:            "undecodable lifecycle state errors",
+			lifecycleStatus: &corev1.LifecycleStatus{State: "ready"},
+			expectError:     true,
+		},
+		{
+			name:            "unrecognized lifecycle state errors",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"unknown"}`},
+			expectError:     true,
+		},
+		{
+			name:            "creating maps to pending",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"creating"}`},
+			expectedStatus:  DpuExtensionServiceStatusPending,
+		},
+		{
+			name:            "ready maps to ready",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"ready"}`},
+			expectedStatus:  DpuExtensionServiceStatusReady,
+		},
+		{
+			name:            "updating maps to updating",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"updating"}`},
+			expectedStatus:  DpuExtensionServiceStatusUpdating,
+		},
+		{
+			name:            "deleting maps to deleting",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleting"}`},
+			expectedStatus:  DpuExtensionServiceStatusDeleting,
+		},
+		{
+			name:            "deleted maps to deleting",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleted"}`},
+			expectedStatus:  DpuExtensionServiceStatusDeleting,
+		},
+		{
+			name:            "failed maps to error",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"failed"}`},
+			expectedStatus:  DpuExtensionServiceStatusError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, err := DpuExtensionServiceStatusFromLifecycleStatus(tc.lifecycleStatus)
+			if tc.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.expectedStatus, status)
 		})
 	}
 }
@@ -137,12 +220,12 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 		HasCredentials: true,
 		Created:        db.GetCurTime(),
 		Observability: &DpuExtensionServiceObservability{
-			DpuExtensionServiceObservability: &cwssaws.DpuExtensionServiceObservability{
-				Configs: []*cwssaws.DpuExtensionServiceObservabilityConfig{
+			DpuExtensionServiceObservability: &corev1.DpuExtensionServiceObservability{
+				Configs: []*corev1.DpuExtensionServiceObservabilityConfig{
 					{
 						Name: &obsName,
-						Config: &cwssaws.DpuExtensionServiceObservabilityConfig_Prometheus{
-							Prometheus: &cwssaws.DpuExtensionServiceObservabilityConfigPrometheus{
+						Config: &corev1.DpuExtensionServiceObservabilityConfig_Prometheus{
+							Prometheus: &corev1.DpuExtensionServiceObservabilityConfigPrometheus{
 								ScrapeIntervalSeconds: 30,
 								Endpoint:              "http://service:9090/metrics",
 							},
@@ -167,7 +250,8 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 					DpuExtensionServiceID: cutil.GetPtr(uuid.New()),
 					Name:                  "test-service-1",
 					Description:           &description,
-					ServiceType:           DpuExtensionServiceServiceTypeKubernetesPod,
+					ServiceType:           DpuExtensionServiceServiceTypeDpfHelmChart,
+					DpuTarget:             cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 					SiteID:                site.ID,
 					TenantID:              tenant.ID,
 					Version:               &version,
@@ -240,6 +324,7 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, input.Name, des.Name)
 					assert.Equal(t, input.Description, des.Description)
 					assert.Equal(t, input.ServiceType, des.ServiceType)
+					assert.Equal(t, input.DpuTarget, des.DpuTarget)
 					assert.Equal(t, input.SiteID, des.SiteID)
 					assert.Equal(t, input.TenantID, des.TenantID)
 					assert.Equal(t, input.Status, des.Status)
@@ -257,8 +342,6 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -414,8 +497,6 @@ func TestDpuExtensionServiceSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -602,11 +683,40 @@ func TestDpuExtensionServiceSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("include deleted returns a soft-deleted object", func(t *testing.T) {
+		err := dessd.Delete(ctx, nil, created[0].ID)
+		require.NoError(t, err)
+
+		active, _, err := dessd.GetAll(
+			ctx,
+			nil,
+			DpuExtensionServiceFilterInput{DpuExtensionServiceIDs: []uuid.UUID{created[0].ID}},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+
+		withDeleted, _, err := dessd.GetAll(
+			ctx,
+			nil,
+			DpuExtensionServiceFilterInput{
+				DpuExtensionServiceIDs: []uuid.UUID{created[0].ID},
+				IncludeDeleted:         true,
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, withDeleted, 1) {
+			assert.NotNil(t, withDeleted[0].Deleted)
+		}
+	})
 }
 
 func TestDpuExtensionServiceSQLDAO_GetAll_includeRelations(t *testing.T) {
@@ -649,12 +759,12 @@ func TestDpuExtensionServiceSQLDAO_Update(t *testing.T) {
 		HasCredentials: true,
 		Created:        db.GetCurTime(),
 		Observability: &DpuExtensionServiceObservability{
-			DpuExtensionServiceObservability: &cwssaws.DpuExtensionServiceObservability{
-				Configs: []*cwssaws.DpuExtensionServiceObservabilityConfig{
+			DpuExtensionServiceObservability: &corev1.DpuExtensionServiceObservability{
+				Configs: []*corev1.DpuExtensionServiceObservabilityConfig{
 					{
 						Name: &newObsName,
-						Config: &cwssaws.DpuExtensionServiceObservabilityConfig_Logging{
-							Logging: &cwssaws.DpuExtensionServiceObservabilityConfigLogging{
+						Config: &corev1.DpuExtensionServiceObservabilityConfig_Logging{
+							Logging: &corev1.DpuExtensionServiceObservabilityConfigLogging{
 								Path: "/var/log/service.log",
 							},
 						},
@@ -784,8 +894,6 @@ func TestDpuExtensionServiceSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -876,11 +984,24 @@ func TestDpuExtensionServiceSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		err := dessd.Delete(ctx, nil, dessExp[2].ID)
+		require.NoError(t, err)
+
+		restored, err := dessd.Clear(ctx, nil, DpuExtensionServiceClearInput{
+			DpuExtensionServiceID: dessExp[2].ID,
+			Deleted:               true,
+		})
+		require.NoError(t, err)
+
+		if assert.NotNil(t, restored) {
+			assert.Nil(t, restored.Deleted)
+		}
+	})
 }
 
 func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
@@ -899,12 +1020,14 @@ func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
 	tests := []struct {
 		desc               string
 		desID              uuid.UUID
+		checkSoftDelete    bool
 		wantErr            bool
 		verifyChildSpanner bool
 	}{
 		{
 			desc:               "can delete existing object success",
 			desID:              dessExp[1].ID,
+			checkSoftDelete:    true,
 			wantErr:            false,
 			verifyChildSpanner: true,
 		},
@@ -928,11 +1051,15 @@ func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
 			err = dbSession.DB.NewSelect().Model(&res).Where("des.id = ?", tc.desID).Scan(ctx)
 			assert.ErrorIs(t, err, sql.ErrNoRows)
 
+			if tc.checkSoftDelete {
+				err = dbSession.DB.NewSelect().Model(&res).Where("des.id = ?", tc.desID).WhereAllWithDeleted().Scan(ctx)
+				require.NoError(t, err)
+				assert.NotNil(t, res.Deleted)
+			}
+
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

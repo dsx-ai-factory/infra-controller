@@ -117,6 +117,8 @@ pub struct BuildVersion<'a> {
     hotfix: usize,
     commits: usize,
     git_hash: &'a str,
+    /// True if (git) appended a "-dirty" suffix.
+    is_dirty: bool,
 }
 
 impl BuildVersion<'_> {
@@ -154,6 +156,9 @@ impl fmt::Display for BuildVersion<'_> {
         if !self.git_hash.is_empty() {
             write!(f, "-{}", self.git_hash)?;
         }
+        if self.is_dirty {
+            write!(f, "-dirty")?;
+        }
         Ok(())
     }
 }
@@ -162,22 +167,27 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
     type Error = eyre::Report;
 
     fn try_from(s: &'_ str) -> Result<BuildVersion<'_>, Self::Error> {
+        let (s, is_dirty) = match s.strip_suffix("-dirty") {
+            Some(stripped) => (stripped, true),
+            None => (s, false),
+        };
+
         if s.is_empty() {
-            eyre::bail!("Build version is empty");
+            eyre::bail!("build version is empty");
         }
         if !s.starts_with('v') {
-            eyre::bail!("Build version should start with a 'v'");
+            eyre::bail!("build version should start with a 'v'");
         }
         let parts = s[1..].split('-').collect::<Vec<&str>>();
         if parts.is_empty() || parts[0].is_empty() {
-            eyre::bail!("Build version should have a version number after 'v'");
+            eyre::bail!("build version should have a version number after 'v'");
         }
         // Validate that the first part looks like a version (date or semver)
         // Date: 2023.08, 2024.05.02
         // Semver: 0.0.4, 1.2.3
         let first_char = parts[0].chars().next().unwrap();
         if !first_char.is_ascii_digit() {
-            eyre::bail!("Build version should start with a digit after 'v'");
+            eyre::bail!("build version should start with a digit after 'v'");
         }
         match parts.len() {
             // Tag only. The tag is <year>.<month> or semver. e.g:
@@ -188,6 +198,7 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                 hotfix: 0,
                 commits: 0,
                 git_hash: "",
+                is_dirty,
             }),
             // Tag only with a release-candidate part
             // v2023.09-rc1 or v0.0.4-rc1
@@ -197,6 +208,7 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                 hotfix: 0,
                 commits: 0,
                 git_hash: "",
+                is_dirty,
             }),
             // Version tag with commits OR new style version-rc-hotfix
             // v2023.08-92-g1b48e8b6 OR v2024.05.02-rc3-0
@@ -209,6 +221,7 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                         hotfix: 0,
                         commits: parts[1].parse().unwrap(),
                         git_hash: parts[2],
+                        is_dirty,
                     })
                 } else {
                     // v2024.05.02-rc3-0 or v0.0.4-rc4-0
@@ -218,6 +231,7 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                         hotfix: parts[2].parse().unwrap(),
                         commits: 0,
                         git_hash: "",
+                        is_dirty,
                     })
                 }
             }
@@ -229,6 +243,7 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                 hotfix: 0,
                 commits: parts[2].parse().unwrap(),
                 git_hash: parts[3],
+                is_dirty,
             }),
             // version, rc, hotfix, commits and hash
             // v2024.05.02-rc4-0-27-gc3ce4d5d or v0.0.4-rc4-0-27-gc3ce4d5d
@@ -238,15 +253,19 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                 hotfix: parts[2].parse().unwrap(),
                 commits: parts[3].parse().unwrap(),
                 git_hash: parts[4],
+                is_dirty,
             }),
             n => {
-                eyre::bail!("Invalid build version. Has {n} dash-separated parts.")
+                eyre::bail!("invalid build version. has {n} dash-separated parts")
             }
         }
     }
 }
 
 impl Ord for BuildVersion<'_> {
+    // Ordering is by version/rc/hotfix/commits only; `git_hash` and `is_dirty`
+    // are intentionally ignored (neither affects which build is "newer"). Note
+    // the derived `Eq` is structural and does consider them.
     fn cmp(&self, other: &Self) -> Ordering {
         // If one is date-based and one is semver, semver is always newer
         // (represents migration from date-based to semver versioning)
@@ -302,6 +321,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 92,
                     git_hash: "g1b48e8b6",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -313,6 +333,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 27,
                     git_hash: "gc3ce4d5d",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -324,6 +345,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 0,
                     git_hash: "",
+                    is_dirty: false,
                 }),
             },
             // Semver versions
@@ -336,6 +358,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 0,
                     git_hash: "g2a3c98cac",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -347,6 +370,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 0,
                     git_hash: "",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -358,6 +382,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 0,
                     git_hash: "",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -369,6 +394,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 0,
                     git_hash: "",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -380,6 +406,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 27,
                     git_hash: "gc3ce4d5d",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -391,6 +418,7 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 0,
                     git_hash: "",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -402,6 +430,19 @@ fn test_parse_version() {
                     hotfix: 0,
                     commits: 27,
                     git_hash: "gc3ce4d5d",
+                    is_dirty: false,
+                }),
+            },
+            Case {
+                scenario: "semver with rc, commits, hash and -dirty suffix",
+                input: "v2.0.0-rc.2-9-g0401aad9f-dirty",
+                expect: Yields(BuildVersion {
+                    version: "2.0.0",
+                    rc: "rc.2",
+                    hotfix: 0,
+                    commits: 9,
+                    git_hash: "g0401aad9f",
+                    is_dirty: true,
                 }),
             },
             Case {
@@ -413,6 +454,7 @@ fn test_parse_version() {
                     hotfix: 2,
                     commits: 0,
                     git_hash: "",
+                    is_dirty: false,
                 }),
             },
             Case {
@@ -744,6 +786,9 @@ mod tests {
         );
     }
 
+    // Total ordering over build versions. Each row pins the `cmp` result; the
+    // runner also asserts `partial_cmp` agrees (it must return `Some(cmp)`), so
+    // the PartialOrd impl is checked against Ord on every row.
     #[test]
     fn build_version_ordering() {
         struct Pair {
@@ -754,7 +799,13 @@ mod tests {
             run = |Pair { left, right }| {
                 let l = BuildVersion::try_from(left).unwrap();
                 let r = BuildVersion::try_from(right).unwrap();
-                l.cmp(&r)
+                let ordering = l.cmp(&r);
+                assert_eq!(
+                    l.partial_cmp(&r),
+                    Some(ordering),
+                    "partial_cmp must agree with cmp for {left} vs {right}",
+                );
+                ordering
             };
             "older date less than newer date" {
                 Pair {
@@ -824,28 +875,6 @@ mod tests {
                     left: "v0.0.4",
                     right: "v0.0.5",
                 } => Ordering::Less,
-            }
-        );
-    }
-
-    #[test]
-    fn build_version_partial_cmp_matches_cmp() {
-        value_scenarios!(
-            run = |(l, r)| {
-                BuildVersion::try_from(l)
-                    .unwrap()
-                    .partial_cmp(&BuildVersion::try_from(r).unwrap())
-            };
-            "less" {
-                ("v0.0.1", "v1.0.0") => Some(Ordering::Less),
-            }
-
-            "greater" {
-                ("v1.0.0", "v0.0.1") => Some(Ordering::Greater),
-            }
-
-            "equal" {
-                ("v1.0.0", "v1.0.0") => Some(Ordering::Equal),
             }
         );
     }

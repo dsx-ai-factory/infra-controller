@@ -27,6 +27,9 @@ var (
 		taskcommon.TaskTypeBringUp: {
 			Timeout: 120 * time.Minute,
 		},
+		taskcommon.TaskTypeDecommission: {
+			Timeout: 4 * time.Hour,
+		},
 	}
 )
 

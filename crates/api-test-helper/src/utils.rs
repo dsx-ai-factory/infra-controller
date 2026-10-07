@@ -15,13 +15,15 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, path};
 
-use carbide_secrets::credentials::{CredentialKey, CredentialType, CredentialWriter, Credentials};
+use carbide_secrets::credentials::{
+    CredentialKey, CredentialType, CredentialWriter, Credentials, NicLockdownIkm,
+};
 use carbide_secrets::{CredentialConfig, VaultConfig, create_credential_manager};
 use carbide_utils::HostPortPair;
 use eyre::Report;
@@ -53,8 +55,12 @@ lazy_static::lazy_static! {
 
 #[derive(Debug, Clone)]
 pub struct IntegrationTestEnvironment {
+    /// API client addresses. Each slot starts at `127.0.0.1:0`; [`start_api_server`] replaces it
+    /// with the runtime-selected port before returning.
     pub carbide_api_addrs: Vec<SocketAddr>,
     pub root_dir: PathBuf,
+    /// Metrics listener addresses. Each slot starts at `127.0.0.1:0`;
+    /// [`start_api_server`] replaces it with the bound address before returning.
     pub carbide_metrics_addrs: Vec<SocketAddr>,
     pub db_url: String,
     pub db_pool: Pool<Postgres>,
@@ -85,44 +91,17 @@ impl IntegrationTestEnvironment {
         };
         let root_dir = PathBuf::from(repo_root.clone());
 
-        // Pick free ports for addresses we need. This is still racy, as it's not guaranteed that
-        // the ports will still be available when we start the servers, but it's better than
-        // hardcoding them.
-        let (carbide_api_addrs, carbide_metrics_addrs, vault_addr) = {
-            let mut listeners = vec![]; // hold the listeners so that we don't get the same port twice
-            let mut api_addrs = vec![];
-            let mut metrics_addrs = vec![];
-            for _ in 0..api_server_count {
-                api_addrs.push({
-                    let l = TcpListener::bind("127.0.0.1:0")?;
-                    let addr = l.local_addr()?;
-                    listeners.push(l);
-                    addr
-                });
-                metrics_addrs.push({
-                    let l = TcpListener::bind("127.0.0.1:0")?;
-                    let addr = l.local_addr()?;
-                    listeners.push(l);
-                    addr
-                });
-            }
+        let unbound_address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let carbide_api_addrs = vec![unbound_address; usize::from(api_server_count)];
+        let carbide_metrics_addrs = vec![unbound_address; usize::from(api_server_count)];
 
-            // Pick an address for vault too
-            let vault_addr = {
-                let l = TcpListener::bind("127.0.0.1:0")?;
-                let addr = l.local_addr()?;
-                listeners.push(l);
-                addr
-            };
-
-            (api_addrs, metrics_addrs, vault_addr)
-        };
-
-        let vault = vault::start(vault_addr).await?;
+        // vault picks its own free port (retrying past races) and reports it
+        // back on the handle, so we don't reserve one here.
+        let vault = vault::start().await?;
 
         let credential_config = CredentialConfig {
             vault: VaultConfig {
-                address: Some(format!("https://{vault_addr}")),
+                address: Some(format!("https://{}", vault.addr)),
                 kv_mount_location: Some("secret".to_string()),
                 pki_mount_location: Some("forgeca".to_string()),
                 pki_role_name: Some("forge-cluster".to_string()),
@@ -145,7 +124,15 @@ impl IntegrationTestEnvironment {
             credential_config,
             db_url,
             db_pool,
-            metrics: metrics_endpoint::new_metrics_setup("carbide-api", "forge-system", true)?, // unique to each test
+            metrics: {
+                let metrics =
+                    metrics_endpoint::new_metrics_setup("carbide-api", "forge-system", true)?; // unique to each test
+                // Counts are process-wide; registering here puts
+                // carbide_log_events_total on the in-process API's /metrics
+                // (and, via the catalogue regeneration, in core_metrics.md).
+                carbide_instrument::log_events::register(&metrics.meter);
+                metrics
+            },
             _vault_handle: Arc::new(vault),
         }))
     }
@@ -188,26 +175,42 @@ async fn drop_pg_database_with_retry_if_exists(db_url: &str) -> eyre::Result<()>
     Ok(())
 }
 
+pub struct TestApiServerArgs {
+    pub bmc_proxy: Option<HostPortPair>,
+    pub firmware_directory: PathBuf,
+    pub addr_index: usize,
+    pub put_dev_bin_in_path: bool,
+    pub insecure_discovery: bool,
+}
+
 pub async fn start_api_server(
-    test_env: IntegrationTestEnvironment,
-    bmc_proxy: Option<HostPortPair>,
-    firmware_directory: PathBuf,
-    addr_index: usize,
-    put_dev_bin_in_path: bool,
+    test_env: &mut IntegrationTestEnvironment,
+    TestApiServerArgs {
+        bmc_proxy,
+        firmware_directory,
+        addr_index,
+        put_dev_bin_in_path,
+        insecure_discovery,
+    }: TestApiServerArgs,
     cancel_token: CancellationToken,
 ) -> eyre::Result<ApiServerHandle> {
-    // Destructure into vars to save typing
-    let IntegrationTestEnvironment {
-        carbide_api_addrs,
-        db_pool,
-        db_url,
-        root_dir,
-        carbide_metrics_addrs,
-        metrics,
-        credential_config,
-        _vault_handle,
-    } = test_env;
+    let api_address = *test_env
+        .carbide_api_addrs
+        .get(addr_index)
+        .ok_or_else(|| eyre::eyre!("API address index {addr_index} is out of range"))?;
+    let metrics_address = *test_env
+        .carbide_metrics_addrs
+        .get(addr_index)
+        .ok_or_else(|| eyre::eyre!("metrics address index {addr_index} is out of range"))?;
+    let db_pool = test_env.db_pool.clone();
+    let db_url = test_env.db_url.clone();
+    let root_dir = test_env.root_dir.clone();
+    let credential_config = test_env.credential_config.clone();
 
+    // SAFETY: Initial lint enablement: these test settings are installed before the API
+    // server task is spawned, but callers already run in multi-threaded test processes.
+    // Unix process-wide exclusion from environment readers is not proven; this needs
+    // owner review.
     unsafe {
         env::set_var("DISABLE_TLS_ENFORCEMENT", "true");
         env::set_var("IGNORE_MGMT_VRF", "true");
@@ -237,13 +240,10 @@ pub async fn start_api_server(
     // which can also only be initialized once. What a mess.
     // Error is: "attempted to set a logger after the logging system was already initialized"
 
-    #[allow(clippy::large_stack_arrays)] // It should be fixed in sqlx.
-    let m = sqlx::migrate!("../api-db/migrations");
-
     // Dependencies: Postgres, Vault and a Redfish BMC
-    m.run(&db_pool).await?;
+    db::migrations::migrate(&db_pool).await?;
 
-    populate_initial_vault_secrets(&credential_config, &metrics).await?;
+    populate_initial_vault_secrets(&credential_config).await?;
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn({
@@ -251,8 +251,8 @@ pub async fn start_api_server(
         let cancel_token = cancel_token.clone();
         async move {
             api_server::start(StartArgs {
-                addr: carbide_api_addrs[addr_index],
-                metrics_addr: carbide_metrics_addrs[addr_index],
+                addr: api_address,
+                metrics_addr: metrics_address,
                 root_dir,
                 db_url,
                 bmc_proxy,
@@ -260,6 +260,7 @@ pub async fn start_api_server(
                 cancel_token,
                 ready_channel: ready_tx,
                 credential_config,
+                insecure_discovery,
             })
             .await
             .inspect_err(|e| {
@@ -268,7 +269,29 @@ pub async fn start_api_server(
         }
     });
 
-    ready_rx.await.unwrap();
+    let addresses = match ready_rx.await {
+        Ok(addresses) => addresses,
+        Err(_error) => match join_handle.await {
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok(())) => eyre::bail!("API server exited before reporting readiness"),
+            Err(error) => return Err(error.into()),
+        },
+    };
+
+    // `api_server::start` binds `[::]`, but test clients authenticate `127.0.0.1`; use the
+    // listener's selected port without replacing the client IP.
+    let listen_address = SocketAddr::new(api_address.ip(), addresses.listen_address.port());
+    let Some(metrics_address) = addresses.metrics_address else {
+        cancel_token.cancel();
+        match join_handle.await {
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok(())) => eyre::bail!("API server reported readiness without a metrics listener"),
+            Err(error) => return Err(error.into()),
+        }
+    };
+
+    test_env.carbide_api_addrs[addr_index] = listen_address;
+    test_env.carbide_metrics_addrs[addr_index] = metrics_address;
 
     Ok(ApiServerHandle { join_handle })
 }
@@ -286,10 +309,8 @@ impl ApiServerHandle {
 
 pub async fn populate_initial_vault_secrets(
     credential_config: &CredentialConfig,
-    metrics: &MetricsSetup,
 ) -> Result<(), Report> {
-    let credential_manager =
-        create_credential_manager(credential_config, metrics.meter.clone()).await?;
+    let credential_manager = create_credential_manager(credential_config).await?;
     credential_manager
         .set_credentials(
             &CredentialKey::BmcCredentials {
@@ -316,12 +337,38 @@ pub async fn populate_initial_vault_secrets(
 
     credential_manager
         .set_credentials(
+            &CredentialKey::DpuUefi {
+                credential_type: CredentialType::DpuHardwareDefault {
+                    model: bmc_vendor::DpuModel::Unknown,
+                },
+            },
+            &Credentials::UsernamePassword {
+                username: "root".to_string(),
+                password: "password".to_string(),
+            },
+        )
+        .await?;
+
+    credential_manager
+        .set_credentials(
             &CredentialKey::HostUefi {
                 credential_type: CredentialType::SiteDefault,
             },
             &Credentials::UsernamePassword {
                 username: "root".to_string(),
                 password: "password".to_string(),
+            },
+        )
+        .await?;
+
+    credential_manager
+        .set_credentials(
+            &CredentialKey::NicLockdownIkm {
+                credential_type: NicLockdownIkm::SiteWide { version: 0 },
+            },
+            &Credentials::UsernamePassword {
+                username: "root".to_string(),
+                password: "test-lockdown-ikm".to_string(),
             },
         )
         .await?;
@@ -332,7 +379,6 @@ pub fn find_prerequisites() -> eyre::Result<HashMap<String, PathBuf>> {
     let mut bins = HashMap::with_capacity(2);
     let paths: Vec<path::PathBuf> = env::split_paths(&env::var_os("PATH").unwrap()).collect();
     bins.insert("vault", find_first_in("vault", &paths));
-    bins.insert("grpcurl", find_first_in("grpcurl", &paths));
     bins.insert("curl", find_first_in("curl", &paths));
 
     let mut full_paths = HashMap::with_capacity(bins.len());
@@ -342,7 +388,7 @@ pub fn find_prerequisites() -> eyre::Result<HashMap<String, PathBuf>> {
                 full_paths.insert(k.to_string(), full_path);
             }
             None => {
-                eyre::bail!("Missing prerequisite binary: {k}");
+                eyre::bail!("missing prerequisite binary: {k}");
             }
         }
     }

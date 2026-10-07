@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn refresh_endpoint(api_client: &ApiClient, opts: Args) -> CarbideCliResult<()> {
+pub(super) async fn refresh_endpoint(api_client: &ApiClient, opts: Args) -> CarbideCliResult<()> {
     let address = opts.address;
     eprintln!("Starting report refresh for endpoint {address}...");
     let endpoint = api_client

@@ -71,3 +71,11 @@ func TestTaskStatus_IsFinished(t *testing.T) {
 		assert.False(t, s.IsFinished(), "%q should not be finished", s)
 	}
 }
+
+func TestNonTerminalTaskStatuses(t *testing.T) {
+	assert.Equal(t, []TaskStatus{
+		TaskStatusWaiting,
+		TaskStatusPending,
+		TaskStatusRunning,
+	}, NonTerminalTaskStatuses())
+}

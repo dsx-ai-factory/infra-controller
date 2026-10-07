@@ -35,7 +35,7 @@ func (api *API) RegisterSubscriber() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("ExpectedRack: Successfully registered DeleteAllExpectedRacks workflow")
 
 	// Register activities
-	expectedRackManager := swa.NewManageExpectedRack(ManagerAccess.Data.EB.Managers.CoreGrpc.Client, ManagerAccess.Data.EB.Managers.FlowGrpc.Client)
+	expectedRackManager := swa.NewManageExpectedRack(ManagerAccess.Data.EB.Managers.CoreGrpc.Client)
 
 	// Register CreateExpectedRackOnSite activity
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(expectedRackManager.CreateExpectedRackOnSite)

@@ -112,7 +112,7 @@ jobs:
 
       - name: Notify Slack - Build Success
         if: steps.analyze.outputs.status == 'success' && inputs.notify-on-success
-        uses: NVIDIA/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
@@ -182,7 +182,7 @@ jobs:
 
       - name: Notify Slack - Partial Failure
         if: steps.analyze.outputs.status == 'partial' && inputs.notify-on-partial
-        uses: NVIDIA/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
@@ -259,7 +259,7 @@ jobs:
 
       - name: Notify Slack - Build Failure
         if: steps.analyze.outputs.status == 'failure' && inputs.notify-on-failure
-        uses: NVIDIA/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}

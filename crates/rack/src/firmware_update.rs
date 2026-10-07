@@ -18,6 +18,7 @@
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use db::{machine as db_machine, machine_topology as db_machine_topology, switch as db_switch};
@@ -28,9 +29,11 @@ use model::rack::FirmwareUpgradeDeviceInfo;
 use model::rack_type::{RackHardwareClass, RackProfile};
 use sqlx::PgPool;
 
+use crate::rms_node_type::RmsNodeIdentity;
+
 #[derive(Debug, Clone)]
 pub struct RackFirmwareInventory {
-    pub machine_ids: Vec<carbide_uuid::machine::MachineId>,
+    pub machine_ids: Vec<carbide_uuid::machine::HostMachineId>,
     pub machines: Vec<FirmwareUpgradeDeviceInfo>,
     pub switch_ids: Vec<SwitchId>,
     pub switches: Vec<FirmwareUpgradeDeviceInfo>,
@@ -54,10 +57,10 @@ pub async fn load_rack_firmware_inventory(
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) -> Result<RackFirmwareInventory> {
-    let (machine_ids, machine_topologies) = {
+    let (machine_ids, machine_topologies, bmc_ips) = {
         let mut txn = db_pool.begin().await?;
 
-        let machine_ids = db_machine::find_machine_ids(
+        let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
             txn.as_mut(),
             MachineSearchConfig {
                 rack_id: Some(rack_id.clone()),
@@ -65,11 +68,23 @@ pub async fn load_rack_firmware_inventory(
             },
         )
         .await?;
+
         let machine_topologies =
             db_machine_topology::find_latest_by_machine_ids(txn.as_mut(), &machine_ids).await?;
+        // The BMC IP is live network state -- read it from machine_interfaces, not the
+        // discovery topology snapshot, so a released or changed lease can't surface a stale IP.
+        let bmc_ips: std::collections::HashMap<_, _> =
+            db_machine_topology::find_machine_bmc_pairs_by_machine_id(
+                txn.as_mut(),
+                machine_ids.clone(),
+            )
+            .await?
+            .into_iter()
+            .filter_map(|(id, ip)| ip.map(|ip| (id, ip)))
+            .collect();
 
         txn.commit().await?;
-        (machine_ids, machine_topologies)
+        (machine_ids, machine_topologies, bmc_ips)
     };
 
     let mut machines = Vec::with_capacity(machine_ids.len());
@@ -82,11 +97,9 @@ pub async fn load_rack_firmware_inventory(
             .bmc_info
             .mac
             .ok_or_else(|| eyre!("machine {} missing BMC MAC", machine_id))?;
-        let bmc_ip = topology
-            .topology()
-            .bmc_info
-            .ip
-            .ok_or_else(|| eyre!("machine {} missing BMC IP", machine_id))?;
+        let bmc_ip = bmc_ips
+            .get(machine_id)
+            .ok_or_else(|| eyre!("machine {} has no live BMC IP", machine_id))?;
         let (bmc_username, bmc_password) =
             fetch_bmc_credentials(credential_manager, bmc_mac).await?;
         machines.push(FirmwareUpgradeDeviceInfo {
@@ -99,6 +112,7 @@ pub async fn load_rack_firmware_inventory(
             os_ip: None,
             os_username: None,
             os_password: None,
+            os_hostname: None,
         });
     }
 
@@ -140,20 +154,7 @@ pub async fn load_rack_switch_firmware_inventory(
 
     let mut switches = Vec::with_capacity(switch_endpoints.len());
     for switch in &switch_endpoints {
-        let (bmc_username, bmc_password) =
-            fetch_bmc_credentials(credential_manager, switch.bmc_mac).await?;
-        let nvos_creds = fetch_nvos_credentials(credential_manager, switch.bmc_mac).await;
-        switches.push(FirmwareUpgradeDeviceInfo {
-            node_id: switch.switch_id.to_string(),
-            mac: switch.bmc_mac.to_string(),
-            bmc_ip: switch.bmc_ip.to_string(),
-            bmc_username,
-            bmc_password,
-            os_mac: switch.nvos_mac.map(|mac| mac.to_string()),
-            os_ip: switch.nvos_ip.map(|ip| ip.to_string()),
-            os_username: nvos_creds.as_ref().map(|(username, _)| username.clone()),
-            os_password: nvos_creds.map(|(_, password)| password),
-        });
+        switches.push(switch_endpoint_to_firmware_device_info(credential_manager, switch).await?);
     }
 
     Ok(RackSwitchFirmwareInventory {
@@ -162,6 +163,56 @@ pub async fn load_rack_switch_firmware_inventory(
     })
 }
 
+pub async fn load_switch_firmware_device_info(
+    db_pool: &PgPool,
+    credential_manager: &dyn CredentialManager,
+    switch_id: &SwitchId,
+) -> Result<FirmwareUpgradeDeviceInfo> {
+    let switch_endpoint = {
+        let mut txn = db_pool.begin().await?;
+        let mut switch_endpoints =
+            db_switch::find_switch_endpoints_by_ids(txn.as_mut(), std::slice::from_ref(switch_id))
+                .await?;
+        txn.commit().await?;
+        switch_endpoints
+            .pop()
+            .ok_or_else(|| eyre!("switch {} missing endpoint info", switch_id))?
+    };
+
+    switch_endpoint_to_firmware_device_info(credential_manager, &switch_endpoint).await
+}
+
+async fn switch_endpoint_to_firmware_device_info(
+    credential_manager: &dyn CredentialManager,
+    switch: &db_switch::SwitchEndpointRow,
+) -> Result<FirmwareUpgradeDeviceInfo> {
+    let (bmc_username, bmc_password) =
+        fetch_bmc_credentials(credential_manager, switch.bmc_mac).await?;
+    let nvos_creds = fetch_nvos_credentials(credential_manager, switch.bmc_mac).await;
+
+    Ok(FirmwareUpgradeDeviceInfo {
+        node_id: switch.switch_id.to_string(),
+        mac: switch.bmc_mac.to_string(),
+        bmc_ip: switch.bmc_ip.to_string(),
+        bmc_username,
+        bmc_password,
+        os_mac: switch.nvos_mac.map(|mac| mac.to_string()),
+        os_ip: switch.nvos_ip.map(|ip| ip.to_string()),
+        os_username: nvos_creds.as_ref().map(|(username, _)| username.clone()),
+        os_password: nvos_creds.map(|(_, password)| password),
+        os_hostname: switch
+            .nvos_hostname
+            .clone()
+            .filter(|hostname| !hostname.is_empty()),
+    })
+}
+
+/// Resolve the per-device BMC root credentials for the given MAC.
+///
+/// Per-device secrets are authoritative; there is deliberately no site-wide
+/// fallback. A missing per-MAC secret means the device has not been
+/// (re)ingested, and falling back to the rotating site-wide credential would
+/// mask that and break the moment the site rotates.
 async fn fetch_bmc_credentials(
     credential_manager: &dyn CredentialManager,
     bmc_mac: mac_address::MacAddress,
@@ -172,18 +223,14 @@ async fn fetch_bmc_credentials(
         },
     };
 
-    let creds = match credential_manager.get_credentials(&key).await? {
-        Some(creds) => creds,
-        None => {
-            let sitewide_key = CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::SiteWideRoot,
-            };
-            credential_manager
-                .get_credentials(&sitewide_key)
-                .await?
-                .ok_or_else(|| eyre!("no BMC credentials found for {} or sitewide", bmc_mac))?
-        }
-    };
+    let creds = credential_manager
+        .get_credentials(&key)
+        .await?
+        .ok_or_else(|| {
+            eyre!(
+                "no per-device BMC credentials found for {bmc_mac}; the device must be (re)ingested"
+            )
+        })?;
 
     match creds {
         Credentials::UsernamePassword { username, password } => Ok((username, password)),
@@ -208,7 +255,7 @@ async fn fetch_nvos_credentials(
 pub fn build_new_node_info(
     rack_id: &RackId,
     device: &FirmwareUpgradeDeviceInfo,
-    node_type: rms::NodeType,
+    identity: &RmsNodeIdentity,
 ) -> rms::NodeInfo {
     let bmc_endpoint = if device.bmc_ip.is_empty() || device.mac.is_empty() {
         None
@@ -217,16 +264,14 @@ pub fn build_new_node_info(
             interface: Some(rms::NetworkInterface {
                 ip_address: device.bmc_ip.clone(),
                 mac_address: device.mac.clone(),
+                host_name: None,
             }),
             port: 443,
             credentials: user_pass_credentials(&device.bmc_username, &device.bmc_password),
-            // TODO: we'll need to remove this from the RMS proto `Endpoint` field. This field
-            // should not be set by the caller, and should be owned by the RMS.
-            dangerously_accept_invalid_certs: true,
         })
     };
 
-    let host_endpoint = if matches!(node_type, rms::NodeType::Switch) {
+    let host_endpoint = if identity.is_switch() {
         Some(rms::Endpoint {
             interface: build_host_interface(device),
             port: 0,
@@ -234,21 +279,22 @@ pub fn build_new_node_info(
                 device.os_username.as_deref().unwrap_or_default(),
                 device.os_password.as_deref().unwrap_or_default(),
             ),
-            // TODO: we'll need to remove this from the RMS proto `Endpoint` field. This field
-            // should not be set by the caller, and should be owned by the RMS.
-            dangerously_accept_invalid_certs: true,
         })
     } else {
         None
     };
 
-    rms::NodeInfo {
+    let mut node = rms::NodeInfo {
         node_id: device.node_id.clone(),
         rack_id: rack_id.to_string(),
-        r#type: Some(node_type as i32),
+        r#type: None,
         bmc_endpoint,
         host_endpoint,
-    }
+        node_descriptor: None,
+    };
+
+    identity.apply_to_node_info(&mut node);
+    node
 }
 
 fn build_host_interface(device: &FirmwareUpgradeDeviceInfo) -> Option<rms::NetworkInterface> {
@@ -259,6 +305,10 @@ fn build_host_interface(device: &FirmwareUpgradeDeviceInfo) -> Option<rms::Netwo
     Some(rms::NetworkInterface {
         ip_address: ip_address.clone(),
         mac_address: mac_address.clone(),
+        host_name: device
+            .os_hostname
+            .clone()
+            .filter(|hostname| !hostname.is_empty()),
     })
 }
 

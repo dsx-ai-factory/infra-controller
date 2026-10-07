@@ -1,0 +1,67 @@
+# Least-privilege RBAC for the simulator. Keep in sync with the
+# +kubebuilder:rbac markers in internal/controller/dpudevice_controller.go
+# (regenerate with `make manifests` once controller-gen is wired).
+#
+# Namespaced Role/RoleBinding on purpose: the manager cache and reconciler are
+# scoped to one namespace, so the grants are too — the simulator must not be
+# able to touch DPF resources anywhere else (e.g. a real DPF install elsewhere
+# on the cluster). DPU cleanup rides the ownerRef GC; `delete` on dpus exists
+# only to recreate a DPU whose immutable flavor drifted from the deployment
+# selecting its node.
+#
+# IMPORTANT: every `namespace:` below AND the Deployment namespace
+# (config/manager/manager.yaml) must equal the value passed to
+# --dpf-namespace. They are hardcoded to dpf-operator-system here; `make
+# deploy DPF_NAMESPACE=...` rewrites all of them together. If they drift, the
+# pod's SA token is not bound to this Role and every API call returns 403.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpf-sim-controller
+  namespace: dpf-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dpf-sim-controller
+  namespace: dpf-operator-system
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpudevices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodemaintenances"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpus"]
+    # delete: a DPU whose immutable flavor no longer matches the deployment
+    # selecting its node is deleted and recreated, as the DPF DPUSet controller does.
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["dpudeployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    # The real DPUDeployment controller reports DPUSetsReconciled; NICo will not
+    # look at a deployment's DPUs until that condition is True.
+    resources: ["dpudeployments/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpus/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dpf-sim-controller
+  namespace: dpf-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dpf-sim-controller
+subjects:
+  - kind: ServiceAccount
+    name: dpf-sim-controller
+    namespace: dpf-operator-system

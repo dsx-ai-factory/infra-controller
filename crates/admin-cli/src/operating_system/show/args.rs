@@ -31,10 +31,10 @@ List the OS definitions for an organization:
     $ nico-admin-cli operating-system show --org fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Operating system definition ID; omit to list all.")]
-    pub id: Option<String>,
+    pub(super) id: Option<String>,
 
     #[clap(long, help = "Filter by organization identifier (when listing).")]
-    pub org: Option<String>,
+    pub(super) org: Option<String>,
 }

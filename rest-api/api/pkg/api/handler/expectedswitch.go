@@ -4,47 +4,49 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
+
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"go.opentelemetry.io/otel/attribute"
+	tclient "go.temporal.io/sdk/client"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
-	validation "github.com/go-ozzo/ozzo-validation/v4"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"go.opentelemetry.io/otel/attribute"
-	tclient "go.temporal.io/sdk/client"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateExpectedSwitchHandler is the API Handler for creating new ExpectedSwitch
 type CreateExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateExpectedSwitchHandler initializes and returns a new handler for creating ExpectedSwitch
 func NewCreateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedSwitchHandler {
 	return CreateExpectedSwitchHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -60,7 +62,7 @@ func NewCreateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, 
 // @Success 201 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch [post]
 func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Create", c, cesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -68,12 +70,6 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 	if dbUser == nil {
 		logger.Error().Msg("invalid User object found in request context")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
-	}
-
-	// ensure our user is a provider or tenant for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, cesh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate request
@@ -102,6 +98,12 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
 	}
 
+	// Scope tenant privilege to the Site targeted by this request.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, cesh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
 	// Validate ProviderTenantSite relationship and site state
 	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, cesh.dbSession, site, infrastructureProvider, tenant)
 	if apiError != nil {
@@ -121,7 +123,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 	// Check for duplicate MAC address. The DB enforces UNIQUE (bmc_mac_address, site_id),
 	// but we pre-check here so we can return the conflicting record's ID in the response.
 	esDAO := cdbm.NewExpectedSwitchDAO(cesh.dbSession)
-	ess, count, err := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
+	ess, _, err := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
 		BmcMacAddresses: []string{apiRequest.BmcMacAddress},
 		SiteIDs:         []uuid.UUID{site.ID},
 	}, paginator.PageInput{
@@ -133,12 +135,36 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate MAC address uniqueness on Site due to DB error", nil)
 	}
 
-	if count > 0 {
+	if len(ess) > 0 {
 		logger.Warn().Str("MacAddress", apiRequest.BmcMacAddress).Msg("Expected Switch with specified MAC address already exists on Site")
 
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified MAC address already exists on Site", validation.Errors{
 			"id": errors.New(ess[0].ID.String()),
 		})
+	}
+
+	// NVOS MACs identify the switch's management ports during discovery, so a
+	// MAC claimed by another Expected Switch on the Site is a conflict.
+	if len(apiRequest.NvosMacAddresses) > 0 {
+		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
+			NvosMacAddresses: apiRequest.NvosMacAddresses,
+			SiteIDs:          []uuid.UUID{site.ID},
+		}, paginator.PageInput{
+			Limit: cutil.GetPtr(1),
+		}, nil)
+
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error checking for duplicate NVOS MAC addresses on Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate NVOS MAC address uniqueness on Site due to DB error", nil)
+		}
+
+		if len(conflicts) > 0 {
+			logger.Warn().Strs("NvosMacAddresses", apiRequest.NvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
+
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified NVOS MAC address already exists on Site", validation.Errors{
+				"id": errors.New(conflicts[0].ID.String()),
+			})
+		}
 	}
 
 	expectedSwitch, err := cdb.WithTxResult(ctx, cesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
@@ -152,6 +178,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 				BmcMacAddress:      apiRequest.BmcMacAddress,
 				BmcIpAddress:       apiRequest.BmcIpAddress,
 				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
+				NvosMacAddresses:   apiRequest.NvosMacAddresses,
 				RackID:             apiRequest.RackID,
 				Name:               apiRequest.Name,
 				Manufacturer:       apiRequest.Manufacturer,
@@ -209,23 +236,21 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // GetAllExpectedSwitchHandler is the API Handler for getting all ExpectedSwitches
 type GetAllExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetAllExpectedSwitchHandler initializes and returns a new handler for getting all ExpectedSwitches
 func NewGetAllExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) GetAllExpectedSwitchHandler {
 	return GetAllExpectedSwitchHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Get all ExpectedSwitches
-// @Description Get all ExpectedSwitches
+// @Description Get all ExpectedSwitches. Provider callers may omit siteId to list across their Sites; Tenant callers must specify siteId.
 // @Tags ExpectedSwitch
 // @Accept json
 // @Produce json
@@ -239,7 +264,7 @@ func NewGetAllExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) 
 // @Success 200 {object} []model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch [get]
 func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "GetAll", c, gaesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -249,18 +274,15 @@ func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gaesh.dbSession, org, dbUser, true, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	filterInput := cdbm.ExpectedSwitchFilterInput{}
 
 	// Get Site ID from query param if specified
 	siteIDStr := c.QueryParam("siteId")
+	var site *cdbm.Site
+	var err error
+	var privilegeScope *common.TenantPrivilegeScope
 	if siteIDStr != "" {
-		site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gaesh.dbSession)
+		site, err = common.GetSiteFromIDString(ctx, nil, siteIDStr, gaesh.dbSession)
 		if err != nil {
 			if errors.Is(err, cdb.ErrDoesNotExist) {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data does not exist", nil)
@@ -268,7 +290,17 @@ func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
 		}
+		privilegeScope = &common.TenantPrivilegeScope{SiteID: &site.ID}
+	}
 
+	// A missing scope is the documented provider-wide list exemption above;
+	// tenant callers without siteId are rejected below.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gaesh.dbSession, org, dbUser, true, privilegeScope)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if site != nil {
 		// Validate ProviderTenantSite relationship and site state
 		hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, gaesh.dbSession, site, infrastructureProvider, tenant)
 		if apiError != nil {
@@ -280,8 +312,8 @@ func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 
 		filterInput.SiteIDs = []uuid.UUID{site.ID}
-	} else if tenant != nil {
-		// Tenants must specify a Site ID
+	} else if tenant != nil && infrastructureProvider == nil {
+		// Tenant-only callers must specify a Site ID.
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site ID must be specified in query when retrieving Expected Switches as a Tenant", nil)
 	} else {
 		// Get all Sites for the org's Infrastructure Provider
@@ -313,7 +345,7 @@ func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
 
 	// Validate pagination request
 	pageRequest := pagination.PageRequest{}
-	err := c.Bind(&pageRequest)
+	err = c.Bind(&pageRequest)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
@@ -369,17 +401,15 @@ func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // GetExpectedSwitchHandler is the API Handler for retrieving ExpectedSwitch
 type GetExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetExpectedSwitchHandler initializes and returns a new handler to retrieve ExpectedSwitch
 func NewGetExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) GetExpectedSwitchHandler {
 	return GetExpectedSwitchHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -396,7 +426,7 @@ func NewGetExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) Get
 // @Success 200 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch/{id} [get]
 func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Get", c, gesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -404,12 +434,6 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 	if dbUser == nil {
 		logger.Error().Msg("invalid User object found in request context")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
-	}
-
-	// ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gesh.dbSession, org, dbUser, true, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Get Expected Switch ID from URL param
@@ -421,7 +445,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 
 	logger = logger.With().Str("ExpectedSwitchID", expectedSwitchID.String()).Logger()
 
-	gesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -453,6 +477,12 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	// Scope tenant privilege to the Expected Switch's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gesh.dbSession, org, dbUser, true, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
 	// Validate ProviderTenantSite relationship and site state
 	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, gesh.dbSession, site, infrastructureProvider, tenant)
 	if apiError != nil {
@@ -474,19 +504,17 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // UpdateExpectedSwitchHandler is the API Handler for updating a ExpectedSwitch
 type UpdateExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateExpectedSwitchHandler initializes and returns a new handler for updating ExpectedSwitch
 func NewUpdateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedSwitchHandler {
 	return UpdateExpectedSwitchHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -503,7 +531,7 @@ func NewUpdateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, 
 // @Success 200 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch/{id} [patch]
 func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Update", c, uesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -514,12 +542,6 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// Ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, uesh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	// Get Expected Switch ID from URL param
 	expectedSwitchID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -527,7 +549,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("ExpectedSwitchID", expectedSwitchID.String()).Logger()
 
-	uesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()))
 
 	// Validate request
 	// Bind request data to API model
@@ -571,6 +593,12 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Switch", nil)
 	}
 
+	// Scope tenant privilege to the Expected Switch's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, uesh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
 	// Validate ProviderTenantSite relationship and site state
 	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, uesh.dbSession, site, infrastructureProvider, tenant)
 	if apiError != nil {
@@ -581,6 +609,43 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site of the Expected Switch", nil)
 	}
 
+	if !bmcMacUnchanged(expectedSwitch.BmcMacAddress, apiRequest.BmcMacAddress) {
+		validationErrors := bmcMacImmutableValidationError()
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Switch update data", validationErrors)
+	}
+
+	// NVOS MACs identify the switch's management ports during discovery, so a
+	// MAC claimed by another Expected Switch on the Site is a conflict. The
+	// switch being updated is excluded so re-asserting its own MACs stays valid.
+	if len(apiRequest.NvosMacAddresses) > 0 {
+		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
+			NvosMacAddresses:         apiRequest.NvosMacAddresses,
+			SiteIDs:                  []uuid.UUID{site.ID},
+			ExcludeExpectedSwitchIDs: []uuid.UUID{expectedSwitch.ID},
+		}, paginator.PageInput{
+			Limit: cutil.GetPtr(1),
+		}, nil)
+
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error checking for duplicate NVOS MAC addresses on Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate NVOS MAC address uniqueness on Site due to DB error", nil)
+		}
+
+		if len(conflicts) > 0 {
+			logger.Warn().Strs("NvosMacAddresses", apiRequest.NvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
+
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified NVOS MAC address already exists on Site", validation.Errors{
+				"id": errors.New(conflicts[0].ID.String()),
+			})
+		}
+	}
+
+	bmcIPAddress := apiRequest.BmcIpAddress
+	clearBmcIPAddress := bmcIPAddress != nil && *bmcIPAddress == ""
+	if clearBmcIPAddress {
+		bmcIPAddress = nil
+	}
+
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
 		// Note: NvOsUsername and NvOsPassword are not stored in DB, only passed to workflow
 		es, err := esDAO.Update(
@@ -588,9 +653,9 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			tx,
 			cdbm.ExpectedSwitchUpdateInput{
 				ExpectedSwitchID:   expectedSwitch.ID,
-				BmcMacAddress:      apiRequest.BmcMacAddress,
-				BmcIpAddress:       apiRequest.BmcIpAddress,
+				BmcIpAddress:       bmcIPAddress,
 				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
+				NvosMacAddresses:   apiRequest.NvosMacAddresses,
 				RackID:             apiRequest.RackID,
 				Name:               apiRequest.Name,
 				Manufacturer:       apiRequest.Manufacturer,
@@ -607,19 +672,21 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 		}
 
-		updateExpectedSwitchRequest := es.ToProto(cdbm.ExpectedSwitchCredentials{
-			BmcUsername:  apiRequest.DefaultBmcUsername,
-			BmcPassword:  apiRequest.DefaultBmcPassword,
-			NvosUsername: apiRequest.NvOsUsername,
-			NvosPassword: apiRequest.NvOsPassword,
-		})
+		if clearBmcIPAddress {
+			es, err = esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+				ExpectedSwitchID: expectedSwitch.ID,
+				BmcIpAddress:     true,
+			})
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch BMC IP address in DB")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
+			}
+		}
 
-		logger.Info().Msg("triggering ExpectedSwitch update workflow")
-
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       "expected-switch-update-" + expectedSwitch.ID.String(),
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchExpectedSwitchRequest := apiRequest.ToProto(es)
+		var secretFields []string
+		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil || apiRequest.NvOsUsername != nil || apiRequest.NvOsPassword != nil {
+			secretFields = []string{"expectedSwitch"}
 		}
 
 		stc, err := uesh.scp.GetClientByID(site.ID)
@@ -628,7 +695,9 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "UpdateExpectedSwitch", workflowOptions, updateExpectedSwitchRequest); apiErr != nil {
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedSwitch_FullMethodName, patchExpectedSwitchRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected switch")
 			return nil, apiErr
 		}
 		return es, nil
@@ -648,19 +717,17 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // DeleteExpectedSwitchHandler is the API Handler for deleting a ExpectedSwitch
 type DeleteExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteExpectedSwitchHandler initializes and returns a new handler for deleting ExpectedSwitch
 func NewDeleteExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteExpectedSwitchHandler {
 	return DeleteExpectedSwitchHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -676,7 +743,7 @@ func NewDeleteExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, 
 // @Success 204
 // @Router /v2/org/{org}/nico/expected-switch/{id} [delete]
 func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Delete", c, desh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -686,12 +753,6 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// Ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, desh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	// Get Expected Switch ID from URL param
 	expectedSwitchID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -699,7 +760,7 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("ExpectedSwitchID", expectedSwitchID.String()).Logger()
 
-	desh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()))
 
 	// Get ExpectedSwitch from DB by ID
 	esDAO := cdbm.NewExpectedSwitchDAO(desh.dbSession)
@@ -719,6 +780,12 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Switch", nil)
 	}
 
+	// Scope tenant privilege to the Expected Switch's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, desh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
 	// Validate ProviderTenantSite relationship and site state
 	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, desh.dbSession, site, infrastructureProvider, tenant)
 	if apiError != nil {
@@ -735,8 +802,8 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Switch due to DB error", nil)
 		}
 
-		deleteExpectedSwitchRequest := &cwssaws.ExpectedSwitchRequest{
-			ExpectedSwitchId: &cwssaws.UUID{Value: expectedSwitch.ID.String()},
+		deleteExpectedSwitchRequest := &corev1.ExpectedSwitchRequest{
+			ExpectedSwitchId: &corev1.UUID{Value: expectedSwitch.ID.String()},
 			BmcMacAddress:    expectedSwitch.BmcMacAddress,
 		}
 
@@ -766,4 +833,119 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("finishing API handler")
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// ReplaceAllExpectedSwitchesHandler replaces the complete ExpectedSwitch set for one Site.
+type ReplaceAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+
+// NewReplaceAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch replacement handler.
+func NewReplaceAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedSwitchesHandler {
+	return ReplaceAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Replace all ExpectedSwitches for a Site
+// @Tags ExpectedSwitch
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body model.APIReplaceAllExpectedSwitchesRequest true "ExpectedSwitch replace-all request"
+// @Success 200 {object} []model.APIExpectedSwitch
+// @Router /v2/org/{org}/nico/expected-switch/all [put]
+func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, span := common.SetupHandler("ExpectedSwitch", "ReplaceAll", c)
+	if span != nil {
+		defer span.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+	request := model.APIReplaceAllExpectedSwitchesRequest{}
+	err := c.Bind(&request)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ReplaceAllExpectedSwitches request data", err)
+	}
+	site, apiErr := h.resolveSite(ctx, logger, org, dbUser, request.SiteID, true)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+	logger = logger.With().Str("SiteID", site.ID.String()).Logger()
+
+	inputs := make([]cdbm.ExpectedSwitchCreateInput, 0, len(request.ExpectedSwitches))
+	credentials := make(map[uuid.UUID]cdbm.ExpectedSwitchCredentials, len(request.ExpectedSwitches))
+	for _, expectedSwitch := range request.ExpectedSwitches {
+		id := uuid.New()
+		credentials[id] = cdbm.ExpectedSwitchCredentials{BmcUsername: expectedSwitch.DefaultBmcUsername, BmcPassword: expectedSwitch.DefaultBmcPassword, NvosUsername: expectedSwitch.NvOsUsername, NvosPassword: expectedSwitch.NvOsPassword}
+		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,
+			SwitchSerialNumber: expectedSwitch.SwitchSerialNumber, BmcIpAddress: expectedSwitch.BmcIpAddress,
+			NvosMacAddresses: expectedSwitch.NvosMacAddresses, RackID: expectedSwitch.RackID,
+			Name: expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
+			Description: expectedSwitch.Description, SlotID: expectedSwitch.SlotID, TrayIdx: expectedSwitch.TrayIdx,
+			HostID: expectedSwitch.HostID, Labels: expectedSwitch.Labels, CreatedBy: dbUser.ID,
+		})
+	}
+	stc, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	dao := cdbm.NewExpectedSwitchDAO(h.dbSession)
+	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedSwitch, error) {
+		switches, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error replacing ExpectedSwitch records in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Switches due to DB error", nil)
+		}
+		protos := make([]*corev1.ExpectedSwitch, 0, len(switches))
+		for i := range switches {
+			protos = append(protos, switches[i].ToProto(credentials[switches[i].ID]))
+		}
+		coreRequest := &corev1.ExpectedSwitchList{ExpectedSwitches: protos}
+		var secretFields []string
+		if slices.ContainsFunc(request.ExpectedSwitches, func(expectedSwitch *model.APIExpectedSwitchCreateRequest) bool {
+			return expectedSwitch.DefaultBmcUsername != nil || expectedSwitch.DefaultBmcPassword != nil || expectedSwitch.NvOsUsername != nil || expectedSwitch.NvOsPassword != nil
+		}) {
+			secretFields = []string{"expectedSwitches"}
+		}
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		return switches, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to replace Expected Switches due to DB transaction error")
+	}
+	response := make([]*model.APIExpectedSwitch, 0, len(replaced))
+	for i := range replaced {
+		response = append(response, model.NewAPIExpectedSwitch(&replaced[i]))
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+// DeleteAllExpectedSwitchesHandler deletes the complete ExpectedSwitch set for one Site.
+type DeleteAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+
+// NewDeleteAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch deletion handler.
+func NewDeleteAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedSwitchesHandler {
+	return DeleteAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Delete all ExpectedSwitches for a Site
+// @Tags ExpectedSwitch
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site whose ExpectedSwitches should be deleted"
+// @Success 204
+// @Router /v2/org/{org}/nico/expected-switch/all [delete]
+func (h DeleteAllExpectedSwitchesHandler) Handle(c echo.Context) error {
+	return h.deleteAll(c, "ExpectedSwitch", corev1.Forge_DeleteAllExpectedSwitches_FullMethodName, func(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID) error {
+		return cdbm.NewExpectedSwitchDAO(h.dbSession).DeleteAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+	})
 }

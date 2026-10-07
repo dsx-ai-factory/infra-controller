@@ -29,7 +29,7 @@ use crate::rpc::ApiClient;
 /// Display details about objects that are using the
 /// requested NSG, including propagation status of the
 /// NSG across that object
-pub async fn show_attachments(
+pub(super) async fn show_attachments(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

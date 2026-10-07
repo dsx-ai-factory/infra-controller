@@ -15,7 +15,7 @@ import (
 
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
@@ -27,7 +27,7 @@ type ManageInstanceType struct {
 }
 
 // Function to Create NICo InstanceType with the Site Controller
-func (mm *ManageInstanceType) CreateInstanceTypeOnSite(ctx context.Context, request *cwssaws.CreateInstanceTypeRequest) error {
+func (mm *ManageInstanceType) CreateInstanceTypeOnSite(ctx context.Context, request *corev1.CreateInstanceTypeRequest) error {
 	logger := log.With().Str("Activity", "CreateInstanceTypeOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -52,19 +52,20 @@ func (mm *ManageInstanceType) CreateInstanceTypeOnSite(ctx context.Context, requ
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.CreateInstanceType(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create InstanceType using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create InstanceType using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function Update NICo InstanceType with the Site Controller
-func (mm *ManageInstanceType) UpdateInstanceTypeOnSite(ctx context.Context, request *cwssaws.UpdateInstanceTypeRequest) error {
+func (mm *ManageInstanceType) UpdateInstanceTypeOnSite(ctx context.Context, request *corev1.UpdateInstanceTypeRequest) error {
 	logger := log.With().Str("Activity", "UpdateInstanceTypeOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -89,19 +90,20 @@ func (mm *ManageInstanceType) UpdateInstanceTypeOnSite(ctx context.Context, requ
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateInstanceType(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update config for InstanceType using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update config for InstanceType using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to Delete NICo InstanceType with the Site Controller
-func (mm *ManageInstanceType) DeleteInstanceTypeOnSite(ctx context.Context, request *cwssaws.DeleteInstanceTypeRequest) error {
+func (mm *ManageInstanceType) DeleteInstanceTypeOnSite(ctx context.Context, request *corev1.DeleteInstanceTypeRequest) error {
 	logger := log.With().Str("Activity", "DeleteInstanceTypeOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -126,19 +128,20 @@ func (mm *ManageInstanceType) DeleteInstanceTypeOnSite(ctx context.Context, requ
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteInstanceType(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete InstanceType using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete InstanceType using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to associate Machine records with an InstanceType
-func (mm *ManageInstanceType) AssociateMachinesWithInstanceTypeOnSite(ctx context.Context, request *cwssaws.AssociateMachinesWithInstanceTypeRequest) error {
+func (mm *ManageInstanceType) AssociateMachinesWithInstanceTypeOnSite(ctx context.Context, request *corev1.AssociateMachinesWithInstanceTypeRequest) error {
 	logger := log.With().Str("Activity", "AssociateMachinesWithInstanceTypeOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -166,19 +169,20 @@ func (mm *ManageInstanceType) AssociateMachinesWithInstanceTypeOnSite(ctx contex
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.AssociateMachinesWithInstanceType(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to associate Machines with InstanceType using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to associate Machines with InstanceType using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to remove the association between a Machine and InstanceType
-func (mm *ManageInstanceType) RemoveMachineInstanceTypeAssociationOnSite(ctx context.Context, request *cwssaws.RemoveMachineInstanceTypeAssociationRequest) error {
+func (mm *ManageInstanceType) RemoveMachineInstanceTypeAssociationOnSite(ctx context.Context, request *corev1.RemoveMachineInstanceTypeAssociationRequest) error {
 	logger := log.With().Str("Activity", "RemoveMachineInstanceTypeAssociationOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -204,13 +208,14 @@ func (mm *ManageInstanceType) RemoveMachineInstanceTypeAssociationOnSite(ctx con
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.RemoveMachineInstanceTypeAssociation(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to associate Machines with InstanceType using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to associate Machines with InstanceType using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
@@ -231,7 +236,7 @@ type ManageInstanceTypeInventory struct {
 func (mmi *ManageInstanceTypeInventory) DiscoverInstanceTypeInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverInstanceTypeInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[*cwssaws.UUID, *cwssaws.InstanceType, *cwssaws.InstanceTypeInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.UUID, *corev1.InstanceType, *corev1.InstanceTypeInventory]{
 		itemType:               "InstanceType",
 		config:                 mmi.config,
 		internalFindIDs:        instanceTypeFindIDs,
@@ -248,20 +253,20 @@ func NewManageInstanceTypeInventory(config ManageInventoryConfig) ManageInstance
 	}
 }
 
-func instanceTypeFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.UUID, error) {
+func instanceTypeFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.UUID, error) {
 	// Call Core gRPC API endpoint
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	instanceTypeIdList, err := grpcServiceClient.FindInstanceTypeIds(ctx, &cwssaws.FindInstanceTypeIdsRequest{})
+	instanceTypeIdList, err := grpcServiceClient.FindInstanceTypeIds(ctx, &corev1.FindInstanceTypeIdsRequest{})
 	if err != nil {
 		return nil, err
 	}
 	return util.StringsToProtobufUUIDList(instanceTypeIdList.GetInstanceTypeIds()), nil
 }
 
-func instanceTypeFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.UUID) ([]*cwssaws.InstanceType, error) {
+func instanceTypeFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.UUID) ([]*corev1.InstanceType, error) {
 	// Call Core gRPC API endpoint
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	instanceTypeList, err := grpcServiceClient.FindInstanceTypesByIds(ctx, &cwssaws.FindInstanceTypesByIdsRequest{
+	instanceTypeList, err := grpcServiceClient.FindInstanceTypesByIds(ctx, &corev1.FindInstanceTypesByIdsRequest{
 		InstanceTypeIds: util.ProtobufUUIDListToStringList(ids),
 	})
 	if err != nil {
@@ -270,14 +275,14 @@ func instanceTypeFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClie
 	return instanceTypeList.GetInstanceTypes(), nil
 }
 
-func instanceTypePagedInventory(allItemIDs []*cwssaws.UUID, pagedItems []*cwssaws.InstanceType, input *pagedInventoryInput) *cwssaws.InstanceTypeInventory {
+func instanceTypePagedInventory(allItemIDs []*corev1.UUID, pagedItems []*corev1.InstanceType, input *pagedInventoryInput) *corev1.InstanceTypeInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of Machines
-	instanceTypeInventory := &cwssaws.InstanceTypeInventory{
+	instanceTypeInventory := &corev1.InstanceTypeInventory{
 		InstanceTypes: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),

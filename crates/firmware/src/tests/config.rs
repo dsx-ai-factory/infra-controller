@@ -16,7 +16,7 @@
  */
 
 use carbide_test_support::value_scenarios;
-use model::firmware::{Firmware, FirmwareComponentType};
+use model::firmware::{Firmware, FirmwareComponentType, HostFirmwareConfig};
 
 use crate::config::*;
 
@@ -44,6 +44,73 @@ current_version_reported_as = "BMCImage1"
 [[components.bmc.known_firmware]]
 version = "1.28.260500"
 filename = "/opt/carbide/firmware/lenovoami-thinksystem_hs350x_v3-bmc-1.28.260500/lnvgy_fw_BMC_igc602x-1.28_anyos_noarch.ima"
+default = true
+"#;
+
+const LENOVO_RUNTIME_CFG: &str = r#"
+model = "ThinkSystem HS350X V3"
+vendor = "Lenovo"
+
+[components.bmc]
+current_version_reported_as = "BMCImage1"
+
+[[components.bmc.known_firmware]]
+version = "1.29.260700"
+filename = "/opt/carbide/firmware/lenovo-thinksystem_hs350x_v3-bmc-1.29.260700/lnvgy_fw_BMC_igc602z-1.29_anyos_noarch.ima"
+default = true
+"#;
+
+const DELL_METADATA_CFG: &str = r#"
+model = "PowerEdge R750"
+vendor = "Dell"
+ordering = ["uefi", "bmc"]
+explicit_start_needed = true
+
+[components.uefi]
+current_version_reported_as = "^Installed-.*__BIOS.Setup."
+preingest_upgrade_when_below = "1.13.2"
+
+[[components.uefi.known_firmware]]
+version = "1.13.2"
+filename = "/opt/carbide/firmware/dell-poweredge_r750-uefi-1.13.2/BIOS_T3H20_WN64_1.13.2.EXE"
+default = true
+
+[components.bmc]
+current_version_reported_as = "^Installed-.*__iDRAC."
+preingest_upgrade_when_below = "7.10.30.00"
+
+[[components.bmc.known_firmware]]
+version = "7.10.30.00"
+filename = "/opt/carbide/firmware/dell-poweredge_r750-bmc-7.10.30.00/iDRAC.EXE"
+default = true
+"#;
+
+const DELL_RUNTIME_CFG: &str = r#"
+model = "PowerEdge R750"
+vendor = "Dell"
+ordering = ["cx7", "bmc"]
+explicit_start_needed = false
+
+[components.bmc]
+current_version_reported_as = "^Runtime-BMC$"
+preingest_upgrade_when_below = "7.20.00.00"
+
+[[components.bmc.known_firmware]]
+version = "7.10.30.00"
+url = "https://firmware.example.invalid/bmc-7.10.30.00-runtime.exe"
+default = false
+
+[[components.bmc.known_firmware]]
+version = "7.20.00.00"
+url = "https://firmware.example.invalid/bmc-7.20.00.00.exe"
+default = true
+
+[components.cx7]
+current_version_reported_as = "^CX7_[0-9]+$"
+
+[[components.cx7.known_firmware]]
+version = "28.48.1000"
+url = "https://firmware.example.invalid/cx7-28.48.1000.bin"
 default = true
 "#;
 
@@ -75,7 +142,13 @@ fn summarize_firmware(firmware: Firmware) -> FirmwareLookupSummary {
         bmc_version: firmware
             .components
             .get(&FirmwareComponentType::Bmc)
-            .and_then(|component| component.known_firmware.first())
+            .and_then(|component| {
+                component
+                    .known_firmware
+                    .iter()
+                    .find(|firmware| firmware.default)
+                    .or_else(|| component.known_firmware.first())
+            })
             .map(|firmware| firmware.version.clone()),
     }
 }
@@ -220,6 +293,114 @@ fn finds_lenovo_firmware_configs() {
 }
 
 #[test]
+fn create_snapshot_with_overrides_uses_runtime_default_for_matching_component() -> eyre::Result<()>
+{
+    let runtime_config = toml::from_str::<HostFirmwareConfig>(LENOVO_RUNTIME_CFG)?;
+
+    let snapshot =
+        config_with_overrides(&[LENOVO_CFG]).create_snapshot_with_overrides([runtime_config]);
+
+    assert_eq!(
+        snapshot
+            .find(bmc_vendor::BMCVendor::Lenovo, "ThinkSystem HS350X V3")
+            .map(summarize_firmware),
+        Some(FirmwareLookupSummary {
+            vendor: "lenovo".to_string(),
+            bmc_version: Some("1.29.260700".to_string()),
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn create_snapshot_with_overrides_merges_runtime_config_with_metadata() -> eyre::Result<()> {
+    let runtime_config = toml::from_str::<HostFirmwareConfig>(DELL_RUNTIME_CFG)?;
+
+    let snapshot = config_with_overrides(&[DELL_METADATA_CFG])
+        .create_snapshot_with_overrides([runtime_config]);
+    let server = snapshot.data.get("dell:poweredge r750").unwrap();
+
+    assert!(!server.explicit_start_needed);
+    assert_eq!(
+        server.ordering,
+        vec![
+            FirmwareComponentType::Uefi,
+            FirmwareComponentType::Bmc,
+            FirmwareComponentType::Cx7
+        ]
+    );
+
+    let uefi = server.components.get(&FirmwareComponentType::Uefi).unwrap();
+    assert_eq!(
+        uefi.known_firmware
+            .iter()
+            .filter(|firmware| firmware.default)
+            .map(|firmware| firmware.version.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1.13.2"]
+    );
+
+    let bmc = server.components.get(&FirmwareComponentType::Bmc).unwrap();
+    assert_eq!(
+        bmc.current_version_reported_as
+            .as_ref()
+            .map(|regex| regex.as_str()),
+        Some("^Runtime-BMC$")
+    );
+    assert_eq!(
+        bmc.preingest_upgrade_when_below.as_deref(),
+        Some("7.20.00.00")
+    );
+    assert_eq!(
+        bmc.known_firmware
+            .iter()
+            .map(|firmware| {
+                (
+                    firmware.version.as_str(),
+                    firmware.default,
+                    firmware.filename.as_deref(),
+                    firmware.url.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "7.10.30.00",
+                false,
+                None,
+                Some("https://firmware.example.invalid/bmc-7.10.30.00-runtime.exe")
+            ),
+            (
+                "7.20.00.00",
+                true,
+                None,
+                Some("https://firmware.example.invalid/bmc-7.20.00.00.exe")
+            ),
+        ]
+    );
+
+    let cx7 = server.components.get(&FirmwareComponentType::Cx7).unwrap();
+    assert_eq!(cx7.known_firmware[0].version, "28.48.1000");
+
+    Ok(())
+}
+
+#[test]
+fn create_snapshot_with_overrides_preserves_metadata_explicit_start_when_runtime_omits()
+-> eyre::Result<()> {
+    let mut runtime_config = toml::from_str::<HostFirmwareConfig>(DELL_RUNTIME_CFG)?;
+    runtime_config.explicit_start_needed = None;
+
+    let snapshot = config_with_overrides(&[DELL_METADATA_CFG])
+        .create_snapshot_with_overrides([runtime_config]);
+    let server = snapshot.data.get("dell:poweredge r750").unwrap();
+
+    assert!(server.explicit_start_needed);
+
+    Ok(())
+}
+
+#[test]
 fn cx7_component_config_parses_as_first_class_component() -> eyre::Result<()> {
     let cfg = r#"
 model = "DGXH100"
@@ -240,13 +421,13 @@ power_drains_needed = 1
 filename = "/opt/carbide/firmware/nvidia-dgxh100-cx7-28.47.2682/cx7.bin"
 sha256 = "abc123"
 
+[[components.cx7.known_firmware.files]]
+url = "https://firmware.example.invalid/cx7.bin"
+sha256 = "def456"
+
 [components.cx7.known_firmware.scout]
 execution_timeout_seconds = 1800
 artifact_download_timeout_seconds = 600
-
-[components.cx7.known_firmware.scout.script]
-filename = "/opt/carbide/firmware/nvidia-dgxh100-cx7-28.47.2682/scripts/cx7_upgrade.sh"
-sha256 = "def456"
 "#;
     let mut config: FirmwareConfig = Default::default();
     config.add_test_override(cfg.to_string());
@@ -263,14 +444,20 @@ sha256 = "def456"
     let firmware = cx7.known_firmware.first().unwrap();
     assert_eq!(firmware.version, "28.47.2682");
     assert_eq!(firmware.power_drains_needed, Some(1));
-    assert_eq!(firmware.files.len(), 1);
+    assert_eq!(firmware.files.len(), 2);
+    assert_eq!(
+        firmware.files[0].filename.as_deref(),
+        Some("/opt/carbide/firmware/nvidia-dgxh100-cx7-28.47.2682/cx7.bin")
+    );
+    assert_eq!(firmware.files[1].filename, None);
+    assert_eq!(
+        firmware.files[1].url.as_deref(),
+        Some("https://firmware.example.invalid/cx7.bin")
+    );
 
     let scout = firmware.scout.as_ref().unwrap();
     assert_eq!(scout.execution_timeout_seconds, 1800);
     assert_eq!(scout.artifact_download_timeout_seconds, 600);
-    assert_eq!(
-        scout.script.filename,
-        "/opt/carbide/firmware/nvidia-dgxh100-cx7-28.47.2682/scripts/cx7_upgrade.sh"
-    );
+    assert!(scout.script.is_none());
     Ok(())
 }

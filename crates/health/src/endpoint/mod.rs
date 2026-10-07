@@ -15,12 +15,15 @@
  * limitations under the License.
  */
 
+mod cluster;
 mod model;
 mod sources;
 
+pub use cluster::ClusterEndpointSource;
 pub use model::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
+    SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 pub use sources::{CompositeEndpointSource, StaticEndpointSource};
 
@@ -39,12 +42,12 @@ pub(crate) mod test_support {
     use super::*;
     use crate::bmc::{BmcClient, FixedCredentialProvider};
 
-    pub fn reqwest() -> ReqwestClient {
+    pub(crate) fn reqwest() -> ReqwestClient {
         ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
             .expect("reqwest client builds")
     }
 
-    pub fn endpoint_with_creds(
+    pub(crate) fn endpoint_with_creds(
         addr: BmcAddr,
         creds: BmcCredentials,
         metadata: Option<EndpointMetadata>,
@@ -52,23 +55,32 @@ pub(crate) mod test_support {
     ) -> BmcEndpoint {
         let provider = Arc::new(FixedCredentialProvider::new(creds));
         let bmc = Arc::new(
-            BmcClient::new(reqwest(), addr.clone(), provider, None, 10)
-                .expect("fixed-credential BmcClient construction is infallible"),
+            BmcClient::new(
+                reqwest(),
+                addr.clone(),
+                provider,
+                None,
+                10,
+                std::num::NonZeroUsize::MIN,
+                None,
+            )
+            .expect("fixed-credential BmcClient construction is infallible"),
         );
         BmcEndpoint {
             addr,
             metadata,
             rack_id,
+            labels: Default::default(),
             bmc,
         }
     }
 
-    pub fn test_endpoint(mac: MacAddress) -> BmcEndpoint {
+    pub(crate) fn test_endpoint(mac: MacAddress) -> BmcEndpoint {
         endpoint_with_creds(
             BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: Some(443),
-                mac,
+                mac: Some(mac),
             },
             BmcCredentials::UsernamePassword {
                 username: "admin".to_string(),
@@ -79,7 +91,7 @@ pub(crate) mod test_support {
         )
     }
 
-    pub fn mac(s: &str) -> MacAddress {
+    pub(crate) fn mac(s: &str) -> MacAddress {
         MacAddress::from_str(s).unwrap()
     }
 }
@@ -132,12 +144,12 @@ mod tests {
         let addr_http = BmcAddr {
             ip: "10.0.0.1".parse().expect("valid ip"),
             port: Some(80),
-            mac: mac("00:11:22:33:44:55"),
+            mac: Some(mac("00:11:22:33:44:55")),
         };
         let addr_https = BmcAddr {
             ip: "10.0.0.2".parse().expect("valid ip"),
             port: Some(443),
-            mac: mac("aa:bb:cc:dd:ee:ff"),
+            mac: Some(mac("aa:bb:cc:dd:ee:ff")),
         };
 
         let url_http = addr_http.to_url().expect("url should build");

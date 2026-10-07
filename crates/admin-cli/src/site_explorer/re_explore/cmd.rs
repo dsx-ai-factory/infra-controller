@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn re_explore(api_client: &ApiClient, opts: Args) -> CarbideCliResult<()> {
+pub(super) async fn re_explore(api_client: &ApiClient, opts: Args) -> CarbideCliResult<()> {
     api_client
         .0
         .re_explore_endpoint(ReExploreEndpointRequest {

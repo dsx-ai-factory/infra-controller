@@ -46,7 +46,7 @@ impl Tray {
             nvl,
             ib,
         };
-        tracing::trace!(rack_id = %tray.rack_id, rack_state = %tray.rack_state, nvl = ?tray.nvl, ib = ?tray.ib, "Tray constructed");
+        tracing::trace!(rack_id = %tray.rack_id, rack_state = %tray.rack_state, nvlink_node = ?tray.nvl, ib_node = ?tray.ib, "Tray constructed");
         tray
     }
 }

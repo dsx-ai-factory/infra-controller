@@ -14,8 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+mod bootstrap_ca;
 mod common;
 mod full;
+mod lldp_collector;
 mod metrics;
 mod test_network_monitor;
 mod upgrade;

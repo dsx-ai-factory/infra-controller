@@ -14,123 +14,165 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Request};
 use axum::middleware::Next;
 use axum::response::Response;
+use tracing::Instrument;
 
+/// Wraps the handler in a `request` span shared by logfmt and OTLP export.
+///
+/// A `traceparent` header continues the caller's trace, otherwise the span starts
+/// a new one. `ForgeTlsClient` sends this span's context on outbound gRPC calls.
 pub(crate) async fn logger(
     ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
-    let mut props = BTreeMap::new();
-    props.insert("level", "SPAN".to_string());
-    props.insert("span_name", "request".to_string());
-
-    props.insert("request_method", request.method().to_string());
-    props.insert("request_path", request.uri().path().to_string());
-    props.insert(
-        "request_query",
-        request
-            .uri()
-            .query()
-            .map(|q| q.to_string())
-            .unwrap_or_default(),
+    // Links request logs using the same correlation ID format as api-core.
+    let span_id = format!("{:#x}", u64::from_le_bytes(rand::random::<[u8; 8]>()));
+    let span = tracing::info_span!(
+        "request",
+        span_id,
+        remote_ip = %socket_addr.ip().to_canonical(),
+        remote_port = socket_addr.port(),
+        request_method = %request.method(),
+        request_path = request.uri().path(),
+        request_query = request.uri().query().unwrap_or_default(),
+        request_headers_host = tracing::field::Empty,
+        "request_headers_content-length" = tracing::field::Empty,
+        "request_headers_user-agent" = tracing::field::Empty,
+        response_status = tracing::field::Empty,
+        "response_headers_content-length" = tracing::field::Empty,
     );
+
+    // Set the parent before entering the span; started spans cannot change it.
+    trace_propagation::set_span_parent_from_headers(&span, request.headers());
+
+    // An absent header leaves its `Empty` placeholder unset, so logfmt omits it.
     if let Some(host) = request.headers().get("Host").and_then(|h| h.to_str().ok()) {
-        props.insert("request_headers_host", host.to_string());
+        span.record("request_headers_host", host);
     }
     if let Some(content_length) = request
         .headers()
         .get("Content-Length")
         .and_then(|h| h.to_str().ok())
     {
-        props.insert("request_headers_content-length", content_length.to_string());
+        span.record("request_headers_content-length", content_length);
     }
     if let Some(user_agent) = request
         .headers()
         .get("User-Agent")
         .and_then(|h| h.to_str().ok())
     {
-        props.insert("request_headers_user-agent", user_agent.to_string());
+        span.record("request_headers_user-agent", user_agent);
     }
 
-    let response = next.run(request).await;
+    let response = next.run(request).instrument(span.clone()).await;
 
-    props.insert("response_status", response.status().as_str().to_string());
+    span.record("response_status", response.status().as_str());
     if let Some(content_length) = response
         .headers()
         .get("Content-Length")
         .and_then(|h| h.to_str().ok())
     {
-        props.insert(
-            "response_headers_content-length",
-            content_length.to_string(),
-        );
+        span.record("response_headers_content-length", content_length);
     }
-
-    props.insert("remote_ip", socket_addr.ip().to_string());
-    props.insert("remote_port", socket_addr.port().to_string());
-
-    let formatted = render_logfmt(&props);
-    println!("{formatted}");
 
     response
 }
 
-/// Renders a list of key-value pairs into a logfmt string
-fn render_logfmt(props: &BTreeMap<&'static str, String>) -> String {
-    let mut msg = String::new();
-
-    for (key, value) in props {
-        if !msg.is_empty() {
-            msg.push(' ');
-        }
-        msg += key;
-        msg.push('=');
-        let needs_quotes = value.is_empty()
-            || value
-                .as_bytes()
-                .iter()
-                .any(|c| *c <= b' ' || matches!(*c, b'=' | b'"'));
-
-        if needs_quotes {
-            msg.push('"');
-        }
-
-        msg.push_str(&value.escape_debug().to_string());
-
-        if needs_quotes {
-            msg.push('"');
-        }
-    }
-
-    msg
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{Arc, Mutex};
 
-    #[test]
-    fn test_logfmt() {
-        let mut props = BTreeMap::new();
-        props.insert("method", "GET".to_string());
-        props.insert("path", "/boot".to_string());
-        props.insert("remote_ip", "127.0.0.1".to_string());
-        assert_eq!(
-            render_logfmt(&props),
-            "method=GET path=/boot remote_ip=127.0.0.1"
+    use axum::body::Body;
+    use axum::extract::{ConnectInfo, Request};
+    use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+    use tower::ServiceExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    // Fixed IDs make an inherited trace easy to recognize.
+    const INBOUND_TRACE: u128 = 0x42;
+    const INBOUND_SPAN: u64 = 0x55;
+
+    /// Returns the handler's trace ID: the context an outbound call would use.
+    /// Returns `None` if the handler has no valid trace context.
+    async fn served_trace_id(traceparent: Option<&str>) -> Option<TraceId> {
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("nico-pxe-test")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let observed: Arc<Mutex<Option<TraceId>>> = Arc::new(Mutex::new(None));
+        let captured = observed.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/v0/pxe/boot",
+                axum::routing::get(move || async move {
+                    let context = tracing::Span::current().context();
+                    let span_context = context.span().span_context().clone();
+                    if span_context.is_valid() {
+                        *captured.lock().unwrap() = Some(span_context.trace_id());
+                    }
+                }),
+            )
+            .route_layer(axum::middleware::from_fn(super::logger));
+
+        let mut builder = Request::builder().uri("/api/v0/pxe/boot");
+        if let Some(traceparent) = traceparent {
+            builder = builder.header("traceparent", traceparent);
+        }
+        let mut request = builder.body(Body::empty()).unwrap();
+        // Supply the peer address normally added by the HTTP server.
+        request
+            .extensions_mut()
+            .insert(ConnectInfo::<std::net::SocketAddr>(
+                "10.0.0.1:4242".parse().unwrap(),
+            ));
+
+        let response = app.oneshot(request).await.unwrap();
+        assert!(
+            response.status().is_success(),
+            "the request itself must still be served: {}",
+            response.status()
         );
 
-        props.insert("z", "with whitespace".to_string());
-        props.insert("e", "".to_string());
+        *observed.lock().unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_span_continues_an_inbound_trace() {
+        let trace_id = served_trace_id(Some(&format!(
+            "00-{INBOUND_TRACE:032x}-{INBOUND_SPAN:016x}-01"
+        )))
+        .await;
+
         assert_eq!(
-            render_logfmt(&props),
-            "e=\"\" method=GET path=/boot remote_ip=127.0.0.1 z=\"with whitespace\""
+            trace_id,
+            Some(TraceId::from(INBOUND_TRACE)),
+            "a request carrying a traceparent must stay on the caller's trace"
         );
+    }
+
+    // Missing or malformed trace context must still allow a fresh trace.
+    #[tokio::test]
+    async fn request_span_roots_a_fresh_trace_without_usable_inbound_context() {
+        for traceparent in [None, Some("not-a-traceparent")] {
+            let trace_id = served_trace_id(traceparent).await;
+
+            assert!(
+                trace_id.is_some_and(|trace_id| trace_id != TraceId::from(INBOUND_TRACE)),
+                "expected a fresh root trace for traceparent {traceparent:?}, got {trace_id:?}"
+            );
+        }
     }
 }

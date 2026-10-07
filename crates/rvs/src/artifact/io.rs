@@ -183,7 +183,7 @@ async fn download_one(
     tokio::fs::rename(&tmp_path, path).await?;
     tracing::info!(
         path = artifact.output_path,
-        bytes,
+        file_size_bytes = bytes,
         "artifact: downloaded to cache"
     );
     Ok(())
@@ -233,7 +233,7 @@ async fn log_cache_request(
     tracing::info!(
         %method,
         path,
-        status = response.status().as_u16(),
+        http_status = response.status().as_u16(),
         "artifact: cache request"
     );
     response

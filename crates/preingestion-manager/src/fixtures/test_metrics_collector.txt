@@ -1,9 +1,9 @@
-# HELP carbide_preingestion_total The amount of known machines currently being evaluated prior to ingestion
+# HELP carbide_preingestion_total Number of known machines currently being evaluated prior to ingestion
 # TYPE carbide_preingestion_total gauge
 carbide_preingestion_total 20
-# HELP carbide_preingestion_waiting_download The amount of machines that are waiting for firmware downloads on other machines to complete before doing their own
+# HELP carbide_preingestion_waiting_download Number of machines that are waiting for firmware downloads on other machines to complete before doing their own
 # TYPE carbide_preingestion_waiting_download gauge
 carbide_preingestion_waiting_download 10
-# HELP carbide_preingestion_waiting_installation The amount of machines which have had firmware uploaded to them and are currently in the process of installing that firmware
+# HELP carbide_preingestion_waiting_installation Number of machines which have had firmware uploaded to them and are currently in the process of installing that firmware
 # TYPE carbide_preingestion_waiting_installation gauge
 carbide_preingestion_waiting_installation 15

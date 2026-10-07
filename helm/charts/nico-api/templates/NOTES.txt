@@ -1,0 +1,7 @@
+{{- if and (eq (include "nico-api.webAuth.renderBasicSecret" .) "true") (eq (include "nico-api.webAuth.hasExistingBasicSecret" .) "false") }}
+The NICo WebUI is configured for HTTP Basic authentication.
+
+Retrieve the generated password (username: admin) with:
+
+  kubectl -n {{ include "nico-api.namespace" . }} get secret {{ include "nico-api.webAuth.basicSecretName" . }} -o jsonpath="{.data['{{ include "nico-api.webAuth.basicSecretKey" . }}']}" | base64 -d
+{{- end }}

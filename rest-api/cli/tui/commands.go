@@ -4,10 +4,14 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -15,18 +19,20 @@ import (
 	"text/tabwriter"
 
 	cli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 )
 
 // Command represents a registered interactive command.
 type Command struct {
 	Name        string
 	Description string
+	Sensitive   bool
 	Run         func(s *Session, args []string) error
 }
 
 // AllCommands returns all available commands.
 func AllCommands() []Command {
-	return []Command{
+	commands := []Command{
 		{Name: "site list", Description: "List all sites", Run: cmdSiteList},
 		{Name: "site get", Description: "Get site details", Run: cmdSiteGet},
 		{Name: "site create", Description: "Create a site", Run: cmdSiteCreate},
@@ -39,10 +45,11 @@ func AllCommands() []Command {
 		{Name: "vpc update", Description: "Update a VPC", Run: cmdVPCUpdate},
 		{Name: "vpc virtualization update", Description: "Update VPC virtualization", Run: cmdVPCVirtualizationUpdate},
 		{Name: "vpc delete", Description: "Delete a VPC", Run: cmdVPCDelete},
+		{Name: "vpc-peering create", Description: "Create VPC peerings", Run: cmdVPCPeeringCreate},
 
 		{Name: "subnet list", Description: "List all subnets", Run: cmdSubnetList},
 		{Name: "subnet get", Description: "Get subnet details", Run: cmdSubnetGet},
-		{Name: "subnet create", Description: "Create a subnet", Run: cmdSubnetCreate},
+		{Name: "subnet create", Description: "Create an IPv4 Subnet in an Ethernet virtualizer VPC", Run: cmdSubnetCreate},
 		{Name: "subnet update", Description: "Update a subnet", Run: cmdSubnetUpdate},
 		{Name: "subnet delete", Description: "Delete a subnet", Run: cmdSubnetDelete},
 
@@ -52,12 +59,13 @@ func AllCommands() []Command {
 		{Name: "instance list", Description: "List all instances", Run: cmdInstanceList},
 		{Name: "instance get", Description: "Get instance details", Run: cmdInstanceGet},
 		{Name: "instance create", Description: "Create an instance on a machine", Run: cmdInstanceCreate},
-		{Name: "instance update", Description: "Update an instance (rename, change OS, rotate ssh key groups, trigger reboot)", Run: cmdInstanceUpdate},
+		{Name: "instance update", Description: "Update an instance (rename, change OS, rotate ssh key groups)", Run: cmdInstanceUpdate},
 		{Name: "instance reboot", Description: "Reboot an instance, optionally with custom iPXE / pending updates", Run: cmdInstanceReboot},
 		{Name: "instance delete", Description: "Delete an instance", Run: cmdInstanceDelete},
 
 		{Name: "machine list", Description: "List machines", Run: cmdMachineList},
 		{Name: "machine get", Description: "Get machine details", Run: cmdMachineGet},
+		{Name: "machine dpu get", Description: "Get DPU machines attached to a host machine", Run: cmdMachineDpuGet},
 
 		{Name: "operating-system list", Description: "List operating systems", Run: cmdOSList},
 		{Name: "operating-system get", Description: "Get operating system details", Run: cmdOSGet},
@@ -172,6 +180,7 @@ func AllCommands() []Command {
 		{Name: "env", Description: "Show NICO_* environment variables in use", Run: cmdEnv},
 		{Name: "help", Description: "Show available commands", Run: cmdHelp},
 	}
+	return appendGeneratedCommands(commands)
 }
 
 // LogCmd prints the equivalent cli one-liner for reference.
@@ -182,6 +191,10 @@ func LogCmd(s *Session, parts ...string) {
 	}
 	cmdParts = append(cmdParts, appendScopeFlags(s, parts)...)
 	fmt.Printf("%s %s\n", Dim("INFO:"), strings.Join(cmdParts, " "))
+}
+
+func shellQuoteCLIArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func appendScopeFlags(s *Session, parts []string) []string {
@@ -292,6 +305,31 @@ func readyMachineItemsForSite(machines []NamedItem, siteID string) []SelectItem 
 	return readyItems
 }
 
+func promptInstanceMachine(s *Session, ctx context.Context, siteID string) (*SelectItem, error) {
+	canTargetMachine, err := s.tenantHasTargetedInstanceCreationAtSite(ctx, siteID)
+	if err != nil {
+		return nil, fmt.Errorf("checking targeted instance creation capability: %w", err)
+	}
+	if !canTargetMachine {
+		return nil, fmt.Errorf("current tenant does not have effective targeted instance creation permission for the selected site")
+	}
+
+	// Temporarily clear VPC scope so fetchMachines returns all Site Machines
+	// rather than Machines already assigned to the scoped VPC.
+	savedVpcID, savedVpcName := s.Scope.VpcID, s.Scope.VpcName
+	s.Scope.VpcID, s.Scope.VpcName = "", ""
+	machines, fetchErr := fetchMachinesWithSiteFallback(s, "Machine listing requires a site filter. Select a site.")
+	s.Scope.VpcID, s.Scope.VpcName = savedVpcID, savedVpcName
+	if fetchErr != nil {
+		return nil, fmt.Errorf("fetching machines: %w", fetchErr)
+	}
+	readyItems := readyMachineItemsForSite(machines, siteID)
+	if len(readyItems) == 0 {
+		return nil, fmt.Errorf("no machines in Ready state available for selected VPC site")
+	}
+	return Select("Machine", readyItems)
+}
+
 // machineSelectLabel formats a machine for the interactive select list. It
 // always includes the resolved display name (which may be a serial number when
 // no friendly labels are set) plus the full machine ID, so reviewers and
@@ -307,6 +345,20 @@ func machineSelectLabel(m NamedItem) string {
 		return name
 	}
 	return name + "  " + Dim(id)
+}
+
+// parseMutationResponseRequiringID rejects success payloads that cannot identify the
+// mutated resource.
+func parseMutationResponseRequiringID(resp []byte, description string) (map[string]interface{}, error) {
+	var parsed map[string]interface{}
+	err := json.Unmarshal(resp, &parsed)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s response: %w", description, err)
+	}
+	if strings.TrimSpace(str(parsed, "id")) == "" {
+		return nil, fmt.Errorf("parsing %s response: missing id", description)
+	}
+	return parsed, nil
 }
 
 // -- List commands --
@@ -384,8 +436,10 @@ func cmdSiteCreate(s *Session, _ []string) error {
 	}
 	s.Cache.Invalidate("site")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created site")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Site created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -497,8 +551,10 @@ func cmdSiteUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("site")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated site")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Site updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -587,16 +643,59 @@ func cmdVPCCreate(s *Session, _ []string) error {
 	if strings.TrimSpace(desc) != "" {
 		body["description"] = desc
 	}
-	LogCmd(s, "vpc", "create", "--name", name, "--site-id", site.ID)
+
+	routingProfile := ""
+	routingProfileOverride := ""
+	siteRaw, _ := site.Raw.(map[string]interface{})
+	siteCapabilities, _ := siteRaw["capabilities"].(map[string]interface{})
+	nativeNetworking, _ := siteCapabilities["nativeNetworking"].(bool)
+	if nativeNetworking {
+		routingProfileResponse, _, requestErr := s.Client.Do("GET", apiPath(s, "tenant/current/routing-profile"), nil, map[string]string{"siteId": site.ID}, nil)
+		if requestErr != nil {
+			return fmt.Errorf("fetching Tenant routing profiles: %w", requestErr)
+		}
+		var tenantRoutingProfile struct {
+			DefaultRoutingProfile    string   `json:"defaultRoutingProfile"`
+			PermittedRoutingProfiles []string `json:"permittedRoutingProfiles"`
+		}
+		if err := json.Unmarshal(routingProfileResponse, &tenantRoutingProfile); err != nil {
+			return fmt.Errorf("parsing Tenant routing profiles: %w", err)
+		}
+		routingProfile, err = PromptChoice(
+			fmt.Sprintf("Routing profile (%s (tenant default))", tenantRoutingProfile.DefaultRoutingProfile),
+			tenantRoutingProfile.PermittedRoutingProfiles,
+			tenantRoutingProfile.DefaultRoutingProfile,
+		)
+		if err != nil {
+			return err
+		}
+		if routingProfile != tenantRoutingProfile.DefaultRoutingProfile {
+			routingProfileOverride = routingProfile
+			body["routingProfile"] = routingProfileOverride
+		}
+	}
+
+	logArgs := []string{"vpc", "create", "--name", name, "--site-id", site.ID}
+	if routingProfileOverride != "" {
+		logArgs = append(logArgs, "--routing-profile", routingProfileOverride)
+	}
+	LogCmd(s, logArgs...)
 	bodyJSON, _ := json.Marshal(body)
 	resp, _, err := s.Client.Do("POST", apiPath(s, "vpc"), nil, nil, bodyJSON)
 	if err != nil {
 		return fmt.Errorf("creating VPC: %w", err)
 	}
 	s.Cache.Invalidate("vpc")
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
-	fmt.Printf("%s VPC created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
+	created, err := parseMutationResponseRequiringID(resp, "created VPC")
+	if err != nil {
+		return err
+	}
+	resolvedRoutingProfile := str(created, "routingProfile")
+	if resolvedRoutingProfile != "" {
+		fmt.Printf("%s VPC created: %s (%s), routing profile: %s\n", Green("OK"), str(created, "name"), str(created, "id"), resolvedRoutingProfile)
+	} else {
+		fmt.Printf("%s VPC created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
+	}
 	return nil
 }
 
@@ -631,8 +730,10 @@ func cmdVPCUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("vpc")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated VPC")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s VPC updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -674,8 +775,10 @@ func cmdVPCVirtualizationUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("vpc")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated VPC virtualization")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s VPC virtualization update submitted: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -715,8 +818,70 @@ func cmdSubnetList(s *Session, _ []string) error {
 	return tw.Flush()
 }
 
+// validateIPv4SubnetPrefixLength checks the REST IPv4 Subnet range.
+func validateIPv4SubnetPrefixLength(prefixLength int) error {
+	if prefixLength < 8 || prefixLength > 30 {
+		return fmt.Errorf("prefix length must be between 8 and 30")
+	}
+	return nil
+}
+
+// filterSubnetVPCs keeps Ready Ethernet virtualizer and legacy untyped VPCs
+// that the REST Subnet handler accepts.
+func filterSubnetVPCs(vpcs []NamedItem) []NamedItem {
+	filtered := make([]NamedItem, 0, len(vpcs))
+	for _, vpc := range vpcs {
+		if !strings.EqualFold(strings.TrimSpace(vpc.Status), "Ready") {
+			continue
+		}
+		virtualizationType := strings.TrimSpace(vpc.Extra["networkVirtualizationType"])
+		// An empty type identifies a legacy VPC that the server preserves.
+		if virtualizationType != "" && virtualizationType != "ETHERNET_VIRTUALIZER" {
+			continue
+		}
+		filtered = append(filtered, vpc)
+	}
+	return filtered
+}
+
+// buildSubnetIPBlockSelectItems returns Ready, tenant-owned IPv4 allocation
+// blocks at the selected VPC's Site.
+func buildSubnetIPBlockSelectItems(ipBlocks []NamedItem, siteID, tenantID string) []SelectItem {
+	siteID = strings.TrimSpace(siteID)
+	tenantID = strings.TrimSpace(tenantID)
+	items := make([]SelectItem, 0, len(ipBlocks))
+	for _, block := range ipBlocks {
+		if !strings.EqualFold(strings.TrimSpace(block.Status), "Ready") {
+			continue
+		}
+		if strings.TrimSpace(block.Extra["protocolVersion"]) != "IPv4" {
+			continue
+		}
+		if siteID != "" && strings.TrimSpace(block.Extra["siteId"]) != siteID {
+			continue
+		}
+		if strings.TrimSpace(block.Extra["tenantId"]) != tenantID {
+			continue
+		}
+		blockID := strings.TrimSpace(block.ID)
+		if blockID == "" {
+			continue
+		}
+		label := strings.TrimSpace(block.Name)
+		if label == "" {
+			label = blockID
+		}
+		items = append(items, SelectItem{Label: label, ID: blockID})
+	}
+	return items
+}
+
 func cmdSubnetCreate(s *Session, _ []string) error {
-	vpc, err := s.Resolver.Resolve(context.Background(), "vpc", "VPC")
+	vpcs, err := s.Resolver.Fetch(context.Background(), "vpc")
+	if err != nil {
+		return fmt.Errorf("fetching vpc: %w", err)
+	}
+	vpc, err := s.Resolver.SelectFromItems("Ready Ethernet virtualizer VPC", filterSubnetVPCs(vpcs))
 	if err != nil {
 		return err
 	}
@@ -731,34 +896,31 @@ func cmdSubnetCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	prefixLenText, err := PromptText("Prefix length (1-32)", true)
+	prefixLenText, err := PromptText("IPv4 prefix length (8-30)", true)
 	if err != nil {
 		return err
 	}
-	var prefixLen int
-	fmt.Sscanf(prefixLenText, "%d", &prefixLen)
-	if prefixLen < 1 || prefixLen > 32 {
-		return fmt.Errorf("prefix length must be between 1 and 32")
+	prefixLen, err := strconv.Atoi(strings.TrimSpace(prefixLenText))
+	if err != nil {
+		return fmt.Errorf("prefix length must be an integer: %w", err)
+	}
+	err = validateIPv4SubnetPrefixLength(prefixLen)
+	if err != nil {
+		return err
 	}
 
-	ipBlocks, err := s.Resolver.Fetch(context.Background(), "ip-block")
+	ipBlocks, tenantID, err := s.fetchTenantIPBlocks(context.Background())
 	if err != nil {
 		return fmt.Errorf("fetching IP blocks: %w", err)
 	}
-	blockItems := make([]SelectItem, 0, len(ipBlocks))
-	for _, block := range ipBlocks {
-		if vpcSiteID != "" && strings.TrimSpace(block.Extra["siteId"]) != vpcSiteID {
-			continue
-		}
-		blockItems = append(blockItems, SelectItem{Label: block.Name, ID: block.ID})
-	}
+	blockItems := buildSubnetIPBlockSelectItems(ipBlocks, vpcSiteID, tenantID)
 	if len(blockItems) == 0 {
 		if vpcSiteID != "" {
-			return fmt.Errorf("no IP blocks available for selected VPC site")
+			return fmt.Errorf("no Ready IPv4 IP blocks available for current tenant at selected VPC site")
 		}
-		return fmt.Errorf("no IP blocks available")
+		return fmt.Errorf("no Ready IPv4 IP blocks available for current tenant")
 	}
-	block, err := Select("IPv4 Block", blockItems)
+	block, err := Select("Tenant IPv4 Block:", blockItems)
 	if err != nil {
 		return err
 	}
@@ -772,7 +934,7 @@ func cmdSubnetCreate(s *Session, _ []string) error {
 	if strings.TrimSpace(desc) != "" {
 		body["description"] = strings.TrimSpace(desc)
 	}
-	LogCmd(s, "subnet", "create", "--name", name, "--vpc-id", vpc.ID, "--ipv4-block-id", block.ID, "--prefix-length", prefixLenText)
+	LogCmd(s, "subnet", "create", "--name", name, "--vpc-id", vpc.ID, "--ipv4block-id", block.ID, "--prefix-length", prefixLenText)
 	bodyJSON, _ := json.Marshal(body)
 	resp, _, err := s.Client.Do("POST", apiPath(s, "subnet"), nil, nil, bodyJSON)
 	if err != nil {
@@ -780,9 +942,11 @@ func cmdSubnetCreate(s *Session, _ []string) error {
 	}
 	s.Cache.Invalidate("subnet")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
-	fmt.Printf("%s Subnet created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
+	created, err := parseMutationResponseRequiringID(resp, "created subnet")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s IPv4 Subnet created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
 
@@ -817,8 +981,10 @@ func cmdSubnetUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("subnet")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated subnet")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Subnet updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -903,13 +1069,38 @@ func cmdInstanceList(s *Session, args []string) error {
 	fmt.Fprintf(os.Stderr, "%d items\n", len(items))
 	defer printLabelHint(os.Stderr, items, merged)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATUS\tVPC\tSITE\tLABELS\tID")
+	fmt.Fprintln(tw, "NAME\tIP ADDRESSES\tIP PREFIXES\tSTATUS\tVPC\tSITE\tLABELS\tID")
 	for _, item := range items {
+		ipAddresses := strings.Join(instanceInterfaceValues(item.Raw, "ipAddresses"), ", ")
+		if ipAddresses == "" {
+			ipAddresses = "-"
+		}
+		ipPrefixes := strings.Join(instanceInterfaceValues(item.Raw, "ipPrefixes"), ", ")
+		if ipPrefixes == "" {
+			ipPrefixes = "-"
+		}
 		vpcName := s.Resolver.ResolveID("vpc", item.Extra["vpcId"])
 		siteName := s.Resolver.ResolveID("site", item.Extra["siteId"])
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, item.Status, vpcName, siteName, formatLabels(item.Labels, 60), item.ID)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, ipAddresses, ipPrefixes, item.Status, vpcName, siteName, formatLabels(item.Labels, 60), item.ID)
 	}
 	return tw.Flush()
+}
+
+func instanceInterfaceValues(raw interface{}, field string) []string {
+	instance, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	interfaces, _ := instance["interfaces"].([]interface{})
+	var values []string
+	for _, rawInterface := range interfaces {
+		instanceInterface, ok := rawInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		values = append(values, stringSlice(instanceInterface[field])...)
+	}
+	return values
 }
 
 func cmdMachineList(s *Session, args []string) error {
@@ -948,8 +1139,9 @@ func cmdMachineList(s *Session, args []string) error {
 	fmt.Fprintf(os.Stderr, "%d items\n", len(items))
 	defer printLabelHint(os.Stderr, items, merged)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATUS\tBLOCKED BY\tSITE\tVPC\tLABELS\tID")
+	fmt.Fprintln(tw, "NAME\tIP ADDRESS\tSTATUS\tBLOCKED BY\tSITE\tVPC\tLABELS\tID")
 	for _, item := range items {
+		ipAddress := firstMachineIPAddress(item.Raw)
 		siteName := s.Resolver.ResolveID("site", item.Extra["siteId"])
 		vpcNames := strings.TrimSpace(vpcNamesByMachineID[item.ID])
 		if vpcNames == "" {
@@ -959,9 +1151,37 @@ func cmdMachineList(s *Session, args []string) error {
 		if blockedBy == "" {
 			blockedBy = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, item.Status, blockedBy, siteName, vpcNames, formatLabels(item.Labels, 60), item.ID)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, ipAddress, item.Status, blockedBy, siteName, vpcNames, formatLabels(item.Labels, 60), item.ID)
 	}
 	return tw.Flush()
+}
+
+func firstMachineIPAddress(raw interface{}) string {
+	machine, ok := raw.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	interfaces, ok := machine["machineInterfaces"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, rawInterface := range interfaces {
+		machineInterface, ok := rawInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ipAddresses, ok := machineInterface["ipAddresses"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, rawIPAddress := range ipAddresses {
+			ipAddress, ok := rawIPAddress.(string)
+			if ok && strings.TrimSpace(ipAddress) != "" {
+				return ipAddress
+			}
+		}
+	}
+	return ""
 }
 
 // blockingHealthAlert captures the fields from MachineHealthProbeAlert that we
@@ -1071,7 +1291,36 @@ func cmdOSList(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return printResourceTable(os.Stdout, "NAME", "STATUS", "ID", items)
+	fmt.Fprintf(os.Stderr, "%d items\n", len(items))
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tSTATUS\tTYPE\tID")
+	for _, item := range items {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", item.Name, item.Status, item.Extra["type"], item.ID)
+	}
+	return tw.Flush()
+}
+
+const (
+	operatingSystemTypeIPXE             = "iPXE"
+	operatingSystemTypeImage            = "Image"
+	operatingSystemTypeTemplatedIPXE    = "Templated iPXE"
+	operatingSystemAPITypeTemplatedIPXE = "TemplatedIpxe"
+	rootFilesystemTypeID                = "ID"
+	rootFilesystemTypeLabel             = "Label"
+	authTypeNone                        = "None"
+	authTypeBasic                       = "Basic"
+	authTypeBearer                      = "Bearer"
+	artifactCacheStrategyAsNeeded       = "Cache as needed"
+	artifactCacheStrategyLocalOnly      = "Local only"
+	artifactCacheStrategyCachedOnly     = "Cached only"
+	artifactCacheStrategyRemoteOnly     = "Remote only"
+)
+
+var artifactCacheStrategyValues = map[string]string{
+	artifactCacheStrategyAsNeeded:   "CacheAsNeeded",
+	artifactCacheStrategyLocalOnly:  "LocalOnly",
+	artifactCacheStrategyCachedOnly: "CachedOnly",
+	artifactCacheStrategyRemoteOnly: "RemoteOnly",
 }
 
 func cmdOSCreate(s *Session, _ []string) error {
@@ -1083,19 +1332,266 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	tenantID, err := s.getTenantID(context.Background())
-	if err != nil {
-		return fmt.Errorf("resolving tenant id: %w", err)
+	body := map[string]interface{}{
+		"name": name,
 	}
+	if strings.TrimSpace(desc) != "" {
+		body["description"] = strings.TrimSpace(desc)
+	}
+
+	ctx := context.Background()
+	osType, err := promptOperatingSystemType(s, ctx)
+	if err != nil {
+		return err
+	}
+	switch osType {
+	case operatingSystemTypeIPXE:
+		err = promptRawIPXEOperatingSystem(body)
+	case operatingSystemTypeTemplatedIPXE:
+		err = promptTemplatedIPXEOperatingSystem(s, ctx, body)
+	case operatingSystemTypeImage:
+		err = promptImageOperatingSystem(s, ctx, body)
+	default:
+		err = fmt.Errorf("unsupported operating system type %q", osType)
+	}
+	if err != nil {
+		return err
+	}
+	err = promptOperatingSystemOptions(body)
+	if err != nil {
+		return err
+	}
+
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding operating system request: %w", err)
+	}
+	logBodyJSON, err := redactAuthTokenJSON(bodyJSON)
+	if err != nil {
+		return fmt.Errorf("redacting operating system request for logging: %w", err)
+	}
+	logBody := shellQuoteCLIArg(string(logBodyJSON))
+	LogCmd(s, "operating-system", "create", "--data", logBody)
+	resp, _, err := s.Client.Do("POST", apiPath(s, "operating-system"), nil, nil, bodyJSON)
+	if err != nil {
+		return fmt.Errorf("creating operating system: %w", err)
+	}
+	s.Cache.Invalidate("operating-system")
+	created, err := parseMutationResponseRequiringID(resp, "created operating system")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s Operating system created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
+	return nil
+}
+
+func promptOperatingSystemType(s *Session, ctx context.Context) (string, error) {
+	_, err := s.getTenantID(ctx)
+	if err == nil {
+		return PromptChoice(
+			"Operating system type",
+			[]string{
+				operatingSystemTypeIPXE,
+				operatingSystemTypeImage,
+				operatingSystemTypeTemplatedIPXE,
+			},
+			"",
+		)
+	}
+
+	apiErr := &cli.APIError{}
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		return "", fmt.Errorf("determining operating system owner type: %w", err)
+	}
+	_, err = s.getInfrastructureProviderID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("determining operating system owner type: %w", err)
+	}
+	fmt.Printf(
+		"%s %s %s\n",
+		Bold("Operating system type:"),
+		Green(operatingSystemTypeTemplatedIPXE),
+		Dim("(default for providers)"),
+	)
+	return operatingSystemTypeTemplatedIPXE, nil
+}
+
+func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
 	ipxeScript, err := PromptText("iPXE script or URL", true)
 	if err != nil {
 		return err
 	}
-	userData, err := PromptText("User data (optional)", false)
+	body["ipxeScript"] = ipxeScript
+	return nil
+}
+
+func promptTemplatedIPXEOperatingSystem(
+	s *Session,
+	ctx context.Context,
+	body map[string]interface{},
+) error {
+	site, err := s.Resolver.Resolve(ctx, "site", "Site")
 	if err != nil {
 		return err
 	}
-	isCloudInit, err := PromptConfirm("Cloud-init enabled?")
+	templates, err := s.fetchIPXETemplatesForSite(site.ID)
+	if err != nil {
+		return fmt.Errorf("fetching ipxe-template: %w", err)
+	}
+	template, err := s.Resolver.SelectFromItems("iPXE template", templates)
+	if err != nil {
+		return err
+	}
+	body["siteIds"] = []string{site.ID}
+	body["ipxeTemplateId"] = template.ID
+	err = promptIPXETemplateRequirements(template, body)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func promptIPXETemplateRequirements(template *NamedItem, body map[string]interface{}) error {
+	requiredParameters, requiredArtifacts, err := ipxeTemplateRequirements(template)
+	if err != nil {
+		return err
+	}
+	parameters, err := promptIPXETemplateParameters(requiredParameters)
+	if err != nil {
+		return err
+	}
+	if len(parameters) > 0 {
+		body["ipxeTemplateParameters"] = parameters
+	}
+	artifacts, err := promptIPXETemplateArtifacts(requiredArtifacts)
+	if err != nil {
+		return err
+	}
+	if len(artifacts) > 0 {
+		body["ipxeTemplateArtifacts"] = artifacts
+	}
+	return nil
+}
+
+func ipxeTemplateRequirements(template *NamedItem) ([]string, []string, error) {
+	requiredParameters, err := namedItemStringList(template, "requiredParams")
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading required iPXE template parameters: %w", err)
+	}
+	requiredArtifacts, err := namedItemStringList(template, "requiredArtifacts")
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading required iPXE template artifacts: %w", err)
+	}
+	return requiredParameters, requiredArtifacts, nil
+}
+
+func promptIPXETemplateParameters(requiredParameters []string) ([]map[string]interface{}, error) {
+	parameters := make([]map[string]interface{}, 0, len(requiredParameters))
+	for _, parameterName := range requiredParameters {
+		value, promptErr := PromptText(fmt.Sprintf("Value for parameter %s", parameterName), true)
+		if promptErr != nil {
+			return nil, promptErr
+		}
+		parameters = append(parameters, map[string]interface{}{
+			"name":  parameterName,
+			"value": value,
+		})
+	}
+	return parameters, nil
+}
+
+func promptIPXETemplateArtifacts(requiredArtifacts []string) ([]map[string]interface{}, error) {
+	artifacts := make([]map[string]interface{}, 0, len(requiredArtifacts))
+	for _, artifactName := range requiredArtifacts {
+		artifact, promptErr := promptIPXETemplateArtifact(artifactName)
+		if promptErr != nil {
+			return nil, promptErr
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, nil
+}
+
+func namedItemStringList(item *NamedItem, field string) ([]string, error) {
+	raw, ok := item.Raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("selected item has no response object")
+	}
+	value, exists := raw[field]
+	if !exists || value == nil {
+		return nil, nil
+	}
+
+	stringsValue, ok := value.([]string)
+	if ok {
+		return append([]string(nil), stringsValue...), nil
+	}
+	interfaceValue, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("field %q is not a string list", field)
+	}
+	result := make([]string, 0, len(interfaceValue))
+	for index, entry := range interfaceValue {
+		name, entryOK := entry.(string)
+		if !entryOK {
+			return nil, fmt.Errorf("field %q entry %d is not a string", field, index)
+		}
+		result = append(result, name)
+	}
+	return result, nil
+}
+
+func promptIPXETemplateArtifact(name string) (map[string]interface{}, error) {
+	artifactURL, err := PromptText(fmt.Sprintf("URL for artifact %s", name), true)
+	if err != nil {
+		return nil, err
+	}
+	artifactSHA, err := PromptText(fmt.Sprintf("SHA for artifact %s (optional)", name), false)
+	if err != nil {
+		return nil, err
+	}
+	authType, authToken, err := promptOptionalAuth(
+		fmt.Sprintf("Auth type for artifact %s", name),
+		fmt.Sprintf("Auth token for artifact %s", name),
+	)
+	if err != nil {
+		return nil, err
+	}
+	cacheStrategyLabel, err := PromptChoice(
+		fmt.Sprintf("Cache strategy for artifact %s", name),
+		[]string{
+			artifactCacheStrategyAsNeeded,
+			artifactCacheStrategyLocalOnly,
+			artifactCacheStrategyCachedOnly,
+			artifactCacheStrategyRemoteOnly,
+		},
+		"",
+	)
+	if err != nil {
+		return nil, err
+	}
+	cacheStrategy, ok := artifactCacheStrategyValues[cacheStrategyLabel]
+	if !ok {
+		return nil, fmt.Errorf("unsupported artifact cache strategy %q", cacheStrategyLabel)
+	}
+
+	artifact := map[string]interface{}{
+		"name":          name,
+		"url":           artifactURL,
+		"cacheStrategy": cacheStrategy,
+	}
+	if artifactSHA != "" {
+		artifact["sha"] = artifactSHA
+	}
+	if authType != "" {
+		artifact["authType"] = authType
+		artifact["authToken"] = authToken
+	}
+	return artifact, nil
+}
+
+func promptOperatingSystemOptions(body map[string]interface{}) error {
+	userData, err := PromptText("User data (optional)", false)
 	if err != nil {
 		return err
 	}
@@ -1107,36 +1603,154 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	body := map[string]interface{}{
-		"name":             name,
-		"tenantId":         tenantID,
-		"ipxeScript":       ipxeScript,
-		"isCloudInit":      isCloudInit,
-		"allowOverride":    allowOverride,
-		"phoneHomeEnabled": phoneHomeEnabled,
-	}
-	if strings.TrimSpace(desc) != "" {
-		body["description"] = strings.TrimSpace(desc)
-	}
+	body["allowOverride"] = allowOverride
+	body["phoneHomeEnabled"] = phoneHomeEnabled
 	if strings.TrimSpace(userData) != "" {
 		body["userData"] = strings.TrimSpace(userData)
 	}
-	LogCmd(s, "operating-system", "create", "--name", name)
-	bodyJSON, _ := json.Marshal(body)
-	resp, _, err := s.Client.Do("POST", apiPath(s, "operating-system"), nil, nil, bodyJSON)
-	if err != nil {
-		return fmt.Errorf("creating operating system: %w", err)
-	}
-	s.Cache.Invalidate("operating-system")
-	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
-	fmt.Printf("%s Operating system created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
 
+func promptImageOperatingSystem(
+	s *Session,
+	ctx context.Context,
+	body map[string]interface{},
+) error {
+	site, err := s.Resolver.Resolve(ctx, "site", "Site")
+	if err != nil {
+		return err
+	}
+	imageURL, err := PromptText("Image URL", true)
+	if err != nil {
+		return err
+	}
+	imageSHA, err := PromptText("Image SHA", true)
+	if err != nil {
+		return err
+	}
+	body["siteIds"] = []string{site.ID}
+	body["imageUrl"] = imageURL
+	body["imageSha"] = imageSHA
+	err = promptRootFilesystem(body)
+	if err != nil {
+		return err
+	}
+	imageAuthType, imageAuthToken, err := promptOptionalAuth(
+		"Image authentication type",
+		"Image auth token",
+	)
+	if err != nil {
+		return err
+	}
+	if imageAuthType != "" {
+		body["imageAuthType"] = imageAuthType
+		body["imageAuthToken"] = imageAuthToken
+	}
+	imageDisk, err := PromptText("Image disk (optional)", false)
+	if err != nil {
+		return err
+	}
+	if imageDisk != "" {
+		body["imageDisk"] = imageDisk
+	}
+	return nil
+}
+
+func promptRootFilesystem(body map[string]interface{}) error {
+	rootFilesystemType, err := PromptChoice(
+		"Specify root filesystem by",
+		[]string{
+			rootFilesystemTypeID,
+			rootFilesystemTypeLabel,
+		},
+		"",
+	)
+	if err != nil {
+		return err
+	}
+	if rootFilesystemType == rootFilesystemTypeID {
+		rootFilesystemID, promptErr := PromptText("Root filesystem ID", true)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["rootFsId"] = rootFilesystemID
+		return nil
+	}
+	rootFilesystemLabel, err := PromptText("Root filesystem label", true)
+	if err != nil {
+		return err
+	}
+	body["rootFsLabel"] = rootFilesystemLabel
+	return nil
+}
+
+func promptOptionalAuth(authTypeLabel string, authTokenLabel string) (string, string, error) {
+	authType, err := PromptChoice(
+		authTypeLabel,
+		[]string{
+			authTypeNone,
+			authTypeBasic,
+			authTypeBearer,
+		},
+		authTypeNone,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	if authType == authTypeNone {
+		return "", "", nil
+	}
+	authToken, err := PromptSecret(authTokenLabel, true)
+	if err != nil {
+		return "", "", err
+	}
+	return authType, authToken, nil
+}
+
+func redactAuthTokenJSON(bodyJSON []byte) ([]byte, error) {
+	var body interface{}
+	decoder := json.NewDecoder(bytes.NewReader(bodyJSON))
+	decoder.UseNumber()
+	err := decoder.Decode(&body)
+	if err != nil {
+		return nil, err
+	}
+	redactAuthTokenValues(body)
+
+	var redacted bytes.Buffer
+	encoder := json.NewEncoder(&redacted)
+	encoder.SetEscapeHTML(false)
+	err = encoder.Encode(body)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(redacted.Bytes()), nil
+}
+
+func redactAuthTokenValues(value interface{}) {
+	switch typedValue := value.(type) {
+	case map[string]interface{}:
+		for key, nestedValue := range typedValue {
+			if key == "authToken" || key == "imageAuthToken" {
+				typedValue[key] = "<redacted>"
+				continue
+			}
+			redactAuthTokenValues(nestedValue)
+		}
+	case []interface{}:
+		for _, nestedValue := range typedValue {
+			redactAuthTokenValues(nestedValue)
+		}
+	}
+}
+
 func cmdOSUpdate(s *Session, args []string) error {
-	item, err := s.Resolver.ResolveWithArgs(context.Background(), "operating-system", "Operating System to update", args)
+	ctx := context.Background()
+	item, err := s.Resolver.ResolveWithArgs(ctx, "operating-system", "Operating System to update", args)
+	if err != nil {
+		return err
+	}
+	osType, err := operatingSystemTypeFromItem(item)
 	if err != nil {
 		return err
 	}
@@ -1148,27 +1762,6 @@ func cmdOSUpdate(s *Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	ipxeScript, err := PromptText("iPXE script or URL (optional)", false)
-	if err != nil {
-		return err
-	}
-	userData, err := PromptText("User data (optional)", false)
-	if err != nil {
-		return err
-	}
-	allowOverrideText, err := PromptText("Allow override? (true/false, blank to keep)", false)
-	if err != nil {
-		return err
-	}
-	phoneHomeText, err := PromptText("Phone home enabled? (true/false, blank to keep)", false)
-	if err != nil {
-		return err
-	}
-	activeText, err := PromptText("Set active? (true/false, blank to keep)", false)
-	if err != nil {
-		return err
-	}
-
 	body := map[string]interface{}{}
 	if strings.TrimSpace(name) != "" {
 		body["name"] = strings.TrimSpace(name)
@@ -1176,21 +1769,50 @@ func cmdOSUpdate(s *Session, args []string) error {
 	if strings.TrimSpace(desc) != "" {
 		body["description"] = strings.TrimSpace(desc)
 	}
-	if strings.TrimSpace(ipxeScript) != "" {
-		body["ipxeScript"] = strings.TrimSpace(ipxeScript)
+
+	switch osType {
+	case operatingSystemTypeIPXE:
+		err = promptRawIPXEOperatingSystemUpdate(body)
+	case operatingSystemTypeImage:
+		err = promptImageOperatingSystemUpdate(body)
+	case operatingSystemTypeTemplatedIPXE:
+		err = promptTemplatedIPXEOperatingSystemUpdate(s, item, body)
+	default:
+		err = fmt.Errorf("unsupported operating system type %q", osType)
 	}
+	if err != nil {
+		return err
+	}
+
+	userData, err := PromptText("User data (optional)", false)
+	if err != nil {
+		return err
+	}
+	allowOverride, hasAllowOverride, err := PromptOptionalBool("Allow override?")
+	if err != nil {
+		return err
+	}
+	phoneHomeEnabled, hasPhoneHomeEnabled, err := PromptOptionalBool("Phone home enabled?")
+	if err != nil {
+		return err
+	}
+	isActive, hasIsActive, err := PromptOptionalBool("Set active?")
+	if err != nil {
+		return err
+	}
+
 	if strings.TrimSpace(userData) != "" {
 		body["userData"] = strings.TrimSpace(userData)
 	}
-	if v, ok := parseOptionalBool(allowOverrideText); ok {
-		body["allowOverride"] = v
+	if hasAllowOverride {
+		body["allowOverride"] = allowOverride
 	}
-	if v, ok := parseOptionalBool(phoneHomeText); ok {
-		body["phoneHomeEnabled"] = v
+	if hasPhoneHomeEnabled {
+		body["phoneHomeEnabled"] = phoneHomeEnabled
 	}
-	if v, ok := parseOptionalBool(activeText); ok {
-		body["isActive"] = v
-		if !v {
+	if hasIsActive {
+		body["isActive"] = isActive
+		if !isActive {
 			note, err := PromptText("Deactivation note (optional)", false)
 			if err != nil {
 				return err
@@ -1203,18 +1825,170 @@ func cmdOSUpdate(s *Session, args []string) error {
 	if len(body) == 0 {
 		return fmt.Errorf("no updates provided")
 	}
-	LogCmd(s, "operating-system", "update", item.ID)
-	bodyJSON, _ := json.Marshal(body)
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding operating system update request: %w", err)
+	}
+	logBodyJSON, err := redactAuthTokenJSON(bodyJSON)
+	if err != nil {
+		return fmt.Errorf("redacting operating system update request for logging: %w", err)
+	}
+	logBody := shellQuoteCLIArg(string(logBodyJSON))
+	LogCmd(s, "operating-system", "update", item.ID, "--data", logBody)
 	resp, _, err := s.Client.Do("PATCH", apiPath(s, "operating-system/{id}"), map[string]string{"id": item.ID}, nil, bodyJSON)
 	if err != nil {
 		return fmt.Errorf("updating operating system: %w", err)
 	}
 	s.Cache.Invalidate("operating-system")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated operating system")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Operating system updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
+}
+
+func operatingSystemTypeFromItem(item *NamedItem) (string, error) {
+	osType := ""
+	if item.Extra != nil {
+		osType = strings.TrimSpace(item.Extra["type"])
+	}
+	if osType == "" {
+		raw, err := operatingSystemRaw(item)
+		if err != nil {
+			return "", err
+		}
+		osType = strings.TrimSpace(str(raw, "type"))
+	}
+
+	switch {
+	case strings.EqualFold(osType, operatingSystemTypeIPXE):
+		return operatingSystemTypeIPXE, nil
+	case strings.EqualFold(osType, operatingSystemTypeImage):
+		return operatingSystemTypeImage, nil
+	case strings.EqualFold(osType, operatingSystemTypeTemplatedIPXE),
+		strings.EqualFold(osType, operatingSystemAPITypeTemplatedIPXE):
+		return operatingSystemTypeTemplatedIPXE, nil
+	default:
+		return "", fmt.Errorf("operating system %q has unsupported type %q", item.Name, osType)
+	}
+}
+
+func operatingSystemRaw(item *NamedItem) (map[string]interface{}, error) {
+	raw, ok := item.Raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("operating system %q has no response object", item.Name)
+	}
+	return raw, nil
+}
+
+func promptRawIPXEOperatingSystemUpdate(body map[string]interface{}) error {
+	ipxeScript, err := PromptText("iPXE script or URL (optional)", false)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(ipxeScript) != "" {
+		body["ipxeScript"] = strings.TrimSpace(ipxeScript)
+	}
+	return nil
+}
+
+func promptImageOperatingSystemUpdate(body map[string]interface{}) error {
+	updateAuth, err := PromptConfirm("Update image authentication?")
+	if err != nil {
+		return err
+	}
+	if updateAuth {
+		authType, authToken, promptErr := promptOptionalAuth(
+			"Image authentication type",
+			"Image auth token",
+		)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["imageAuthType"] = authType
+		body["imageAuthToken"] = authToken
+	}
+
+	updateDisk, err := PromptConfirm("Update image disk?")
+	if err != nil {
+		return err
+	}
+	if updateDisk {
+		imageDisk, promptErr := PromptText("Image disk (blank to clear)", false)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["imageDisk"] = imageDisk
+	}
+
+	return nil
+}
+
+func promptTemplatedIPXEOperatingSystemUpdate(
+	s *Session,
+	item *NamedItem,
+	body map[string]interface{},
+) error {
+	template, err := operatingSystemIPXETemplate(s, item)
+	if err != nil {
+		return err
+	}
+	requiredParameters, requiredArtifacts, err := ipxeTemplateRequirements(template)
+	if err != nil {
+		return err
+	}
+
+	if len(requiredParameters) > 0 {
+		updateParameters, promptErr := PromptConfirm("Update iPXE template parameters?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if updateParameters {
+			parameters, parametersErr := promptIPXETemplateParameters(requiredParameters)
+			if parametersErr != nil {
+				return parametersErr
+			}
+			body["ipxeTemplateParameters"] = parameters
+		}
+	}
+
+	if len(requiredArtifacts) > 0 {
+		updateArtifacts, promptErr := PromptConfirm("Update iPXE template artifacts?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if updateArtifacts {
+			artifacts, artifactsErr := promptIPXETemplateArtifacts(requiredArtifacts)
+			if artifactsErr != nil {
+				return artifactsErr
+			}
+			body["ipxeTemplateArtifacts"] = artifacts
+		}
+	}
+	return nil
+}
+
+func operatingSystemIPXETemplate(s *Session, item *NamedItem) (*NamedItem, error) {
+	raw, err := operatingSystemRaw(item)
+	if err != nil {
+		return nil, err
+	}
+	templateID := strings.TrimSpace(str(raw, "ipxeTemplateId"))
+	if templateID == "" {
+		return nil, fmt.Errorf("templated iPXE operating system %q has no ipxeTemplateId", item.Name)
+	}
+	templates, err := s.fetchIPXETemplatesForSite("")
+	if err != nil {
+		return nil, fmt.Errorf("fetching ipxe-template: %w", err)
+	}
+	for index := range templates {
+		if templates[index].ID == templateID {
+			return &templates[index], nil
+		}
+	}
+	return nil, fmt.Errorf("iPXE template %q used by operating system %q is unavailable", templateID, item.Name)
 }
 
 func cmdOSDelete(s *Session, args []string) error {
@@ -1285,8 +2059,10 @@ func cmdSSHKeyGroupCreate(s *Session, _ []string) error {
 	}
 	s.Cache.Invalidate("ssh-key-group")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created SSH key group")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s SSH key group created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -1344,8 +2120,10 @@ func cmdSSHKeyGroupUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("ssh-key-group")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated SSH key group")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s SSH key group updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -1414,8 +2192,10 @@ func cmdSSHKeyCreate(s *Session, _ []string) error {
 	s.Cache.Invalidate("ssh-key")
 	s.Cache.Invalidate("ssh-key-group")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created SSH key")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s SSH key created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -1441,8 +2221,10 @@ func cmdSSHKeyUpdate(s *Session, args []string) error {
 	s.Cache.Invalidate("ssh-key")
 	s.Cache.Invalidate("ssh-key-group")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated SSH key")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s SSH key updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -1535,8 +2317,10 @@ func cmdAllocationCreate(s *Session, _ []string) error {
 	}
 	s.Cache.Invalidate("allocation")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created allocation")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Allocation created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -1706,11 +2490,12 @@ func promptSingleAllocationConstraint(s *Session, ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	valueText, err := PromptText(fmt.Sprintf("Constraint value (%s)", allocationConstraintValueHint(rt.ID)), true)
+	protocolVersion := rawFieldString(item.Raw, "protocolVersion")
+	valueText, err := PromptText(fmt.Sprintf("Constraint value (%s)", allocationConstraintValueHint(rt.ID, protocolVersion)), true)
 	if err != nil {
 		return nil, err
 	}
-	return buildAllocationConstraint(rt.ID, item.ID, ct.ID, valueText)
+	return buildAllocationConstraint(rt.ID, item.ID, protocolVersion, ct.ID, valueText)
 }
 
 // allocationConstraintResourceTypes lists the supported resource types for an
@@ -1753,10 +2538,13 @@ func resolverResourceForAllocationResourceType(resourceType string) (resolverKey
 }
 
 // allocationConstraintValueHint returns a short hint describing what the
-// constraint value represents for a given resource type.
-func allocationConstraintValueHint(resourceType string) string {
+// constraint value represents for a given resource type and protocol version.
+func allocationConstraintValueHint(resourceType, protocolVersion string) string {
 	switch resourceType {
 	case "IPBlock":
+		if protocolVersion == "IPv6" {
+			return "prefix length, e.g. 56"
+		}
 		return "prefix length, e.g. 28"
 	case "InstanceType":
 		return "machine count, e.g. 4"
@@ -1764,16 +2552,16 @@ func allocationConstraintValueHint(resourceType string) string {
 	return "integer"
 }
 
-// buildAllocationConstraint assembles an API-shaped constraint body from its
-// prompted fields. valueText is parsed as an integer and range-checked against
-// the resource type so the user gets immediate feedback rather than waiting
-// for a server-side rejection.
-func buildAllocationConstraint(resourceType, resourceTypeID, constraintType, valueText string) (map[string]interface{}, error) {
+// buildAllocationConstraint assembles the API request from the prompted fields.
+// valueText is parsed as an integer and range-checked against
+// the resource type and selected IP Block's protocol version so the user gets
+// immediate feedback rather than waiting for a server-side rejection.
+func buildAllocationConstraint(resourceType, resourceTypeID, protocolVersion, constraintType, valueText string) (map[string]interface{}, error) {
 	value, err := strconv.Atoi(strings.TrimSpace(valueText))
 	if err != nil {
 		return nil, fmt.Errorf("constraint value must be an integer: %w", err)
 	}
-	if err := validateAllocationConstraintValue(resourceType, value); err != nil {
+	if err := validateAllocationConstraintValue(resourceType, protocolVersion, value); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
@@ -1788,12 +2576,10 @@ func buildAllocationConstraint(resourceType, resourceTypeID, constraintType, val
 // the REST API itself currently validates only loosely (ConstraintValue is
 // required but not range-checked, see the TODO in
 // api/pkg/api/model/allocationconstraint.go).
-func validateAllocationConstraintValue(resourceType string, value int) error {
+func validateAllocationConstraintValue(resourceType, protocolVersion string, value int) error {
 	switch resourceType {
 	case "IPBlock":
-		if value < 1 || value > 32 {
-			return fmt.Errorf("IPBlock constraint value must be an IPv4 prefix length between 1 and 32, got %d", value)
-		}
+		return validateIPBlockPrefixLength(protocolVersion, value)
 	case "InstanceType":
 		if value < 1 {
 			return fmt.Errorf("InstanceType constraint value (machine count) must be at least 1, got %d", value)
@@ -1837,8 +2623,10 @@ func cmdAllocationUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("allocation")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated allocation")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Allocation updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -1949,8 +2737,10 @@ func cmdIPBlockCreate(s *Session, _ []string) error {
 		return fmt.Errorf("creating IP block: %w", err)
 	}
 	s.Cache.Invalidate("ip-block")
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created IP block")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s IP block created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -1986,8 +2776,10 @@ func cmdIPBlockUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("ip-block")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated IP block")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s IP block updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -2064,8 +2856,10 @@ func cmdNSGCreate(s *Session, _ []string) error {
 	}
 	s.Cache.Invalidate("network-security-group")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created network security group")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Network security group created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -2101,8 +2895,10 @@ func cmdNSGUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("network-security-group")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated network security group")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Network security group updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -2196,6 +2992,67 @@ func cmdVPCPrefixList(s *Session, _ []string) error {
 	return tw.Flush()
 }
 
+const (
+	vpcPrefixAllocationAutomatic = "automatic"
+	vpcPrefixAllocationExplicit  = "explicit"
+)
+
+type vpcPrefixAllocation struct {
+	bodyField string
+	bodyValue any
+	logFlag   string
+	logValue  string
+}
+
+func parseVPCPrefixAllocation(mode, value string, family vpcprefix.IPFamily, maximumLength int) (*vpcPrefixAllocation, error) {
+	value = strings.TrimSpace(value)
+	switch mode {
+	case vpcPrefixAllocationAutomatic:
+		prefixLength, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("prefix length must be an integer: %w", err)
+		}
+		err = validateVPCPrefixLength(maximumLength, prefixLength)
+		if err != nil {
+			return nil, err
+		}
+		return &vpcPrefixAllocation{
+			bodyField: "prefixLength",
+			bodyValue: prefixLength,
+			logFlag:   "--prefix-length",
+			logValue:  value,
+		}, nil
+	case vpcPrefixAllocationExplicit:
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("prefix must be a valid CIDR: %w", err)
+		}
+		if prefix.Addr().Is4In6() {
+			return nil, errors.New("prefix must not use an IPv4-mapped IPv6 address")
+		}
+		if prefix != prefix.Masked() {
+			return nil, errors.New("prefix must be network-aligned")
+		}
+		if (family == vpcprefix.IPFamilyIPv4 && !prefix.Addr().Is4()) ||
+			(family == vpcprefix.IPFamilyIPv6 && !prefix.Addr().Is6()) {
+			return nil, fmt.Errorf("prefix does not match the selected %s IP Block", family)
+		}
+		err = validateVPCPrefixLength(maximumLength, prefix.Bits())
+		if err != nil {
+			return nil, err
+		}
+		canonicalPrefix := prefix.String()
+		return &vpcPrefixAllocation{
+			bodyField: "prefix",
+			bodyValue: canonicalPrefix,
+			logFlag:   "--prefix",
+			logValue:  canonicalPrefix,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown VPC prefix allocation mode %q", mode)
+	}
+}
+
 func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	vpc, err := s.Resolver.Resolve(context.Background(), "vpc", "VPC")
 	if err != nil {
@@ -2208,29 +3065,50 @@ func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	prefixLenText, err := PromptText("Prefix length (8-31)", true)
+	ipBlock, err := promptVPCPrefixIPBlock(context.Background(), s)
 	if err != nil {
 		return err
 	}
-	var prefixLen int
-	fmt.Sscanf(prefixLenText, "%d", &prefixLen)
-	if prefixLen < 8 || prefixLen > 31 {
-		return fmt.Errorf("prefix length must be between 8 and 31")
+	family := vpcprefix.IPFamily(strings.TrimSpace(ipBlock.Extra["protocolVersion"]))
+	slaacEnabled, err := vpcPrefixSlaacEnabled(family, vpc)
+	if err != nil {
+		return err
 	}
-	ipBlockID, err := promptVPCPrefixIPBlockID(s, context.Background())
+	maximumLength, knownFamily := family.MaximumPrefixLength(slaacEnabled)
+	var promptLabel string
+	if knownFamily {
+		promptLabel = fmt.Sprintf("%s prefix length (%d-%d)", family, vpcprefix.PrefixLengthMinimum, maximumLength)
+	} else {
+		promptLabel = fmt.Sprintf("Prefix length (%d-%d; API validates the IP block and VPC limit)", vpcprefix.PrefixLengthMinimum, maximumLength)
+	}
+
+	allocationMode, err := Select("Allocation mode:", []SelectItem{
+		{ID: vpcPrefixAllocationAutomatic, Label: "Automatic (select by prefix length)"},
+		{ID: vpcPrefixAllocationExplicit, Label: "Explicit CIDR"},
+	})
+	if err != nil {
+		return err
+	}
+	allocationPrompt := promptLabel
+	if allocationMode.ID == vpcPrefixAllocationExplicit {
+		allocationPrompt = "VPC prefix CIDR"
+	}
+	allocationValue, err := PromptText(allocationPrompt, true)
+	if err != nil {
+		return err
+	}
+	allocation, err := parseVPCPrefixAllocation(allocationMode.ID, allocationValue, family, maximumLength)
 	if err != nil {
 		return err
 	}
 
-	// ipBlockID is already trimmed by promptVPCPrefixIPBlockID (picker IDs are
-	// clean; the manual-entry path trims), so no extra TrimSpace here.
 	body := map[string]interface{}{
-		"name":         name,
-		"vpcId":        vpc.ID,
-		"ipBlockId":    ipBlockID,
-		"prefixLength": prefixLen,
+		"name":      name,
+		"vpcId":     vpc.ID,
+		"ipBlockId": ipBlock.ID,
 	}
-	LogCmd(s, "vpc-prefix", "create", "--name", name, "--vpc-id", vpc.ID, "--ip-block-id", ipBlockID, "--prefix-length", prefixLenText)
+	body[allocation.bodyField] = allocation.bodyValue
+	LogCmd(s, "vpc-prefix", "create", "--name", name, "--vpc-id", vpc.ID, "--ip-block-id", ipBlock.ID, allocation.logFlag, allocation.logValue)
 	bodyJSON, _ := json.Marshal(body)
 	resp, _, err := s.Client.Do("POST", apiPath(s, "vpc-prefix"), nil, nil, bodyJSON)
 	if err != nil {
@@ -2238,8 +3116,10 @@ func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	}
 	s.Cache.Invalidate("vpc-prefix")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created VPC prefix")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s VPC prefix created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
@@ -2248,51 +3128,85 @@ func cmdVPCPrefixCreate(s *Session, _ []string) error {
 // manually" option in the IP block picker, mirroring tenantManualEntrySentinel.
 const ipBlockManualEntrySentinel = "__manual__"
 
-// promptVPCPrefixIPBlockID picks the IP block for a new VPC prefix. ipBlockId
-// is required by the API (APIVpcPrefixCreateRequest.Validate), so rather than
-// make the operator paste a raw UUID, list the IP blocks already scoped to the
-// VPC's site and let them choose one. Falls back to manual entry when no IP
-// blocks are visible, when listing fails, or when the operator opts out via
-// the trailing sentinel (NVBug 6105076).
-func promptVPCPrefixIPBlockID(s *Session, ctx context.Context) (string, error) {
-	blocks, err := s.Resolver.Fetch(ctx, "ip-block")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s could not list IP blocks (%v); falling back to manual entry\n", Dim("note:"), err)
-		return promptIPBlockIDRaw()
+// validateVPCPrefixLength checks the shared minimum and the maximum resolved
+// from the selected IP Block family and VPC address mode.
+func validateVPCPrefixLength(maximumLength, prefixLength int) error {
+	if prefixLength < vpcprefix.PrefixLengthMinimum || prefixLength > maximumLength {
+		return fmt.Errorf("prefix length must be between %d and %d", vpcprefix.PrefixLengthMinimum, maximumLength)
 	}
-	items := buildIPBlockSelectItems(blocks)
+	return nil
+}
+
+// vpcPrefixSlaacEnabled reads the selected VPC's address mode when it affects
+// an IPv6 VPC Prefix. IPv4 and manual block selection do not depend on it.
+func vpcPrefixSlaacEnabled(family vpcprefix.IPFamily, vpc *NamedItem) (bool, error) {
+	if family != vpcprefix.IPFamilyIPv6 {
+		return false, nil
+	}
+	raw, ok := vpc.Raw.(map[string]interface{})
+	if !ok {
+		return false, fmt.Errorf("could not determine whether VPC %q uses SLAAC", vpc.Name)
+	}
+	enabled, ok := raw["slaacEnabled"].(bool)
+	if !ok {
+		return false, fmt.Errorf("could not determine whether VPC %q uses SLAAC", vpc.Name)
+	}
+	return enabled, nil
+}
+
+// promptVPCPrefixIPBlock picks the IP block for a new VPC prefix. `ipBlockId`
+// is required by the API, so list the Ready tenant blocks already scoped to
+// the VPC's Site instead of requiring a raw UUID. The selected protocol lets
+// the next prompt show the relevant prefix range. Manual entry remains
+// available when listing fails, no blocks are visible, or the operator chooses
+// the trailing option (NVBug 6105076).
+func promptVPCPrefixIPBlock(ctx context.Context, s *Session) (SelectItem, error) {
+	blocks, tenantID, err := s.fetchTenantIPBlocks(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s could not list current tenant IP blocks (%v); falling back to manual entry\n", Dim("note:"), err)
+		return promptVPCPrefixIPBlockRaw()
+	}
+	items := buildIPBlockSelectItems(blocks, tenantID)
 	if len(items) == 1 {
-		// Only the manual-entry sentinel: no IP blocks for this site.
-		fmt.Fprintf(os.Stderr, "%s no IP blocks found for this site; enter an IP block ID manually\n", Dim("note:"))
-		return promptIPBlockIDRaw()
+		// Only the manual-entry sentinel: no usable tenant IP blocks for this site.
+		fmt.Fprintf(os.Stderr, "%s no Ready tenant IP blocks found for this site; create an allocation or enter an IP block ID manually\n", Dim("note:"))
+		return promptVPCPrefixIPBlockRaw()
 	}
 	selected, err := Select("IP block:", items)
 	if err != nil {
-		return "", err
+		return SelectItem{}, err
 	}
 	if selected.ID == ipBlockManualEntrySentinel {
-		return promptIPBlockIDRaw()
+		return promptVPCPrefixIPBlockRaw()
 	}
-	return selected.ID, nil
+	return *selected, nil
 }
 
-func promptIPBlockIDRaw() (string, error) {
+// promptVPCPrefixIPBlockRaw returns a manually entered block without a known
+// protocol. The server resolves its family before allocating the prefix.
+func promptVPCPrefixIPBlockRaw() (SelectItem, error) {
 	raw, err := PromptText("IP block ID", true)
 	if err != nil {
-		return "", err
+		return SelectItem{}, err
 	}
-	return strings.TrimSpace(raw), nil
+	return SelectItem{ID: strings.TrimSpace(raw)}, nil
 }
 
-// buildIPBlockSelectItems turns the resolver's IP block list into picker
-// options whose ID is the IP block UUID and whose label surfaces the block
-// name (falling back to the UUID when unnamed) plus status. A trailing
-// manual-entry sentinel is always appended -- even for an empty list -- so the
-// operator can still type a raw UUID for a block that isn't listed in the
-// current scope. Blocks without an ID are skipped.
-func buildIPBlockSelectItems(blocks []NamedItem) []SelectItem {
+// buildIPBlockSelectItems turns the resolver's Ready tenant IP blocks into
+// picker options whose ID is the IP block UUID and whose label surfaces the
+// block name (falling back to the UUID when unnamed), protocol version, and
+// status. It also preserves the protocol version for the prefix prompt for
+// that family. Provider IP blocks and tenant IP blocks that are not Ready
+// cannot back a VPC prefix and are skipped. A trailing sentinel for manual
+// entry is always appended so the operator can still type a raw UUID for a
+// block that isn't listed.
+func buildIPBlockSelectItems(blocks []NamedItem, tenantID string) []SelectItem {
+	tenantID = strings.TrimSpace(tenantID)
 	items := make([]SelectItem, 0, len(blocks)+1)
 	for _, b := range blocks {
+		if strings.TrimSpace(b.Extra["tenantId"]) != tenantID || !strings.EqualFold(strings.TrimSpace(b.Status), "Ready") {
+			continue
+		}
 		id := strings.TrimSpace(b.ID)
 		if id == "" {
 			continue
@@ -2301,10 +3215,18 @@ func buildIPBlockSelectItems(blocks []NamedItem) []SelectItem {
 		if label == "" {
 			label = id
 		}
+		protocolVersion := strings.TrimSpace(b.Extra["protocolVersion"])
+		if protocolVersion != "" {
+			label += "  " + Dim(protocolVersion)
+		}
 		if strings.TrimSpace(b.Status) != "" {
 			label += "  " + Dim(b.Status)
 		}
-		items = append(items, SelectItem{Label: label, ID: id})
+		items = append(items, SelectItem{
+			Label: label,
+			ID:    id,
+			Extra: map[string]string{"protocolVersion": protocolVersion},
+		})
 	}
 	items = append(items, SelectItem{Label: "Enter IP block ID manually...", ID: ipBlockManualEntrySentinel})
 	return items
@@ -2330,8 +3252,10 @@ func cmdVPCPrefixUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("vpc-prefix")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated VPC prefix")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s VPC prefix updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
@@ -2398,8 +3322,10 @@ func cmdTenantAccountCreate(s *Session, _ []string) error {
 		return fmt.Errorf("creating tenant account: %w", err)
 	}
 	s.Cache.Invalidate("tenant-account")
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created tenant account")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Tenant account created: %s (%s)\n", Green("OK"), str(created, "tenantOrg"), str(created, "id"))
 	return nil
 }
@@ -2420,8 +3346,10 @@ func cmdTenantAccountUpdate(s *Session, args []string) error {
 		return fmt.Errorf("accepting tenant account invitation: %w", err)
 	}
 	s.Cache.Invalidate("tenant-account")
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "accepted tenant account")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Tenant account accepted: %s (%s)\n", Green("OK"), str(updated, "tenantOrg"), str(updated, "id"))
 	return nil
 }
@@ -2677,29 +3605,25 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	vpcSiteID := strings.TrimSpace(vpc.Extra["siteId"])
-	setSiteScopeFromID(s, vpcSiteID)
-
-	// Temporarily clear VPC scope so fetchMachines returns all site machines
-	// rather than filtering to machines already assigned to a prior VPC.
-	savedVpcID, savedVpcName := s.Scope.VpcID, s.Scope.VpcName
-	s.Scope.VpcID, s.Scope.VpcName = "", ""
-	machines, err := fetchMachinesWithSiteFallback(s, "Machine listing requires a site filter. Select a site.")
-	s.Scope.VpcID, s.Scope.VpcName = savedVpcID, savedVpcName
-	if err != nil {
-		return fmt.Errorf("fetching machines: %w", err)
-	}
-	readyItems := readyMachineItemsForSite(machines, vpcSiteID)
-	if len(readyItems) == 0 {
-		if vpcSiteID != "" {
-			return fmt.Errorf("no machines in Ready state available for selected VPC site")
-		}
-		return fmt.Errorf("no machines in Ready state available")
-	}
-	machine, err := Select("Machine", readyItems)
+	networkConfig, err := instanceNetworkConfigForVPC(vpc)
 	if err != nil {
 		return err
 	}
+	vpcSiteID := vpc.Extra["siteId"]
+	setSiteScopeFromID(s, vpcSiteID)
+
+	machine, err := promptInstanceMachine(s, ctx, vpcSiteID)
+	if err != nil {
+		return err
+	}
+	networkCapability, capabilityErr := fetchInstanceNetworkCapabilities(s, machine.ID)
+	if capabilityErr != nil {
+		return capabilityErr
+	}
+	if networkConfig.detectMultiDPU && networkCapability.hasMultiDPU() {
+		networkConfig.dpuCapability = networkCapability.multiDPU
+	}
+
 	name, err := PromptText("Instance name", true)
 	if err != nil {
 		return err
@@ -2721,8 +3645,8 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 		}
 	}
 
-	// Scope vpc-prefix lookups to the selected VPC so the picker only offers
-	// prefixes that are actually attachable to this instance.
+	// Scope network-resource lookups to the selected VPC so the picker only
+	// offers subnets or VPC prefixes that are attachable to this instance.
 	savedVpcID2, savedVpcName2 := s.Scope.VpcID, s.Scope.VpcName
 	s.Scope.VpcID, s.Scope.VpcName = vpc.ID, vpc.Name
 	s.Cache.InvalidateFiltered()
@@ -2731,9 +3655,16 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 		s.Cache.InvalidateFiltered()
 	}()
 
-	interfaces, err := promptInstanceInterfaces(s, ctx)
+	interfaces, err := promptInstanceInterfaces(s, networkConfig)
 	if err != nil {
 		return err
+	}
+	var infiniBandInterfaces []map[string]interface{}
+	if networkCapability.hasActiveInfiniBand() {
+		infiniBandInterfaces, err = promptInstanceInfiniBandInterfaces(s, networkCapability.infiniBand)
+		if err != nil {
+			return err
+		}
 	}
 
 	sshKeyGroupIDs, err := promptOptionalResourceIDs(s, ctx, "ssh-key-group", "SSH key group")
@@ -2752,46 +3683,216 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if len(interfaces) > 0 {
 		body["interfaces"] = interfaces
 	}
+	if len(infiniBandInterfaces) > 0 {
+		body["infinibandInterfaces"] = infiniBandInterfaces
+	}
+	if networkConfig.autoNetwork {
+		body["autoNetwork"] = true
+	}
 	if len(sshKeyGroupIDs) > 0 {
 		body["sshKeyGroupIds"] = sshKeyGroupIDs
 	}
-	LogCmd(s, "instance", "create", "--name", name, "--machine-id", machine.ID, "--vpc-id", vpc.ID)
-	bodyJSON, _ := json.Marshal(body)
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding instance create request: %w", err)
+	}
+	LogCmd(s, "instance", "create", "--data", shellQuoteCLIArg(string(bodyJSON)))
 	resp, _, err := s.Client.Do("POST", apiPath(s, "instance"), nil, nil, bodyJSON)
 	if err != nil {
 		return fmt.Errorf("creating instance: %w", err)
 	}
 	s.Cache.Invalidate("instance")
 	s.Cache.InvalidateFiltered()
-	var created map[string]interface{}
-	json.Unmarshal(resp, &created)
+	created, err := parseMutationResponseRequiringID(resp, "created instance")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Instance created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
 
-// promptInstanceInterfaces builds the interfaces[] array for an instance
-// create request by walking the operator through one VPC-prefix-backed
-// interface at a time. The OpenAPI schema requires at least one entry, so
-// the first interface is always prompted; subsequent interfaces are opt-in.
-// Returns nil (not error) if no vpc-prefixes exist for the current VPC scope
-// so cmdInstanceCreate can still attempt the API call and surface the
-// server-side validation error instead of silently sending an empty array.
-func promptInstanceInterfaces(s *Session, ctx context.Context) ([]map[string]interface{}, error) {
-	prefixes, err := s.Resolver.Fetch(ctx, "vpc-prefix")
+type instanceNetworkConfig struct {
+	autoNetwork    bool
+	detectMultiDPU bool
+	dpuCapability  *instanceDPUDeviceNetworkCapability
+	resourceType   string
+	reuseResources bool
+	singular       string
+	plural         string
+	selectorKey    string
+}
+
+func instanceNetworkConfigForVPC(vpc *NamedItem) (instanceNetworkConfig, error) {
+	if vpc == nil {
+		return instanceNetworkConfig{}, fmt.Errorf("selected VPC is missing")
+	}
+
+	virtualizationType := vpc.Extra["networkVirtualizationType"]
+	switch virtualizationType {
+	case "ETHERNET_VIRTUALIZER":
+		return instanceNetworkConfig{
+			resourceType: "subnet",
+			singular:     "Subnet",
+			plural:       "subnets",
+			selectorKey:  "subnetId",
+		}, nil
+	case "FNN":
+		return instanceNetworkConfig{
+			detectMultiDPU: true,
+			resourceType:   "vpc-prefix",
+			reuseResources: true,
+			singular:       "VPC prefix",
+			plural:         "VPC prefixes",
+			selectorKey:    "vpcPrefixId",
+		}, nil
+	case "FLAT":
+		return instanceNetworkConfig{
+			autoNetwork: true,
+		}, nil
+	case "":
+		return instanceNetworkConfig{}, fmt.Errorf("selected VPC has no network virtualization type")
+	default:
+		return instanceNetworkConfig{}, fmt.Errorf(
+			"instance creation does not support VPC network virtualization type %q",
+			virtualizationType,
+		)
+	}
+}
+
+type instanceDPUDeviceNetworkCapability struct {
+	name  string
+	count int
+}
+
+type instanceInfiniBandCapability struct {
+	name            string
+	count           int
+	inactiveDevices []int
+}
+
+func (c *instanceInfiniBandCapability) hasActiveDevice() bool {
+	inactiveDevices := make(map[int]bool, len(c.inactiveDevices))
+	for _, deviceInstance := range c.inactiveDevices {
+		inactiveDevices[deviceInstance] = true
+	}
+	for deviceInstance := range c.count {
+		if !inactiveDevices[deviceInstance] {
+			return true
+		}
+	}
+	return false
+}
+
+type instanceNetworkCapability struct {
+	multiDPU   *instanceDPUDeviceNetworkCapability
+	infiniBand []instanceInfiniBandCapability
+}
+
+func (c *instanceNetworkCapability) hasMultiDPU() bool {
+	return c.multiDPU != nil
+}
+
+func (c *instanceNetworkCapability) hasActiveInfiniBand() bool {
+	for i := range c.infiniBand {
+		if c.infiniBand[i].hasActiveDevice() {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchInstanceNetworkCapabilities(s *Session, machineID string) (*instanceNetworkCapability, error) {
+	body, _, err := s.Client.Do(
+		"GET",
+		apiPath(s, "machine/{id}"),
+		map[string]string{
+			"id": machineID,
+		},
+		nil,
+		nil,
+	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s could not list vpc-prefixes (%v); the API may reject this create if interfaces are required\n", Dim("note:"), err)
+		return nil, fmt.Errorf("fetching capabilities for machine %s: %w", machineID, err)
+	}
+
+	var machine struct {
+		MachineCapabilities []struct {
+			Type            string `json:"type"`
+			Name            string `json:"name"`
+			Count           *int   `json:"count"`
+			DeviceType      string `json:"deviceType"`
+			InactiveDevices []int  `json:"inactiveDevices"`
+		} `json:"machineCapabilities"`
+	}
+	err = json.Unmarshal(body, &machine)
+	if err != nil {
+		return nil, fmt.Errorf("parsing capabilities for machine %s: %w", machineID, err)
+	}
+
+	networkCapability := &instanceNetworkCapability{}
+	for _, capability := range machine.MachineCapabilities {
+		name := capability.Name
+		count := capability.Count
+		if name == "" {
+			continue
+		}
+		if count == nil || *count <= 0 {
+			continue
+		}
+		if strings.EqualFold(capability.Type, "Network") {
+			if !strings.EqualFold(capability.DeviceType, "DPU") || *count <= 1 {
+				continue
+			}
+			if networkCapability.multiDPU == nil {
+				networkCapability.multiDPU = &instanceDPUDeviceNetworkCapability{
+					name:  name,
+					count: *count,
+				}
+			}
+		} else if strings.EqualFold(capability.Type, "InfiniBand") {
+			infiniBandCapability := instanceInfiniBandCapability{
+				name:            name,
+				count:           *count,
+				inactiveDevices: capability.InactiveDevices,
+			}
+			if !infiniBandCapability.hasActiveDevice() {
+				continue
+			}
+			networkCapability.infiniBand = append(networkCapability.infiniBand, infiniBandCapability)
+		}
+	}
+	return networkCapability, nil
+}
+
+// promptInstanceInterfaces builds the interfaces[] array for an instance
+// create request using the selected VPC's network configuration. Ethernet
+// virtualizer VPCs use subnets, FNN VPCs use VPC prefixes, and Flat VPCs use
+// autoNetwork without explicit interfaces. For interface-backed VPCs, the
+// first interface is always prompted; subsequent interfaces are opt-in.
+func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) ([]map[string]interface{}, error) {
+	if networkConfig.autoNetwork {
 		return nil, nil
 	}
-	if len(prefixes) == 0 {
-		fmt.Fprintf(os.Stderr, "%s no vpc-prefixes available for the selected VPC; the API may reject this create if interfaces are required\n", Dim("note:"))
-		return nil, nil
+	readyItems, err := fetchReadyInstanceNetworkResources(s, networkConfig)
+	if err != nil {
+		return nil, fmt.Errorf("listing %s for selected VPC: %w", networkConfig.plural, err)
+	}
+	if len(readyItems) == 0 {
+		return nil, fmt.Errorf("no Ready %s available for selected VPC", networkConfig.plural)
+	}
+	if networkConfig.dpuCapability != nil {
+		return promptMultiDPUInstanceInterfaces(s, networkConfig, readyItems)
 	}
 	var ifaces []map[string]interface{}
-	usedPrefixes := make(map[string]bool)
+	usedResourceIDs := make(map[string]bool)
+	usedVirtualFunctionIDs := make(map[int]bool)
 	for {
-		label := "VPC prefix for interface"
+		label := networkConfig.singular + " for Ethernet interface"
 		if len(ifaces) > 0 {
-			confirmLabel := fmt.Sprintf("Add another interface (have %d)?", len(ifaces))
+			if len(usedVirtualFunctionIDs) == virtualFunctionIDCount {
+				return ifaces, nil
+			}
+			confirmLabel := fmt.Sprintf("Add another Ethernet interface (have %d)?", len(ifaces))
 			more, confirmErr := PromptConfirm(confirmLabel)
 			if confirmErr != nil {
 				return ifaces, confirmErr
@@ -2800,25 +3901,346 @@ func promptInstanceInterfaces(s *Session, ctx context.Context) ([]map[string]int
 				return ifaces, nil
 			}
 		}
-		available := make([]NamedItem, 0, len(prefixes))
-		for _, p := range prefixes {
-			if !usedPrefixes[p.ID] {
-				available = append(available, p)
+		available := readyItems
+		if !networkConfig.reuseResources {
+			available = make([]NamedItem, 0, len(readyItems))
+			for _, item := range readyItems {
+				if !usedResourceIDs[item.ID] {
+					available = append(available, item)
+				}
 			}
 		}
 		if len(available) == 0 {
-			fmt.Fprintf(os.Stderr, "%s no more vpc-prefixes to attach\n", Dim("note:"))
+			fmt.Fprintf(os.Stderr, "%s no more %s to attach\n", Dim("note:"), networkConfig.plural)
 			return ifaces, nil
 		}
 		picked, err := s.Resolver.SelectFromItems(label, available)
 		if err != nil {
 			return ifaces, err
 		}
-		usedPrefixes[picked.ID] = true
-		ifaces = append(ifaces, map[string]interface{}{
-			"vpcPrefixId": picked.ID,
-			"isPhysical":  true,
+		if !networkConfig.reuseResources {
+			usedResourceIDs[picked.ID] = true
+		}
+		isPhysical := len(ifaces) == 0
+		iface := map[string]interface{}{
+			networkConfig.selectorKey: picked.ID,
+			"isPhysical":              isPhysical,
+		}
+		if networkConfig.selectorKey == "vpcPrefixId" {
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
+		}
+		if !isPhysical {
+			virtualFunctionID, promptErr := promptVirtualFunctionID(
+				"Virtual function ID (0-15)",
+				usedVirtualFunctionIDs,
+			)
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			iface["virtualFunctionId"] = virtualFunctionID
+		}
+		ifaces = append(ifaces, iface)
+	}
+}
+
+func fetchReadyInstanceNetworkResources(s *Session, networkConfig instanceNetworkConfig) ([]NamedItem, error) {
+	query := map[string]string{
+		"orderBy": "NAME_ASC",
+		"status":  "Ready",
+	}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+	if s.Scope.VpcID != "" {
+		query["vpcId"] = s.Scope.VpcID
+	}
+
+	resources, err := s.fetchAll(apiPath(s, networkConfig.resourceType), query)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, len(resources))
+	for i, resource := range resources {
+		items[i] = NamedItem{
+			Name: str(resource, "name"),
+			ID:   str(resource, "id"),
+			Raw:  resource,
+		}
+	}
+	return items, nil
+}
+
+type activeInfiniBandDevice struct {
+	capabilityName string
+	deviceInstance int
+}
+
+// promptInstanceInterfaces builds the infinibandInterfaces[] array for an instance
+// users are able to configure one interface for each active InfiniBand device, as
+// as determined by machine capabilities.
+func promptInstanceInfiniBandInterfaces(
+	s *Session,
+	capabilities []instanceInfiniBandCapability,
+) ([]map[string]interface{}, error) {
+	activeDevices := make([]activeInfiniBandDevice, 0)
+	for _, capability := range capabilities {
+		inactiveDevices := make(map[int]bool, len(capability.inactiveDevices))
+		for _, deviceInstance := range capability.inactiveDevices {
+			inactiveDevices[deviceInstance] = true
+		}
+		for deviceInstance := range capability.count {
+			if inactiveDevices[deviceInstance] {
+				continue
+			}
+			activeDevices = append(activeDevices, activeInfiniBandDevice{
+				capabilityName: capability.name,
+				deviceInstance: deviceInstance,
+			})
+		}
+	}
+	if len(activeDevices) == 0 {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s no active InfiniBand interfaces are available on the selected machine\n",
+			Dim("note:"),
+		)
+		return nil, nil
+	}
+
+	configure, err := PromptConfirm("Configure an InfiniBand interface?")
+	if err != nil {
+		return nil, err
+	}
+	if !configure {
+		return nil, nil
+	}
+
+	readyPartitions, err := fetchReadyInstanceInfiniBandPartitions(s)
+	if err != nil {
+		return nil, fmt.Errorf("listing Ready InfiniBand partitions for selected site: %w", err)
+	}
+	if len(readyPartitions) == 0 {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site\n",
+			Dim("note:"),
+		)
+		return nil, nil
+	}
+
+	interfaces := make([]map[string]interface{}, 0, len(activeDevices))
+	for activeDeviceIndex, activeDevice := range activeDevices {
+		if activeDeviceIndex > 0 {
+			more, confirmErr := PromptConfirm("Configure another InfiniBand interface?")
+			if confirmErr != nil {
+				return interfaces, confirmErr
+			}
+			if !more {
+				return interfaces, nil
+			}
+		}
+
+		label := fmt.Sprintf(
+			"InfiniBand partition for interface %s %d",
+			activeDevice.capabilityName,
+			activeDevice.deviceInstance,
+		)
+		partition, selectErr := s.Resolver.SelectFromItems(label, readyPartitions)
+		if selectErr != nil {
+			return interfaces, selectErr
+		}
+		interfaces = append(interfaces, map[string]interface{}{
+			"partitionId":    partition.ID,
+			"device":         activeDevice.capabilityName,
+			"deviceInstance": activeDevice.deviceInstance,
+			"isPhysical":     true,
 		})
+	}
+	return interfaces, nil
+}
+
+// only IB partitions in Ready state are suitable for interface configuration
+func fetchReadyInstanceInfiniBandPartitions(s *Session) ([]NamedItem, error) {
+	query := map[string]string{
+		"orderBy": "NAME_ASC",
+		"status":  "Ready",
+	}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+
+	resources, err := s.fetchAll(apiPath(s, "infiniband-partition"), query)
+	if err != nil {
+		return nil, err
+	}
+	partitions := make([]NamedItem, len(resources))
+	for i, resource := range resources {
+		partitions[i] = NamedItem{
+			Name: str(resource, "name"),
+			ID:   str(resource, "id"),
+			Raw:  resource,
+		}
+	}
+	return partitions, nil
+}
+
+const (
+	virtualFunctionIDMinimum = 0
+	virtualFunctionIDMaximum = 15
+	virtualFunctionIDCount   = virtualFunctionIDMaximum - virtualFunctionIDMinimum + 1
+)
+
+type deviceVirtualFunctionIDs struct {
+	used map[int]bool
+}
+
+func (vfIDs deviceVirtualFunctionIDs) exhausted() bool {
+	return len(vfIDs.used) == virtualFunctionIDCount
+}
+
+func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig, readyItems []NamedItem) ([]map[string]interface{}, error) {
+	capability := networkConfig.dpuCapability
+	if capability == nil {
+		return nil, fmt.Errorf("multi-DPU interface prompting requires a DPU capability")
+	}
+	ifaces := make([]map[string]interface{}, 0, capability.count)
+	for deviceInstance := range capability.count {
+		if deviceInstance > 0 {
+			configureDevice, confirmErr := PromptConfirm(fmt.Sprintf("Configure DPU %d?", deviceInstance))
+			if confirmErr != nil {
+				return ifaces, confirmErr
+			}
+			if !configureDevice {
+				return ifaces, nil
+			}
+		}
+
+		physical, err := selectDPUInterfaceResource(
+			s,
+			readyItems,
+			fmt.Sprintf("%s for DPU %d physical interface", networkConfig.singular, deviceInstance),
+		)
+		if err != nil {
+			return ifaces, err
+		}
+		iface := map[string]interface{}{
+			networkConfig.selectorKey: physical.ID,
+			"device":                  capability.name,
+			"deviceInstance":          deviceInstance,
+			"isPhysical":              true,
+		}
+		ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+		if promptErr != nil {
+			return ifaces, promptErr
+		}
+		if ipAddress != "" {
+			iface["ipAddress"] = ipAddress
+		}
+		ifaces = append(ifaces, iface)
+
+		vfIDs := deviceVirtualFunctionIDs{
+			used: make(map[int]bool),
+		}
+		for !vfIDs.exhausted() {
+			more, confirmErr := PromptConfirm(fmt.Sprintf(
+				"Add a virtual function for DPU %d (configured functions: %d)?",
+				deviceInstance,
+				countInterfacesForDevice(ifaces, deviceInstance),
+			))
+			if confirmErr != nil {
+				return ifaces, confirmErr
+			}
+			if !more {
+				break
+			}
+
+			virtual, selectErr := selectDPUInterfaceResource(
+				s,
+				readyItems,
+				fmt.Sprintf("%s for DPU %d virtual interface", networkConfig.singular, deviceInstance),
+			)
+			if selectErr != nil {
+				return ifaces, selectErr
+			}
+			iface := map[string]interface{}{
+				networkConfig.selectorKey: virtual.ID,
+				"device":                  capability.name,
+				"deviceInstance":          deviceInstance,
+				"isPhysical":              false,
+			}
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
+			virtualFunctionID, promptErr := promptVirtualFunctionID(
+				fmt.Sprintf("Virtual function ID for DPU %d (0-15)", deviceInstance),
+				vfIDs.used,
+			)
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			iface["virtualFunctionId"] = virtualFunctionID
+			ifaces = append(ifaces, iface)
+		}
+	}
+	return ifaces, nil
+}
+
+func promptOptionalInstanceInterfaceIPAddress() (string, error) {
+	return PromptText(
+		"IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)",
+		false,
+	)
+}
+
+func selectDPUInterfaceResource(
+	s *Session,
+	readyItems []NamedItem,
+	label string,
+) (*NamedItem, error) {
+	picked, err := s.Resolver.SelectFromItems(label, readyItems)
+	if err != nil {
+		return nil, err
+	}
+	return picked, nil
+}
+
+func countInterfacesForDevice(ifaces []map[string]interface{}, deviceInstance int) int {
+	count := 0
+	for _, iface := range ifaces {
+		if iface["deviceInstance"] == deviceInstance {
+			count++
+		}
+	}
+	return count
+}
+
+func promptVirtualFunctionID(label string, used map[int]bool) (int, error) {
+	for {
+		valueText, err := PromptText(label, true)
+		if err != nil {
+			return 0, err
+		}
+		value, err := strconv.Atoi(valueText)
+		if err != nil || value < virtualFunctionIDMinimum || value > virtualFunctionIDMaximum {
+			fmt.Println(Red("  (required; must be an integer from 0 to 15)"))
+			continue
+		}
+		if used[value] {
+			fmt.Println(Red("  (must be unique among virtual interfaces on this device)"))
+			continue
+		}
+		used[value] = true
+		return value, nil
 	}
 }
 
@@ -2868,20 +4290,14 @@ func promptOptionalResourceIDs(s *Session, ctx context.Context, resourceType, si
 	}
 }
 
-// instanceUpdateInputs collects the optional fields exposed by the TUI
-// instance update form. Extracted so cmdInstanceUpdate stays linear and
-// cmdInstanceReboot can drive a stripped-down version of the same flow.
-type instanceUpdateInputs struct {
-	name                 string
-	description          string
-	osID                 string
-	sshKeyGroupIDs       []string
-	triggerReboot        bool
-	rebootWithCustomIpxe bool
-	applyUpdatesOnReboot bool
+type instanceAttributeUpdateInputs struct {
+	name           string
+	description    string
+	osID           string
+	sshKeyGroupIDs []string
 }
 
-func (u instanceUpdateInputs) toBody() map[string]interface{} {
+func (u instanceAttributeUpdateInputs) attributeBody() map[string]interface{} {
 	body := map[string]interface{}{}
 	if strings.TrimSpace(u.name) != "" {
 		body["name"] = strings.TrimSpace(u.name)
@@ -2895,14 +4311,21 @@ func (u instanceUpdateInputs) toBody() map[string]interface{} {
 	if len(u.sshKeyGroupIDs) > 0 {
 		body["sshKeyGroupIds"] = u.sshKeyGroupIDs
 	}
-	if u.triggerReboot {
-		body["triggerReboot"] = true
-		if u.rebootWithCustomIpxe {
-			body["rebootWithCustomIpxe"] = true
-		}
-		if u.applyUpdatesOnReboot {
-			body["applyUpdatesOnReboot"] = true
-		}
+	return body
+}
+
+type instanceRebootInputs struct {
+	rebootWithCustomIpxe bool
+	applyUpdatesOnReboot bool
+}
+
+func (u instanceRebootInputs) rebootBody() map[string]interface{} {
+	body := map[string]interface{}{"triggerReboot": true}
+	if u.rebootWithCustomIpxe {
+		body["rebootWithCustomIpxe"] = true
+	}
+	if u.applyUpdatesOnReboot {
+		body["applyUpdatesOnReboot"] = true
 	}
 	return body
 }
@@ -2913,7 +4336,7 @@ func cmdInstanceUpdate(s *Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	inputs := instanceUpdateInputs{}
+	inputs := instanceAttributeUpdateInputs{}
 	inputs.name, err = PromptText("New name (optional)", false)
 	if err != nil {
 		return err
@@ -2948,22 +4371,7 @@ func cmdInstanceUpdate(s *Session, args []string) error {
 		}
 	}
 
-	inputs.triggerReboot, err = PromptConfirm("Trigger reboot now?")
-	if err != nil {
-		return err
-	}
-	if inputs.triggerReboot {
-		inputs.rebootWithCustomIpxe, err = PromptConfirm("Reboot with custom iPXE (one-time)?")
-		if err != nil {
-			return err
-		}
-		inputs.applyUpdatesOnReboot, err = PromptConfirm("Apply pending updates on reboot?")
-		if err != nil {
-			return err
-		}
-	}
-
-	body := inputs.toBody()
+	body := inputs.attributeBody()
 	if len(body) == 0 {
 		return fmt.Errorf("no updates provided")
 	}
@@ -2976,9 +4384,12 @@ func cmdInstanceUpdate(s *Session, args []string) error {
 	}
 	s.Cache.Invalidate("instance")
 	s.Cache.InvalidateFiltered()
-	var updated map[string]interface{}
-	json.Unmarshal(resp, &updated)
+	updated, err := parseMutationResponseRequiringID(resp, "updated instance")
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%s Instance updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
+	fmt.Fprintf(os.Stderr, "%s run `instance reboot` when ready\n", Dim("note:"))
 	return nil
 }
 
@@ -3001,11 +4412,10 @@ func cmdInstanceReboot(s *Session, args []string) error {
 		return err
 	}
 
-	body := instanceUpdateInputs{
-		triggerReboot:        true,
+	body := instanceRebootInputs{
 		rebootWithCustomIpxe: rebootWithCustomIpxe,
 		applyUpdatesOnReboot: applyUpdatesOnReboot,
-	}.toBody()
+	}.rebootBody()
 
 	LogCmd(s, "instance", "update", item.ID, "--trigger-reboot=true")
 	bodyJSON, _ := json.Marshal(body)
@@ -3050,6 +4460,24 @@ func cmdMachineGet(s *Session, args []string) error {
 		return err
 	}
 	printMachineHealthSummary(os.Stdout, body)
+	return printDetailJSON(os.Stdout, body)
+}
+
+// cmdMachineDpuGet prints the DPU machines attached to a host machine.
+func cmdMachineDpuGet(s *Session, args []string) error {
+	item, err := s.Resolver.ResolveWithArgs(context.Background(), "machine", "Machine", args)
+	if err != nil {
+		return err
+	}
+	LogCmd(s, "machine", "dpu get", item.ID)
+	body, _, err := s.Client.Do("GET", apiPath(s, "machine/{id}/dpu"), map[string]string{"id": item.ID}, nil, nil)
+	if err != nil {
+		return err
+	}
+	var dpus []json.RawMessage
+	if err := json.Unmarshal(body, &dpus); err == nil {
+		fmt.Fprintf(os.Stdout, "%d DPU(s) attached\n", len(dpus))
+	}
 	return printDetailJSON(os.Stdout, body)
 }
 
@@ -3236,7 +4664,7 @@ func cmdTrayGet(s *Session, args []string) error {
 // powerStateChoices is the canonical list accepted by every power-control
 // endpoint (see UpdatePowerStateRequest in OpenAPI). Kept in one place so
 // rack and tray commands cannot drift from each other.
-var powerStateChoices = []string{"on", "off", "cycle", "forceoff", "forcecycle"}
+var powerStateChoices = []string{"On", "Off", "Cycle", "ForceOff", "ForceCycle", "ACPowerCycle"}
 
 // printTaskIDs renders the standard taskIds-bearing response from a
 // lifecycle action. Action endpoints return one task ID per affected
@@ -3804,7 +5232,7 @@ func cmdTenantIdentityTokenDelegationUpdate(s *Session, args []string) error {
 		if err != nil {
 			return err
 		}
-		sec, err := PromptText("clientSecretBasic.clientSecret (required, write-only)", true)
+		sec, err := PromptSecret("clientSecretBasic.clientSecret (required, write-only)", true)
 		if err != nil {
 			return err
 		}
@@ -4236,12 +5664,13 @@ func sortByLabelKey(items []NamedItem, key string) []NamedItem {
 
 // parseLabelArgs extracts --label key=value and --sort-label key from args.
 // Returns the remaining args, label filters, sort-label key, and an error
-// if a --label value is missing "=" or --sort-label has no following token.
+// if a --label value is missing "=" or either flag is followed by an option.
 func parseLabelArgs(args []string) (remaining []string, labels map[string]string, sortKey string, err error) {
 	labels = map[string]string{}
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--label" {
-			if i+1 >= len(args) {
+		switch args[i] {
+		case "--label":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
 				return nil, nil, "", fmt.Errorf("--label requires a key=value argument")
 			}
 			i++
@@ -4253,13 +5682,13 @@ func parseLabelArgs(args []string) (remaining []string, labels map[string]string
 			} else {
 				return nil, nil, "", fmt.Errorf("--label value %q must contain '='", args[i])
 			}
-		} else if args[i] == "--sort-label" {
-			if i+1 >= len(args) {
+		case "--sort-label":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
 				return nil, nil, "", fmt.Errorf("--sort-label requires a key argument")
 			}
 			i++
 			sortKey = args[i]
-		} else {
+		default:
 			remaining = append(remaining, args[i])
 		}
 	}

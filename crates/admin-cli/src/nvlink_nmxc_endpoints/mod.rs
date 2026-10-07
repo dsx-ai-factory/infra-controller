@@ -26,7 +26,7 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     /// List chassis serial → NMX-C endpoint mappings (optionally one serial)
     Show(show::Args),
     /// Insert a mapping for a chassis serial

@@ -19,7 +19,7 @@ use std::ffi::OsStr;
 use carbide_utils::cmd::TokioCmd;
 use scout::CarbideClientError;
 
-pub async fn run_prog<I, S>(command: S, args: I) -> Result<String, CarbideClientError>
+pub(super) async fn run_prog<I, S>(command: S, args: I) -> Result<String, CarbideClientError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

@@ -34,9 +34,9 @@ Clear the UEFI password for a host selected by MAC address:
     $ nico-admin-cli host clear-uefi-password --query 00:11:22:33:44:55
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: MachineQuery,
+    inner: MachineQuery,
 }
 
 impl From<Args> for ClearHostUefiPasswordRequest {

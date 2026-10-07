@@ -134,9 +134,10 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
             controller_state,
             metadata: Some(src.metadata.into()),
             version: src.version.version_string(),
-            bmc_info: None,
+            bmc_info: src.bmc_info.map(Into::into),
             state_version,
             rack_id: src.rack_id,
+            nvlink_domain_uuid: src.nvlink_domain_uuid,
         })
     }
 }
@@ -149,5 +150,86 @@ impl From<rpc::PowerShelfSearchFilter> for PowerShelfSearchFilter {
             controller_state: filter.controller_state,
             bmc_mac: filter.bmc_mac.and_then(|m| m.parse::<MacAddress>().ok()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_uuid::power_shelf::PowerShelfId;
+    use config_version::{ConfigVersion, Versioned};
+    use model::metadata::Metadata;
+    use model::power_shelf::{PowerShelfControllerState, PowerShelfStatus};
+
+    use super::*;
+
+    #[test]
+    fn test_power_shelf_model_to_rpc_conversion() -> Result<(), Box<dyn std::error::Error>> {
+        let power_shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
+        let power_shelf = PowerShelf {
+            id: power_shelf_id,
+            config: PowerShelfConfig {
+                name: "Conversion Test Power Shelf".to_string(),
+                capacity: Some(5000),
+                voltage: Some(240),
+            },
+            status: Some(PowerShelfStatus {
+                shelf_name: "Conversion Test Power Shelf".to_string(),
+                power_state: "on".to_string(),
+                health_status: "ok".to_string(),
+            }),
+            deleted: None,
+            controller_state: Versioned {
+                value: PowerShelfControllerState::Initializing,
+                version: ConfigVersion::initial(),
+            },
+            controller_state_outcome: None,
+            bmc_mac_address: None,
+            bmc_credential_rotation_requested: false,
+            decommission_requested: false,
+            bmc_info: None,
+            rack_id: None,
+            nvlink_domain_uuid: Some(
+                "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e"
+                    .parse()
+                    .expect("valid NVLink domain UUID"),
+            ),
+            power_shelf_maintenance_requested: None,
+            power_shelf_reprovisioning_requested: None,
+            firmware_upgrade_status: None,
+            metadata: Metadata::default(),
+            version: ConfigVersion::initial(),
+            health_reports: Default::default(),
+        };
+
+        let rpc_power_shelf = rpc::PowerShelf::try_from(power_shelf)?;
+
+        assert_eq!(
+            rpc_power_shelf.id.unwrap().to_string(),
+            power_shelf_id.to_string()
+        );
+        assert_eq!(
+            rpc_power_shelf
+                .nvlink_domain_uuid
+                .map(|domain| domain.to_string()),
+            Some("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e".to_string())
+        );
+
+        let rpc_config = rpc_power_shelf
+            .config
+            .as_ref()
+            .expect("config should be present");
+        assert_eq!(rpc_config.name, "Conversion Test Power Shelf");
+        assert_eq!(rpc_config.capacity, Some(5000));
+        assert_eq!(rpc_config.voltage, Some(240));
+
+        let rpc_status = rpc_power_shelf.status.expect("status should be present");
+        assert_eq!(
+            rpc_status.shelf_name,
+            Some("Conversion Test Power Shelf".to_string())
+        );
+        assert_eq!(rpc_status.power_state, Some("on".to_string()));
+        assert_eq!(rpc_status.health_status, Some("ok".to_string()));
+
+        Ok(())
     }
 }

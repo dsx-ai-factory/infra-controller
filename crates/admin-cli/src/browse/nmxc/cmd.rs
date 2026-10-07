@@ -21,11 +21,12 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn browse(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn browse(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let resp = api_client
         .0
         .nmxc_browse(forgerpc::NmxcBrowseRequest {
-            chassis_serial: args.chassis_serial,
+            chassis_serial: args.chassis_serial.unwrap_or_default(),
+            rack_id: args.rack_id,
             operation: forgerpc::NmxcBrowseOperation::from(args.operation) as i32,
             gpu_uid: args.gpu_uid,
         })

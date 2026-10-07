@@ -123,7 +123,7 @@ impl<'de> Deserialize<'de> for FaultValue {
             }
         }
 
-        deserializer.deserialize_any(BinaryValueVisitor)
+        deserializer.deserialize_f64(BinaryValueVisitor)
     }
 }
 
@@ -202,62 +202,65 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_value_message_active_int() {
-        let json = r#"{"value": 1, "timestamp": 1706284800}"#;
-        let value: ValueMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(value.value, FaultValue::Faulting);
-    }
+    fn parses_value_message_binary_value() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
 
-    #[test]
-    fn test_parse_value_message_active_float() {
-        let json = r#"{"value": 1.0, "timestamp": 1706284800}"#;
-        let value: ValueMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(value.value, FaultValue::Faulting);
-        // 1706284800 = 2024-01-26T12:00:00Z
-        assert_eq!(value.timestamp.timestamp(), 1706284800);
-        assert_eq!(
-            value.timestamp,
-            DateTime::from_timestamp(1706284800, 0).unwrap()
+        // Every fixture carries the same timestamp; 1706284800 = 2024-01-26T12:00:00Z.
+        // Each success row asserts both the decoded fault value and that the
+        // timestamp round-trips through `ts_seconds`.
+        scenarios!(
+            run = |json: &str| {
+                serde_json::from_str::<ValueMessage>(json)
+                    .map(|m| (m.value, m.timestamp))
+                    // The error type isn't PartialEq; these rows assert only that
+                    // an out-of-range value fails, so carry the message as a String.
+                    .map_err(|e| e.to_string())
+            };
+            "0 or 1 decode to Clear / Faulting, as int or float" {
+                r#"{"value": 1, "timestamp": 1706284800}"#
+                    => Yields((FaultValue::Faulting, DateTime::from_timestamp(1706284800, 0).unwrap())),
+                r#"{"value": 1.0, "timestamp": 1706284800}"#
+                    => Yields((FaultValue::Faulting, DateTime::from_timestamp(1706284800, 0).unwrap())),
+                r#"{"value": 0, "timestamp": 1706284800}"#
+                    => Yields((FaultValue::Clear, DateTime::from_timestamp(1706284800, 0).unwrap())),
+                r#"{"value": 0.0, "timestamp": 1706284800}"#
+                    => Yields((FaultValue::Clear, DateTime::from_timestamp(1706284800, 0).unwrap())),
+            }
+            "anything other than 0 or 1 is rejected, as int or float" {
+                r#"{"value": 2, "timestamp": 1706284800}"# => Fails,
+                r#"{"value": 0.5, "timestamp": 1706284800}"# => Fails,
+            }
         );
     }
 
     #[test]
-    fn test_parse_value_message_clear_int() {
-        let json = r#"{"value": 0, "timestamp": 1706284800}"#;
-        let value: ValueMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(value.value, FaultValue::Clear);
-    }
+    fn leak_point_type_probe_id() {
+        use carbide_test_support::value_scenarios;
 
-    #[test]
-    fn test_parse_value_message_clear_float() {
-        let json = r#"{"value": 0.0, "timestamp": 1706284800}"#;
-        let value: ValueMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(value.value, FaultValue::Clear);
-    }
-
-    #[test]
-    fn test_parse_value_message_invalid_int() {
-        let json = r#"{"value": 2, "timestamp": 1706284800}"#;
-        let result: Result<ValueMessage, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid binary value")
+        // The probe id is part of the contract with the health pipeline; pin each
+        // variant's exact id.
+        value_scenarios!(
+            run = |leak_type: LeakPointType| leak_type.probe_id();
+            "each leak type maps to its health probe id" {
+                LeakPointType::LeakDetectRack => "BmsLeakDetectRack".parse().unwrap(),
+                LeakPointType::LeakSensorFaultRack => "BmsLeakSensorFaultRack".parse().unwrap(),
+                LeakPointType::LeakDetectRackTray => "BmsLeakDetectRackTray".parse().unwrap(),
+            }
         );
     }
 
     #[test]
-    fn test_parse_value_message_invalid_float() {
-        let json = r#"{"value": 0.5, "timestamp": 1706284800}"#;
-        let result: Result<ValueMessage, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid binary value")
+    fn leak_point_type_description() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(
+            run = |leak_type: LeakPointType| leak_type.description();
+            "each leak type carries a human-readable alert description" {
+                LeakPointType::LeakDetectRack => "Leak detected",
+                LeakPointType::LeakSensorFaultRack => "Leak sensor fault",
+                LeakPointType::LeakDetectRackTray => "Rack tray leak detected",
+            }
         );
     }
 

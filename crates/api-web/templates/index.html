@@ -1,344 +1,147 @@
 {% extends "base.html" %}
 
-{% block title %}Root{% endblock %}
+{% block title %}Configuration{% endblock %}
 
 {% block content %}
 <h1>Configuration</h1>
 
 {% include "missing_credentials_warning.html" %}
 
-<table class="detailsview">
-	<tr>
-		<th>Version</th>
-		<td>{{ version }}</td>
-	</tr>
-</table>
+<div class="config-page">
+	<div class="config-toolbar">
+		<div class="config-version">
+			<span class="config-version-label">NICo version</span>
+			<code>{{ version }}</code>
+		</div>
+		<input type="search" id="config-search" placeholder="Filter options by name, value, or description&hellip;" autocomplete="off">
+		<label class="config-toggle">
+			<input type="checkbox" id="config-overridden-only"> Overridden only
+		</label>
+	</div>
 
-<h2>Dynamic</h2>
-<table class="detailsview">
-	<tr>
-		<th>DPU agent upgrade policy</th>
-		<td>{{ agent_upgrade_policy }}</td>
-	</tr>
-	<tr>
-		<th>Site explorer enabled</th>
-		<td>{{ site_explorer_enabled }}</td>
-	</tr>
-	<tr>
-		<th>Site explorer create machines</th>
-		<td>{{ create_machines }}</td>
-	</tr>
-	<tr>
-		<th>RUST_LOG</th>
-		<td>{{ log_filter }}</td>
-	<tr/>
-	<tr>
-		<th>BMC Proxy</th>
-		<td>{{ bmc_proxy }}</td>
-	<tr/>
-</table>
+	<div class="tab-nav">
+		{% for group in config.groups %}
+		<button class="tab-button{% if loop.first %} active{% endif %}" data-tab="{{ group.slug }}">{{ group.title }}</button>
+		{% endfor %}
+		<div class="tab-indicator"></div>
+	</div>
 
-<h2>Static</h2>
-<table class="detailsview">
-	<tr>
-		<th>Listen Address</th>
-		<td>{{ carbide_config.listen.to_string() }}</td>
-	</tr>
-	<tr>
-		<th>Metrics Endpoint</th>
-		<td>
-			{% match carbide_config.metrics_endpoint %}
-			{% when Some with (val) %}
-			{{ val.to_string() }}
-			{% else %}
-			No value found
-			{% endmatch %}</td>
-	</tr>
-	<tr>
-		<th>Database URL</th>
-		<td>{{ carbide_config.database_url }}</td>
-	</tr>
-	<tr>
-		<th>Max Database Connections</th>
-		<td>{{ carbide_config.max_database_connections }}</td>
-	</tr>
-	<tr>
-		<th>IB Fabric</th>
-		<td>
-			{% match carbide_config.ib_config %}
-				{% when Some with (config) %}
-					{% if config.enabled %}
-						Enabled
-					{% else %}
-						Disabled
-					{% endif %}
-				{% else %}
-					Disabled
-			{% endmatch %}</td></tr>
-	<tr>
-		<th>NVLink</th>
-		<td>
-			{% match carbide_config.nvlink_config %}
-				{% when Some with (config) %}
-					<details>
-						<summary>
-							{% if config.enabled %}
-								Enabled
-							{% else %}
-								Disabled
-							{% endif %}
-						</summary>
-						<table>
-							<tr>
-								<th>Monitor run interval</th>
-								<td>{{ config.monitor_run_interval.as_secs() }}s</td>
-							</tr>
-							<tr>
-								<th>Allow insecure</th>
-								<td>{{ config.allow_insecure }}</td>
-							</tr>
-							<tr>
-								<th>NMX-C TLS CA cert path</th>
-								<td>
-									{% match config.nmx_c_tls_ca_cert_path %}
-										{% when Some with (val) %}
-											{{ val }}
-										{% else %}
-											Not Configured
-									{% endmatch %}
-								</td>
-							</tr>
-							<tr>
-								<th>NMX-C TLS client cert path</th>
-								<td>
-									{% match config.nmx_c_tls_client_cert_path %}
-										{% when Some with (val) %}
-											{{ val }}
-										{% else %}
-											Not Configured
-									{% endmatch %}
-								</td>
-							</tr>
-							<tr>
-								<th>NMX-C TLS client key path</th>
-								<td>
-									{% match config.nmx_c_tls_client_key_path %}
-										{% when Some with (val) %}
-											{{ val }}
-										{% else %}
-											Not Configured
-									{% endmatch %}
-								</td>
-							</tr>
-							<tr>
-								<th>NMX-C TLS authority</th>
-								<td>
-									{% match config.nmx_c_tls_authority %}
-										{% when Some with (val) %}
-											{{ val }}
-										{% else %}
-											Not Configured
-									{% endmatch %}
-								</td>
-							</tr>
-						</table>
-					</details>
-				{% else %}
-					Not Configured
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr><th>ASN</th><td>{{ carbide_config.asn }}</td></tr>
-	<tr><th>DHCP Servers</th><td>{{ carbide_config.dhcp_servers | comma_separated }}</td></tr>
-	<tr><th>Route Server State</th><td>{% if carbide_config.enable_route_servers %}Enabled{% else %}Disabled{% endif %}</td></tr>
-	<tr><th>Route Servers</th><td>{{ carbide_config.route_servers | comma_separated }}</td></tr>
-	<tr><th>Deny Prefixes</th><td>
-			{% if carbide_config.deny_prefixes.len() != 0 %}
-			{{ carbide_config.deny_prefixes | comma_separated }}
-			{% else %}
-			Not Configured
-			{% endif %}
-		</td>
-	</tr>
-	<tr>
-		<th>Site Fabric Prefixes</th>
-		<td>
-			{% if carbide_config.site_fabric_prefixes.len() != 0 %}
-			{{ carbide_config.site_fabric_prefixes | comma_separated }}
-			{% else %}
-			Not Configured
-			{% endif %}
-		</td>
-	</tr>
-	<tr>
-		<th>VPC Isolation Behavior</th>
-		<td>
-			{{ carbide_config.vpc_isolation_behavior.to_string() }}
-		</td>
-	</tr>
-	<tr>
-		<th>Networks</th>
-		<td>
-			{% match carbide_config.networks %}
-			{% when Some with (val) %}
-			{{ val.keys() | comma_separated }}
-			{% else %}
-			Not Configured
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>DPU IPMI Tool Impl</th>
-		<td>
-			{% match carbide_config.dpu_ipmi_tool_impl %}
-			{% when Some with (val) %}
-			{{ val }},
-			{% else %}
-			Not Configured
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>DPU IPMI Reboot Attempt</th>
-		<td>
-			{% match carbide_config.dpu_ipmi_reboot_attempts %}
-			{% when Some with (val) %}
-			{{ val }},
-			{% else %}
-			Not Configured (Default: 0)
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>Initial Domain Name</th>
-		<td>
-			{% match carbide_config.initial_domain_name %}
-			{% when Some with (val) %}
-			{{ val }}
-			{% else %}
-			Not Configured
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>Initial DPU Agent Upgrade Policy</th>
-		<td>
-			{% match carbide_config.initial_dpu_agent_upgrade_policy %}
-			{% when Some with (val) %}
-			{{ val.to_string() }}
-			{% else %}
-			Not Configured (Default: Off)
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>DPU NIC Firmware Versions</th>
-		<td>
-		  {{ carbide_config.dpu_config.dpu_nic_firmware_update_versions | comma_separated }}
-		</td>
-
-	</tr>
-	<tr>
-		<th>DPU Firmware Versions</th>
-		<td style="padding: 0;">
-			<table>
-			    {% match carbide_config.dpu_config.find_bf2_entry() %}
-			    {% when Some with (val) %}
-				<tr>
-					<td>BlueField 2</td>
-					<td>{{ val.version }}</td>
-				</tr>
-				{% else %}
-				Bf2 Firmware Not Configured
-				{% endmatch %}
-				{% match carbide_config.dpu_config.find_bf3_entry() %}
-				{% when Some with (val) %}
-				<tr>
-					<td>BlueField 3</td>
-					<td>{{ val.version }}</td>
-				</tr>
-				{% else %}
-				Bf3 Firmware Not Configured
-				{% endmatch %}
+	<div class="config-body">
+	<div class="config-tables">
+	{% for group in config.groups %}
+	<div class="tab-content{% if loop.first %} active{% endif %}" id="tab-{{ group.slug }}">
+		<h2 class="config-group-label">{{ group.title }}</h2>
+		{% for section in group.sections %}
+		<section class="config-section">
+			<h3>{{ section.title }}{% if section.path.len() > 0 %} <code class="config-section-path">[{{ section.path }}]</code>{% endif %}</h3>
+			<table class="config-options">
+				<thead><tr><th>Option</th><th>Value</th></tr></thead>
+				<tbody>
+					{% for row in section.rows %}
+					<tr class="config-row{% if row.overridden %} overridden{% endif %}{% if row.value.is_unset() %} unset{% endif %}" data-path="{{ row.path }}" data-search="{{ row.search }}">
+						<td class="config-name">
+							<code>{{ row.name }}</code>
+						</td>
+						<td class="config-value">
+							{{ row.value.to_html()|safe }}
+							{% if row.runtime %}<span class="config-runtime" title="Live value — adjustable on a running server with 'nico-admin-cli set'; overrides expire (default 1h) and reset on restart">runtime</span>{% endif %}
+							{% if row.overridden %}<span class="config-source" title="Explicitly set — not the compiled-in default">{{ row.source }}</span>{% endif %}
+							<div class="config-row-detail" hidden>
+								<div>{{ row.description_html|safe }}</div>
+								<dl>
+									{% if !row.ty.is_empty() %}<dt>Type</dt><dd>{{ row.ty }}</dd>{% endif %}
+									<dt>Default</dt><dd>{{ row.default.to_html()|safe }}</dd>
+									<dt>Path</dt><dd><code>{{ row.path }}</code></dd>
+									{% if row.overridden %}<dt>Source</dt><dd>{{ row.source }} (explicitly set)</dd>{% endif %}
+									{% if row.runtime %}<dt>Runtime</dt><dd>Adjustable live via <code>nico-admin-cli set</code>; overrides expire (default 1h) and reset on restart.</dd>{% endif %}
+								</dl>
+							</div>
+						</td>
+					</tr>
+					{% endfor %}
+				</tbody>
 			</table>
-		</td>
-	</tr>
-	<tr>
-		<th>DPU NIC Initial Update</th>
-		<td>{% if carbide_config.dpu_config.dpu_nic_firmware_initial_update_enabled %}Enabled{% else %}Disabled{% endif %}</td>
-	</tr>
-	<tr>
-		<th>DPU NIC Reprovision Update</th>
-		<td>{% if carbide_config.dpu_config.dpu_nic_firmware_reprovision_update_enabled %}Enabled{% else %}Disabled{% endif %}</td>
-	</tr>
-	<tr>
-		<th>Max Concurrent Machine Update Absolute</th>
-		<td>
-			{% match carbide_config.machine_updater.max_concurrent_machine_updates_absolute %}
-			{% when Some with (val) %}
-			{{ val }}
-			{% else %}
-			Not Configured (Default: 0)
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>Max Concurrent Machine Update Percentage</th>
-		<td>
-			{% match carbide_config.machine_updater.max_concurrent_machine_updates_percent %}
-			{% when Some with (val) %}
-			{{ val }}
-			{% else %}
-			Not Configured (Default: 0)
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>Machine Update Runtime Interval</th>
-		<td>
-			{% match carbide_config.machine_update_run_interval %}
-			{% when Some with (val) %}
-			{{ val }}
-			{% else %}
-			Not Configured (Default: 0)
-			{% endmatch %}
-		</td>
-	</tr>
-	<tr>
-		<th>Machine Attestation Enabled</th>
-		<td>{{ carbide_config.attestation_enabled }}</td>
-	</tr>
-	<tr>
-		<th>DPA Enabled</th>
-		<td>
-			{% match carbide_config.dpa_config %}
-			{% when Some with (val) %}
-			{{ val.enabled }}
-			{% else %}
-			Disabled
-			{% endmatch %}</td>
-	</tr>
-	<tr>
-		<th>MQTT Endpoint</th>
-		<td>
-			{% match carbide_config.dpa_config %}
-			{% when Some with (val) %}
-			{{ val.mqtt_endpoint }}
-			{% else %}
-			N/A
-			{% endmatch %}</td>
-	</tr>
-	<tr>
-		<th>DPU Secure Boot Enabled</th>
-		<td>
-      {{ carbide_config.dpu_config.dpu_enable_secure_boot }}
-    </td>
-	</tr>
-	<tr>
-		<th>DPF Enabled</th>
-		<td>
-      {{ carbide_config.dpf.enabled }}
-	  </td>
-	</tr>
-</table>
+		</section>
+		{% endfor %}
+	</div>
+	{% endfor %}
+
+	<p class="config-empty" id="config-no-matches" hidden>No options match the current filter.</p>
+	</div>
+
+	<aside class="config-panel">
+		<h4 id="config-panel-title">Details</h4>
+		<div id="config-panel-body" class="config-desc">Select an option to see its description, type, and default here.</div>
+	</aside>
+	</div>
+</div>
+
+<script>
+(() => {
+	const page = document.querySelector('.config-page');
+	const search = document.getElementById('config-search');
+	const overriddenOnly = document.getElementById('config-overridden-only');
+	const contents = [...page.querySelectorAll('.tab-content')];
+	const noMatches = document.getElementById('config-no-matches');
+
+	// While a filter is active the tab nav is bypassed: every group with
+	// matches is shown (with its label), so search covers the whole catalog.
+	function applyFilter() {
+		const query = search.value.trim().toLowerCase();
+		const filtering = query !== '' || overriddenOnly.checked;
+		resetPanel();
+		page.classList.toggle('config-filtering', filtering);
+		let anyVisible = false;
+		for (const content of contents) {
+			let contentVisible = 0;
+			for (const section of content.querySelectorAll('.config-section')) {
+				let visibleRows = 0;
+				for (const row of section.querySelectorAll('.config-row')) {
+					// data-search holds name/path/value/source/description —
+					// not the type or the panel's Type/Default/Path labels,
+					// which would match on every row.
+					const matches = (!query || row.dataset.search.includes(query))
+						&& (!overriddenOnly.checked || row.classList.contains('overridden'));
+					row.hidden = !matches;
+					if (matches) visibleRows++;
+				}
+				section.hidden = filtering && visibleRows === 0;
+				contentVisible += visibleRows;
+			}
+			content.classList.toggle('config-has-matches', contentVisible > 0);
+			if (contentVisible > 0) anyVisible = true;
+		}
+		noMatches.hidden = !filtering || anyVisible;
+	}
+
+	search.addEventListener('input', applyFilter);
+	overriddenOnly.addEventListener('change', applyFilter);
+
+	// Row click fills the sticky detail panel.
+	const panelTitle = document.getElementById('config-panel-title');
+	const panelBody = document.getElementById('config-panel-body');
+	const panelDefaultTitle = panelTitle.textContent;
+	const panelDefaultBody = panelBody.innerHTML;
+
+	function resetPanel() {
+		for (const selected of page.querySelectorAll('.config-row.selected')) {
+			selected.classList.remove('selected');
+		}
+		panelTitle.textContent = panelDefaultTitle;
+		panelBody.innerHTML = panelDefaultBody;
+	}
+	page.querySelector('.config-tables').addEventListener('click', (e) => {
+		const row = e.target.closest('.config-row');
+		// Don't hijack clicks on the "show value" expander or links.
+		if (!row || e.target.closest('a, details, summary')) return;
+		for (const selected of page.querySelectorAll('.config-row.selected')) {
+			selected.classList.remove('selected');
+		}
+		row.classList.add('selected');
+		const detail = row.querySelector('.config-row-detail');
+		panelTitle.textContent = row.dataset.path || 'Details';
+		panelBody.innerHTML = detail ? detail.innerHTML : '';
+	});
+})();
+</script>
 {% endblock %}

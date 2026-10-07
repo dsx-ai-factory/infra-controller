@@ -4,10 +4,13 @@
 package model
 
 import (
+	"fmt"
+	"slices"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -16,11 +19,15 @@ import (
 const (
 	// ErrTenantIDOrOrgRequired is returned when no tenant ID or tenant org is provided
 	validationErrorTenantIDOrOrgRequired = "Either Tenant ID or Tenant Org must be specified"
+
+	validationErrorDuplicateAccountCapability = "only one siteCapabilities entry with empty siteIds is allowed"
+	validationErrorMissingAccountCapability   = "exactly one siteCapabilities entry with empty siteIds is required"
+	validationErrorDuplicateSiteID            = "duplicate siteIds are not allowed across siteCapabilities entries"
 )
 
 var (
 	// Time when the AccountNumber, SubscriptionID, and SubscriptionTier attributes will be deprecated
-	accountNumberSubscriptionIDTierDeprecationTime, _ = time.Parse(time.RFC1123, "Thu, 09 Jul 2026 00:00:00 UTC")
+	accountNumberSubscriptionIDTierDeprecationTime = time.Date(2026, time.September, 10, 0, 0, 0, 0, time.UTC)
 
 	tenantAccountDeprecations = []DeprecatedEntity{
 		{
@@ -69,6 +76,10 @@ func (tacr APITenantAccountCreateRequest) Validate() error {
 type APITenantAccountUpdateRequest struct {
 	// TenantContactID is the ID of the requesting user
 	TenantContactID *string `json:"tenantContactId"`
+	// SiteCapabilities replaces the provider-scoped capability configuration for the
+	// TenantAccount. It is a pointer so an omitted payload (nil) is distinguishable
+	// from a supplied-but-empty payload (non-nil, zero length), which is rejected.
+	SiteCapabilities *APITenantAccountSiteCapabilitiesUpdateRequest `json:"siteCapabilities"`
 }
 
 // Validate ensure the values passed in request are acceptable
@@ -77,6 +88,83 @@ func (taur APITenantAccountUpdateRequest) Validate() error {
 		validation.Field(&taur.TenantContactID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
+}
+
+// HasSiteCapabilities reports whether the request supplied a siteCapabilities replace
+// payload at all. A supplied payload (including an explicit empty array) is considered
+// present; only an omitted or JSON-null field is treated as absent.
+func (taur APITenantAccountUpdateRequest) HasSiteCapabilities() bool {
+	return taur.SiteCapabilities != nil
+}
+
+// APITenantAccountSiteCapability describes the TargetedInstanceCreation capability for
+// either the TenantAccount or an explicit site list. Used in responses.
+type APITenantAccountSiteCapability struct {
+	SiteIDs                  []string `json:"siteIds"`
+	TargetedInstanceCreation bool     `json:"targetedInstanceCreation"`
+}
+
+// APITenantAccountSiteCapabilityUpdate is the replace payload entry for Provider Admin
+// capability updates. targetedInstanceCreation must be present on every entry so an
+// omitted field cannot silently bind as false.
+type APITenantAccountSiteCapabilityUpdate struct {
+	SiteIDs                  []string `json:"siteIds"`
+	TargetedInstanceCreation *bool    `json:"targetedInstanceCreation"`
+}
+
+// APITenantAccountSiteCapabilitiesUpdateRequest is the replace payload for Provider Admin
+// capability updates on a TenantAccount.
+type APITenantAccountSiteCapabilitiesUpdateRequest []APITenantAccountSiteCapabilityUpdate
+
+// Validate ensures the replace payload is structurally valid.
+func (caps APITenantAccountSiteCapabilitiesUpdateRequest) Validate() error {
+	if len(caps) == 0 {
+		return validation.Errors{"siteCapabilities": fmt.Errorf("siteCapabilities must contain at least one entry")}
+	}
+
+	accountCapabilityCount := 0
+	seenSiteIDs := map[string]struct{}{}
+
+	for i, cap := range caps {
+		prefix := fmt.Sprintf("[%d]", i)
+		if err := validation.ValidateStruct(&cap,
+			validation.Field(&cap.TargetedInstanceCreation,
+				validation.NotNil.Error(validationErrorValueRequired)),
+			validation.Field(&cap.SiteIDs,
+				validation.Each(validationis.UUID.Error(validationErrorInvalidUUID)),
+			),
+		); err != nil {
+			return validation.Errors{prefix: err}
+		}
+
+		if len(cap.SiteIDs) == 0 {
+			accountCapabilityCount++
+		}
+
+		for _, siteID := range cap.SiteIDs {
+			// Normalize to the canonical UUID string so differently formatted
+			// representations of the same Site (case, urn prefix) dedupe. The
+			// values are already validated as UUIDs above, so parsing succeeds.
+			parsed, perr := uuid.Parse(siteID)
+			if perr != nil {
+				return validation.Errors{prefix: fmt.Errorf(validationErrorInvalidUUID)}
+			}
+			key := parsed.String()
+			if _, ok := seenSiteIDs[key]; ok {
+				return validation.Errors{"siteCapabilities": fmt.Errorf(validationErrorDuplicateSiteID)}
+			}
+			seenSiteIDs[key] = struct{}{}
+		}
+	}
+
+	if accountCapabilityCount == 0 {
+		return validation.Errors{"siteCapabilities": fmt.Errorf(validationErrorMissingAccountCapability)}
+	}
+	if accountCapabilityCount > 1 {
+		return validation.Errors{"siteCapabilities": fmt.Errorf(validationErrorDuplicateAccountCapability)}
+	}
+
+	return nil
 }
 
 // APITenantAccount is the data structure to capture API representation of a TenantAccount
@@ -115,6 +203,8 @@ type APITenantAccount struct {
 	Updated time.Time `json:"updated"`
 	// Deprecations is the list of deprecations for the TenantAccount
 	Deprecations []APIDeprecation `json:"deprecations"`
+	// SiteCapabilities describes provider-scoped TargetedInstanceCreation settings
+	SiteCapabilities []APITenantAccountSiteCapability `json:"siteCapabilities,omitempty"`
 }
 
 // APITenantAccountStats is a data structure to capture information about a TenantAccount stats at the API layer
@@ -132,7 +222,7 @@ type APITenantAccountStats struct {
 }
 
 // NewAPITenantAccount accepts a DB layer TenantAccount object returns an API layer object
-func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, allocationCount int) *APITenantAccount {
+func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, allocationCount int, tenantSites []cdbm.TenantSite) *APITenantAccount {
 	apiTenantAccount := APITenantAccount{
 		ID:                        dbta.ID.String(),
 		InfrastructureProviderID:  dbta.InfrastructureProviderID.String(),
@@ -174,6 +264,57 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 	for _, deprecation := range tenantAccountDeprecations {
 		apiTenantAccount.Deprecations = append(apiTenantAccount.Deprecations, NewAPIDeprecation(deprecation))
 	}
+
+	accountDefault := dbta.Config.TargetedInstanceCreation
+	caps := []APITenantAccountSiteCapability{
+		{
+			SiteIDs:                  []string{},
+			TargetedInstanceCreation: accountDefault,
+		},
+	}
+
+	if dbta.TenantID != nil {
+		enabledSiteIDs := []string{}
+		disabledSiteIDs := []string{}
+
+		for _, ts := range tenantSites {
+			// Fail closed: a TenantSite with a missing Site relation cannot be
+			// confirmed to belong to this account's provider, so it is excluded.
+			if ts.Site == nil || ts.Site.InfrastructureProviderID != dbta.InfrastructureProviderID {
+				continue
+			}
+			if ts.Config.TargetedInstanceCreation == nil {
+				continue
+			}
+			override := *ts.Config.TargetedInstanceCreation
+			if override == accountDefault {
+				continue
+			}
+			if override {
+				enabledSiteIDs = append(enabledSiteIDs, ts.SiteID.String())
+			} else {
+				disabledSiteIDs = append(disabledSiteIDs, ts.SiteID.String())
+			}
+		}
+
+		slices.Sort(enabledSiteIDs)
+		slices.Sort(disabledSiteIDs)
+
+		if len(enabledSiteIDs) > 0 {
+			caps = append(caps, APITenantAccountSiteCapability{
+				SiteIDs:                  enabledSiteIDs,
+				TargetedInstanceCreation: true,
+			})
+		}
+		if len(disabledSiteIDs) > 0 {
+			caps = append(caps, APITenantAccountSiteCapability{
+				SiteIDs:                  disabledSiteIDs,
+				TargetedInstanceCreation: false,
+			})
+		}
+	}
+
+	apiTenantAccount.SiteCapabilities = caps
 
 	return &apiTenantAccount
 }

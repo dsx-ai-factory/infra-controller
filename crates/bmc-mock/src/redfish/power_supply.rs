@@ -23,7 +23,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn resource<'a>(chassis_id: &str, supply_id: &'a str) -> redfish::Resource<'a> {
+pub(crate) fn resource<'a>(chassis_id: &str, supply_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!(
         "{}/PowerSubsystem/PowerSupplies/{supply_id}",
         redfish::chassis::resource(chassis_id).odata_id
@@ -36,7 +36,7 @@ pub fn resource<'a>(chassis_id: &str, supply_id: &'a str) -> redfish::Resource<'
     }
 }
 
-pub fn collection(chassis_id: &str) -> redfish::Collection<'static> {
+pub(super) fn collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!(
         "{}/PowerSubsystem/PowerSupplies",
         redfish::chassis::resource(chassis_id).odata_id
@@ -48,25 +48,25 @@ pub fn collection(chassis_id: &str) -> redfish::Collection<'static> {
     }
 }
 
-pub struct PowerSupply {
-    pub id: Cow<'static, str>,
+pub(crate) struct PowerSupply {
+    pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
 }
 
 impl PowerSupply {
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
     }
 }
 
-pub fn builder(resource: &redfish::Resource) -> PowerSupplyBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> PowerSupplyBuilder {
     PowerSupplyBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
     }
 }
 
-pub struct PowerSupplyBuilder {
+pub(crate) struct PowerSupplyBuilder {
     id: Cow<'static, str>,
     value: serde_json::Value,
 }
@@ -81,17 +81,57 @@ impl Builder for PowerSupplyBuilder {
 }
 
 impl PowerSupplyBuilder {
-    pub fn oem_liteon_power_state(self, v: bool) -> Self {
+    pub(crate) fn oem_liteon_power_state(self, v: bool) -> Self {
         self.apply_patch(json!({"PowerState": v}))
     }
 
-    pub fn status(self, status: redfish::resource::Status) -> Self {
+    /// LiteOn reports capacity as the non-standard string `CapacityWatts`
+    /// and omits `PowerCapacityWatts`. Mirrors PF-1333-7R firmware r1.3.8.
+    pub(crate) fn oem_liteon_capacity_watts(self, v: &str) -> Self {
+        self.apply_patch(json!({"CapacityWatts": v}))
+    }
+
+    /// Delta Energy Systems reports per-PSU power state under
+    /// `Oem.deltaenergysystems.Power` rather than the standard `PowerState`
+    /// field. Mirrors the shape served by real Delta power shelves.
+    pub(crate) fn oem_delta_power_state(self, v: bool) -> Self {
+        self.apply_patch(json!({
+            "Oem": {
+                "deltaenergysystems": {
+                    "@odata.type": "#DeltaEnergySystemsPowerSupply.v1_0_0.PowerSupply",
+                    "Power": v
+                }
+            }
+        }))
+    }
+
+    /// Standard Redfish per-PSU capacity. Delta reports capacity this way
+    /// (unlike LiteOn's non-standard OEM string); any vendor can use it.
+    pub(crate) fn power_capacity_watts(self, v: f64) -> Self {
+        self.apply_patch(json!({"PowerCapacityWatts": v}))
+    }
+
+    /// Sets `Oem.deltaenergysystems.FanSpeedTarget`, the commanded fan speed
+    /// in percent, where `0` means the PSU controls its own fan. JSON-patch
+    /// merges this into the same `Oem.deltaenergysystems` object
+    /// `oem_delta_power_state` writes, so the two compose in either order.
+    pub(crate) fn oem_delta_fan_speed_target(self, v: i64) -> Self {
+        self.apply_patch(json!({
+            "Oem": {
+                "deltaenergysystems": {
+                    "FanSpeedTarget": v
+                }
+            }
+        }))
+    }
+
+    pub(crate) fn status(self, status: redfish::resource::Status) -> Self {
         self.apply_patch(json!({
             "Status": status.into_json()
         }))
     }
 
-    pub fn build(self) -> PowerSupply {
+    pub(crate) fn build(self) -> PowerSupply {
         PowerSupply {
             id: self.id,
             value: self.value,

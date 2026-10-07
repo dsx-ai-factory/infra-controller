@@ -99,8 +99,10 @@ impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager 
 
             results.push(ComputeTrayResult {
                 bmc_ip: ep.bmc_ip,
+                bmc_mac: ep.bmc_mac,
                 success: outcome.is_ok(),
                 error: outcome.err(),
+                backend_job_id: None,
             });
         }
 
@@ -132,5 +134,30 @@ impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager 
         Err(ComponentManagerError::Internal(
             "firmware bundles listing is not supported by the core compute tray backend".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+    use libredfish::model::service_root::RedfishVendor;
+
+    use super::*;
+
+    #[test]
+    fn compute_tray_vendor_maps_to_redfish_vendor() {
+        value_scenarios!(map_vendor:
+            "supported Redfish vendors" {
+                ComputeTrayVendor::Dell => Some(RedfishVendor::Dell),
+                ComputeTrayVendor::Hpe => Some(RedfishVendor::Hpe),
+                ComputeTrayVendor::Lenovo => Some(RedfishVendor::Lenovo),
+                ComputeTrayVendor::Supermicro => Some(RedfishVendor::Supermicro),
+            }
+
+            "vendors without a Redfish adapter" {
+                ComputeTrayVendor::Nvidia => None,
+                ComputeTrayVendor::Unknown => None,
+            }
+        );
     }
 }

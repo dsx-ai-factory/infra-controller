@@ -19,5 +19,5 @@
 
 use std::time::Duration;
 
-pub const PROVISIONING: Duration = Duration::from_secs(15 * 60);
-pub const DELETING: Duration = Duration::from_secs(15 * 60);
+pub(super) const PROVISIONING: Duration = Duration::from_secs(15 * 60);
+pub(super) const DELETING: Duration = Duration::from_secs(15 * 60);

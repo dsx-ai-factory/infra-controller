@@ -22,7 +22,9 @@ use carbide_rack_controller::metrics::RackMetricsEmitter;
 use carbide_uuid::rack::RackId;
 use config_version::{ConfigVersion, Versioned};
 use db::rack::IdColumn;
-use db::{DatabaseError, ObjectColumnFilter, rack as db_rack};
+use db::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter, rack as db_rack,
+};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::rack::{
@@ -70,7 +72,7 @@ impl StateControllerIO for RackStateControllerIO {
             return Err(DatabaseError::new(
                 "Rack::find()",
                 sqlx::Error::Decode(
-                    eyre::eyre!("Searching for Rack {} returned multiple results", rack_id).into(),
+                    eyre::eyre!("searching for rack {} returned multiple results", rack_id).into(),
                 ),
             ));
         }
@@ -94,7 +96,7 @@ impl StateControllerIO for RackStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db_rack::try_update_controller_state(txn, rack_id, old_version, new_version, new_state)
             .await
     }
@@ -151,6 +153,11 @@ impl StateControllerIO for RackStateControllerIO {
             RackState::Error { .. } => ("error", ""),
             RackState::Deleting => ("deleting", ""),
         }
+    }
+
+    fn manual_intervention_reason(state: &Self::ControllerState) -> Option<&'static str> {
+        // The stored cause is free text, so the reason is a fixed token.
+        matches!(state, RackState::Error { .. }).then_some("error")
     }
 
     fn state_sla(

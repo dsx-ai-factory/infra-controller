@@ -20,11 +20,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mac_address::MacAddress;
 
 #[derive(Copy, Clone, Debug)]
-pub struct MacAddressPoolConfig {
+pub(crate) struct MacAddressPoolConfig {
     /// The first mac address in the pool as a byte array
-    pub start: [u8; 6],
+    pub(crate) start: [u8; 6],
     /// The amount of addresses in the pool
-    pub length: usize,
+    pub(crate) length: usize,
 }
 
 #[derive(Debug)]
@@ -36,7 +36,7 @@ pub struct MacAddressPool {
 }
 
 impl MacAddressPool {
-    pub fn new(config: MacAddressPoolConfig) -> Self {
+    pub(crate) fn new(config: MacAddressPoolConfig) -> Self {
         Self {
             config,
             used: AtomicUsize::new(0),
@@ -63,7 +63,8 @@ impl MacAddressPool {
     }
 
     /// Returns whether an address is part of the pool
-    pub fn contains(&self, address: MacAddress) -> bool {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, address: MacAddress) -> bool {
         let a = to_u64_be(address.bytes());
         let min = to_u64_be(self.config.start);
 
@@ -73,42 +74,42 @@ impl MacAddressPool {
 
 lazy_static::lazy_static! {
     /// Pool of DPU MAC addresses
-    pub static ref DPU_OOB_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref DPU_OOB_MAC_ADDRESS_POOL: MacAddressPool =
         MacAddressPool::new(MacAddressPoolConfig {
             start: [0x11, 0x11, 0x11, 0x11, 0x0, 0x0],
             length: 65536,
         });
 
     /// Pool of DPU BMC MAC addresses
-    pub static ref DPU_BMC_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref DPU_BMC_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x11, 0x11, 0x22, 0x22, 0x0, 0x0],
         length: 65536,
     });
 
     /// Pool of Host MAC addresses
-    pub static ref HOST_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref HOST_MAC_ADDRESS_POOL: MacAddressPool =
         MacAddressPool::new(MacAddressPoolConfig {
             start: [0x22, 0x22, 0x11, 0x11, 0x0, 0x0],
             length: 65536,
         });
 
     /// Pool of Host BMC MAC addresses
-    pub static ref HOST_BMC_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref HOST_BMC_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x22, 0x22, 0x22, 0x22, 0x0, 0x0],
         length: 65536,
     });
 
     /// Pool of Host non-DPU MAC addresses
-    pub static ref HOST_NON_DPU_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref HOST_NON_DPU_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x33, 0x33, 0x11, 0x11, 0x0, 0x0],
         length: 65536,
     });
 
     /// Pool of Expected Switch BMC MAC addresses
-    pub static ref EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x44, 0x44, 0x11, 0x11, 0x0, 0x0],
         length: 65536,
@@ -122,7 +123,7 @@ lazy_static::lazy_static! {
     });
 
     /// Pool of Expected Switch NVOS MAC addresses
-    pub static ref EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL: MacAddressPool =
+    pub(crate) static ref EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x44, 0x44, 0x33, 0x33, 0x0, 0x0],
         length: 65536,

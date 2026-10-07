@@ -24,7 +24,7 @@ use crate::errors::DpaManagerResult;
 use crate::metrics::DpaMonitorMetrics;
 use crate::{DpaMonitor, HandlerResult};
 
-pub struct AstraInterfaceHandler;
+pub(super) struct AstraInterfaceHandler;
 
 #[async_trait]
 impl DpaInterfaceStateHandler for AstraInterfaceHandler {
@@ -37,8 +37,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_provisioning idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_provisioning index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -57,7 +58,7 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
         }
 
         let new_state = DpaInterfaceControllerState::Ready;
-        tracing::info!(state = ?new_state, "Dpa Interface state transition");
+        tracing::info!(next_state = ?new_state, "Dpa Interface state transition");
         Ok(HandlerResult {
             new_state: Some(new_state),
             txn: None,
@@ -73,8 +74,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_ready idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_ready index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -87,7 +89,7 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
         let host_use_admin_network = dpa_interface.use_admin_network();
         if !host_use_admin_network {
             let new_state = DpaInterfaceControllerState::Assigned;
-            tracing::info!(state = ?new_state, "Dpa Interface state transition");
+            tracing::info!(next_state = ?new_state, "Dpa Interface state transition");
 
             return Ok(HandlerResult {
                 new_state: Some(new_state),
@@ -110,8 +112,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_unlocking idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_unlocking index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -122,8 +125,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
         let dpa_interface = &mh.dpa_interface_snapshots[idx];
 
         tracing::warn!(
-            "Astra DPA interface state unexpected state: {:#?}",
-            dpa_interface.id
+            dpa_interface_id = %dpa_interface.id,
+            controller_state = ?dpa_interface.controller_state.value,
+            "Astra DPA interface is in an unexpected state",
         );
 
         return Ok(HandlerResult {
@@ -141,8 +145,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_apply_firmware idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_apply_firmware index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -153,8 +158,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
         let dpa_interface = &mh.dpa_interface_snapshots[idx];
 
         tracing::warn!(
-            "Astra DPA interface state unexpected state: {:#?}",
-            dpa_interface.id
+            dpa_interface_id = %dpa_interface.id,
+            controller_state = ?dpa_interface.controller_state.value,
+            "Astra DPA interface is in an unexpected state",
         );
 
         return Ok(HandlerResult {
@@ -172,8 +178,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_apply_profile idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_apply_profile index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -183,8 +190,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
 
         let dpa_interface = &mh.dpa_interface_snapshots[idx];
         tracing::warn!(
-            "Astra DPA interface state unexpected state: {:#?}",
-            dpa_interface.id
+            dpa_interface_id = %dpa_interface.id,
+            controller_state = ?dpa_interface.controller_state.value,
+            "Astra DPA interface is in an unexpected state",
         );
         return Ok(HandlerResult {
             new_state: None,
@@ -201,8 +209,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_locking idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_locking index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -212,8 +221,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
 
         let dpa_interface = &mh.dpa_interface_snapshots[idx];
         tracing::warn!(
-            "Astra DPA interface state unexpected state: {:#?}",
-            dpa_interface.id
+            dpa_interface_id = %dpa_interface.id,
+            controller_state = ?dpa_interface.controller_state.value,
+            "Astra DPA interface is in an unexpected state",
         );
         return Ok(HandlerResult {
             new_state: None,
@@ -230,8 +240,9 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
     ) -> DpaManagerResult<HandlerResult> {
         if idx >= mh.dpa_interface_snapshots.len() {
             tracing::error!(
-                "handle_assigned idx out of bounds: {idx}, len: {}",
-                mh.dpa_interface_snapshots.len()
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_assigned index out of bounds",
             );
             return Ok(HandlerResult {
                 new_state: None,
@@ -245,7 +256,7 @@ impl DpaInterfaceStateHandler for AstraInterfaceHandler {
 
         if host_use_admin_network {
             let new_state = DpaInterfaceControllerState::Ready;
-            tracing::info!(state = ?new_state, "Dpa Interface state transition");
+            tracing::info!(next_state = ?new_state, "Dpa Interface state transition");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
                 txn: None,

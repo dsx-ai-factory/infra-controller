@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Client code for NVUE configuration"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "nvue_client"
@@ -28,14 +29,24 @@ name = "nvue_client"
 [features]
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 reqwest = { features = ["rustls", "json"], workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+urlencoding = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+carbide-test-support = { path = "../test-support" }
 glob = { workspace = true }
+http = { workspace = true }
+tempfile = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
+url = { workspace = true }
 
 [lints]
 workspace = true

@@ -26,7 +26,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
 use carbide_host_support::agent_config::MachineIdentityConfig;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use eyre::eyre;
 use forge_dpu_agent_utils::utils::create_forge_client;
 use forge_dpu_fmds_shared::machine_identity::{
@@ -44,7 +44,9 @@ use crate::periodic_config_fetcher::InstanceMetadata;
 use crate::util::phone_home;
 
 const PUBLIC_IPV4_CATEGORY: &str = "public-ipv4";
+const PUBLIC_IPV6_CATEGORY: &str = "public-ipv6";
 const HOSTNAME_CATEGORY: &str = "hostname";
+const INSTANCE_NAME_CATEGORY: &str = "instance-name";
 const SITENAME_CATEGORY: &str = "sitename";
 const USER_DATA_CATEGORY: &str = "user-data";
 const META_DATA_CATEGORY: &str = "meta-data";
@@ -61,7 +63,7 @@ const ASN_CATEGORY: &str = "asn";
 
 #[automock]
 #[async_trait]
-pub trait InstanceMetadataRouterState: Sync + Send {
+pub(super) trait InstanceMetadataRouterState: Sync + Send {
     fn read(
         &self,
     ) -> (
@@ -86,10 +88,10 @@ pub trait InstanceMetadataRouterState: Sync + Send {
     async fn serve_meta_data_identity(&self, uri: Uri, headers: HeaderMap) -> Response;
 }
 
-pub struct InstanceMetadataRouterStateImpl {
+pub(super) struct InstanceMetadataRouterStateImpl {
     latest_instance_data: ArcSwapOption<InstanceMetadata>,
     latest_network_config: ArcSwapOption<ManagedHostNetworkConfigResponse>,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     forge_api: String,
     forge_client_config: Arc<ForgeClientConfig>,
     outbound_governor:
@@ -124,12 +126,12 @@ impl InstanceMetadataRouterState for InstanceMetadataRouterStateImpl {
 
         let mut client = create_forge_client(&self.forge_api, &self.forge_client_config).await?;
 
-        let timestamp = phone_home(&mut client, &self.machine_id).await?.to_string() + "\n";
+        let timestamp = phone_home(&mut client, &self.machine_id).await?;
 
         tracing::info!(
-            "Successfully phoned home for Machine {} at {}",
-            self.machine_id,
-            timestamp
+            machine_id = %self.machine_id,
+            %timestamp,
+            "Successfully phoned home"
         );
 
         Ok(())
@@ -183,7 +185,7 @@ impl MetaDataIdentitySigner for InstanceMetadataRouterStateImpl {
 
 impl InstanceMetadataRouterStateImpl {
     /// Wait for a `meta-data/identity` rate-limit permit (governor).
-    pub async fn wait_identity_governor(&self) -> Result<(), tonic::Status> {
+    async fn wait_identity_governor(&self) -> Result<(), tonic::Status> {
         wait_identity_rate_limit_permit(
             &self.identity_serving.governor,
             self.identity_serving.wait_timeout,
@@ -196,8 +198,8 @@ impl InstanceMetadataRouterStateImpl {
         })
     }
 
-    pub fn new(
-        machine_id: MachineId,
+    pub(super) fn new(
+        machine_id: DpuMachineId,
         forge_api: String,
         forge_client_config: Arc<ForgeClientConfig>,
         machine_identity: MachineIdentityConfig,
@@ -225,11 +227,11 @@ impl InstanceMetadataRouterStateImpl {
     }
 
     /// Updates the instance metadata that should be served by FMDS
-    pub fn update_instance_data(&self, instance_data: Option<Arc<InstanceMetadata>>) {
+    pub(super) fn update_instance_data(&self, instance_data: Option<Arc<InstanceMetadata>>) {
         self.latest_instance_data.store(instance_data);
     }
 
-    pub fn update_network_configuration(
+    pub(super) fn update_network_configuration(
         &self,
         network_config: Option<Arc<ManagedHostNetworkConfigResponse>>,
     ) {
@@ -237,7 +239,9 @@ impl InstanceMetadataRouterStateImpl {
     }
 }
 
-pub fn get_fmds_router(metadata_router_state: Arc<dyn InstanceMetadataRouterState>) -> Router {
+pub(super) fn get_fmds_router(
+    metadata_router_state: Arc<dyn InstanceMetadataRouterState>,
+) -> Router {
     let user_data_router =
         Router::new().route(&format!("/{USER_DATA_CATEGORY}"), get(get_userdata));
 
@@ -313,8 +317,18 @@ fn extract_metadata(
         (instance_meta.as_ref(), network_config.as_ref())
     {
         match category.as_str() {
-            PUBLIC_IPV4_CATEGORY => (StatusCode::OK, metadata.address.clone()),
+            PUBLIC_IPV4_CATEGORY => (StatusCode::OK, metadata.public_addresses.ipv4_string()),
+            PUBLIC_IPV6_CATEGORY => (StatusCode::OK, metadata.public_addresses.ipv6_string()),
             HOSTNAME_CATEGORY => (StatusCode::OK, metadata.hostname.clone()),
+            INSTANCE_NAME_CATEGORY => match &metadata.instance_name {
+                Some(instance_name) if !instance_name.is_empty() => {
+                    (StatusCode::OK, instance_name.clone())
+                }
+                _ => (
+                    StatusCode::NOT_FOUND,
+                    "instance name not available".to_string(),
+                ),
+            },
             SITENAME_CATEGORY => (
                 StatusCode::OK,
                 metadata.sitename.clone().unwrap_or(String::new()),
@@ -387,11 +401,13 @@ async fn get_metadata_params(
         StatusCode::OK,
         [
             HOSTNAME_CATEGORY,
+            INSTANCE_NAME_CATEGORY,
             SITENAME_CATEGORY,
             MACHINE_ID_CATEGORY,
             INSTANCE_ID_CATEGORY,
             ASN_CATEGORY,
-            machine_identity::META_DATA_IDENTITY_CATEGORY,
+            PUBLIC_IPV4_CATEGORY,
+            PUBLIC_IPV6_CATEGORY,
         ]
         .join("\n"),
     )
@@ -574,6 +590,8 @@ async fn post_phone_home(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use axum::http;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Bytes;
@@ -581,7 +599,9 @@ mod tests {
     use uuid::uuid;
 
     use super::*;
-    use crate::periodic_config_fetcher::{IBDeviceConfig, IBInstanceConfig, InstanceMetadata};
+    use crate::periodic_config_fetcher::{
+        IBDeviceConfig, IBInstanceConfig, InstanceMetadata, PublicAddresses,
+    };
 
     async fn setup_server(
         metadata: Option<InstanceMetadata>,
@@ -592,7 +612,6 @@ mod tests {
         let mut mock_router_state = MockInstanceMetadataRouterState::new();
         mock_router_state
             .expect_read()
-            .times(2)
             .return_const((metadata.clone(), network_config.clone()));
 
         let arc_mock_router_state = Arc::new(mock_router_state);
@@ -643,7 +662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_metadata_parameter_public_ipv4_category() {
+    async fn test_get_metadata_parameter_public_ip_categories() {
         let metadata = InstanceMetadata {
             instance_id: Some(uuid!("67e55044-10b1-426f-9247-bb680e5fe0c8").into()),
             machine_id: Some(
@@ -651,8 +670,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: Some(Ipv6Addr::LOCALHOST),
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -669,24 +692,50 @@ mod tests {
         send_request_and_check_response(
             server_port,
             "meta-data/public-ipv4",
-            &metadata.address,
+            "127.0.0.1",
+            StatusCode::OK,
+        )
+        .await;
+        send_request_and_check_response(
+            server_port,
+            "meta-data/public-ipv6",
+            "::1",
             StatusCode::OK,
         )
         .await;
         server.abort();
+
+        let metadata = InstanceMetadata {
+            public_addresses: PublicAddresses::default(),
+            ..metadata
+        };
+        let (server, server_port) = setup_server(
+            Some(metadata),
+            Some(ManagedHostNetworkConfigResponse::default()),
+        )
+        .await;
+        send_request_and_check_response(server_port, "meta-data/public-ipv4", "", StatusCode::OK)
+            .await;
+        send_request_and_check_response(server_port, "meta-data/public-ipv6", "", StatusCode::OK)
+            .await;
+        server.abort();
     }
 
     #[tokio::test]
-    async fn test_get_metadata_parameter_hostname_category() {
-        let metadata = InstanceMetadata {
+    async fn test_get_metadata_parameter_hostname_and_instance_name_categories() {
+        let mut metadata = InstanceMetadata {
             instance_id: None,
             machine_id: Some(
                 "fm100ht6n80e7do39u8gmt7cvhm89pb32st9ngevgdolu542l1nfa4an0rg"
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -708,6 +757,31 @@ mod tests {
         )
         .await;
         server.abort();
+
+        for (instance_name, expected_body, expected_status) in [
+            (Some("test-instance"), "test-instance", StatusCode::OK),
+            (None, "instance name not available", StatusCode::NOT_FOUND),
+            (
+                Some(""),
+                "instance name not available",
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            metadata.instance_name = instance_name.map(str::to_owned);
+            let (server, server_port) = setup_server(
+                Some(metadata.clone()),
+                Some(ManagedHostNetworkConfigResponse::default()),
+            )
+            .await;
+            send_request_and_check_response(
+                server_port,
+                "meta-data/instance-name",
+                expected_body,
+                expected_status,
+            )
+            .await;
+            server.abort();
+        }
     }
 
     #[tokio::test]
@@ -719,8 +793,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -731,11 +809,13 @@ mod tests {
 
         let expected_output = [
             HOSTNAME_CATEGORY,
+            INSTANCE_NAME_CATEGORY,
             SITENAME_CATEGORY,
             MACHINE_ID_CATEGORY,
             INSTANCE_ID_CATEGORY,
             ASN_CATEGORY,
-            machine_identity::META_DATA_IDENTITY_CATEGORY,
+            PUBLIC_IPV4_CATEGORY,
+            PUBLIC_IPV6_CATEGORY,
         ]
         .join("\n");
 
@@ -766,8 +846,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -813,8 +897,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![
                 IBDeviceConfig {
@@ -864,8 +952,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "pfguid1".to_string(),
@@ -905,8 +997,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "guid".to_string(),
@@ -953,8 +1049,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "guid".to_string(),
@@ -994,8 +1094,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "guid".to_string(),
@@ -1035,8 +1139,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "guid".to_string(),
@@ -1076,8 +1184,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "guid".to_string(),
@@ -1117,8 +1229,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: Some(vec![IBDeviceConfig {
                 pf_guid: "guid".to_string(),
@@ -1158,8 +1274,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -1192,8 +1312,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -1226,8 +1350,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),
@@ -1256,8 +1384,12 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
-            address: "127.0.0.1".to_string(),
+            public_addresses: PublicAddresses {
+                ipv4: Some(Ipv4Addr::LOCALHOST),
+                ipv6: None,
+            },
             hostname: "localhost".to_string(),
+            instance_name: Some("test-instance".to_string()),
             user_data: "\"userData\": {\"data\": 0}".to_string(),
             ib_devices: None,
             config_version: "V2-T1666644937962267".parse().unwrap(),

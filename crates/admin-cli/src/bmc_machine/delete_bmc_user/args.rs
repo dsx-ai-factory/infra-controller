@@ -34,16 +34,16 @@ Target the BMC by MAC address:
     $ nico-admin-cli bmc-machine delete-bmc-user --mac-address 00:11:22:33:44:55 --username admin
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, short, help = "IP of the BMC where we want to delete a user")]
-    pub ip_address: Option<String>,
+    ip_address: Option<String>,
     #[clap(long, help = "MAC of the BMC where we want to delete a user")]
-    pub mac_address: Option<MacAddress>,
+    mac_address: Option<MacAddress>,
     #[clap(long, short, help = "ID of the machine where we want to delete a user")]
-    pub machine: Option<String>,
+    machine: Option<String>,
 
     #[clap(long, short, help = "Username of BMC account to delete")]
-    pub username: String,
+    username: String,
 }
 
 impl From<Args> for forgerpc::DeleteBmcUserRequest {

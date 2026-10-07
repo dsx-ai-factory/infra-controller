@@ -26,6 +26,10 @@ USER_ID=8
 # NOTE: CEC_REBOOT is supported only if currently installed CEC firmware version is 00.02.0180.0000 or newer
 export CEC_REBOOT="yes"
 
+# Enables automatic BMC reboot after successful BMC firmware update.
+# Without this setting, the BMC firmware is uploaded but not activated until manual reboot.
+export BMC_REBOOT="yes"
+
 # Shell function called by BFB's installer before updating BMC components
 # https://docs.nvidia.com/networking/display/bluefieldbsp4130/customizing-bluefield-software-deployment
 pre_bmc_components_update() {
@@ -57,6 +61,8 @@ run_with_timeout() {
   done
 }
 
+CURL_CMD="curl --verbose --insecure --retry 5 --retry-all-errors --user $BMC_USER:$BMC_PASSWORD"
+
 add_db_cert() {
   tee data.json <<DOF
     {
@@ -68,54 +74,51 @@ DOF
   ilog "Found the following number of certs in the certdb - $num_certs"
   if ((num_certs == 0)); then
     # Only run the call if there are no existing certs, otherwise it could cause subsequent installs of the DPU to fail
-    $CURL_CMD -d @data.json https://"$BMC_IP"/redfish/v1/Systems/Bluefield/SecureBoot/SecureBootDatabases/db/Certificates
+    # Use --retry 0 to avoid duplicate certificate POSTs on transient failures
+    $CURL_CMD --retry 0 -d @data.json https://"$BMC_IP"/redfish/v1/Systems/Bluefield/SecureBoot/SecureBootDatabases/db/Certificates
   fi
 }
 
-wait_bmc_boot() {
-  ilog "Waiting DPU BMC to reboot..."
+# Define bmc_custom_action4: Required to ensure BMC Redfish API is up and running after BMC reboot.
+# The BMC_REBOOT="yes" only waits for network connectivity, but Redfish services may not be fully initialized yet.
+# NOTE: For more details see the upstream installer:
+# https://github.com/Mellanox/bfb-build/blob/lts-3.2.x/common/install.env/bmc#L1136
+bmc_custom_action4() {
+  # It's only required if actual BMC reboot is performed
+  if [[ "$BMC_FIRMWARE_UPDATED" == "yes" ]]; then
+    ilog "Waiting DPU BMC to finish its reboot..."
 
-  local tries_ok=0
-  local tries=0
-  local max_tries=30
+    local tries_ok=0
+    local tries=0
+    local max_tries=30
 
-  while ((tries_ok < 2 && tries < max_tries)); do
-    http_code=$($CURL_CMD -s --retry 0 --max-time 5 -w "%{http_code}" https://"$BMC_IP"/redfish/v1/ -o /dev/null)
-    [[ "$http_code" == "200" ]] && ((tries_ok++))
-    ((tries++))
-    sleep 5
-  done
+    while ((tries_ok < 2 && tries < max_tries)); do
+      http_code=$($CURL_CMD -s --retry 0 --max-time 5 -w "%{http_code}" https://"$BMC_IP"/redfish/v1/ -o /dev/null)
+      [[ "$http_code" == "200" ]] && ((++tries_ok))
+      ((++tries))
+      sleep 5
+    done
 
-  if ((tries_ok < 2)); then
-    ilog "WARN: DPU BMC boot timeout after $tries attempts"
+    if ((tries_ok < 2)); then
+      ilog "WARN: DPU BMC boot timeout after $tries attempts"
+    fi
   fi
 }
 
 # This function is called as a last step before reboot. All eMMC/SSD partitions are unmounted at this stage.
 # https://docs.nvidia.com/networking/display/bluefieldbsp4130/customizing-bluefield-software-deployment
 bfb_post_install() {
-  set -x
   ilog "Run BFB post install script"
-  CURL_CMD="curl --verbose --insecure --retry 5 --retry-all-errors --user $BMC_USER:$BMC_PASSWORD"
 
   # Calling create_vlan function defined in the upstream installer
-  # https://github.com/Mellanox/bfb-build/blob/bf-bundle-3.2.0-113_25.10_ubuntu-22.04/common/install.env/bmc#L135
+  # https://github.com/Mellanox/bfb-build/blob/lts-3.2.x/common/install.env/bmc#L155
+  # It will create VLAN 4040 on OOB interface for DPU-to-BMC Redfish API calls
   create_vlan
 
   # Restore NVIDIA Secure Boot db certificate
   # There is a possibility that all db certificates have been lost. If this occurs, all capsule updates (UEFI/ATF) will fail.
   add_db_cert
 
-  # The BlueField BMC needs a graceful reboot in order to update itself
-  if [[ "$BMC_FIRMWARE_UPDATED" == "yes" ]]; then
-    ilog "DPU BMC reboot is triggered to apply new BMC version"
-    # Calling bmc_reboot function defined in the upstream installer
-    # https://github.com/Mellanox/bfb-build/blob/bf-bundle-3.2.0-113_25.10_ubuntu-22.04/common/install.env/bmc#L570
-    bmc_reboot
-    wait_bmc_boot
-  fi
-
   ilog "Removing $BMC_USER user after BFB install complete"
   $CURL_CMD -X DELETE https://"$BMC_IP"/redfish/v1/AccountService/Accounts/"$BMC_USER"
-  set +x
 }

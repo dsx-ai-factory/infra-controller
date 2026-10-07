@@ -46,6 +46,7 @@ type Operation struct {
 	OperationID string       `yaml:"operationId"`
 	Summary     string       `yaml:"summary"`
 	Description string       `yaml:"description"`
+	Deprecated  bool         `yaml:"deprecated"`
 	Tags        []string     `yaml:"tags"`
 	Parameters  []Parameter  `yaml:"parameters"`
 	RequestBody *RequestBody `yaml:"requestBody"`
@@ -55,12 +56,14 @@ type Parameter struct {
 	Name        string  `yaml:"name"`
 	In          string  `yaml:"in"`
 	Required    bool    `yaml:"required"`
+	Deprecated  bool    `yaml:"deprecated"`
 	Description string  `yaml:"description"`
 	Schema      *Schema `yaml:"schema"`
 }
 
 type RequestBody struct {
-	Content map[string]MediaType `yaml:"content"`
+	Required bool                 `yaml:"required"`
+	Content  map[string]MediaType `yaml:"content"`
 }
 
 type MediaType struct {
@@ -93,9 +96,11 @@ type Schema struct {
 	Type       SchemaType         `yaml:"type"`
 	Format     string             `yaml:"format"`
 	Enum       []string           `yaml:"enum"`
+	Deprecated bool               `yaml:"deprecated"`
 	Properties map[string]*Schema `yaml:"properties"`
 	Required   []string           `yaml:"required"`
 	Items      *Schema            `yaml:"items"`
+	MaxItems   *int               `yaml:"maxItems"`
 	MinLength  *int               `yaml:"minLength"`
 	MaxLength  *int               `yaml:"maxLength"`
 	Minimum    *int               `yaml:"minimum"`

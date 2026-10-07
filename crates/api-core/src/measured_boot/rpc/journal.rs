@@ -39,7 +39,7 @@ use crate::errors::CarbideError;
 
 /// handle_delete_measurement_journal handles the DeleteMeasurementJournal
 /// API endpoint.
-pub async fn handle_delete_measurement_journal(
+pub(crate) async fn handle_delete_measurement_journal(
     api: &Api,
     req: DeleteMeasurementJournalRequest,
 ) -> Result<DeleteMeasurementJournalResponse, Status> {
@@ -66,7 +66,7 @@ pub async fn handle_delete_measurement_journal(
 
 /// handle_show_measurement_journal handles the ShowMeasurementJournal
 /// API endpoint.
-pub async fn handle_show_measurement_journal(
+pub(crate) async fn handle_show_measurement_journal(
     api: &Api,
     req: ShowMeasurementJournalRequest,
 ) -> Result<ShowMeasurementJournalResponse, Status> {
@@ -84,7 +84,7 @@ pub async fn handle_show_measurement_journal(
                 match db::measured_boot::journal::get_latest_journal_for_id(
                     &mut txn,
                     MachineId::from_str(&machine_id).map_err(|e| {
-                        CarbideError::InvalidArgument(format!("Could not parse MachineId: {e}"))
+                        CarbideError::InvalidArgument(format!("could not parse MachineId: {e}"))
                     })?,
                 )
                 .await
@@ -114,7 +114,7 @@ pub async fn handle_show_measurement_journal(
 
 /// handle_show_measurement_journals handles the ShowMeasurementJournals
 /// API endpoint.
-pub async fn handle_show_measurement_journals(
+pub(crate) async fn handle_show_measurement_journals(
     api: &Api,
     _req: ShowMeasurementJournalsRequest,
 ) -> Result<ShowMeasurementJournalsResponse, Status> {
@@ -132,7 +132,7 @@ pub async fn handle_show_measurement_journals(
 
 /// handle_list_measurement_journal handles the ListMeasurementJournal
 /// API endpoint.
-pub async fn handle_list_measurement_journal(
+pub(crate) async fn handle_list_measurement_journal(
     api: &Api,
     req: ListMeasurementJournalRequest,
 ) -> Result<ListMeasurementJournalResponse, Status> {

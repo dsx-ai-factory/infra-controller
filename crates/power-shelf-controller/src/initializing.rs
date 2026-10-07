@@ -37,8 +37,8 @@ pub async fn handle_initializing(
     _ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(
-        "PowerShelf {} initializing, transitioning to FetchingData",
-        power_shelf_id
+        %power_shelf_id,
+        "PowerShelf initializing; transitioning to FetchingData"
     );
     Ok(StateHandlerOutcome::transition(
         PowerShelfControllerState::FetchingData,

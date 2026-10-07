@@ -1,0 +1,32 @@
+{{- if .Values.nvSwitchTls.nicoClient.enabled }}
+{{- $certificate := .Values.nvSwitchTls.nicoClient }}
+{{- $issuer := .Values.nvSwitchTls.issuerRef }}
+{{- if eq (len (default (list) $certificate.uris)) 0 }}
+{{- fail "nico-api: nvSwitchTls.nicoClient.uris must contain at least one URI SAN" }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certificate.name }}
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $certificate.secretName }}
+  duration: {{ $certificate.duration }}
+  renewBefore: {{ $certificate.renewBefore }}
+  isCA: false
+  usages:
+    - digital signature
+    - client auth
+  uris:
+    {{- toYaml $certificate.uris | nindent 4 }}
+  privateKey:
+    algorithm: {{ $certificate.privateKey.algorithm }}
+    size: {{ $certificate.privateKey.size }}
+    rotationPolicy: {{ $certificate.privateKey.rotationPolicy }}
+  issuerRef:
+    kind: {{ $issuer.kind }}
+    name: {{ $issuer.name }}
+    group: {{ $issuer.group }}
+{{- end }}

@@ -159,12 +159,35 @@ func (m *mockTaskStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
 	panic("mockTaskStore.CreateTask: not implemented")
 }
 
+func (m *mockTaskStore) LockRack(_ context.Context, _ uuid.UUID) error {
+	panic("mockTaskStore.LockRack: not implemented")
+}
+
+func (m *mockTaskStore) LockIdempotencyKey(_ context.Context, _ string) error {
+	panic("mockTaskStore.LockIdempotencyKey: not implemented")
+}
+
+func (m *mockTaskStore) GetTaskByIdempotencyKey(_ context.Context, _ string) (*taskdef.Task, error) {
+	panic("mockTaskStore.GetTaskByIdempotencyKey: not implemented")
+}
+
 func (m *mockTaskStore) GetTasks(_ context.Context, _ []uuid.UUID) ([]*taskdef.Task, error) {
 	panic("mockTaskStore.GetTasks: not implemented")
 }
 
 func (m *mockTaskStore) ListTasks(_ context.Context, _ *taskcommon.TaskListOptions, _ *dbquery.Pagination) ([]*taskdef.Task, int32, error) {
 	panic("mockTaskStore.ListTasks: not implemented")
+}
+
+func (m *mockTaskStore) ListNonTerminalTasksForRacks(_ context.Context, _ []uuid.UUID) ([]*taskdef.Task, error) {
+	panic("mockTaskStore.ListNonTerminalTasksForRacks: not implemented")
+}
+
+func (m *mockTaskStore) LatestLeakageShutdownTaskStatuses(
+	_ context.Context,
+	_ []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	panic("mockTaskStore.LatestLeakageShutdownTaskStatuses: not implemented")
 }
 
 func (m *mockTaskStore) UpdateScheduledTask(_ context.Context, _ *taskdef.Task) error {
@@ -949,6 +972,39 @@ func TestSubmitScopeTasks(t *testing.T) {
 		assert.Equal(t, 30*time.Second, capturedReq.QueueTimeout)
 		require.NotNil(t, capturedReq.RuleID)
 		assert.Equal(t, ruleUUID, *capturedReq.RuleID)
+	})
+
+	t.Run("invalid persisted rule ID fails before task submission", func(t *testing.T) {
+		tmpl, err := MarshalTemplate(
+			taskcommon.TaskTypePowerControl,
+			taskcommon.OpCodePowerControlPowerOn,
+			json.RawMessage(`{}`),
+			TemplateOptions{RuleID: "not-a-uuid"},
+		)
+		require.NoError(t, err)
+
+		called := false
+		manager := &mockTaskManager{
+			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+				called = true
+				return []uuid.UUID{taskID}, nil
+			},
+		}
+		dispatcher := newDispatcher(nil, nil, manager)
+		schedule := &dbmodel.TaskSchedule{
+			ID:                uuid.New(),
+			Name:              "sched",
+			OperationTemplate: tmpl,
+		}
+
+		_, _, err = dispatcher.submitScopeTasks(
+			context.Background(),
+			schedule,
+			[]*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}},
+			now,
+		)
+		require.ErrorContains(t, err, "invalid rule_id")
+		assert.False(t, called)
 	})
 
 	t.Run("SubmitTask error — scope skipped, all-fail error returned", func(t *testing.T) {

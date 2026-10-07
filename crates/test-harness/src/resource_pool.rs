@@ -20,23 +20,19 @@ use std::iter;
 
 use ipnetwork::IpNetwork;
 use model::resource_pool;
-use model::resource_pool::common::SECONDARY_VTEP_IP;
 use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
 
 #[derive(Default)]
 pub struct ResourcePoolBuilder {
-    secondary_vtep_ip: Option<IpNetwork>,
+    loopback_ip_v6: Option<IpNetwork>,
     vlan_id_ranges: Option<Vec<(u32, u32)>>,
     vni_ranges: Option<Vec<(u32, u32)>>,
 }
 
 impl ResourcePoolBuilder {
-    pub fn with_secondary_vtep_ip(self, addr: &str) -> Self {
-        // This "allow" should be removed when more options will be
-        // added to the builder.
-        #[allow(clippy::needless_update)]
+    pub fn with_loopback_ip_v6(self, addr: &str) -> Self {
         Self {
-            secondary_vtep_ip: Some(
+            loopback_ip_v6: Some(
                 addr.parse()
                     .expect("correct IP address / mask must be provided"),
             ),
@@ -104,11 +100,11 @@ impl ResourcePoolBuilder {
         ]
         .into_iter()
         .map(Some)
-        .chain(iter::once(self.secondary_vtep_ip.map(|network| {
+        .chain(iter::once(self.loopback_ip_v6.map(|network| {
             (
-                SECONDARY_VTEP_IP.to_string(),
+                resource_pool::common::LOOPBACK_IP_V6.to_string(),
                 ResourcePoolDef {
-                    pool_type: ResourcePoolType::Ipv4,
+                    pool_type: ResourcePoolType::Ipv6,
                     prefix: Some(network.to_string()),
                     ranges: vec![],
                     delegate_prefix_len: None,

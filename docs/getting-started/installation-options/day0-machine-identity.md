@@ -13,9 +13,9 @@ The design and API details live in the [SPIFFE JWT-SVID SDD](../../design/machin
 Before starting:
 
 - A running NICo deployment with healthy `nico-api` (Core) and `nico-rest-api` (REST).
-- Site config (`siteConfig` in `helm-prereqs/values/ncx-core.yaml` or equivalent) is already wired for your site — see [Quick Start Guide, Step 3](../quick-start.md#step-3--configure-the-site).
+- Site config (`siteConfig` in `helm-prereqs/values/nico-core.yaml` or equivalent) is already wired for your site — see [Quick Start Guide, Step 3](../quick-start.md#step-3--configure-the-site).
 
-This page assumes you have completed [Day 0 IP and Network Configuration](day0-ip-network-config.md) or equivalent network bring-up.
+This page assumes you have completed [IP and Network Configuration](../../provisioning/ip-and-network-configuration.md) or equivalent network bring-up.
 
 ---
 

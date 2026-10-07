@@ -19,23 +19,23 @@
 // instance of it.
 #![cfg_attr(not(feature = "linux-build"), allow(dead_code, unused_imports))]
 
-pub mod measured_boot;
+pub(crate) mod measured_boot;
 
-pub mod digest_crate_shim;
-pub mod tpm_ca_cert;
+mod digest_crate_shim;
+pub(crate) mod tpm_ca_cert;
 
 use carbide_uuid::machine::MachineId;
 use db::{ObjectFilter, Transaction};
 #[cfg(any(feature = "linux-build", test))]
-pub use measured_boot::*;
+pub(crate) use measured_boot::*;
 use model::hardware_info::TpmEkCertificate;
 use model::machine::machine_search_config::MachineSearchConfig;
 use sqlx::{PgConnection, Pool, Postgres};
-pub use tpm_ca_cert::{extract_ca_fields, match_insert_new_ek_cert_status_against_ca};
+pub(crate) use tpm_ca_cert::{extract_ca_fields, match_insert_new_ek_cert_status_against_ca};
 
 use crate::{CarbideError, CarbideResult};
 
-pub async fn get_ek_cert_by_machine_id(
+pub(crate) async fn get_ek_cert_by_machine_id(
     txn: &mut PgConnection,
     machine_id: &MachineId,
 ) -> CarbideResult<TpmEkCertificate> {
@@ -49,21 +49,22 @@ pub async fn get_ek_cert_by_machine_id(
         },
     )
     .await?
-    .ok_or_else(|| CarbideError::internal(format!("Machine with id {machine_id} not found.")))?;
+    .ok_or_else(|| CarbideError::internal(format!("machine with id {machine_id} not found")))?;
 
     // obtain an ek cert
     let tpm_ek_cert = machine
+        .status
         .hardware_info
         .as_ref()
-        .ok_or_else(|| CarbideError::internal("Hardware Info not found.".to_string()))?
+        .ok_or_else(|| CarbideError::internal("hardware info not found".to_string()))?
         .tpm_ek_certificate
         .as_ref()
-        .ok_or_else(|| CarbideError::internal("TPM EK Certificate not found.".to_string()))?;
+        .ok_or_else(|| CarbideError::internal("TPM EK certificate not found".to_string()))?;
 
     Ok(tpm_ek_cert.clone())
 }
 
-pub async fn backfill_ek_cert_status_for_existing_machines(
+pub(crate) async fn backfill_ek_cert_status_for_existing_machines(
     db_pool: &Pool<Postgres>,
 ) -> CarbideResult<()> {
     // get all machines that are not DPU
@@ -73,12 +74,15 @@ pub async fn backfill_ek_cert_status_for_existing_machines(
 
     let mut txn = Transaction::begin(db_pool).await?;
 
-    let machines: Vec<::carbide_uuid::machine::MachineId> =
-        db::machine::find(&mut txn, ObjectFilter::All, MachineSearchConfig::default())
-            .await?
-            .iter()
-            .map(|machine| machine.id)
-            .collect();
+    let machines: Vec<::carbide_uuid::machine::MachineId> = db::machine::find(
+        &mut txn,
+        ObjectFilter::<MachineId>::All,
+        MachineSearchConfig::default(),
+    )
+    .await?
+    .iter()
+    .map(|machine| machine.id)
+    .collect();
 
     if !machines.is_empty() {
         let topologies =

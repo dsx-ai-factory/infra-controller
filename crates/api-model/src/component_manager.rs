@@ -40,6 +40,32 @@ pub enum FirmwareState {
     Cancelled,
 }
 
+/// Switch certificate configuration job lifecycle state returned by component-manager backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfigureSwitchCertificateState {
+    Started,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+impl ConfigureSwitchCertificateState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
+impl std::fmt::Display for ConfigureSwitchCertificateState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Started => write!(f, "Started"),
+            Self::InProgress => write!(f, "InProgress"),
+            Self::Completed => write!(f, "Completed"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
 /// Updatable components of an Switch tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NvSwitchComponent {

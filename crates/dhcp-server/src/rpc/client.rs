@@ -14,15 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use forge_tls::client_config::ClientCert;
-use forge_tls::default::{default_client_cert, default_client_key, default_root_ca};
 use rpc::forge::{DhcpDiscovery, DhcpRecord};
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeTlsClient};
+use rpc::forge_tls_client::{ApiConfig, ForgeTlsClient};
 
 use crate::Config;
 use crate::errors::DhcpError;
 
-pub async fn discover_dhcp(
+pub(crate) async fn discover_dhcp(
     discovery_request: DhcpDiscovery,
     config: &Config,
 ) -> Result<DhcpRecord, DhcpError> {
@@ -32,15 +30,7 @@ pub async fn discover_dhcp(
         ));
     };
 
-    let client_config = ForgeClientConfig::new(
-        default_root_ca().to_string(),
-        Some(ClientCert {
-            cert_path: default_client_cert().to_string(),
-            key_path: default_client_key().to_string(),
-        }),
-    );
-
-    let api_config = ApiConfig::new(carbide_api_url, &client_config);
+    let api_config = ApiConfig::new(carbide_api_url, &config.forge_client_config);
 
     let mut client = ForgeTlsClient::retry_build(&api_config)
         .await

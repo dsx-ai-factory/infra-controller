@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	subnetActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 // DeleteSubnetByID is a helper Temporal workflow to delete an existing Subnet by ID
@@ -41,8 +41,8 @@ func DeleteSubnetByID(ctx workflow.Context, subnetID uuid.UUID) error {
 
 	var subnetManager subnetActivity.ManageSubnet
 
-	request := &cwssaws.NetworkSegmentDeletionRequest{
-		Id: &cwssaws.NetworkSegmentId{Value: subnetID.String()},
+	request := &corev1.NetworkSegmentDeletionRequest{
+		Id: &corev1.NetworkSegmentId{Value: subnetID.String()},
 	}
 
 	err := workflow.ExecuteActivity(ctx, subnetManager.DeleteSubnetOnSite, request).Get(ctx, nil)

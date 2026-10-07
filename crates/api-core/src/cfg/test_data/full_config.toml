@@ -2,10 +2,14 @@ listen = "[::]:1081"
 metrics_endpoint = "[::]:1080"
 database_url = "postgres://a:b@postgresql"
 max_database_connections = 1222
+database_pool_acquire_timeout = "15s"
+database_pool_idle_timeout = "20m"
+database_pool_max_lifetime = "45m"
+database_startup_retry_timeout = "2m"
 asn = 123
 dhcp_servers = ["1.2.3.4", "5.6.7.8"]
+ntp_servers = ["10.20.30.40", "50.60.70.80"]
 route_servers = ["9.10.11.12"]
-rapid_iterations = false
 initial_domain_name = "forge.local"
 initial_dpu_agent_upgrade_policy = "off"
 machine_update_run_interval = 60
@@ -17,6 +21,7 @@ vpc_peering_policy = "exclusive"
 vpc_peering_policy_on_existing = "mixed"
 internet_l3_vni = 1337
 selected_profile = "powerefficiency"
+pxe_public_base_url = "http://pxe.example.com:8080"
 
 [tls]
 identity_pemfile_path = "/path/to/cert"
@@ -73,6 +78,14 @@ pkeys = [{ start = "1", end = "10" }]
 [ib_config]
 fabric_monitor_run_interval = "101s"
 
+[credentials]
+ufm_source = "backend"
+bmc_site_wide_root_source = "local"
+
+[credentials.file]
+path = "/var/run/secrets/nico/ufm/credentials.yaml"
+poll_interval = "17s"
+
 [site_explorer]
 enabled = true
 run_interval = "100s"
@@ -90,6 +103,7 @@ power_down_wait = "13s"
 failure_retry_time = "31m"
 dpu_up_threshold = "33m"
 scout_reporting_timeout = "20m"
+boot_interface_observation_interval = "10m"
 
 [host_health]
 prevent_allocations_on_stale_dpu_agent_version = true
@@ -98,6 +112,11 @@ suppress_external_alerting_on_scout_heartbeat_timeout = false
 
 [observability]
 per_object_metrics_for_classifications = ["Hardware", "PreventAllocations"]
+
+[observability.per_object_state_metrics]
+enabled = true
+listen_address = "127.0.0.1:9191"
+object_types = ["machine", "switch"]
 
 [machine_state_controller.controller]
 iteration_time = "9m"
@@ -146,8 +165,11 @@ instance_autoreboot_period.start = "2025-01-07T00:00:00Z"
 instance_autoreboot_period.end = "2026-01-08T00:00:00Z"
 max_concurrent_machine_updates_absolute = 1
 
-[dpa_config]
+[ewethers_config]
 enabled = true
+svpc_enabled = true
+
+[ewethers_config.svpc]
 mqtt_endpoint = "mqtt.forge"
 
 [host_models.dell_r750]
@@ -190,9 +212,6 @@ known_firmware = [
   { version = "2.0", filename = "/mnt/persistence/fw/dell/uefi/r750_1.1.fw", url = "https://letmegooglethat.com/?q=dell750uefi", checksum = "f4d4e0954b5635e6c9a8c79ebaa95218", default = true },
 ]
 
-[multi_dpu]
-enabled = false
-
 [measured_boot_collector]
 enabled = false
 run_interval = "555s"
@@ -206,6 +225,12 @@ DevicesandIOPorts_IOMMU = "Disabled"
 OperatingModes_ChooseOperatingMode = "MinimalPower"
 
 [rack_profiles.NVL72]
+product_family = "gb200"
+
+[rack_profiles.NVL72.firmware_object]
+url = "https://firmware.example.invalid/sot/nvl72.json"
+fetch_timeout = "45s"
+
 [rack_profiles.NVL72.rack_capabilities.compute]
 name = "GB200"
 count = 18
@@ -218,6 +243,8 @@ count = 9
 count = 8
 
 [rack_profiles.NVL36]
+product_family = "gb200"
+
 [rack_profiles.NVL36.rack_capabilities.compute]
 count = 9
 
@@ -244,3 +271,13 @@ description = "this is yet another test profile"
 [mlx-config-profiles.test-profile2.config]
 SRIOV_EN = false
 NUM_OF_VFS = 16
+
+[certificates]
+backend = "dedicated_vault"
+
+[certificates.dedicated_vault]
+address = "https://vault-certs.example:8200"
+pki_mount_location = "pki-machine"
+pki_role_name = "machine"
+token = "s.fulltest"
+vault_cacert = "/path/to/vault-ca.pem"

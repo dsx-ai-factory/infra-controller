@@ -28,7 +28,7 @@ pub fn read_resolv_conf<P: AsRef<Path>>(path: P) -> Result<resolv_conf::Config, 
     let mut file = File::open(&path)
         .map_err(|_| {
             io::Error::other(eyre::eyre!(
-                "Unable to read resolv.conf at {:?}",
+                "unable to read resolv.conf at {:?}",
                 path.as_ref().file_name()
             ))
         })

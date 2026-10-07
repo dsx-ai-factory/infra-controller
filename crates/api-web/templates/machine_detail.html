@@ -4,7 +4,10 @@
 
 {% block content %}
 <div id="json">
+	<a id="console-logs-link" href="/admin/machine/{{ id }}/console-logs">Console Logs</a>
+	{% if !Self::logs_link_template().is_empty() %}
 	<a id="logs-link" href="" target="_blank">Logs</a>
+	{% endif %}
 	<a id="json-link" href="">JSON</a>
 </div>
 <h1>{{ machine_type }} {{ id }}</h1>
@@ -70,6 +73,145 @@
 		</td>
 	</tr>
 </table>
+
+{% if is_host %}
+<h3 id="desired_boot_interface">Desired Boot Interface</h3>
+{% match desired_boot_interface %}
+{% when Some with (boot_interface) %}
+	{% match boot_interface.reconciliation %}
+	{% when Some with (reconciliation) %}
+	<table class="detailsview">
+		<tr><th>Reconciliation State</th><td>{{ reconciliation.reconciliation_state }}</td></tr>
+		<tr><th>Desired MAC Address</th><td>{{ reconciliation.desired_mac_address }}</td></tr>
+		<tr><th>Desired Redfish Interface ID</th><td>{{ reconciliation.desired_redfish_interface_id }}</td></tr>
+		<tr><th>Selection Source</th><td>{{ reconciliation.selection_source }}</td></tr>
+		<tr><th>Selection Updated At</th><td>{{ reconciliation.selection_updated_at }}</td></tr>
+		<tr><th>Desired Version</th><td>{{ reconciliation.desired_version }}</td></tr>
+		<tr><th>Verified Version</th><td>{{ reconciliation.verified_version }}</td></tr>
+		<tr><th>Observed At</th><td>{{ reconciliation.observed_at }}</td></tr>
+		<tr><th>Observation</th><td>{{ reconciliation.observation_type }}</td></tr>
+		<tr><th>Machine State</th><td>{{ reconciliation.machine_state }}</td></tr>
+		<tr><th>Reconciling Version</th><td>{{ reconciliation.reconciling_version }}</td></tr>
+		{% if let Some(failure) = reconciliation.failure %}
+		<tr><th>Failure</th><td class="cell-error">{{ failure }}
+			{% if reconciliation.reconciling_version != reconciliation.desired_version %}
+			<br><small>(reported for superseded generation {{ reconciliation.reconciling_version }})</small>
+			{% endif %}
+		</td></tr>
+		{% endif %}
+	</table>
+	{% if has_complete_bmc_info %}
+	<form method="POST" action="/admin/machine/{{ id }}/boot-interface/reconcile">
+		<span class="action-spinner"></span>
+		<input type="submit" value="Request reconciliation">
+	</form>
+	{% else %}
+	<p>Reconciliation cannot be requested until BMC data is available.</p>
+	{% endif %}
+	{% when None %}
+	<p><strong>Not yet initialized</strong></p>
+	<p>Choose a managed interface below to create the desired boot-interface target.</p>
+	{% endmatch %}
+
+	<h4>Managed Interface Candidates</h4>
+	{% if !boot_interface.candidates.is_empty() %}
+	<table class="detailsview">
+		<tr>
+			<th>Interface ID</th>
+			<th>MAC Address</th>
+			<th>Redfish Interface ID</th>
+			<th>Network Segment Type</th>
+			<th>Annotations</th>
+		</tr>
+		{% for candidate in boot_interface.candidates %}
+		<tr>
+			<td>
+			{% match candidate.machine_interface_id %}
+			{% when Some with (machine_interface_id) %}
+				<a href="/admin/interface/{{ machine_interface_id }}">{{ machine_interface_id }}</a>
+			{% when None %}
+				-
+			{% endmatch %}
+			</td>
+			<td>{{ candidate.mac_address }}</td>
+			<td>{{ candidate.redfish_interface_id }}</td>
+			<td>{{ candidate.network_segment_type }}</td>
+			<td>
+				{% if candidate.is_current %}<strong>Current</strong>{% endif %}
+				{% if candidate.is_desired %}<strong>Matches desired target</strong>{% endif %}
+				{% if candidate.is_default %}<strong>Matches system default</strong>{% endif %}
+				{% if !candidate.is_selectable %}<strong>Not selectable</strong>{% endif %}
+			</td>
+		</tr>
+		{% endfor %}
+	</table>
+	{% else %}
+	<p>No managed interface candidates are available.</p>
+	{% endif %}
+
+	{% if boot_interface.has_selectable_candidates %}
+	<form method="POST" action="/admin/machine/{{ id }}/boot-interface" onsubmit="return confirm('This also changes the host primary interface and admin network identity. Continue?');">
+		<label for="desired_boot_interface_id">Desired interface:</label>
+		<select id="desired_boot_interface_id" name="machine_interface_id" required>
+			<option value="" selected disabled>Select a managed interface</option>
+			{% for candidate in boot_interface.candidates %}
+			{% if candidate.is_selectable %}
+			{% if let Some(machine_interface_id) = candidate.machine_interface_id %}
+			<option value="{{ machine_interface_id }}">{{ candidate.mac_address }} ({{ machine_interface_id }})</option>
+			{% endif %}
+			{% endif %}
+			{% endfor %}
+		</select>
+		<span class="action-spinner"></span>
+		<input type="submit" value="Set desired interface">
+	</form>
+	<p>Changing the desired interface also makes that exact managed row the host's primary interface.</p>
+	{% endif %}
+
+	{% if let Some(default_machine_interface_id) = boot_interface.default_machine_interface_id %}
+	<form method="POST" action="/admin/machine/{{ id }}/boot-interface" onsubmit="return confirm('This also changes the host primary interface and admin network identity. Continue?');">
+		<input type="hidden" name="machine_interface_id" value="{{ default_machine_interface_id }}">
+		<span class="action-spinner"></span>
+		<input type="submit" value="Use system default">
+	</form>
+	<p>This persists the system's current default as the desired interface; it does not follow future default changes.</p>
+	{% else %}
+	<p><button type="button" disabled>Use system default</button> No unambiguous managed default is available.</p>
+	{% endif %}
+
+	{% if !boot_interface.predicted_candidates.is_empty() %}
+	<h4>Predicted Interface Candidates</h4>
+	<p>Predicted interfaces are informational until DHCP creates an owned managed interface.</p>
+	<table class="detailsview">
+		<tr>
+			<th>MAC Address</th>
+			<th>Redfish Interface ID</th>
+			<th>Network Segment Type</th>
+			<th>Annotations</th>
+		</tr>
+		{% for candidate in boot_interface.predicted_candidates %}
+		<tr>
+			<td>{{ candidate.mac_address }}</td>
+			<td>{{ candidate.redfish_interface_id }}</td>
+			<td>{{ candidate.network_segment_type }}</td>
+			<td>
+				{% if candidate.is_primary %}<strong>Declared primary</strong>{% endif %}
+				{% if candidate.is_default %}<strong>Predicted default</strong>{% endif %}
+			</td>
+		</tr>
+		{% endfor %}
+	</table>
+	{% endif %}
+	<p>Machine-controller applies the desired boot interface and reboots only when required.</p>
+{% when None %}
+	<p class="cell-error">Boot-interface details are unavailable.</p>
+{% endmatch %}
+{% if let Some(status) = action_status %}
+{% if status.action == action_status::Type::DesiredBootInterface %}
+{{ status.action_result_script()|safe }}
+{% endif %}
+{% endif %}
+{% endif %}
 
 {% if is_host %}
 <h3>Maintenance and Quarantine</h3>
@@ -242,32 +384,6 @@
 			{% endif %}
 		</td>
 	</tr>
-	{% if is_host %}
-	<tr>
-		<th>Boot Order</th>
-		<td class="action-cell">
-			<div></div>
-			<div>
-				<form id="set_dpu_first_boot_order" method="POST" action="/admin/machine/{{ id }}/set-dpu-first-boot-order" onsubmit="action_reminder(event)">
-					<span class="action-spinner"></span>
-					<input type="hidden" name="bmc_ip" value="{{ bmc_info.ip|option_fmt }}">
-					{% for interface in interfaces %}
-						{% if interface.primary == "true" %}
-							<input type="hidden" name="boot_interface_mac" value="{{ interface.mac_address }}">
-						{% endif %}
-					{% endfor %}
-					<input type="submit" value="Set DPU first">
-				</form>
-			</div>
-			{% include "restart_reminder.html" %}
-			{% if let Some(status) = action_status %}
-			{% if status.action == action_status::Type::SetDpuFirstBootOrder %}
-			{{ status.action_result_script()|safe }}
-			{% endif %}
-			{% endif %}
-		</td>
-	</tr>
-	{% endif %}
 </table>
 {% else %}
 Missing BMC Data
@@ -517,14 +633,22 @@ Missing BMC Data
 	}
 
 	document.addEventListener("DOMContentLoaded", function(event){
-		let maintenance_form = document.getElementById("maintenance_action");
-		maintenance_form.addEventListener("submit", are_you_sure_maintenance);
-		let quarantine_form = document.getElementById("quarantine_action");
-		quarantine_form.addEventListener("submit", are_you_sure_quarantine);
+		// Set up maintenance/quarantine form handlers (Host machines only)
+		const maintenance_form = document.getElementById("maintenance_action");
+		if (maintenance_form) {
+			maintenance_form.addEventListener("submit", are_you_sure_maintenance);
+		}
+		const quarantine_form = document.getElementById("quarantine_action");
+		if (quarantine_form) {
+			quarantine_form.addEventListener("submit", are_you_sure_quarantine);
+		}
 
-		// Set up Logs link
-		const machineId = "{{ id }}";
-		document.getElementById('logs-link').href = buildGrafanaLogsUrl(machineId);
+		// Set up Logs link (if configured)
+		const logsLink = document.getElementById('logs-link');
+		if (logsLink) {
+			const machineId = "{{ id }}";
+			logsLink.href = buildLogsUrl(machineId);
+		}
 	});
 </script>
 

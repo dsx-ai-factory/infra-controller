@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ResourcePoolDef {
     #[serde(default)]
     pub ranges: Vec<Range>,
@@ -29,6 +30,7 @@ pub struct ResourcePoolDef {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Range {
     pub start: String,
     pub end: String,

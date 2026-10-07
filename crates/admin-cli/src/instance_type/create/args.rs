@@ -38,33 +38,33 @@ Create with an explicit id:
     --name dgx-h100
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'i',
         long,
         help = "Optional, unique ID to use when creating the instance type"
     )]
-    pub id: Option<String>,
+    id: Option<String>,
 
     #[clap(short = 'n', long, help = "Name of the instance type")]
-    pub name: Option<String>,
+    name: Option<String>,
 
     #[clap(short = 'd', long, help = "Description of the instance type")]
-    pub description: Option<String>,
+    description: Option<String>,
 
     #[clap(
         short = 'l',
         long,
         help = "JSON map of simple key:value pairs to be applied as labels to the instance type"
     )]
-    pub labels: Option<String>,
+    labels: Option<String>,
 
     #[clap(
         short = 'f',
         long,
         help = "Optional, JSON array containing a set of instance type capability filters"
     )]
-    pub desired_capabilities: Option<String>,
+    desired_capabilities: Option<String>,
 }
 
 impl TryFrom<Args> for CreateInstanceTypeRequest {

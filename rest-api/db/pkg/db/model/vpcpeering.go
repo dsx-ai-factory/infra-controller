@@ -9,13 +9,16 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/uptrace/bun"
 )
@@ -102,11 +105,11 @@ type VpcPeering struct {
 // treats them as opaque identifiers, and any ControllerVpcID
 // indirection has already been applied by the time the peering rows
 // reference these UUIDs.
-func (vp *VpcPeering) ToProto() *cwssaws.VpcPeering {
-	return &cwssaws.VpcPeering{
-		Id:        &cwssaws.VpcPeeringId{Value: vp.ID.String()},
-		VpcId:     &cwssaws.VpcId{Value: vp.Vpc1ID.String()},
-		PeerVpcId: &cwssaws.VpcId{Value: vp.Vpc2ID.String()},
+func (vp *VpcPeering) ToProto() *corev1.VpcPeering {
+	return &corev1.VpcPeering{
+		Id:        &corev1.VpcPeeringId{Value: vp.ID.String()},
+		VpcId:     &corev1.VpcId{Value: vp.Vpc1ID.String()},
+		PeerVpcId: &corev1.VpcId{Value: vp.Vpc2ID.String()},
 	}
 }
 
@@ -114,7 +117,7 @@ func (vp *VpcPeering) ToProto() *cwssaws.VpcPeering {
 // representation. A nil proto is a no-op. This is the inverse of
 // `ToProto` and exists for convention symmetry — currently no code
 // path on the cloud side reconstructs a full VpcPeering entity from a
-// `cwssaws.VpcPeering` (the site is the destination, not the source),
+// `corev1.VpcPeering` (the site is the destination, not the source),
 // but the method is provided so future reconciliation flows have a
 // single canonical entry point.
 //
@@ -125,7 +128,7 @@ func (vp *VpcPeering) ToProto() *cwssaws.VpcPeering {
 //     omits the matching `VpcId` / `PeerVpcId` or carries an
 //     unparseable value, so `FromProto` cannot silently zero out a
 //     required foreign key.
-func (vp *VpcPeering) FromProto(proto *cwssaws.VpcPeering) {
+func (vp *VpcPeering) FromProto(proto *corev1.VpcPeering) {
 	if proto == nil {
 		return
 	}
@@ -149,20 +152,29 @@ func (vp *VpcPeering) FromProto(proto *cwssaws.VpcPeering) {
 // ToDeletionRequestProto builds the workflow request that asks a Site to
 // delete this VpcPeering. Stays on the entity because the delete-by-id
 // flow has no API request body.
-func (vp *VpcPeering) ToDeletionRequestProto() *cwssaws.VpcPeeringDeletionRequest {
-	return &cwssaws.VpcPeeringDeletionRequest{
-		Id: &cwssaws.VpcPeeringId{Value: vp.ID.String()},
+func (vp *VpcPeering) ToDeletionRequestProto() *corev1.VpcPeeringDeletionRequest {
+	return &corev1.VpcPeeringDeletionRequest{
+		Id: &corev1.VpcPeeringId{Value: vp.ID.String()},
 	}
 }
 
 type VpcPeeringCreateInput struct {
+	VpcPeeringID             *uuid.UUID
 	Vpc1ID                   uuid.UUID
 	Vpc2ID                   uuid.UUID
 	SiteID                   uuid.UUID
 	IsMultiTenant            bool
 	InfrastructureProviderID *uuid.UUID
 	TenantID                 *uuid.UUID
+	Status                   string
 	CreatedByID              uuid.UUID
+}
+
+// VpcPeeringClearInput input parameters for Clear method
+type VpcPeeringClearInput struct {
+	VpcPeeringID uuid.UUID
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 type VpcPeeringFilterInput struct {
@@ -172,7 +184,13 @@ type VpcPeeringFilterInput struct {
 	IsMultiTenant             *bool
 	InfrastructureProviderIDs []uuid.UUID
 	TenantIDs                 []uuid.UUID
-	Statuses                  []string
+	// PeerTenantIDs filters peerings where vpc1 OR vpc2 belongs to any of the specified
+	// tenants. This is a user-requested filter and is distinct from TenantIDs, which
+	// scopes results to the caller's authorization context.
+	PeerTenantIDs []uuid.UUID
+	Statuses      []string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 func (vp *VpcPeering) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery) error {
@@ -196,6 +214,9 @@ type VpcPeeringDAO interface {
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*VpcPeering, error)
 	//
 	UpdateStatusByID(ctx context.Context, tx *db.Tx, id uuid.UUID, newStatus string) error
+	UpdateStatusByIDIfCurrent(ctx context.Context, tx *db.Tx, id uuid.UUID, currentStatus string, newStatus string) (bool, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input VpcPeeringClearInput) (*VpcPeering, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 	//
@@ -205,7 +226,6 @@ type VpcPeeringDAO interface {
 type VpcPeeringSQLDAO struct {
 	dbSession *db.Session
 	VpcPeeringDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create inserts a new VPC peering record into the database without checking for duplicates.
@@ -215,11 +235,9 @@ func (vpsd VpcPeeringSQLDAO) Create(
 	ctx context.Context,
 	tx *db.Tx,
 	input VpcPeeringCreateInput,
-) (*VpcPeering, error) {
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.Create")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-	}
+) (_ *VpcPeering, retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.Create")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	vpc1ID, vpc2ID := input.Vpc1ID, input.Vpc2ID
 
@@ -227,15 +245,25 @@ func (vpsd VpcPeeringSQLDAO) Create(
 		return nil, errors.New("cannot peer a VPC with itself")
 	}
 
+	vpcPeeringID := uuid.New()
+	if input.VpcPeeringID != nil {
+		vpcPeeringID = *input.VpcPeeringID
+	}
+
+	status := input.Status
+	if status == "" {
+		status = VpcPeeringStatusPending
+	}
+
 	vp := &VpcPeering{
-		ID:                       uuid.New(),
+		ID:                       vpcPeeringID,
 		Vpc1ID:                   vpc1ID,
 		Vpc2ID:                   vpc2ID,
 		SiteID:                   input.SiteID,
 		IsMultiTenant:            input.IsMultiTenant,
 		InfrastructureProviderID: input.InfrastructureProviderID,
 		TenantID:                 input.TenantID,
-		Status:                   VpcPeeringStatusPending,
+		Status:                   status,
 		Created:                  db.GetCurTime(),
 		Updated:                  db.GetCurTime(),
 		CreatedBy:                input.CreatedByID,
@@ -255,14 +283,15 @@ func (vpsd VpcPeeringSQLDAO) GetAll(
 	filter VpcPeeringFilterInput,
 	page paginator.PageInput,
 	includeRelations []string,
-) ([]VpcPeering, int, error) {
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.GetAll")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-	}
+) (_ []VpcPeering, _ int, retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.GetAll")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	vps := []VpcPeering{}
 	query := db.GetIDB(tx, vpsd.dbSession).NewSelect().Model(&vps)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	query, err := vpsd.setQueryWithFilter(filter, query, vpDAOSpan)
 	if err != nil {
 		return vps, 0, err
@@ -295,10 +324,9 @@ func (vpsd VpcPeeringSQLDAO) GetAll(
 	return vps, paginator.Total, nil
 }
 
-func (vpsd VpcPeeringSQLDAO) setQueryWithFilter(filter VpcPeeringFilterInput, query *bun.SelectQuery, vpDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (vpsd VpcPeeringSQLDAO) setQueryWithFilter(filter VpcPeeringFilterInput, query *bun.SelectQuery, vpDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.IDs != nil {
 		query = query.Where("vp.id IN (?)", bun.In(filter.IDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", filter.IDs)
 	}
 
 	if len(filter.VpcIDs) > 0 {
@@ -307,22 +335,18 @@ func (vpsd VpcPeeringSQLDAO) setQueryWithFilter(filter VpcPeeringFilterInput, qu
 				WhereOr("vp.vpc1_id IN (?)", bun.In(filter.VpcIDs)).
 				WhereOr("vp.vpc2_id IN (?)", bun.In(filter.VpcIDs))
 		})
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "vpc_ids", filter.VpcIDs)
 	}
 
 	if filter.Statuses != nil {
 		query = query.Where("vp.status IN (?)", bun.In(filter.Statuses))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "status", filter.Statuses)
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("vp.site_id IN (?)", bun.In(filter.SiteIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "site_ids", filter.SiteIDs)
 	}
 
 	if filter.IsMultiTenant != nil {
 		query = query.Where("vp.is_multi_tenant = ?", *filter.IsMultiTenant)
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "is_multi_tenant", *filter.IsMultiTenant)
 	}
 
 	hasProviderIDs := len(filter.InfrastructureProviderIDs) > 0
@@ -335,11 +359,10 @@ func (vpsd VpcPeeringSQLDAO) setQueryWithFilter(filter VpcPeeringFilterInput, qu
 				WhereOr("vp.vpc1_id IN (SELECT id FROM vpc WHERE tenant_id IN (?))", bun.In(filter.TenantIDs)).
 				WhereOr("vp.vpc2_id IN (SELECT id FROM vpc WHERE tenant_id IN (?))", bun.In(filter.TenantIDs))
 		})
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "infrastructure_provider_ids", filter.InfrastructureProviderIDs)
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "tenant_ids", filter.TenantIDs)
+
 	} else if hasProviderIDs {
 		query = query.Where("vp.infrastructure_provider_id IN (?)", bun.In(filter.InfrastructureProviderIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "infrastructure_provider_ids", filter.InfrastructureProviderIDs)
+
 	} else if hasTenantIDs {
 		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.
@@ -347,7 +370,14 @@ func (vpsd VpcPeeringSQLDAO) setQueryWithFilter(filter VpcPeeringFilterInput, qu
 				WhereOr("vp.vpc1_id IN (SELECT id FROM vpc WHERE tenant_id IN (?))", bun.In(filter.TenantIDs)).
 				WhereOr("vp.vpc2_id IN (SELECT id FROM vpc WHERE tenant_id IN (?))", bun.In(filter.TenantIDs))
 		})
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "tenant_ids", filter.TenantIDs)
+	}
+
+	if len(filter.PeerTenantIDs) > 0 {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				WhereOr("vp.vpc1_id IN (SELECT id FROM vpc WHERE tenant_id IN (?))", bun.In(filter.PeerTenantIDs)).
+				WhereOr("vp.vpc2_id IN (SELECT id FROM vpc WHERE tenant_id IN (?))", bun.In(filter.PeerTenantIDs))
+		})
 	}
 
 	return query, nil
@@ -358,13 +388,9 @@ func (vpsd VpcPeeringSQLDAO) GetByID(
 	tx *db.Tx,
 	id uuid.UUID,
 	includeRelations []string,
-) (*VpcPeering, error) {
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.GetByID")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id)
-	}
+) (_ *VpcPeering, retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.GetByID")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	vp := &VpcPeering{}
 
@@ -390,18 +416,15 @@ func (vpsd VpcPeeringSQLDAO) UpdateStatusByID(
 	tx *db.Tx,
 	id uuid.UUID,
 	newStatus string,
-) error {
+) (retErr error) {
 	// Disallow undefined VPC peering status
 	if !VpcPeeringStatusMap[newStatus] {
 		return db.ErrInvalidValue
 	}
 
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.UpdateStatusByID")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id)
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "status", newStatus)
-	}
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.UpdateStatusByID")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("status", newStatus))
 
 	_, err := db.GetIDB(tx, vpsd.dbSession).
 		NewUpdate().
@@ -414,15 +437,72 @@ func (vpsd VpcPeeringSQLDAO) UpdateStatusByID(
 	return err
 }
 
+// UpdateStatusByIDIfCurrent updates an active peering only if its status still
+// matches currentStatus. A changed status, missing row, or soft-deleted row
+// returns (false, nil). Invalid statuses return db.ErrInvalidValue.
+func (vpsd VpcPeeringSQLDAO) UpdateStatusByIDIfCurrent(
+	ctx context.Context,
+	tx *db.Tx,
+	id uuid.UUID,
+	currentStatus string,
+	newStatus string,
+) (_ bool, retErr error) {
+	if !VpcPeeringStatusMap[currentStatus] || !VpcPeeringStatusMap[newStatus] {
+		return false, db.ErrInvalidValue
+	}
+
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.UpdateStatusByIDIfCurrent")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("status", newStatus))
+
+	result, err := db.GetIDB(tx, vpsd.dbSession).
+		NewUpdate().
+		Model((*VpcPeering)(nil)).
+		Set("status = ?", newStatus).
+		Set("updated = ?", db.GetCurTime()).
+		Where("id = ?", id).
+		Where("status = ?", currentStatus).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	return updated > 0, err
+}
+
+// Clear clears VpcPeering attributes based on provided arguments
+func (vpsd VpcPeeringSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcPeeringClearInput) (_ *VpcPeering, retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.Clear")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+
+	if input.Deleted {
+		_, err := db.GetIDB(tx, vpsd.dbSession).
+			NewUpdate().
+			Model((*VpcPeering)(nil)).
+			Set("deleted = NULL").
+			Set("updated = ?", db.GetCurTime()).
+			Where("id = ?", input.VpcPeeringID).
+			WhereAllWithDeleted().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	vpcPeering, err := vpsd.GetByID(ctx, tx, input.VpcPeeringID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return vpcPeering, nil
+}
+
 func (vpsd VpcPeeringSQLDAO) Delete(
 	ctx context.Context,
 	tx *db.Tx,
 	id uuid.UUID,
-) error {
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.Delete")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-	}
+) (retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.Delete")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	vp := &VpcPeering{
 		ID: id,
@@ -437,12 +517,9 @@ func (vpsd VpcPeeringSQLDAO) DeleteByVpcID(
 	ctx context.Context,
 	tx *db.Tx,
 	vpcID uuid.UUID,
-) error {
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.DeleteByVpcID")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "vpcID", vpcID)
-	}
+) (retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.DeleteByVpcID")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	_, err := db.GetIDB(tx, vpsd.dbSession).
 		NewDelete().
@@ -455,7 +532,6 @@ func (vpsd VpcPeeringSQLDAO) DeleteByVpcID(
 
 func NewVpcPeeringDAO(dbSession *db.Session) VpcPeeringDAO {
 	return &VpcPeeringSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

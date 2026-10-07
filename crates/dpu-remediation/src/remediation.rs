@@ -21,14 +21,21 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_instrument::emit;
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use rand::RngExt;
 use rpc::Metadata;
 use rpc::forge::{
     GetNextRemediationForMachineRequest, RemediationApplicationStatus, RemediationAppliedRequest,
 };
 use rpc::forge_tls_client::ForgeClientConfig;
+
+use crate::metrics::{
+    RemediationApplyFailed, RemediationClientCreationFailed, RemediationFetchFailed,
+    RemediationResponseInvalid, RemediationStatusOutputDecodeFailed,
+};
 
 const MIN_INITIAL_DELAY_TIME_SECS: u64 = 48; // 80% of 60
 const MAX_INITIAL_DELAY_TIME_SECS: u64 = 72; // 120% of 60
@@ -39,11 +46,11 @@ const MAX_LOOP_DELAY_TIME_SECS: u64 = 360; // 120% of 300
 const MAX_SCRIPT_TIMEOUT_SECS: u64 = 120; // two minutes, best I can do.
 
 pub struct MachineInfo {
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
 }
 
 impl MachineInfo {
-    pub fn new(machine_id: MachineId) -> Self {
+    pub fn new(machine_id: DpuMachineId) -> Self {
         Self { machine_id }
     }
     pub fn get_envs(&self, status_path: &Path) -> HashMap<String, String> {
@@ -106,57 +113,62 @@ impl RemediationExecutor {
             .spawn()?;
         let output_fut = process.wait_with_output();
 
-        let (succeeded, results) = match tokio::time::timeout(
-            Duration::from_secs(MAX_SCRIPT_TIMEOUT_SECS),
-            output_fut,
-        )
-        .await
-        {
-            Ok(result) => match result {
-                Ok(output) => {
-                    let exit_status = output.status;
-                    let succeeded = exit_status.success();
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let _ignored = tokio::fs::write(&stdout_path, &output.stdout).await;
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let _ignored = tokio::fs::write(&stderr_path, &output.stderr).await;
+        let (succeeded, results) =
+            match tokio::time::timeout(Duration::from_secs(MAX_SCRIPT_TIMEOUT_SECS), output_fut)
+                .await
+            {
+                Ok(result) => match result {
+                    Ok(output) => {
+                        let exit_status = output.status;
+                        let succeeded = exit_status.success();
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        tokio::fs::write(&stdout_path, &output.stdout).await.ok();
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tokio::fs::write(&stderr_path, &output.stderr).await.ok();
 
-                    tracing::debug!("Remediation stdout:\n{}", stdout);
-                    tracing::debug!("Remediation stderr:\n{}", stderr);
+                        tracing::debug!("Remediation stdout:\n{}", stdout);
+                        tracing::debug!("Remediation stderr:\n{}", stderr);
 
-                    let status_file_str = tokio::fs::read_to_string(&status_path).await?;
-                    let results = if !status_file_str.is_empty() {
-                        serde_json::from_str::<HashMap<String, String>>(&status_file_str).map_err(|err| {
-                                tracing::error!("Unable to deserialize json into hashmap from status output file, error was {:#?}", err);
-                            }).unwrap_or_default()
-                    } else {
-                        HashMap::new()
-                    };
+                        let status_file_str = tokio::fs::read_to_string(&status_path).await?;
+                        let results = if status_file_str.is_empty() {
+                            HashMap::new()
+                        } else {
+                            match serde_json::from_str::<HashMap<String, String>>(&status_file_str)
+                            {
+                                Ok(results) => results,
+                                Err(error) => {
+                                    emit(RemediationStatusOutputDecodeFailed::new(
+                                        self.machine_info.machine_id.into(),
+                                        remediation_id,
+                                        format!("{error:?}"),
+                                    ));
+                                    HashMap::new()
+                                }
+                            }
+                        };
 
-                    (succeeded, results)
-                }
-                Err(process_error) => {
+                        (succeeded, results)
+                    }
+                    Err(process_error) => {
+                        let results = HashMap::from([(
+                            "status".to_string(),
+                            format!("process_execution_error: {process_error}"),
+                        )]);
+
+                        (false, results)
+                    }
+                },
+                Err(_elapsed_timeout_err) => {
                     let results = HashMap::from([(
                         "status".to_string(),
-                        format!("process_execution_error: {process_error}"),
+                        "elapsed_script_timeout_error".to_string(),
                     )]);
 
                     (false, results)
                 }
-            },
-            Err(_elapsed_timeout_err) => {
-                let results = HashMap::from([(
-                    "status".to_string(),
-                    "elapsed_script_timeout_error".to_string(),
-                )]);
+            };
 
-                (false, results)
-            }
-        };
-
-        let metadata = if results.is_empty() {
-            None
-        } else {
+        let metadata = results.none_if_empty().map(|results| {
             let labels = results
                 .into_iter()
                 .map(|(k, v)| rpc::forge::Label {
@@ -164,12 +176,12 @@ impl RemediationExecutor {
                     value: Some(v),
                 })
                 .collect();
-            Some(Metadata {
+            Metadata {
                 name: "".to_string(),
                 description: "".to_string(),
                 labels,
-            })
-        };
+            }
+        });
 
         let application_status = RemediationApplicationStatus {
             succeeded,
@@ -225,10 +237,11 @@ impl RemediationExecutor {
                                             tracing::debug!("Remediation successfully applied.");
                                         }
                                         Err(error) => {
-                                            tracing::error!(
-                                                "Remediation failed with error: {:#?}.",
-                                                error
-                                            );
+                                            emit(RemediationApplyFailed::new(
+                                                self.machine_info.machine_id.into(),
+                                                *remediation_id,
+                                                format!("{error:?}"),
+                                            ));
                                         }
                                     }
                                 }
@@ -236,26 +249,27 @@ impl RemediationExecutor {
                                     tracing::debug!("no remediation this loop, nothing to do.");
                                 }
                                 _ => {
-                                    tracing::error!(
-                                        "received a response with one of id or script but not both, skipping, will retry next loop, response: {:#?}",
-                                        next_remediation
-                                    );
+                                    emit(RemediationResponseInvalid::new(
+                                        self.machine_info.machine_id.into(),
+                                        next_remediation.remediation_script.is_some(),
+                                        next_remediation.remediation_id.is_some(),
+                                    ));
                                 }
                             }
                         }
                         Err(remediation_fetch_error) => {
-                            tracing::error!(
-                                "Remediation executor unable to fetch next remediation this loop, will retry next loop, error was: {:#?}",
-                                remediation_fetch_error
-                            );
+                            emit(RemediationFetchFailed::new(
+                                self.machine_info.machine_id.into(),
+                                format!("{remediation_fetch_error:?}"),
+                            ));
                         }
                     }
                 }
                 Err(client_creation_error) => {
-                    tracing::error!(
-                        "Remediation executor unable to create forge client this loop, will retry next loop, error was: {:#?}",
-                        client_creation_error
-                    );
+                    emit(RemediationClientCreationFailed::new(
+                        self.machine_info.machine_id.into(),
+                        format!("{client_creation_error:?}"),
+                    ));
                 }
             }
 

@@ -26,6 +26,32 @@ use tonic::{Request, Response, Status};
 use crate::CarbideError;
 use crate::api::Api;
 
+/// Validates a caller-supplied default TTL into the zone's range.
+fn zone_ttl_argument(secs: Option<u32>) -> Result<Option<model::dns::ZoneTtl>, CarbideError> {
+    secs.map(model::dns::ZoneTtl::try_from)
+        .transpose()
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))
+}
+
+/// Rejects a proposed domain name at or below either reverse-DNS tree root.
+///
+/// Reverse lookups derive PTRs from inventory, not stored zones. Accepting
+/// a zone write would imply support for reverse authority that is not served.
+/// Network lifecycle maintains compatibility rows directly for rollback;
+/// this validation applies to explicit domain API creation.
+fn ensure_not_reverse_zone_name(proposed_name: &str) -> Result<(), CarbideError> {
+    let normalized = db::dns::normalize_domain(proposed_name.trim());
+    if matches!(normalized.as_str(), "in-addr.arpa" | "ip6.arpa")
+        || db::dns::normalize_reverse_zone_name(&normalized).is_some()
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "{proposed_name} is a reverse DNS zone; only inventory-derived PTR records are supported, not reverse domain creation"
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn create(
     api: &Api,
     request: Request<CreateDomainRequest>,
@@ -35,7 +61,12 @@ pub(crate) async fn create(
     let mut txn = api.txn_begin().await?;
 
     let req = request.into_inner();
-    let new_domain = NewDomain::new(req.name);
+    ensure_not_reverse_zone_name(&req.name)?;
+    let new_domain = NewDomain {
+        vpc_id: req.vpc_id,
+        default_ttl: zone_ttl_argument(req.default_ttl)?,
+        ..NewDomain::new(req.name)
+    };
 
     let domain = domain::persist(new_domain, &mut txn).await?;
 
@@ -69,11 +100,31 @@ pub(crate) async fn update(
                 id: uuid.to_string(),
             })?;
 
-    domain.name = domain_proto.name;
+    if domain_proto.vpc_id.is_some() && domain_proto.vpc_id != domain.vpc_id {
+        return Err(CarbideError::InvalidArgument(format!(
+            "changing the VPC ownership of domain {} is not supported; delete it and create a new domain under the other VPC",
+            domain.name
+        ))
+        .into());
+    }
+    // Renaming a domain is not supported. The name may be omitted or sent
+    // back unchanged so a caller updating another field need not read the
+    // row first.
+    if !domain_proto.name.is_empty() && domain_proto.name != domain.name {
+        return Err(CarbideError::InvalidArgument(format!(
+            "renaming domain {} to {} is not supported; delete it and create a new domain",
+            domain.name, domain_proto.name
+        ))
+        .into());
+    }
+    // Omission preserves the stored default; the wire cannot clear it.
+    if let Some(default_ttl) = zone_ttl_argument(domain_proto.default_ttl)? {
+        domain.default_ttl = Some(default_ttl);
+    }
 
     domain.increment_serial();
 
-    let updated_domain = domain::update(&mut domain, &mut txn).await?;
+    let updated_domain = domain::update(&domain, &mut txn).await?;
 
     txn.commit().await?;
 
@@ -98,6 +149,8 @@ pub(crate) async fn delete(
                 kind: "domain",
                 id: uuid.to_string(),
             })?;
+
+    db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
 
     // TODO: This needs to validate that nothing references the domain anymore
     // (like NetworkSegments)
@@ -158,7 +211,7 @@ use ::rpc::protos::forge::{
 };
 
 /// Compatibility adapter for legacy create_domain RPC
-pub async fn create_legacy_compat(
+pub(crate) async fn create_legacy_compat(
     api: &Api,
     request: Request<DomainLegacy>,
 ) -> Result<Response<DomainLegacy>, Status> {
@@ -171,6 +224,8 @@ pub async fn create_legacy_compat(
     // Convert legacy Domain to CreateDomainRequest
     let create_request = CreateDomainRequest {
         name: domain_legacy.name,
+        default_ttl: None,
+        vpc_id: None,
     };
 
     // Call the new handler
@@ -188,7 +243,7 @@ pub async fn create_legacy_compat(
 }
 
 /// Compatibility adapter for legacy update_domain RPC
-pub async fn update_legacy_compat(
+pub(crate) async fn update_legacy_compat(
     api: &Api,
     request: Request<DomainLegacy>,
 ) -> Result<Response<DomainLegacy>, Status> {
@@ -208,6 +263,8 @@ pub async fn update_legacy_compat(
             deleted: domain_legacy.deleted,
             metadata: None, // Legacy doesn't have metadata
             soa: None,      // Legacy doesn't have SOA
+            default_ttl: None,
+            vpc_id: None,
         }),
     };
 
@@ -226,7 +283,7 @@ pub async fn update_legacy_compat(
 }
 
 /// Compatibility adapter for legacy delete_domain RPC
-pub async fn delete_legacy_compat(
+pub(crate) async fn delete_legacy_compat(
     api: &Api,
     request: Request<DomainDeletionLegacy>,
 ) -> Result<Response<DomainDeletionResultLegacy>, Status> {
@@ -249,7 +306,7 @@ pub async fn delete_legacy_compat(
 }
 
 /// Compatibility adapter for legacy find_domain RPC
-pub async fn find_legacy_compat(
+pub(crate) async fn find_legacy_compat(
     api: &Api,
     request: Request<DomainSearchQueryLegacy>,
 ) -> Result<Response<DomainListLegacy>, Status> {

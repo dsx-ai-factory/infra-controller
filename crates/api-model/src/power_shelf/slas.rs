@@ -16,13 +16,13 @@
  */
 
 /// SLA for PowerShelf initialization in seconds
-pub const INITIALIZING: u64 = 300; // 5 minutes
+pub(super) const INITIALIZING: u64 = 300; // 5 minutes
 
 /// SLA for PowerShelf fetching data in seconds
-pub const FETCHING_DATA: u64 = 300; // 5 minutes
+pub(super) const FETCHING_DATA: u64 = 300; // 5 minutes
 
 /// SLA for PowerShelf configuring in seconds
-pub const CONFIGURING: u64 = 300; // 5 minutes
+pub(super) const CONFIGURING: u64 = 300; // 5 minutes
 
 // /// SLA for PowerShelf ready in seconds
 // pub const READY: u64 = 0; // 0 minutes
@@ -31,7 +31,33 @@ pub const CONFIGURING: u64 = 300; // 5 minutes
 // pub const ERROR: u64 = 300; // 5 minutes
 
 /// SLA for PowerShelf deleting in seconds
-pub const DELETING: u64 = 300; // 5 minutes
+pub(super) const DELETING: u64 = 300; // 5 minutes
 
 /// SLA for PowerShelf maintenance (PowerOn / PowerOff) in seconds
-pub const MAINTENANCE: u64 = 300; // 5 minutes
+pub(super) const MAINTENANCE: u64 = 300; // 5 minutes
+
+/// SLA for PowerShelf BMC (PMC) credential rotation in seconds. Generous enough
+/// to absorb the up-to-5-minute site-explorer pause handshake (its
+/// `SITE_EXPLORER_PAUSE_BUDGET`) that precedes the change, a slow BMC, and the
+/// rotation engine's short per-device backoff without tripping the SLA on the
+/// first retry.
+pub(super) const ROTATING_BMC: u64 = 15 * 60; // 15 minutes
+
+/// SLA for PowerShelf rack-level reprovisioning (firmware wait) in seconds
+pub(super) const REPROVISIONING: u64 = 3600; // 1 hour
+
+/// SLA for Site Explorer suppression acknowledgement during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER: u64 = 300; // 5 minutes
+
+/// SLA for recording BMC DHCP suppression during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_BMC_DHCP: u64 = 300; // 5 minutes
+
+/// SLA for BMC factory reset during decommissioning
+pub(super) const DECOMMISSIONING_FACTORY_RESET_BMC: u64 = 300; // 5 minutes
+
+/// SLA for waiting for BMC DHCP suppression acknowledgement after reset.
+/// Covers BMC reboot, Kea reload, and the subsequent DHCP discover.
+pub(super) const DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACK: u64 = 15 * 60; // 15 minutes
+
+/// SLA for deleting managed per-device credentials during decommissioning
+pub(super) const DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS: u64 = 300; // 5 minutes

@@ -14,8 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 mod carbide_reporting;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
@@ -117,6 +120,21 @@ struct Configuration {
     /// to lookup a log struct index in the vec
     #[serde(skip)]
     pub logs_hash: HashMap<Vec<u8>, usize>,
+}
+
+impl Configuration {
+    fn delimiter_byte(&self) -> Result<u8, anyhow::Error> {
+        match self.delimiter.as_deref() {
+            None => Ok(b'\n'),
+            Some(delimiter) => match delimiter.as_bytes() {
+                [delimiter] => Ok(*delimiter),
+                bytes => Err(anyhow!(
+                    "delimiter must be exactly one byte, got {delimiter:?} ({} bytes)",
+                    bytes.len()
+                )),
+            },
+        }
+    }
 }
 
 /// track each log file we're looking for events in
@@ -228,14 +246,13 @@ fn check_constraints(
             queue_event(timestamp, event_type, log, buffer);
         }
     } else if let Some(event_pattern) = constraints.preceded_by.as_ref() {
-        let mut event_pattern_matched = true;
-        // walk through the pattern and queue and check every event name matches
-        for (event_name, prior_event) in event_pattern.iter().rev().zip(log.events.iter().rev()) {
-            if *event_name != prior_event.name {
-                event_pattern_matched = false;
-                break;
-            }
-        }
+        let event_pattern_matched = !event_pattern.is_empty()
+            && log.events.len() >= event_pattern.len()
+            && event_pattern
+                .iter()
+                .rev()
+                .zip(log.events.iter().rev())
+                .all(|(event_name, prior_event)| *event_name == prior_event.name);
         if event_pattern_matched {
             queue_event(timestamp, event_type, log, buffer);
         }
@@ -278,6 +295,7 @@ async fn process_log_file_events(
     log_index: usize,
     set_offset: bool,
 ) -> Result<(), anyhow::Error> {
+    let delimiter = cfg.delimiter_byte()?;
     if let Some(log) = cfg.logs.get_mut(log_index) {
         let file_length = tokio::fs::metadata(&log.file_path).await?.len();
         if file_length == log.length {
@@ -303,11 +321,6 @@ async fn process_log_file_events(
         let mut file = tokio::fs::File::open(&log.file_path).await?;
 
         let mut consumed = 0;
-        let delimiter: u8 = if let Some(delim) = cfg.delimiter.clone() {
-            delim.as_bytes()[0]
-        } else {
-            b'\n'
-        };
 
         while consumed < len {
             let mut buffer = vec![0u8; buffer_length as usize];
@@ -315,7 +328,7 @@ async fn process_log_file_events(
             file.read_exact(&mut buffer).await?;
             consumed += buffer_length;
 
-            if buffer.contains(&b'\n') {
+            if buffer.contains(&delimiter) {
                 // find last delimiter and move seek offset to that, truncate buffer to that
                 if let Some(seek_position) = buffer.iter().rev().position(|&c| c == delimiter) {
                     log.offset += buffer_length - seek_position as u64;
@@ -323,7 +336,7 @@ async fn process_log_file_events(
                 } else {
                     log.offset += buffer_length;
                 }
-                let segments = buffer.split(|&c| c == b'\n');
+                let segments = buffer.split(|&c| c == delimiter);
                 for segment in segments {
                     if segment.is_empty() {
                         continue;
@@ -340,7 +353,7 @@ async fn process_log_file_events(
             } else {
                 eprintln!(
                     "{}: buffer of size {buffer_length} did not contain the delimiter",
-                    &log.file_path
+                    log.file_path
                 );
                 log.offset += buffer_length;
             }
@@ -450,6 +463,7 @@ async fn scan_files(cfg: &mut Configuration, set_offset: bool) -> Result<(), any
 async fn read_event_definition(path: &Path) -> Result<Configuration, anyhow::Error> {
     let json = tokio::fs::read_to_string(path).await?;
     let mut config: Configuration = serde_json::from_str(&json)?;
+    config.delimiter_byte()?;
     config.filename = Some(
         path.file_name()
             .unwrap_or_default()
@@ -459,7 +473,7 @@ async fn read_event_definition(path: &Path) -> Result<Configuration, anyhow::Err
     let filename_format = config.filename_format.replace("\\\\", "\\");
     if filename_format.is_empty() {
         return Err(anyhow!(
-            "Invalid filename_format regex pattern {}",
+            "invalid filename_format regex pattern {}",
             config.filename_format
         ));
     }
@@ -469,8 +483,8 @@ async fn read_event_definition(path: &Path) -> Result<Configuration, anyhow::Err
         let regex_string = event_type.regex_string.replace("\\\\", "\\");
         if regex_string.is_empty() {
             return Err(anyhow!(
-                "Invalid event regex pattern {}",
-                &event_type.regex_string
+                "invalid event regex pattern {}",
+                event_type.regex_string
             ));
         }
         let event_regex = Regex::new(regex_string.as_str())?;

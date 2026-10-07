@@ -24,6 +24,7 @@ const MAX_IB_PARTITION_PER_TENANT: i32 = 31;
 
 /// InfiniBand fabric manager configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct IBFabricConfig {
     /// Maximum InfiniBand partitions per tenant (1-31).
     #[serde(
@@ -141,6 +142,7 @@ impl IBFabricConfig {
 
 /// Settings related to an IB fabric
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct IbFabricDefinition {
     /// UFM endpoint address
     /// These need to be fully qualified, e.g. https://1.2.3.4:443

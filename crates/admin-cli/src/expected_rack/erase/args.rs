@@ -25,7 +25,7 @@ Erase all expected rack records (requires explicit confirmation):
     $ nico-admin-cli expected-rack erase --confirm
 
 ")]
-pub struct Args {
-    #[clap(long, help = "Confirm that you want to erase all records.")]
-    pub confirm: bool,
+pub(crate) struct Args {
+    #[clap(long, help = "Required to erase all expected rack records.")]
+    pub(super) confirm: bool,
 }

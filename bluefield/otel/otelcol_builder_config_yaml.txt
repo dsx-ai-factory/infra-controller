@@ -1,5 +1,6 @@
 dist:
   name: otelcol-contrib
+  module: otelcol-contrib
   description: Custom OpenTelemetry Collector build for DPU logging
   output_path: ./ocb-build
   otelcol_version: ${VERSION}
@@ -39,6 +40,8 @@ receivers:
       github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver v${VERSION}
   - gomod:
       github.com/open-telemetry/opentelemetry-collector-contrib/receiver/journaldreceiver v${VERSION}
+  - gomod:
+      go.opentelemetry.io/collector/receiver/otlpreceiver v${VERSION}
   - gomod:
       github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver v${VERSION}
   - gomod: puntstatsreceiver v${PUNTSTATS_VERSION}

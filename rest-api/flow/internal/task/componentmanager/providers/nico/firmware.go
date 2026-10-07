@@ -4,23 +4,23 @@
 package nico
 
 import (
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // MapFirmwareState converts a NICo protobuf FirmwareUpdateState into the
 // corresponding operations.FirmwareUpdateState.
-func MapFirmwareState(state pb.FirmwareUpdateState) operations.FirmwareUpdateState {
+func MapFirmwareState(state corev1.FirmwareUpdateState) operations.FirmwareUpdateState {
 	switch state {
-	case pb.FirmwareUpdateState_FW_STATE_QUEUED:
+	case corev1.FirmwareUpdateState_FW_STATE_QUEUED:
 		return operations.FirmwareUpdateStateQueued
-	case pb.FirmwareUpdateState_FW_STATE_IN_PROGRESS:
+	case corev1.FirmwareUpdateState_FW_STATE_IN_PROGRESS:
 		return operations.FirmwareUpdateStateQueued // closest available state
-	case pb.FirmwareUpdateState_FW_STATE_VERIFYING:
+	case corev1.FirmwareUpdateState_FW_STATE_VERIFYING:
 		return operations.FirmwareUpdateStateVerifying
-	case pb.FirmwareUpdateState_FW_STATE_COMPLETED:
+	case corev1.FirmwareUpdateState_FW_STATE_COMPLETED:
 		return operations.FirmwareUpdateStateCompleted
-	case pb.FirmwareUpdateState_FW_STATE_FAILED, pb.FirmwareUpdateState_FW_STATE_CANCELLED:
+	case corev1.FirmwareUpdateState_FW_STATE_FAILED, corev1.FirmwareUpdateState_FW_STATE_CANCELLED:
 		return operations.FirmwareUpdateStateFailed
 	default:
 		return operations.FirmwareUpdateStateUnknown

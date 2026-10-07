@@ -25,7 +25,7 @@ Update metadata for many SKUs from a CSV file:
     $ nico-admin-cli sku bulk-update-metadata ./sku-metadata.csv
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The CSV file to use to update metadata for multiple skus")]
-    pub filename: String,
+    pub(super) filename: String,
 }

@@ -47,7 +47,9 @@ func (s *notifyingTaskStore) UpdateTaskStatus(
 		return nil
 	}
 
-	tasks, err := s.Store.GetTasks(ctx, []uuid.UUID{u.ID})
+	// Delegate explicitly so a future wrapper override cannot change this
+	// post-update lookup's semantics.
+	tasks, err := s.Store.GetTasks(ctx, []uuid.UUID{u.ID}) //nolint:staticcheck // Intentional embedded-field qualification.
 	if err != nil || len(tasks) == 0 {
 		log.Warn().
 			Str("task_id", u.ID.String()).

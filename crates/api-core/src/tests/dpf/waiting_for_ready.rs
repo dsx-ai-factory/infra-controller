@@ -22,18 +22,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use carbide_dpf::DpuPhase;
+use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::TransactionVending;
 use libredfish::SystemPowerControl;
-use model::machine::{DpfState, DpuInitState, ManagedHostState};
+use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
 use tokio::time::timeout;
 
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
 use crate::tests::common::api_fixtures::{
-    TestEnvOverrides, TestManagedHost, create_managed_host_with_dpf,
+    TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
     create_test_env_with_overrides, get_config, reboot_completed,
 };
 
@@ -55,32 +56,25 @@ fn dpf_left_operator_provisioning_substates(host: &ManagedHostState) -> bool {
 /// Does NOT set up `get_dpu_phase` -- each test configures it to control the
 /// DPU CR phase (the authoritative readiness signal).
 fn expect_provisioning(mock: &mut MockDpfOperations) {
-    mock.expect_register_dpu_device().returning(|_| Ok(()));
+    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
-    mock.expect_verify_node_labels().returning(|_| Ok(true));
+    mock.expect_deployment_type_for_dpu()
+        .returning(move |__, _| Ok(DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    expect_dpf_service_inventory(mock);
 }
 
-fn dpf_config() -> crate::cfg::file::DpfConfig {
-    crate::cfg::file::DpfConfig {
-        enabled: true,
-        bfb_url: "http://example.com/test.bfb".to_string(),
-        ..Default::default()
-    }
-}
-
-async fn reset_host_to_waiting_for_ready(
+/// Persists one DPU's DPF substate directly so tests can isolate a handler
+/// transition without replaying the preceding operator workflow.
+async fn reset_host_to_dpf_state(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
+    dpf_state: DpfState,
 ) {
     let state = ManagedHostState::DPUInit {
         dpu_states: model::machine::DpuInitStates {
-            states: HashMap::from([(
-                *dpu_id,
-                DpuInitState::DpfStates {
-                    state: DpfState::WaitingForReady { phase_detail: None },
-                },
-            )]),
+            states: HashMap::from([(*dpu_id, DpuInitState::DpfStates { state: dpf_state })]),
         },
     };
     let state_json = serde_json::to_value(&state).unwrap();
@@ -104,13 +98,20 @@ async fn reset_host_to_waiting_for_ready(
     .unwrap();
 }
 
-async fn get_host_state(
-    env: &crate::tests::common::api_fixtures::TestEnv,
-    mh: &TestManagedHost,
-) -> ManagedHostState {
-    let mut txn = env.db_txn().await;
-    let machine = mh.host().db_machine(&mut txn).await;
-    machine.state.value
+/// Restores WaitingForReady so tests can replay operator readiness and reboot
+/// decisions after their initial DPF ingestion has completed.
+async fn reset_host_to_waiting_for_ready(
+    pool: &sqlx::PgPool,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
+) {
+    reset_host_to_dpf_state(
+        pool,
+        host_id,
+        dpu_id,
+        DpfState::WaitingForReady { phase_detail: None },
+    )
+    .await;
 }
 
 /// WaitingForReady with reboot required:
@@ -185,7 +186,9 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
 
     reboot_completed(&env, mh.id).await;
 
+    // Complete On, observe DPU readiness, then cross the DeviceReady barrier.
     timeout(TEST_TIMEOUT, async {
+        env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
     })
@@ -267,6 +270,155 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
     assert!(
         dpf_left_operator_provisioning_substates(&host),
         "Host should have left DPF operator substates after DeviceReady, got: {:?}",
+        host
+    );
+}
+
+/// Regression for the reprovision race: after `reprovision_dpu` deletes the DPU
+/// CR, the old CR lingers (finalizer) with a `deletionTimestamp` while its
+/// `status.phase` is still `Ready`. `get_dpu_phase` surfaces that as
+/// `DpuPhase::Deleting`; WaitingForReady must keep waiting instead of reading the
+/// stale `Ready` and short-circuiting to `DeviceReady`. Once the fresh CR reports
+/// `Ready`, it advances.
+#[crate::sqlx_test]
+async fn test_waiting_for_ready_waits_while_dpu_deleting(pool: sqlx::PgPool) {
+    let mut mock = MockDpfOperations::new();
+    expect_provisioning(&mut mock);
+
+    // True during initial provisioning; flipped to false to simulate the
+    // terminating old CR observed right after a reprovision delete.
+    let dpu_ready = Arc::new(AtomicBool::new(true));
+    let dr = dpu_ready.clone();
+    mock.expect_get_dpu_phase().returning(move |_, _| {
+        if dr.load(Ordering::SeqCst) {
+            Ok(DpuPhase::Ready)
+        } else {
+            Ok(DpuPhase::Deleting)
+        }
+    });
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
+    let mut config = get_config();
+    config.dpf = dpf_config();
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config).with_dpf_sdk(dpf_sdk),
+    )
+    .await;
+
+    let mh = timeout(TEST_TIMEOUT, create_managed_host_with_dpf(&env))
+        .await
+        .expect("timed out during initial provisioning");
+
+    // Simulate the terminating old CR and re-enter WaitingForReady.
+    dpu_ready.store(false, Ordering::SeqCst);
+    reset_host_to_waiting_for_ready(&pool, &mh.id, &mh.dpu_ids[0]).await;
+
+    timeout(TEST_TIMEOUT, async {
+        for _ in 0..5 {
+            env.run_machine_state_controller_iteration().await;
+        }
+    })
+    .await
+    .expect("timed out during state controller iterations");
+
+    let host = get_host_state(&env, &mh).await;
+    assert!(
+        matches!(host, ManagedHostState::DPUInit { .. })
+            && !dpf_left_operator_provisioning_substates(&host),
+        "Host must keep waiting in DPF substates while the DPU CR is Deleting, got: {:?}",
+        host
+    );
+
+    // The operator recreates the DPU; it now reports Ready and provisioning advances.
+    dpu_ready.store(true, Ordering::SeqCst);
+
+    timeout(TEST_TIMEOUT, async {
+        env.run_machine_state_controller_iteration().await;
+        env.run_machine_state_controller_iteration().await;
+    })
+    .await
+    .expect("timed out during post-ready iterations");
+
+    let host = get_host_state(&env, &mh).await;
+    assert!(
+        dpf_left_operator_provisioning_substates(&host),
+        "Host should have left DPF operator substates once the fresh DPU CR is Ready, got: {:?}",
+        host
+    );
+}
+
+/// After the operator removes the old DPU CR and before it recreates the new one,
+/// `get_dpu_phase` returns `NotFound`. WaitingForReady must treat that window as a
+/// wait, not an error, and advance once the fresh CR reports `Ready`.
+#[crate::sqlx_test]
+async fn test_waiting_for_ready_waits_when_dpu_not_found(pool: sqlx::PgPool) {
+    let mut mock = MockDpfOperations::new();
+    expect_provisioning(&mut mock);
+
+    // True during initial provisioning; flipped to false to simulate the gap
+    // between the old CR being removed and the new CR being created.
+    let dpu_ready = Arc::new(AtomicBool::new(true));
+    let dr = dpu_ready.clone();
+    mock.expect_get_dpu_phase().returning(move |_, _| {
+        if dr.load(Ordering::SeqCst) {
+            Ok(DpuPhase::Ready)
+        } else {
+            Err(DpfError::not_found("DPU", "node-dpu-001-device-dpu-001"))
+        }
+    });
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
+    let mut config = get_config();
+    config.dpf = dpf_config();
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config).with_dpf_sdk(dpf_sdk),
+    )
+    .await;
+
+    let mh = timeout(TEST_TIMEOUT, create_managed_host_with_dpf(&env))
+        .await
+        .expect("timed out during initial provisioning");
+
+    dpu_ready.store(false, Ordering::SeqCst);
+    reset_host_to_waiting_for_ready(&pool, &mh.id, &mh.dpu_ids[0]).await;
+
+    timeout(TEST_TIMEOUT, async {
+        for _ in 0..5 {
+            env.run_machine_state_controller_iteration().await;
+        }
+    })
+    .await
+    .expect("timed out during state controller iterations");
+
+    let host = get_host_state(&env, &mh).await;
+    assert!(
+        matches!(host, ManagedHostState::DPUInit { .. })
+            && !dpf_left_operator_provisioning_substates(&host),
+        "Host must keep waiting in DPF substates while the DPU CR is absent, got: {:?}",
+        host
+    );
+
+    dpu_ready.store(true, Ordering::SeqCst);
+
+    timeout(TEST_TIMEOUT, async {
+        env.run_machine_state_controller_iteration().await;
+        env.run_machine_state_controller_iteration().await;
+    })
+    .await
+    .expect("timed out during post-ready iterations");
+
+    let host = get_host_state(&env, &mh).await;
+    assert!(
+        dpf_left_operator_provisioning_substates(&host),
+        "Host should have left DPF operator substates once the fresh DPU CR is Ready, got: {:?}",
         host
     );
 }
@@ -372,6 +524,86 @@ async fn test_waiting_for_ready_idempotent_reboot(pool: sqlx::PgPool) {
     );
 }
 
+/// Verifies the On intent is persisted in a separate reconciliation before
+/// issuing power-on, preventing a crash from leaving durable state at Off.
+#[crate::sqlx_test]
+async fn test_reboot_persists_on_intent_before_power_command(pool: sqlx::PgPool) {
+    let mut mock = MockDpfOperations::new();
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::default().with_dpf_sdk(dpf_sdk),
+    )
+    .await;
+    let managed_host = create_managed_host(&env).await;
+
+    // Start with hardware Off and durable state at the completed Off phase.
+    let bmc_access_info = {
+        let mut txn = env.pool.txn_begin().await.unwrap();
+        let bmc_access_info = managed_host.host().bmc_access(&mut txn).await;
+        txn.commit().await.unwrap();
+        bmc_access_info
+    };
+    env.redfish_sim
+        .client_by_info(&bmc_access_info)
+        .await
+        .unwrap()
+        .power(SystemPowerControl::ForceOff)
+        .await
+        .unwrap();
+    reset_host_to_dpf_state(
+        &pool,
+        &managed_host.id,
+        &managed_host.dpu_ids[0],
+        DpfState::HandleReboot {
+            op: PerformPowerOperation::Off,
+            retry_count: 0,
+        },
+    )
+    .await;
+    let redfish_timepoint = env.redfish_sim.timepoint();
+
+    // The first reconciliation only persists On intent and performs no power-on.
+    timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+        .await
+        .expect("timed out while persisting On intent");
+    let first_actions = env
+        .redfish_sim
+        .actions_since(&redfish_timepoint)
+        .all_hosts();
+    assert!(
+        !first_actions.contains(&RedfishSimAction::Power(SystemPowerControl::On)),
+        "On must not be issued before its intent is persisted: {first_actions:?}"
+    );
+    let host_state = get_host_state(&env, &managed_host).await;
+    let ManagedHostState::DPUInit { dpu_states } = host_state else {
+        panic!("expected DPUInit after persisting On intent");
+    };
+    assert!(matches!(
+        dpu_states.states.get(&managed_host.dpu_ids[0]),
+        Some(DpuInitState::DpfStates {
+            state: DpfState::HandleReboot {
+                op: PerformPowerOperation::On,
+                retry_count: 0,
+            },
+        })
+    ));
+
+    // The next reconciliation may now issue On from the durable On phase.
+    let second_timepoint = env.redfish_sim.timepoint();
+    timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+        .await
+        .expect("timed out while issuing On command");
+    let second_actions = env.redfish_sim.actions_since(&second_timepoint).all_hosts();
+    assert!(
+        second_actions.contains(&RedfishSimAction::Power(SystemPowerControl::On)),
+        "On must be issued from the durable On phase: {second_actions:?}"
+    );
+}
+
 /// When the host is already Off and last_reboot_requested is None,
 /// the reboot handler should skip ForceOff and go straight to PowerOn.
 #[crate::sqlx_test]
@@ -462,7 +694,9 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
 
     reboot_completed(&env, mh.id).await;
 
+    // Complete On, observe DPU readiness, then cross the DeviceReady barrier.
     timeout(TEST_TIMEOUT, async {
+        env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
     })
@@ -481,8 +715,8 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
 /// a stale/invalid state stored by a previous implementation.
 async fn write_unknown_dpf_init_state(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     let state_json: serde_json::Value = serde_json::json!({
         "state": "dpuinit",

@@ -12,7 +12,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -206,8 +205,6 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -274,6 +271,7 @@ func TestSiteSQLDAO_GetAll(t *testing.T) {
 
 		if i == 25 || i == 24 {
 			site.Config.NativeNetworking = true
+			site.Config.VpcSlaac = true
 			site.Config.NVLinkPartition = true
 			site.Config.Flow = true
 		}
@@ -402,6 +400,24 @@ func TestSiteSQLDAO_GetAll(t *testing.T) {
 			},
 			wantCount:      3,
 			wantTotalCount: 3,
+			wantErr:        false,
+		},
+		{
+			name: "get all Sites by VPC SLAAC flag",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx: context.Background(),
+				filter: SiteFilterInput{
+					Org:                       nil,
+					InfrastructureProviderIDs: nil,
+					Config:                    &SiteConfigFilterInput{VpcSlaac: cutil.GetPtr(true)},
+				},
+				includeRelations: false,
+			},
+			wantCount:      2,
+			wantTotalCount: 2,
 			wantErr:        false,
 		},
 		{
@@ -781,8 +797,6 @@ func TestSiteSQLDAO_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1081,8 +1095,6 @@ func TestSiteSQLDAO_GetCount(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1206,8 +1218,6 @@ func TestSiteSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1289,6 +1299,24 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Legacy Sites can have a SQL NULL config because the migration from the
+	// legacy capabilities column copied NULL values. Config updates must
+	// initialize that row instead of letting NULL absorb the JSONB merge.
+	legacyNullConfigSite := &Site{
+		ID:                       uuid.New(),
+		Name:                     "test-null-config",
+		Org:                      "test",
+		InfrastructureProviderID: ip.ID,
+		IsInfinityEnabled:        true,
+		Status:                   SiteStatusPending,
+		CreatedBy:                uuid.New(),
+	}
+
+	_, err = dbSession.DB.NewInsert().Model(legacyNullConfigSite).Exec(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Current time
 	curTime := db.GetCurTime()
 
@@ -1330,6 +1358,7 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 		verifyChildSpanner bool
 		verifyAgentCert    bool
 		agentCertExpected  *time.Time
+		wantVpcSlaac       *bool
 	}{
 		{
 			name: "update only site config from params",
@@ -1409,6 +1438,22 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 			verifyAgentCert:    true,
 			agentCertExpected:  &agentCertTime2,
 		},
+		{
+			name: "update VPC SLAAC config when stored config is SQL NULL",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			ctx: ctx,
+			input: SiteUpdateInput{
+				SiteID: legacyNullConfigSite.ID,
+				Config: &SiteConfigUpdateInput{
+					VpcSlaac: cutil.GetPtr(true),
+				},
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+			wantVpcSlaac:       cutil.GetPtr(true),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1424,6 +1469,9 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.NotNil(t, got)
+			if tt.wantVpcSlaac != nil && assert.NotNil(t, got.Config) {
+				assert.Equal(t, *tt.wantVpcSlaac, got.Config.VpcSlaac)
+			}
 
 			if tt.want == ust {
 				assert.Equal(t, tt.want.Name, got.Name)
@@ -1452,8 +1500,6 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(tt.ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := tt.ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1556,8 +1602,6 @@ func TestSiteSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1835,4 +1879,84 @@ func validateSite(t *testing.T, got Site, want Site) {
 	assert.Equal(t, want.CreatedBy, got.CreatedBy)
 	assert.Equal(t, want.Location, got.Location)
 	assert.Equal(t, want.Contact, got.Contact)
+}
+
+func TestSite_IsTimeWithinStaleInventoryThreshold(t *testing.T) {
+	reportedOneMinute := &Site{InventoryIntervalSeconds: cutil.GetPtr(60)}
+
+	tests := []struct {
+		name       string
+		site       *Site
+		actionTime time.Time
+		want       bool
+	}{
+		{
+			name:       "a change just now is too recent to act on",
+			site:       &Site{},
+			actionTime: time.Now(),
+			want:       true,
+		},
+		{
+			name:       "a change older than the fallback threshold is safe to act on",
+			site:       &Site{},
+			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + time.Second)),
+			want:       false,
+		},
+		{
+			// The same age that clears the fallback is still too recent for a slower Site.
+			name:       "follows a reported interval longer than the fallback",
+			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(300)},
+			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + time.Second)),
+			want:       true,
+		},
+		{
+			// The same age is stale against the fallback and safe against a faster Site, which
+			// is the whole point of following the reported interval.
+			name:       "an age between the two intervals depends on the reported one",
+			site:       reportedOneMinute,
+			actionTime: time.Now().Add(-2 * time.Minute),
+			want:       false,
+		},
+		{
+			name:       "the same age is still too recent against the fallback",
+			site:       &Site{},
+			actionTime: time.Now().Add(-2 * time.Minute),
+			want:       true,
+		},
+		{
+			// There is no padding past the interval. A reconciler that anchors its writes to
+			// the start of a cycle has to read them back as exactly one interval old and act
+			// on them, rather than treating its own write as an external change.
+			name:       "a change a full interval old is safe to act on",
+			site:       reportedOneMinute,
+			actionTime: time.Now().Add(-time.Minute),
+			want:       false,
+		},
+		{
+			// A stored zero or negative would otherwise collapse the threshold to nothing and
+			// let inventory act on data it should treat as newer.
+			name:       "falls back on a zero reported interval",
+			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(0)},
+			actionTime: time.Now().Add(-10 * time.Second),
+			want:       true,
+		},
+		{
+			name:       "falls back on a negative reported interval",
+			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(-30)},
+			actionTime: time.Now().Add(-10 * time.Second),
+			want:       true,
+		},
+		{
+			name:       "falls back on a nil Site",
+			site:       nil,
+			actionTime: time.Now().Add(-10 * time.Second),
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.site.IsTimeWithinStaleInventoryThreshold(tt.actionTime))
+		})
+	}
 }

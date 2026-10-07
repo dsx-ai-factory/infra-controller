@@ -17,7 +17,7 @@
 
 use ::rpc::forge as rpc;
 
-use super::args::MaintenanceOptions;
+use super::args::{MaintenanceOptions, TerminateOptions};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
@@ -86,7 +86,7 @@ fn resolve_firmware_upgrade_source(
     Ok((firmware_version, access_token))
 }
 
-pub async fn on_demand_rack_maintenance(
+pub(super) async fn on_demand_rack_maintenance(
     api_client: &ApiClient,
     args: MaintenanceOptions,
 ) -> CarbideCliResult<()> {
@@ -121,7 +121,7 @@ pub async fn on_demand_rack_maintenance(
                     rpc::PowerSequenceActivity {},
                 )),
                 other => Err(eyre::eyre!(
-                    "Unknown activity '{}'. Valid values: firmware-upgrade, nvos-update, configure-nmx-cluster, power-sequence",
+                    "unknown activity '{}'. valid values: firmware-upgrade, nvos-update, configure-nmx-cluster, power-sequence",
                     other
                 )),
             }?;
@@ -141,6 +141,17 @@ pub async fn on_demand_rack_maintenance(
         )
         .await?;
     println!("On-demand rack maintenance scheduled successfully.");
+    Ok(())
+}
+
+pub(super) async fn terminate_rack_maintenance(
+    api_client: &ApiClient,
+    args: TerminateOptions,
+) -> CarbideCliResult<()> {
+    api_client.terminate_rack_maintenance(args.rack).await?;
+    println!(
+        "Rack maintenance termination requested. The rack will transition to Error; externally submitted work is not guaranteed to stop."
+    );
     Ok(())
 }
 

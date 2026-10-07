@@ -24,6 +24,8 @@ mod enable_infinite_boot;
 mod is_infinite_boot_enabled;
 mod lockdown;
 mod lockdown_status;
+mod probe_vendor;
+mod set_root_password;
 
 #[cfg(test)]
 mod tests;
@@ -34,7 +36,7 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Reset BMC")]
     BmcReset(bmc_reset::Args),
     #[clap(about = "Redfish Power Control")]
@@ -49,4 +51,10 @@ pub enum Cmd {
     Lockdown(lockdown::Args),
     #[clap(about = "Check lockdown status")]
     LockdownStatus(lockdown_status::Args),
+    #[clap(
+        about = "Set the root password of a BMC out-of-band (for fleet rotation use `credential rotate`)"
+    )]
+    SetRootPassword(set_root_password::Args),
+    #[clap(about = "Resolve the Redfish vendor for a BMC")]
+    ProbeVendor(probe_vendor::Args),
 }

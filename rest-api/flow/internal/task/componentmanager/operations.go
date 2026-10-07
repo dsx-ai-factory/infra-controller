@@ -39,7 +39,9 @@ type PowerController interface {
 // Required descriptor capability: capability.CapabilityPowerStatus.
 type PowerStatusReader interface {
 	// GetPowerStatus queries the current power state of each component in the
-	// target. Returns a map of component ID to PowerStatus.
+	// target. Keys are the requested Core IDs or MAC addresses. Missing or failed
+	// responses are omitted; an Unknown value means a response was received but
+	// its power state could not be determined.
 	GetPowerStatus(ctx context.Context, target common.Target) (map[string]operations.PowerStatus, error) //nolint
 }
 
@@ -84,6 +86,28 @@ type BringUpStatusReader interface {
 	// GetBringUpStatus returns the current bring-up state for each component in
 	// the target. Returns a map of component ID to MachineBringUpState.
 	GetBringUpStatus(ctx context.Context, target common.Target) (map[string]operations.MachineBringUpState, error)
+}
+
+// Decommissioner is implemented by component managers that support
+// decommissioning their components.
+//
+// Required descriptor capability: capability.CapabilityDecommissionControl.
+type Decommissioner interface {
+	// Decommission initiates the decommission of the target components. It
+	// returns immediately after the request is accepted; callers should poll
+	// GetDecommissionStatus for completion.
+	Decommission(ctx context.Context, target common.Target, info operations.DecommissionTaskInfo) error //nolint
+}
+
+// DecommissionStatusReader is implemented by component managers that can
+// report decommission progress.
+//
+// Required descriptor capability: capability.CapabilityDecommissionStatus.
+type DecommissionStatusReader interface {
+	// GetDecommissionStatus returns the current decommission state for each
+	// component in the target. Returns a map of component ID to raw state
+	// string (e.g. "Decommissioning/...", "Decommissioned", "Failed/...").
+	GetDecommissionStatus(ctx context.Context, target common.Target) (map[string]string, error) //nolint
 }
 
 // FirmwareConsistencyChecker is an optional interface for component managers

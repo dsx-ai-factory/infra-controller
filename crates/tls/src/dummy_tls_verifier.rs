@@ -38,6 +38,14 @@ impl DummyTlsVerifier {
             print_warning: true,
         }
     }
+
+    fn warn_if_enabled(&self) {
+        if self.print_warning {
+            eprintln!(
+                "IGNORING SERVER CERT, Please ensure that I am removed to actually validate TLS."
+            );
+        }
+    }
 }
 
 impl ServerCertVerifier for DummyTlsVerifier {
@@ -49,11 +57,7 @@ impl ServerCertVerifier for DummyTlsVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if self.print_warning {
-            eprintln!(
-                "IGNORING SERVER CERT, Please ensure that I am removed to actually validate TLS."
-            );
-        }
+        self.warn_if_enabled();
         Ok(ServerCertVerified::assertion())
     }
 
@@ -63,11 +67,7 @@ impl ServerCertVerifier for DummyTlsVerifier {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        if self.print_warning {
-            eprintln!(
-                "IGNORING SERVER CERT, Please ensure that I am removed to actually validate TLS."
-            );
-        }
+        self.warn_if_enabled();
         Ok(HandshakeSignatureValid::assertion())
     }
 
@@ -77,11 +77,7 @@ impl ServerCertVerifier for DummyTlsVerifier {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        if self.print_warning {
-            eprintln!(
-                "IGNORING SERVER CERT, Please ensure that I am removed to actually validate TLS."
-            );
-        }
+        self.warn_if_enabled();
         Ok(HandshakeSignatureValid::assertion())
     }
 

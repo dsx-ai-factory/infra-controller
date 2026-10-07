@@ -7,7 +7,7 @@
 # Dynamic values (image tags, site UUID) are passed via --set in setup.sh.
 #
 # Key fields to customize for non-dev environments:
-#   envConfig.DB_DATABASE / DB_ADDR               — match your postgres instance
+#   envConfig.DB_DATABASE / DB_ADDR               — consolidated nico-pg-cluster by default
 #   secrets.dbCreds                               — name of Secret with DB_USER and DB_PASSWORD
 #   certificate.uris                               — SPIFFE URI for this site
 #   global.certificate.issuerRef.name             — CA issuer for mTLS certs
@@ -56,17 +56,16 @@ envConfig:
   # Using InsecuregRPC (0) against a TLS-only server causes a 5-second
   # DeadlineExceeded on the initial Version health-check RPC and leaves the
   # NicoClient nil, causing all inventory activity panics.
-  # Set both NICO_* (renamed binary) and CARBIDE_* (current carbide binary) names
-  # so the chart works with either image; binary reads only its expected env name.
-  NICO_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
-  NICO_SEC_OPT: "2"
+  # Site-agent reads CORE_GRPC_* first, then CARBIDE_* legacy fallbacks.
+  CORE_GRPC_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
+  CORE_GRPC_SEC_OPT: "2"
   CARBIDE_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
   CARBIDE_SEC_OPT: "2"
 
-  # DB connection config — DEV ONLY, matches the dev postgres instance in setup.sh.
+  # DB connection — nico-pg-cluster (Zalando-managed, shared with nico-rest-api).
   # DB_USER and DB_PASSWORD are injected from the db-creds Secret (secrets.dbCreds).
-  DB_ADDR: "postgres.postgres.svc.cluster.local"
-  DB_DATABASE: "elektratest"
+  DB_ADDR: "nico-pg-cluster.postgres.svc.cluster.local"
+  DB_DATABASE: "nico_rest"
   DB_PORT: "5432"
 
   TEMPORAL_HOST: "temporal-frontend.temporal"

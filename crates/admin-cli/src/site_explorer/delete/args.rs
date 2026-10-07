@@ -25,7 +25,7 @@ Delete an explored endpoint from the database:
     $ nico-admin-cli site-explorer delete --address 192.0.2.10
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "BMC IP address of the endpoint to delete")]
-    pub address: String,
+    pub(super) address: String,
 }

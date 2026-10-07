@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/compute/common/dpureprov"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
@@ -22,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestDescriptor(t *testing.T) {
@@ -34,6 +34,8 @@ func TestDescriptor(t *testing.T) {
 		capability.CapabilitySet{
 			capability.CapabilityBringUpControl,
 			capability.CapabilityBringUpStatus,
+			capability.CapabilityDecommissionControl,
+			capability.CapabilityDecommissionStatus,
 			capability.CapabilityFirmwareControl,
 			capability.CapabilityFirmwareStatus,
 			capability.CapabilityInjectExpectation,
@@ -88,8 +90,8 @@ func TestInjectExpectation(t *testing.T) {
 			m := New(tc.client, nil)
 
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.InjectExpectation(context.Background(), target, tc.info)
@@ -106,24 +108,81 @@ func TestInjectExpectation(t *testing.T) {
 }
 
 func TestPowerControl_HappyPath(t *testing.T) {
-	m := New(nicoapi.NewMockClient(), nil)
-
-	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1", "machine-2"},
+	tests := map[string]struct {
+		operation operations.PowerOperation
+		want      corev1.SystemPowerControl
+	}{
+		"power on": {
+			operation: operations.PowerOperationPowerOn,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_ON,
+		},
+		"graceful power cycle": {
+			operation: operations.PowerOperationRestart,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART,
+		},
+		"forced power cycle": {
+			operation: operations.PowerOperationForceRestart,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART,
+		},
+		"AC power cycle": {
+			operation: operations.PowerOperationColdReset,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_AC_POWERCYCLE,
+		},
 	}
 
-	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := nicoapi.NewMockClient()
+			m := New(client, nil)
+			target := common.Target{
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1", "machine-2"},
+			}
+
+			err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+				Operation: test.operation,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, client.LastComponentPowerControlRequest().GetAction())
+			assert.Nil(t, client.LastGetComponentInventoryRequest())
+		})
+	}
+}
+
+func TestMACTargetRequests(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
+	macs := []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}
+	target := common.Target{
+		Type:           devicetypes.ComponentTypeCompute,
+		IdentifierType: common.IdentifierTypeMACAddress,
+		Identifiers:    macs,
+	}
+
+	require.NoError(t, m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
 		Operation: operations.PowerOperationPowerOn,
-	})
+	}))
+	assert.Equal(t, macs, client.LastComponentPowerControlRequest().GetComputeBmcMacs().GetMacAddresses())
+
+	_, err := m.GetPowerStatus(context.Background(), target)
 	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentInventoryRequest().GetComputeBmcMacs().GetMacAddresses())
+
+	require.NoError(t, m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		TargetVersion: "fw-bundle-id-v1",
+	}))
+	assert.Equal(t, macs, client.LastUpdateComponentFirmwareRequest().GetComputeTrays().GetBmcMacs().GetMacAddresses())
+
+	_, err = m.GetFirmwareStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentFirmwareStatusRequest().GetComputeBmcMacs().GetMacAddresses())
 }
 
 func TestPowerControl_RejectsUnsupportedOperation(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -134,26 +193,35 @@ func TestPowerControl_RejectsUnsupportedOperation(t *testing.T) {
 }
 
 func TestFirmwareControl_HappyPath(t *testing.T) {
-	m := New(nicoapi.NewMockClient(), nil)
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		Operation:     operations.FirmwareOperationUpgrade,
-		TargetVersion: "fw-bundle-id-v1",
-		SubTargets:    []string{"bmc", "bios"},
+		Operation:            operations.FirmwareOperationUpgrade,
+		TargetVersion:        "fw-bundle-id-v1",
+		SubTargets:           []string{"bmc", "bios"},
+		AccessToken:          "compute-token",
+		OverrideVersionCheck: true,
 	})
 	require.NoError(t, err)
+	require.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
+	require.Equal(
+		t,
+		"compute-token",
+		client.LastUpdateComponentFirmwareRequest().GetAccessToken(),
+	)
 }
 
 func TestFirmwareControl_RejectsUnknownSubTarget(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -175,8 +243,8 @@ func TestFirmwareControl_DpuOnlyTarget(t *testing.T) {
 
 	m := withFastDpuReprov(New(client, nil), client)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{testHostMachineID},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{testHostMachineID},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -200,6 +268,52 @@ func TestFirmwareControl_DpuOnlyTarget(t *testing.T) {
 	assert.True(t, power[0].ApplyUpdates)
 }
 
+func TestFirmwareControl_DpuOnlyRejectsAuthenticationData(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
+	target := common.Target{
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{testHostMachineID},
+	}
+
+	err := m.FirmwareControl(
+		context.Background(),
+		target,
+		operations.FirmwareControlTaskInfo{
+			Operation:   operations.FirmwareOperationUpgrade,
+			SubTargets:  []string{"dpu"},
+			AccessToken: "compute-token",
+		},
+	)
+
+	require.ErrorContains(
+		t,
+		err,
+		"dpu-only firmware updates do not support authentication data",
+	)
+	require.Nil(t, client.LastUpdateComponentFirmwareRequest())
+	require.Empty(t, client.DpuReprovisioningTriggers())
+}
+
+func TestFirmwareControl_MACTargetRejectsDpuReprovisioning(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
+	target := common.Target{
+		Type:           devicetypes.ComponentTypeCompute,
+		IdentifierType: common.IdentifierTypeMACAddress,
+		Identifiers:    []string{"aa:bb:cc:dd:ee:ff"},
+	}
+
+	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		Operation:  operations.FirmwareOperationUpgrade,
+		SubTargets: []string{"dpu"},
+	})
+
+	require.ErrorContains(t, err, "DPU firmware reprovisioning requires ingested machine IDs")
+	require.Nil(t, client.LastUpdateComponentFirmwareRequest())
+	require.Empty(t, client.DpuReprovisioningTriggers())
+}
+
 // TestFirmwareControl_MixedDpuAndComputeTargets pins the
 // mixed-request contract: a request like ["bmc", "dpu"] runs the
 // compute-tray-internal path AND the DPU SAGA, with DPU last.
@@ -210,8 +324,8 @@ func TestFirmwareControl_MixedDpuAndComputeTargets(t *testing.T) {
 
 	m := withFastDpuReprov(New(client, nil), client)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{testHostMachineID},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{testHostMachineID},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -235,8 +349,8 @@ func TestFirmwareControl_EmptySubTargetsSkipsDpu(t *testing.T) {
 
 	m := New(client, nil)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{testHostMachineID},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{testHostMachineID},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -254,8 +368,8 @@ func TestGetFirmwareStatus_HappyPath(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	statuses, err := m.GetFirmwareStatus(context.Background(), target)
@@ -268,10 +382,10 @@ func TestGetFirmwareStatus_HappyPath(t *testing.T) {
 }
 
 func TestAggregateNICoStatuses(t *testing.T) {
-	mkStatus := func(compID string, state pb.FirmwareUpdateState, errMsg string) *pb.FirmwareUpdateStatus {
-		return &pb.FirmwareUpdateStatus{
-			Result: &pb.ComponentResult{
-				ComponentId: compID,
+	mkStatus := func(compID string, state corev1.FirmwareUpdateState, errMsg string) *corev1.FirmwareUpdateStatus {
+		return &corev1.FirmwareUpdateStatus{
+			Result: &corev1.ComponentResult{
+				ComponentId: &compID,
 				Error:       errMsg,
 			},
 			State: state,
@@ -279,7 +393,7 @@ func TestAggregateNICoStatuses(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		statuses      []*pb.FirmwareUpdateStatus
+		statuses      []*corev1.FirmwareUpdateStatus
 		expectedState operations.FirmwareUpdateState
 		expectedError string
 	}{
@@ -288,24 +402,24 @@ func TestAggregateNICoStatuses(t *testing.T) {
 			expectedState: operations.FirmwareUpdateStateUnknown,
 		},
 		"all completed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("machine-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("machine-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("machine-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("machine-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateCompleted,
 		},
 		"any failure marks overall failed": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("machine-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("machine-1", pb.FirmwareUpdateState_FW_STATE_FAILED, "BIOS update failed"),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("machine-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("machine-1", corev1.FirmwareUpdateState_FW_STATE_FAILED, "BIOS update failed"),
 			},
 			expectedState: operations.FirmwareUpdateStateFailed,
 			expectedError: "BIOS update failed",
 		},
 		"still in progress": {
-			statuses: []*pb.FirmwareUpdateStatus{
-				mkStatus("machine-1", pb.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
-				mkStatus("machine-1", pb.FirmwareUpdateState_FW_STATE_IN_PROGRESS, ""),
+			statuses: []*corev1.FirmwareUpdateStatus{
+				mkStatus("machine-1", corev1.FirmwareUpdateState_FW_STATE_COMPLETED, ""),
+				mkStatus("machine-1", corev1.FirmwareUpdateState_FW_STATE_IN_PROGRESS, ""),
 			},
 			expectedState: operations.FirmwareUpdateStateQueued,
 		},
@@ -381,8 +495,8 @@ func TestPowerControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -400,8 +514,8 @@ func TestPowerControl_AllowsReadyMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -416,8 +530,8 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -440,8 +554,8 @@ func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -457,8 +571,8 @@ func TestBringUpControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.BringUpControl(context.Background(), target, operations.BringUpTaskInfo{})
@@ -473,14 +587,72 @@ func TestBringUpControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.BringUpControl(context.Background(), target, operations.BringUpTaskInfo{
 		OverrideReadinessCheck: true,
 	})
 	require.NoError(t, err)
+}
+
+func TestNormalizeDecommissionState(t *testing.T) {
+	testCases := map[string]struct {
+		raw  string
+		want string
+	}{
+		"terminal state": {
+			raw:  `{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}`,
+			want: "Decommissioned",
+		},
+		"in-progress state": {
+			raw:  `{"state":"decommissioning","decommissioning_state":{"state":"factoryresettingbmcs"}}`,
+			want: "Decommissioning/factoryresettingbmcs",
+		},
+		"unrelated state remains unchanged": {
+			raw:  `{"state":"ready"}`,
+			want: `{"state":"ready"}`,
+		},
+		"malformed state remains unchanged": {
+			raw:  "Ready",
+			want: "Ready",
+		},
+		"decommissioning state without substate remains unchanged": {
+			raw:  `{"state":"decommissioning"}`,
+			want: `{"state":"decommissioning"}`,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeDecommissionState(tc.raw))
+		})
+	}
+}
+
+func TestGetDecommissionStatusNormalizesStates(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	client.SetMachineControllerState(
+		"machine-1",
+		`{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}`,
+	)
+	client.SetMachineControllerState(
+		"machine-2",
+		`{"state":"decommissioning","decommissioning_state":{"state":"suppressingoobdhcp"}}`,
+	)
+
+	m := New(client, nil)
+	states, err := m.GetDecommissionStatus(context.Background(), common.Target{
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1", "machine-2", "machine-3"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"machine-1": "Decommissioned",
+		"machine-2": "Decommissioning/suppressingoobdhcp",
+		"machine-3": "",
+	}, states)
 }
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {

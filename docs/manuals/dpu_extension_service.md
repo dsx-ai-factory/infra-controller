@@ -1,16 +1,15 @@
 # DPU Extension Service Management
 
-DPU Extension Services let tenants deploy and manage custom workloads on the DPUs attached to their instances. 
+DPU Extension Services let tenants deploy and manage custom workloads on the DPUs attached to their instances.
 
 NVIDIA Infra Controller (NICo) allows you to do the following with DPU Extension Services:
 
-* Create, update, list and delete reusable service definitions using REST API or admin CLI. 
+* Create, update, list and delete reusable service definitions using REST API or admin CLI.
 * Deploy one or more service versions to the DPUs attached to an instance.
 * Upgrade or remove deployed services by updating the Instance configuration.
 * Monitor deployment status of the extension services on the Instance through instance status report.
 
 Currently, the only supported service type is **Kubernetes Pod** (`KubernetesPod`). For this service type, the service `data` field must contain a Kubernetes Pod manifest in YAML format.
-
 
 ## Typical Workflow
 
@@ -22,7 +21,6 @@ Currently, the only supported service type is **Kubernetes Pod** (`KubernetesPod
 
 > **Important:** Creating or updating a service definition does not automatically redeploy running Instances. To roll out a new version, update the Instance's `dpuExtensionServiceDeployments`.
 
-
 ## Core Concepts
 
 | Concept | Description |
@@ -31,15 +29,14 @@ Currently, the only supported service type is **Kubernetes Pod** (`KubernetesPod
 | **Version** | An immutable snapshot of the Pod manifest (`data`), optional registry credentials, and optional observability configuration. Versions use NICo config version strings (for example, `V1-T1761856992374052`). |
 | **Deployment** | An association between an Instance and a specific `(service_id, version)` pair. |
 | **Active versions** | All non-deleted versions available for deployment. Older versions remain until explicitly deleted. |
-| **Terminating services** | When a service is removed from an Instance, NICo tracks it until all DPUs confirm termination. |
+| **Terminating services** | When a service is removed from an Instance, NICo tracks it until the affected DPUs confirm termination. |
 
 **Important Constraints:**
 
-* Service names must be case-insensitive unique within a tenant.
+* Service names must be case-insensitive unique among non-deleted services within a tenant. After a service is deleted, a new service in the same tenant may reuse the same name.
 * Service type and tenant ownership are immutable after creation.
 * An Instance may deploy multiple services but at most one version of each service at a time.
 * Instance extension service changes are only accepted while the Instance is in `Ready` state.
-
 
 ## Managing DPU Extension Services
 
@@ -47,7 +44,7 @@ Currently, the only supported service type is **Kubernetes Pod** (`KubernetesPod
 
 Create a service definition before deploying it to an Instance.
 
-To create a service definition of type `KubernetesPod`, prepare a Pod manifest according to [Kubernetes Pod requirements](#kubernetes-pod-requirements) 
+To create a service definition of type `KubernetesPod`, prepare a Pod manifest according to [Kubernetes Pod requirements](#kubernetes-pod-requirements)
 
 **REST API:** `POST /v2/org/{org}/nico/dpu-extension-service`
 
@@ -64,7 +61,7 @@ To create a service definition of type `KubernetesPod`, prepare a Pod manifest a
 **Admin CLI:**
 
 ```bash
-carbide-admin-cli extension-service create \
+nico-admin-cli extension-service create \
   --id <<some UUID>>  \
   --name test1 \
   --type 0 \
@@ -76,7 +73,7 @@ To include private registry credentials, add a `credentials` object to the reque
 
 ```bash
 # With private registry credentials
-carbide-admin-cli extension-service create \
+nico-admin-cli extension-service create \
   --id <service_uuid>  \
   --name test1 \
   --type 0 \
@@ -87,7 +84,6 @@ carbide-admin-cli extension-service create \
   --registry_url "nvcr.io/<org_name>" 
 ```
 
-
 ### List DPU Extension Services
 
 **REST API:** `GET /v2/org/{org}/nico/dpu-extension-service`
@@ -97,7 +93,7 @@ Optional query parameters: `siteId`, `status`, `query`, `includeRelation`, `page
 **Admin CLI:**
 
 ```bash
-carbide-admin-cli extension-service show
+nico-admin-cli extension-service show
 ```
 
 Optional filters: `--type`, `--name`, `--tenant-organization-id`.
@@ -111,7 +107,7 @@ Retrieve a single service, including its latest version and list of active versi
 **Admin CLI:**
 
 ```bash
-carbide-admin-cli extension-service show --id <service-id>
+nico-admin-cli extension-service show --id <service-id>
 ```
 
 ### Get a DPU Extension Service Version
@@ -123,7 +119,7 @@ Retrieve the Pod manifest and metadata for a specific version.
 **Admin CLI:**
 
 ```bash
-carbide-admin-cli extension-service get-version --id <service-id> --version <version>
+nico-admin-cli extension-service get-version --id <service-id> --version <version>
 ```
 
 ### Update a DPU Extension Service
@@ -143,7 +139,7 @@ Optional fields: `name`, `description`, `credentials`, and `observability`. Omit
 **Admin CLI:**
 
 ```bash
-carbide-admin-cli extension-service update \
+nico-admin-cli extension-service update \
   --id <service-id> \
   --data "$(cat pod-v2.yaml)" \
   --if-version-ctr-match 2
@@ -151,10 +147,9 @@ carbide-admin-cli extension-service update \
 
 Use `--if-version-ctr-match` (CLI only) to prevent concurrent update conflicts.
 
-
 ### Delete a DPU Extension Service or Version
 
-Deletion succeeds only when no Instance is using the version being deleted. If a version is still deployed, remove it from affected Instances first. When all versions are deleted, the service itself is removed automatically.
+Deletion succeeds only when no Instance is using the version being deleted. If a version is still deployed, remove it from affected Instances first. When all versions are deleted, the service itself is removed automatically. Deleted service names are released and can be reused by new services in the same tenant.
 
 **REST API:**
 
@@ -165,15 +160,13 @@ Deletion succeeds only when no Instance is using the version being deleted. If a
 
 ```bash
 # Delete the entire service (all versions)
-carbide-admin-cli extension-service delete --id <service-id>
+nico-admin-cli extension-service delete --id <service-id>
 
 # Delete specific versions
-carbide-admin-cli extension-service delete --id <service-id> --version <version1>,<version2>,...
+nico-admin-cli extension-service delete --id <service-id> --version <version1>,<version2>,...
 ```
 
-
 ---
-
 
 ## Managing Instance DPU Extension Service Deployments
 
@@ -202,11 +195,11 @@ Include `dpuExtensionServiceDeployments` in the request body:
 }
 ```
 
-During Instance provisioning, NICo waits for all configured extension services to reach a running state before the Instance becomes ready. If no extension services are configured, this step is skipped.
+During Instance provisioning, NICo waits for all configured extension services to reach a running state on every DPU used by the Instance before the Instance becomes ready. On multi-DPU hosts, DPUs that are attached to the host but not selected by the Instance network configuration do not block the extension-service readiness check. If no extension services are configured, this step is skipped.
 
 ### Upgrade a Deployed DPU Extension Service for an Instance
 
-1. Update the service definition to create a new version (see [Update an extension service](#update-an-extension-service)).
+1. Update the service definition to create a new version (see [Update a DPU Extension Service](#update-a-dpu-extension-service)).
 2. Update each affected Instance to reference the new version in `dpuExtensionServiceDeployments`.
 
 The Instance remains in `Ready` state while DPUs asynchronously apply the new configuration. Monitor progress through the Instance deployment status.
@@ -228,7 +221,7 @@ The response includes `dpuExtensionServiceDeployments` with per-service deployme
 **Admin CLI:**
 
 ```bash
-carbide-admin-cli extension-service show-instances --id <service-id>
+nico-admin-cli extension-service show-instances --id <service-id>
 ```
 
 Optionally filter by version: `--version <version>`.
@@ -242,6 +235,7 @@ Optionally filter by version: `--version <version>`.
 For DPU Extension Service defined with `KubernetesPod` type, the `data` field of the DPU Extension Service must be a valid Kubernetes **Pod** manifest in YAML format.
 
 The pod manifest must not exceed 64 KB and the pod manifest must have following fields:
+
 * `apiVersion`
 * `kind: Pod`
 * `metadata.name`
@@ -261,8 +255,6 @@ spec:
       command: ["sh", "-c", "echo 'BusyBox container running' && sleep 3600"]
 ```
 
-
-
 ### Registry Credentials
 
 For DPU Extension Service defined with `KubernetesPod` type, in order for the DPU agent to pull images referenced in the pod manifest, tenant should provider credentials when creating or updating a service:
@@ -276,7 +268,7 @@ message DpuExtensionServiceCredential {
 }
 ```
 
-Credentials are stored in Vault and will not be displayed when tenant queries service definition through REST API or admin CLI. Each field must be non-empty and at most 255 characters. Deleting a service version removes its associated Vault credentials.
+Credentials are kept in the NICo credential store and will not be displayed when tenant queries service definition through REST API or admin CLI. Each field must be non-empty and at most 255 characters. Deleting a service version removes its associated credentials from the store.
 
 The registry URL is used as an image match prefix for kubelet's [image credential provider](https://kubernetes.io/docs/tasks/administer-cluster/kubelet-credential-provider/). NICo matches credentials against the image reference by prefix.
 

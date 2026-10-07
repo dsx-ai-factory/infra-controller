@@ -17,7 +17,7 @@ import (
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ManageTenant is activity to manage a Tenant on Site
@@ -26,7 +26,7 @@ type ManageTenant struct {
 }
 
 // CreateTenantOnSite creates a Tenant by calling Site Controller gRPC API
-func (mt *ManageTenant) CreateTenantOnSite(ctx context.Context, request *cwssaws.CreateTenantRequest) error {
+func (mt *ManageTenant) CreateTenantOnSite(ctx context.Context, request *corev1.CreateTenantRequest) error {
 	logger := log.With().Str("Activity", "CreateTenantOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -51,19 +51,20 @@ func (mt *ManageTenant) CreateTenantOnSite(ctx context.Context, request *cwssaws
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.CreateTenant(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Tenant using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create Tenant using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return err
 }
 
 // UpdateTenantOnSite creates a Tenant by calling Site Controller gRPC API
-func (mt *ManageTenant) UpdateTenantOnSite(ctx context.Context, request *cwssaws.UpdateTenantRequest) error {
+func (mt *ManageTenant) UpdateTenantOnSite(ctx context.Context, request *corev1.UpdateTenantRequest) error {
 	logger := log.With().Str("Activity", "UpdateTenantOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -88,13 +89,14 @@ func (mt *ManageTenant) UpdateTenantOnSite(ctx context.Context, request *cwssaws
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateTenant(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update Tenant using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update Tenant using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return err
 }
@@ -115,7 +117,7 @@ type ManageTenantInventory struct {
 func (mti *ManageTenantInventory) DiscoverTenantInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverTenantInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[string, *cwssaws.Tenant, *cwssaws.TenantInventory]{
+	inventoryImpl := manageInventoryImpl[string, *corev1.Tenant, *corev1.TenantInventory]{
 		itemType:               "Tenant",
 		config:                 mti.config,
 		internalFindIDs:        tenantFindIDs,
@@ -134,16 +136,16 @@ func NewManageTenantInventory(config ManageInventoryConfig) ManageTenantInventor
 
 func tenantFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]string, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	idList, err := grpcServiceClient.FindTenantOrganizationIds(ctx, &cwssaws.TenantSearchFilter{})
+	idList, err := grpcServiceClient.FindTenantOrganizationIds(ctx, &corev1.TenantSearchFilter{})
 	if err != nil {
 		return nil, err
 	}
 	return idList.GetTenantOrganizationIds(), nil
 }
 
-func tenantFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []string) ([]*cwssaws.Tenant, error) {
+func tenantFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []string) ([]*corev1.Tenant, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	list, err := grpcServiceClient.FindTenantsByOrganizationIds(ctx, &cwssaws.TenantByOrganizationIdsRequest{
+	list, err := grpcServiceClient.FindTenantsByOrganizationIds(ctx, &corev1.TenantByOrganizationIdsRequest{
 		OrganizationIds: ids,
 	})
 	if err != nil {
@@ -152,9 +154,9 @@ func tenantFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, id
 	return list.GetTenants(), nil
 }
 
-func tenantPagedInventory(allItemIDs []string, pagedItems []*cwssaws.Tenant, input *pagedInventoryInput) *cwssaws.TenantInventory {
+func tenantPagedInventory(allItemIDs []string, pagedItems []*corev1.Tenant, input *pagedInventoryInput) *corev1.TenantInventory {
 	// Create an inventory page with the subset of Tenants
-	inventory := &cwssaws.TenantInventory{
+	inventory := &corev1.TenantInventory{
 		Tenants: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),

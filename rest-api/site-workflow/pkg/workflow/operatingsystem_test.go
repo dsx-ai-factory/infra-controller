@@ -7,9 +7,9 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -34,7 +34,7 @@ func (ctts *CreateOsImageTestSuite) AfterTest(suiteName, testName string) {
 func (ctts *CreateOsImageTestSuite) Test_CreateOsImage_Success() {
 	var operatingSystemManager iActivity.ManageOperatingSystem
 
-	request := &cwssaws.OsImageAttributes{
+	request := &corev1.OsImageAttributes{
 		TenantOrganizationId: "m4jjok8wsg",
 	}
 
@@ -51,7 +51,7 @@ func (ctts *CreateOsImageTestSuite) Test_CreateOsImage_Success() {
 func (ctts *CreateOsImageTestSuite) Test_CreateOsImage_Failure() {
 	var operatingSystemManager iActivity.ManageOperatingSystem
 
-	request := &cwssaws.OsImageAttributes{
+	request := &corev1.OsImageAttributes{
 		TenantOrganizationId: "m4jjok8wsg",
 	}
 
@@ -89,7 +89,7 @@ func (s *UpdateOsImageTestSuite) AfterTest(suiteName, testName string) {
 func (s *UpdateOsImageTestSuite) Test_UpdateOsImage_Success() {
 	var operatingSystemManager iActivity.ManageOperatingSystem
 
-	request := &cwssaws.OsImageAttributes{
+	request := &corev1.OsImageAttributes{
 		TenantOrganizationId: "m4jjok8wsg",
 		Name:                 util.GetStrPtr("updated-os-name"),
 	}
@@ -107,7 +107,7 @@ func (s *UpdateOsImageTestSuite) Test_UpdateOsImage_Success() {
 func (s *UpdateOsImageTestSuite) Test_UpdateOsImage_Failure() {
 	var operatingSystemManager iActivity.ManageOperatingSystem
 
-	request := &cwssaws.OsImageAttributes{
+	request := &corev1.OsImageAttributes{
 		TenantOrganizationId: "m4jjok8wsg",
 		Name:                 util.GetStrPtr("updated-os-name"),
 	}
@@ -146,8 +146,8 @@ func (ctts *DeleteOsImageTestSuite) AfterTest(suiteName, testName string) {
 func (ctts *DeleteOsImageTestSuite) Test_DeleteOsImage_Success() {
 	var operatingSystemManager iActivity.ManageOperatingSystem
 
-	request := &cwssaws.DeleteOsImageRequest{
-		Id:                   &cwssaws.UUID{Value: uuid.New().String()},
+	request := &corev1.DeleteOsImageRequest{
+		Id:                   &corev1.UUID{Value: uuid.New().String()},
 		TenantOrganizationId: "m4jjok8wsg",
 	}
 
@@ -164,8 +164,8 @@ func (ctts *DeleteOsImageTestSuite) Test_DeleteOsImage_Success() {
 func (ctts *DeleteOsImageTestSuite) Test_DeleteOsImage_Failure() {
 	var operatingSystemManager iActivity.ManageOperatingSystem
 
-	request := &cwssaws.DeleteOsImageRequest{
-		Id:                   &cwssaws.UUID{Value: uuid.New().String()},
+	request := &corev1.DeleteOsImageRequest{
+		Id:                   &corev1.UUID{Value: uuid.New().String()},
 		TenantOrganizationId: "m4jjok8wsg",
 	}
 

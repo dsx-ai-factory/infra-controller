@@ -13,7 +13,7 @@ explaining the system to a network team.
   troubleshooting
 - [VNI Resource Pools](vni_resource_pools.md) — VNI pool configuration
 - [IP Resource Pools](../networking/ip_resource_pools.md) — IP pool configuration
-- [Networking Requirements](../networking_requirements.md) — underlay and EVPN prerequisites
+- [Network Prerequisites](../../getting-started/prerequisites/network.md) — underlay and EVPN prerequisites
 - [DPU Configuration](../../dpu-management/dpu_configuration.md) — declarative DPU config flow
 - [Flat VPCs and Zero-DPU Hosts](flat_vpcs_zero_dpu.md) — the operator-managed
   alternative for hosts without a NICo-managed DPU (no DPU overlay)
@@ -25,14 +25,13 @@ explaining the system to a network team.
 The following diagram shows how the principal components relate. Each DPU maintains a separate VRF
 for every VPC hosted on its managed host. Routes flow between VRFs and the fabric via BGP EVPN.
 
-```
-
+```text maxLines={0}
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  Site controller (NICo API)                                             │
 │                                                                         │
 │  API server config                                                      │
-│    asn              ──────────────────────────────► DPU BGP ASN pool   │
-│    datacenter_asn   ──────────────────────────────► route-target ASN   │
+│    asn              ──────────────────────────────► DPU BGP ASN pool    │
+│    datacenter_asn   ──────────────────────────────► route-target ASN    │
 │                                                                         │
 │  fnn config                                                             │
 │    routing_profiles[EXTERNAL/INTERNAL/…]                                │
@@ -41,23 +40,23 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 │      leak_* flags                                                       │
 │    additional_route_target_imports                                      │
 └──────────────────────┬──────────────────────────────────────────────────┘
-                       │ configuration poll (every 30 s)
+                       │ configuration poll (every 30 seconds)
                        ▼
-┌──────────────────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────────────────┐
 │  DPU (BlueField, running HBN / Cumulus Linux)                           │
 │                                                                         │
-│  loopback (lo-ip pool)     ◄── VTEP for underlay BGP EVPN peering      │
-│  per-VPC loopback          ◄── VTEP used as EVPN next-hop in VPC VRF   │
+│  loopback (lo-ip pool)     ◄── VTEP for underlay BGP EVPN peering       │
+│  per-VPC loopback          ◄── VTEP used as EVPN next-hop in VPC VRF    │
 │    (vpc-dpu-lo pool)                                                    │
 │                                                                         │
-│  VPC VRF  ◄─── VPC VNI (vpc-vni or external-vpc-vni pool)              │
-│    native RT import: <datacenter_asn>:<vpc_vni>                         │
+│  VPC VRF  ◄─── VPC VNI (vpc-vni or external-vpc-vni pool)               │
+│    native + peered VPC RT imports: <datacenter_asn>:<imported_vni>      │
 │    additional RT imports: from routing profile + fnn config             │
 │    export tags: native RT + route_targets_on_exports                    │
+│    site_fabric_null_routes: distance-250 blackholes in mutual isolation │
 │                                                                         │
 │  deny_prefixes ACL ──► blocks listed prefixes from tenant traffic       │
-└──────────────────────────────────────────────────────────────────────────┘
-
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -65,7 +64,7 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 ## Component Roles
 
 | Component | Pool / Config field | Role |
-|---|---|---|
+| --------- | ------------------- | ---- |
 | DPU loopback IP | `lo-ip` pool | VTEP address for underlay BGP peering and EVPN sessions with route servers or TOR switches |
 | Per-VPC DPU loopback IP | `vpc-dpu-lo` pool | Per-VPC VTEP; used as the EVPN next-hop for type-5 routes in that VPC's VRF |
 | VPC VNI | `vpc-vni` pool (internal VPCs) or `external-vpc-vni` pool (external VPCs) | Identifies the VXLAN L3 tunnel and forms the native route-target `<datacenter_asn>:<vpc_vni>` |
@@ -75,7 +74,8 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 | Routing profile | `fnn.routing_profiles` in the API server config | Defines `route_target_imports`, `route_targets_on_exports`, and leak behavior for a VPC's VRF |
 | Additional RT imports | `fnn.additional_route_target_imports` | Extra route-targets imported into every VPC VRF site-wide |
 | Deny-prefix ACL | `deny_prefixes` in the API server config | Prefixes tenant instances are not permitted to reach |
-| Site fabric prefixes | `site_fabric_prefixes` in the API server config | IP prefixes assigned for tenant use within this site; used for VPC isolation enforcement |
+| Site fabric prefixes | `site_fabric_prefixes` in the API server config | IP prefixes assigned for tenant use within this site. |
+| Site fabric null routes | `site_fabric_null_routes` in the API server config | List of IP prefixes that should receive additional L3 network isolation. Omission inherits `site_fabric_prefixes`. An empty list installs none. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family because the imported default overrides the equal-prefix blackhole. Open isolation does not install the routes. |
 
 Pool definitions (ranges, prefix sizes) are configured in the API server `pools` section; see
 [VNI Resource Pools](vni_resource_pools.md) and
@@ -107,20 +107,20 @@ The handler proceeds as follows:
 
 1. **Load the managed host snapshot** from the database. If the DPU is unknown, a `NotFound`
    error is returned and the DPU places itself into isolated mode.
-2. **Determine `use_admin_network`**. The DPU is placed on the admin network when no instance is
+1. **Determine `use_admin_network`**. The DPU is placed on the admin network when no instance is
    allocated, when the instance has no interfaces configured for this DPU, or when the host is in
    specific transient lifecycle states.
-3. **Resolve the routing profile**. When an instance is allocated, the VPC's routing profile is
+1. **Resolve the routing profile**. When an instance is allocated, the VPC's routing profile is
    looked up in `fnn.routing_profiles`. If the profile name is not defined there, the DPU
    configuration call fails.
-4. **Allocate or retrieve the per-VPC loopback IP** from the `vpc-dpu-lo` pool.
-5. **Build tenant interface configs**, including VLAN IDs, VNI, gateway, prefixes, and the FQDN
+1. **Allocate or retrieve the per-VPC loopback IP** from the `vpc-dpu-lo` pool.
+1. **Build tenant interface configs**, including VLAN IDs, VNI, gateway, prefixes, and the FQDN
    derived from the instance hostname or its IP address.
-6. **Assemble the response**, including:
+1. **Assemble the response**, including:
    - BGP ASN (per-DPU from `fnn-asn` pool)
    - DPU loopback IP from the `lo-ip` pool
    - DHCP server addresses and route server addresses
-   - `deny_prefixes` and `site_fabric_prefixes` ACL data
+   - `deny_prefixes` ACL data and the effective site-isolation prefixes in `site_fabric_null_routes`
    - `datacenter_asn`
    - The resolved `routing_profile` (imports, exports, leak flags)
    - `additional_route_target_imports`
@@ -193,13 +193,13 @@ The flow:
 
 1. A tenant instance boots on a managed host. The DPU receives a configuration that places the
    host interface into the VPC VRF, identified by the VPC VNI.
-2. The host's instance IP is advertised from the host into the DPU via a BGP session between the
+1. The host's instance IP is advertised from the host into the DPU via a BGP session between the
    host OS and the DPU.
-3. The DPU re-advertises that host route into the fabric as a BGP EVPN type-5 prefix, tagged with
+1. The DPU re-advertises that host route into the fabric as a BGP EVPN type-5 prefix, tagged with
    the VPC's native route-target: `<datacenter_asn>:<vpc_vni>`.
-4. Every other DPU that has an instance in the same VPC imports that same route-target (it is the
+1. Every other DPU that has an instance in the same VPC imports that same route-target (it is the
    per-VPC default import) and installs the host route in its local copy of the VPC VRF.
-5. Return traffic follows the per-VPC loopback IP (`vpc-dpu-lo` pool) as the EVPN next-hop.
+1. Return traffic follows the per-VPC loopback IP (`vpc-dpu-lo` pool) as the EVPN next-hop.
 
 ### Site-wide additional route-target imports
 
@@ -207,7 +207,7 @@ The flow:
 entire site, regardless of the VPC's routing
 profile. This is appropriate for routes that all VPCs must be able to reach unconditionally,
 such as control-plane service VIPs. The standard import for site-controller VIPs uses route-target
-`:50100` (see [Networking Requirements](../networking_requirements.md)).
+`:50100` (see [Network Prerequisites](../../getting-started/prerequisites/network.md)).
 
 ---
 
@@ -257,12 +257,14 @@ per-VPC VNIs.
 (default VRF) directly into the tenant VRF, bypassing BGP route-target mechanics entirely.
 
 When to use this:
+
 - The underlay already has a default route and the site lacks a BGP gateway VRF to advertise one
   into the EVPN fabric.
 - The deployment is small or development-grade and full EVPN route-target coordination is not
   warranted.
 
 When not to use this:
+
 - Multi-tenant deployments where internet-bound traffic must be filtered or metered per VPC.
 - Sites where tenant VRF isolation from the underlay is a security requirement.
 - Deployments where the underlay default route changes frequently and the tenant VRFs should not
@@ -326,7 +328,7 @@ accepted_leaks_from_underlay = [
 When the DPU advertises routes from a VPC into the fabric, it tags them with:
 
 1. The VPC's native route-target: `<datacenter_asn>:<vpc_vni>`
-2. Any route-targets listed in `route_targets_on_exports` for the VPC's routing profile
+1. Any route-targets listed in `route_targets_on_exports` for the VPC's routing profile
 
 The network device VRFs must import the route-targets present on VPC routes to see those routes
 and return traffic to instances. If they do not, the overlay routing table appears correct from
@@ -364,29 +366,33 @@ See [VNI Resource Pools](vni_resource_pools.md) for pool sizing and configuratio
 Use this checklist when configuring VPC network virtualization for a new site. Complete each step in order and confirm
 with the network team before proceeding to the next.
 
-### 1. Agree on BGP parameters with the network team
+<Steps toc={true}>
+<Step title="Agree on BGP parameters with the network team">
 
 - [ ] Determine `datacenter_asn` — the ASN used in route-target construction.
 - [ ] Determine VNI ranges for internal VPCs (`vpc-vni` pool) and external VPCs
       (`external-vpc-vni` pool).
 - [ ] Determine the route-target the network will advertise for the default route.
 
-### 2. Configure IP pools
+</Step>
+<Step title="Configure IP pools">
 
 - [ ] Define the `lo-ip` pool for DPU loopback IPs. One IP per DPU.
 - [ ] Define the `vpc-dpu-lo` pool for per-VPC DPU loopback IPs. One IP per DPU per VPC.
 - [ ] Define the `fnn-asn` pool for per-DPU BGP ASNs. One ASN per DPU.
 
-See [IP Resource Pools](../networking/ip_resource_pools.md) for sizing guidance.
+Refer to [IP Resource Pools](../networking/ip_resource_pools.md) for sizing guidance.
 
-### 3. Configure VNI pools
+</Step>
+<Step title="Configure VNI pools">
 
 - [ ] Define the `vpc-vni` pool for internal VPCs.
 - [ ] Define the `external-vpc-vni` pool for external VPCs (if the site serves external tenants).
 
-See [VNI Resource Pools](vni_resource_pools.md) for pool sizing guidance.
+Refer to [VNI Resource Pools](vni_resource_pools.md) for pool sizing guidance.
 
-### 4. Configure API server fields
+</Step>
+<Step title="Configure API server fields">
 
 In the API server configuration file:
 
@@ -424,9 +430,10 @@ leak_tenant_host_routes_to_underlay = false
 
 Replace placeholder values with site-specific values agreed with the network team. The route-target
 numbers `:50100`, `:50200`, and `:50500` are conventional; see
-[Networking Requirements](../networking_requirements.md) for the full standard route-target table.
+[Network Prerequisites](../../getting-started/prerequisites/network.md) for the full standard route-target table.
 
-### 5. Confirm network device configuration
+</Step>
+<Step title="Confirm network device configuration">
 
 Have the network team confirm:
 
@@ -440,17 +447,21 @@ Have the network team confirm:
 - [ ] DPU loopback prefixes from the `lo-ip` pool are reachable from all other DPUs (full mesh or
       aggregate).
 
-### 6. Verify end-to-end
+</Step>
+<Step title="Verify end-to-end">
 
 After site bring-up:
 
 1. Create a tenant with an `EXTERNAL` routing profile.
-2. Create a VPC for that tenant.
-3. Allocate an instance.
-4. From within the instance, confirm:
+1. Create a VPC for that tenant.
+1. Allocate an instance.
+1. From within the instance, confirm:
    - Intra-VPC connectivity to another instance in the same VPC.
    - Internet reachability (for example, `curl` to an external address).
-5. Confirm that the DPU agent health check shows all BGP sessions established.
+1. Confirm that the DPU agent health check shows all BGP sessions established.
+
+</Step>
+</Steps>
 
 ---
 

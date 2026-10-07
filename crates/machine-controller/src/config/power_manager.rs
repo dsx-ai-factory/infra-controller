@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Power management configuration controlling retry
 /// intervals and reboot timing.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PowerManagerOptions {
     /// Master switch to enable or disable power
     /// management.

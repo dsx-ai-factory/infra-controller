@@ -1,0 +1,129 @@
+{{- $root := . }}
+{{- $namespace := include "nico-machine-a-tron.namespace" . }}
+{{- $baseName := include "nico-machine-a-tron.name" . }}
+
+{{- $activePods := include "nico-machine-a-tron.activePods" . | int }}
+{{- if and (gt $activePods 1) (not (index .Values "mat-k8s-controller").enabled) }}
+{{- fail "multi-pod machine-a-tron deployments require mat-k8s-controller.enabled=true" }}
+{{- end }}
+
+{{- if not .Values.startupProbe }}
+{{- fail "startupProbe must be configured — without it liveness fires immediately and can kill MAT during registration (issue #4298)" }}
+{{- end }}
+
+{{- range $podName, $podConfig := .Values.pods }}
+{{/*
+Skip unconfigured pods
+*/}}
+{{- if not (and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0))) }}
+{{- continue }}
+{{- end }}
+
+{{- $name := printf "%s-%s" $baseName $podName }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-machine-a-tron.labels" $root | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "nico-machine-a-tron.selectorLabels" $root | nindent 6 }}
+      nvidia-infra-controller/pod-name: {{ $podName | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-machine-a-tron.selectorLabels" $root | nindent 8 }}
+        nvidia-infra-controller/pod-name: {{ $podName | quote }}
+      annotations:
+        checksum/config: {{ include (print $root.Template.BasePath "/configmap.yaml") $root | sha256sum }}
+    spec:
+      # Controller mode creates one Service per BMC (thousands); the default
+      # service-link env injection then breaks exec in ALL new namespace pods
+      # with E2BIG ("argument list too long").
+      enableServiceLinks: false
+      serviceAccountName: {{ include "nico-machine-a-tron.name" $root }}
+      automountServiceAccountToken: {{ $root.Values.automountServiceAccountToken }}
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: machine-a-tron
+          image: {{ include "nico-machine-a-tron.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command:
+            {{- toYaml $root.Values.command | nindent 12 }}
+          args:
+            - "/app/mat.toml"
+          {{- if $root.Values.ufmMock.enabled }}
+          env:
+            - name: UFM_MOCK_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.ufmMock.existingAuthSecret | default (printf "%s-ufm-mock-auth" $baseName) | quote }}
+                  key: token
+          {{- end }}
+          ports:
+            - name: redfish
+              containerPort: {{ $root.Values.service.bmcMock.port }}
+              protocol: TCP
+            {{- if $root.Values.ufmMock.enabled }}
+            - name: metrics
+              containerPort: {{ $root.Values.service.metrics.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if $root.Values.machineATron.mockBmcSshServer }}
+            - name: ssh
+              containerPort: {{ $root.Values.machineATron.mockBmcSshPort }}
+              protocol: TCP
+            {{- end }}
+            {{- if include "nico-machine-a-tron.dhcpRelayEnabled" $root }}
+            - name: dhcp-relay
+              containerPort: {{ $root.Values.dhcpRelay.listenPort | default 67 }}
+              protocol: UDP
+            {{- end }}
+          {{- with $root.Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $root.Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/mat.toml
+              subPath: mat.toml
+            - name: tls
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            {{- if $root.Values.persistence.enabled }}
+            - name: data
+              mountPath: {{ $root.Values.machineATron.persistDir }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}-config-files
+        - name: tls
+          secret:
+            secretName: {{ $name }}-tls
+        {{- if $root.Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-data
+        {{- end }}
+{{- end }}

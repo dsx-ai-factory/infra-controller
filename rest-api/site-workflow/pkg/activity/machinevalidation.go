@@ -7,9 +7,9 @@ import (
 	"context"
 	"errors"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 )
@@ -26,7 +26,7 @@ func NewManageMachineValidation(coreGrpcClient *client.CoreGrpcAtomicClient) Man
 	}
 }
 
-func (mmv *ManageMachineValidation) EnableDisableMachineValidationTestOnSite(ctx context.Context, request *cwssaws.MachineValidationTestEnableDisableTestRequest) error {
+func (mmv *ManageMachineValidation) EnableDisableMachineValidationTestOnSite(ctx context.Context, request *corev1.MachineValidationTestEnableDisableTestRequest) error {
 	logger := log.With().Str("Activity", "EnableDisableMachineValidationTestOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -65,7 +65,7 @@ func (mmv *ManageMachineValidation) EnableDisableMachineValidationTestOnSite(ctx
 	return nil
 }
 
-func (mmv *ManageMachineValidation) PersistValidationResultOnSite(ctx context.Context, request *cwssaws.MachineValidationResultPostRequest) error {
+func (mmv *ManageMachineValidation) PersistValidationResultOnSite(ctx context.Context, request *corev1.MachineValidationResultPostRequest) error {
 	logger := log.With().Str("Activity", "PersistValidationResultOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -102,7 +102,7 @@ func (mmv *ManageMachineValidation) PersistValidationResultOnSite(ctx context.Co
 	return nil
 }
 
-func (mmv *ManageMachineValidation) GetMachineValidationResultsFromSite(ctx context.Context, request *cwssaws.MachineValidationGetRequest) (*cwssaws.MachineValidationResultList, error) {
+func (mmv *ManageMachineValidation) GetMachineValidationResultsFromSite(ctx context.Context, request *corev1.MachineValidationGetRequest) (*corev1.MachineValidationResultList, error) {
 	logger := log.With().Str("Activity", "GetMachineValidationResultsFromSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -137,7 +137,7 @@ func (mmv *ManageMachineValidation) GetMachineValidationResultsFromSite(ctx cont
 	return result, nil
 }
 
-func (mmv *ManageMachineValidation) GetMachineValidationRunsFromSite(ctx context.Context, request *cwssaws.MachineValidationRunListGetRequest) (*cwssaws.MachineValidationRunList, error) {
+func (mmv *ManageMachineValidation) GetMachineValidationRunsFromSite(ctx context.Context, request *corev1.MachineValidationRunListGetRequest) (*corev1.MachineValidationRunList, error) {
 	logger := log.With().Str("Activity", "GetMachineValidationRunsFromSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -174,7 +174,7 @@ func (mmv *ManageMachineValidation) GetMachineValidationRunsFromSite(ctx context
 	return result, nil
 }
 
-func (mmv *ManageMachineValidation) GetMachineValidationTestsFromSite(ctx context.Context, request *cwssaws.MachineValidationTestsGetRequest) (*cwssaws.MachineValidationTestsGetResponse, error) {
+func (mmv *ManageMachineValidation) GetMachineValidationTestsFromSite(ctx context.Context, request *corev1.MachineValidationTestsGetRequest) (*corev1.MachineValidationTestsGetResponse, error) {
 	logger := log.With().Str("Activity", "GetMachineValidationTestsFromSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -209,7 +209,7 @@ func (mmv *ManageMachineValidation) GetMachineValidationTestsFromSite(ctx contex
 	return result, nil
 }
 
-func (mmv *ManageMachineValidation) AddMachineValidationTestOnSite(ctx context.Context, request *cwssaws.MachineValidationTestAddRequest) (*cwssaws.MachineValidationTestAddUpdateResponse, error) {
+func (mmv *ManageMachineValidation) AddMachineValidationTestOnSite(ctx context.Context, request *corev1.MachineValidationTestAddRequest) (*corev1.MachineValidationTestAddUpdateResponse, error) {
 	logger := log.With().Str("Activity", "AddMachineValidationTestOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -250,7 +250,7 @@ func (mmv *ManageMachineValidation) AddMachineValidationTestOnSite(ctx context.C
 	return response, nil
 }
 
-func (mmv *ManageMachineValidation) UpdateMachineValidationTestOnSite(ctx context.Context, request *cwssaws.MachineValidationTestUpdateRequest) error {
+func (mmv *ManageMachineValidation) UpdateMachineValidationTestOnSite(ctx context.Context, request *corev1.MachineValidationTestUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateMachineValidationTestOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -291,7 +291,7 @@ func (mmv *ManageMachineValidation) UpdateMachineValidationTestOnSite(ctx contex
 	return nil
 }
 
-func (mmv *ManageMachineValidation) GetMachineValidationExternalConfigsFromSite(ctx context.Context, request *cwssaws.GetMachineValidationExternalConfigsRequest) (*cwssaws.GetMachineValidationExternalConfigsResponse, error) {
+func (mmv *ManageMachineValidation) GetMachineValidationExternalConfigsFromSite(ctx context.Context, request *corev1.GetMachineValidationExternalConfigsRequest) (*corev1.GetMachineValidationExternalConfigsResponse, error) {
 	logger := log.With().Str("Activity", "GetMachineValidationExternalConfigsFromSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -326,7 +326,7 @@ func (mmv *ManageMachineValidation) GetMachineValidationExternalConfigsFromSite(
 	return result, nil
 }
 
-func (mmv *ManageMachineValidation) AddUpdateMachineValidationExternalConfigOnSite(ctx context.Context, request *cwssaws.AddUpdateMachineValidationExternalConfigRequest) error {
+func (mmv *ManageMachineValidation) AddUpdateMachineValidationExternalConfigOnSite(ctx context.Context, request *corev1.AddUpdateMachineValidationExternalConfigRequest) error {
 	logger := log.With().Str("Activity", "AddUpdateMachineValidationExternalConfigOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -363,7 +363,7 @@ func (mmv *ManageMachineValidation) AddUpdateMachineValidationExternalConfigOnSi
 	return nil
 }
 
-func (mmv *ManageMachineValidation) RemoveMachineValidationExternalConfigOnSite(ctx context.Context, request *cwssaws.RemoveMachineValidationExternalConfigRequest) error {
+func (mmv *ManageMachineValidation) RemoveMachineValidationExternalConfigOnSite(ctx context.Context, request *corev1.RemoveMachineValidationExternalConfigRequest) error {
 	logger := log.With().Str("Activity", "RemoveMachineValidationExternalConfigOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")

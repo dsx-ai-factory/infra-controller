@@ -19,6 +19,7 @@ use ::rpc::admin_cli::OutputFormat;
 use carbide_uuid::machine::MachineId;
 use mac_address::MacAddress;
 use rpc::Machine;
+use rpc::errors::RpcDataConversionError;
 
 use super::args::{
     Args, MachineMetadataCommandAddLabel, MachineMetadataCommandFromExpectedMachine,
@@ -27,7 +28,7 @@ use super::args::{
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn metadata(
+pub(super) async fn metadata(
     api_client: &ApiClient,
     cmd: Args,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -43,7 +44,7 @@ pub async fn metadata(
     }
 }
 
-pub async fn handle_metadata_show(
+async fn handle_metadata_show(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: &OutputFormat,
     _extended: bool,
@@ -53,7 +54,7 @@ pub async fn handle_metadata_show(
     crate::metadata::display_metadata(output_file, output_format, &metadata).await
 }
 
-pub async fn metadata_show(
+async fn metadata_show(
     api_client: &ApiClient,
     cmd: MachineMetadataCommandShow,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -83,41 +84,60 @@ async fn fetch_machine(api_client: &ApiClient, machine_id: MachineId) -> Carbide
     })
 }
 
-pub async fn metadata_set(
+async fn metadata_set(
     api_client: &ApiClient,
     cmd: MachineMetadataCommandSet,
 ) -> CarbideCliResult<()> {
     let machine = fetch_machine(api_client, cmd.machine).await?;
     let metadata = crate::metadata::apply_set(machine.metadata, cmd.name, cmd.description)?;
     api_client
-        .update_machine_metadata(machine.id.unwrap(), metadata, machine.version)
+        .update_machine_metadata(
+            machine
+                .id
+                .ok_or(RpcDataConversionError::MissingArgument("machine.id"))?,
+            metadata,
+            machine.version,
+        )
         .await
 }
 
-pub async fn metadata_add_label(
+async fn metadata_add_label(
     api_client: &ApiClient,
     cmd: MachineMetadataCommandAddLabel,
 ) -> CarbideCliResult<()> {
     let machine = fetch_machine(api_client, cmd.machine).await?;
     let metadata = crate::metadata::apply_add_label(machine.metadata, cmd.key, cmd.value)?;
     api_client
-        .update_machine_metadata(machine.id.unwrap(), metadata, machine.version)
+        .update_machine_metadata(
+            machine
+                .id
+                .ok_or(RpcDataConversionError::MissingArgument("machine.id"))?,
+            metadata,
+            machine.version,
+        )
         .await
 }
 
-pub async fn metadata_remove_labels(
+async fn metadata_remove_labels(
     api_client: &ApiClient,
     cmd: MachineMetadataCommandRemoveLabels,
 ) -> CarbideCliResult<()> {
     let machine = fetch_machine(api_client, cmd.machine).await?;
     let metadata = crate::metadata::apply_remove_labels(machine.metadata, cmd.keys)?;
     api_client
-        .update_machine_metadata(machine.id.unwrap(), metadata, machine.version)
+        .update_machine_metadata(
+            machine
+                .id
+                .ok_or(RpcDataConversionError::MissingArgument("machine.id"))?,
+            metadata,
+            machine.version,
+        )
         .await?;
     Ok(())
 }
 
-pub async fn metadata_from_expected_machine(
+#[allow(deprecated)]
+async fn metadata_from_expected_machine(
     api_client: &ApiClient,
     cmd: MachineMetadataCommandFromExpectedMachine,
 ) -> CarbideCliResult<()> {
@@ -212,7 +232,13 @@ pub async fn metadata_from_expected_machine(
     }
 
     api_client
-        .update_machine_metadata(machine.id.unwrap(), metadata, machine.version)
+        .update_machine_metadata(
+            machine
+                .id
+                .ok_or(RpcDataConversionError::MissingArgument("machine.id"))?,
+            metadata,
+            machine.version,
+        )
         .await?;
     Ok(())
 }

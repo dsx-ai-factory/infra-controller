@@ -25,176 +25,160 @@ use rpc::admin_cli::OutputFormat;
 use rpc::protos::mlx_device as mlx_device_pb;
 
 use super::args::{
-    ProfileCommand, ProfileCompareCommand, ProfileListCommand, ProfileShowCommand,
-    ProfileSyncCommand,
+    ProfileCompareCommand, ProfileListCommand, ProfileShowCommand, ProfileSyncCommand,
 };
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::mlx::{
-    CliContext, print_comparison_result_csv, print_comparison_result_table, print_sync_result_csv,
+    print_comparison_result_csv, print_comparison_result_table, print_sync_result_csv,
     print_sync_result_table,
 };
 
-// dispatch routes profile subcommands to their handlers.
-pub async fn dispatch(
-    command: ProfileCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    match command {
-        ProfileCommand::Compare(cmd) => handle_compare(cmd, ctxt).await,
-        ProfileCommand::List(cmd) => handle_list(cmd, ctxt).await,
-        ProfileCommand::Sync(cmd) => handle_sync(cmd, ctxt).await,
-        ProfileCommand::Show(cmd) => handle_show(cmd, ctxt).await,
-    }
-}
-
 // handle_compare compares a profile config against running config on a device.
-async fn handle_compare(
-    cmd: ProfileCompareCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminProfileCompareRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_profile_compare(request).await?;
+impl Run for ProfileCompareCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminProfileCompareRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_profile_compare(request).await?;
 
-    let comparison_result_pb = response.comparison_result.ok_or_else(|| {
-        CarbideCliError::GenericError("no comparison result returned".to_string())
-    })?;
+        let comparison_result_pb = response.comparison_result.ok_or_else(|| {
+            CarbideCliError::GenericError("no comparison result returned".to_string())
+        })?;
 
-    let comparison_result: ComparisonResult = comparison_result_pb.try_into()?;
+        let comparison_result: ComparisonResult = comparison_result_pb.try_into()?;
 
-    // Output the comparison result in the requested format.
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&comparison_result)?);
+        // Output the comparison result in the requested format.
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&comparison_result)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&comparison_result)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_comparison_result_table(&comparison_result);
+            }
+            OutputFormat::Csv => {
+                print_comparison_result_csv(&comparison_result);
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&comparison_result)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_comparison_result_table(&comparison_result);
-        }
-        OutputFormat::Csv => {
-            print_comparison_result_csv(&comparison_result);
-        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 // handle_list lists all profiles configured in carbide-api.
-async fn handle_list(
-    _cmd: ProfileListCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let response = ctxt.grpc_conn.0.mlx_admin_profile_list().await?;
+impl Run for ProfileListCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let response = ctx.api_client.0.mlx_admin_profile_list().await?;
 
-    let mut profiles = response.profiles;
-    // Sort by profile name.
-    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut profiles = response.profiles;
+        // Sort by profile name.
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
 
-    match ctxt.format {
-        OutputFormat::Json => {
-            let output: Vec<_> = profiles
-                .iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "profile_name": p.name,
-                        "description": p.description,
-                        "registry_name": p.registry_name,
-                        "variable_count": p.variable_count
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                let output: Vec<_> = profiles
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "profile_name": p.name,
+                            "description": p.description,
+                            "registry_name": p.registry_name,
+                            "variable_count": p.variable_count
+                        })
                     })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
-        OutputFormat::Yaml => {
-            println!("profiles:");
-            for profile in profiles {
-                println!("  - profile_name: {}", profile.name);
-                if let Some(desc) = profile.description {
-                    println!("    description: {desc}");
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            OutputFormat::Yaml => {
+                println!("profiles:");
+                for profile in profiles {
+                    println!("  - profile_name: {}", profile.name);
+                    if let Some(desc) = profile.description {
+                        println!("    description: {desc}");
+                    }
+                    println!("    registry_name: {}", profile.registry_name);
+                    println!("    variable_count: {}", profile.variable_count);
                 }
-                println!("    registry_name: {}", profile.registry_name);
-                println!("    variable_count: {}", profile.variable_count);
+            }
+            OutputFormat::AsciiTable => {
+                print_profiles_table(&profiles);
+            }
+            OutputFormat::Csv => {
+                println!("CSV not yet supported")
             }
         }
-        OutputFormat::AsciiTable => {
-            print_profiles_table(&profiles);
-        }
-        OutputFormat::Csv => {
-            println!("CSV not yet supported")
-        }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 // handle_show shows a profile configured in carbide-api.
-async fn handle_show(
-    cmd: ProfileShowCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminProfileShowRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_profile_show(request).await?;
+impl Run for ProfileShowCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminProfileShowRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_profile_show(request).await?;
 
-    let serializable_profile_pb = response
-        .serializable_profile
-        .ok_or_else(|| CarbideCliError::GenericError("no profile returned".to_string()))?;
+        let serializable_profile_pb = response
+            .serializable_profile
+            .ok_or_else(|| CarbideCliError::GenericError("no profile returned".to_string()))?;
 
-    let serializable_profile: SerializableProfile =
-        serializable_profile_pb.try_into().map_err(|e| {
-            CarbideCliError::GenericError(format!(
-                "could not translate serializable profile from pb: {e}"
-            ))
-        })?;
+        let serializable_profile: SerializableProfile =
+            serializable_profile_pb.try_into().map_err(|e| {
+                CarbideCliError::GenericError(format!(
+                    "could not translate serializable profile from pb: {e}"
+                ))
+            })?;
 
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&serializable_profile)?);
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&serializable_profile)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&serializable_profile)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_profile_table(serializable_profile);
+            }
+            OutputFormat::Csv => {
+                println!("CSV not yet supported")
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&serializable_profile)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_profile_table(serializable_profile);
-        }
-        OutputFormat::Csv => {
-            println!("CSV not yet supported")
-        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 // handle_sync syncs a profile from carbide-api to a device.
-async fn handle_sync(
-    cmd: ProfileSyncCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminProfileSyncRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_profile_sync(request).await?;
+impl Run for ProfileSyncCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminProfileSyncRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_profile_sync(request).await?;
 
-    let sync_result_pb = response
-        .sync_result
-        .ok_or_else(|| CarbideCliError::GenericError("no sync result returned".to_string()))?;
+        let sync_result_pb = response
+            .sync_result
+            .ok_or_else(|| CarbideCliError::GenericError("no sync result returned".to_string()))?;
 
-    let sync_result: SyncResult = sync_result_pb.try_into()?;
+        let sync_result: SyncResult = sync_result_pb.try_into()?;
 
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&sync_result)?);
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&sync_result)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&sync_result)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_sync_result_table(&sync_result);
+            }
+            OutputFormat::Csv => {
+                print_sync_result_csv(&sync_result);
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&sync_result)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_sync_result_table(&sync_result);
-        }
-        OutputFormat::Csv => {
-            print_sync_result_csv(&sync_result);
-        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 // print_profiles_table prints a table of profile summaries.

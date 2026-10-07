@@ -1,0 +1,31 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.extern_paths;
+
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+import "google/protobuf/timestamp.proto";
+
+option (carbide.codegen.v1.imported_extern_path) = {
+  protobuf_type: ".google.protobuf.Timestamp"
+  rust_type: "crate::Timestamp"
+};
+
+message ExternalMessage {
+  option (carbide.codegen.v1.message_extern_path) = "::fixture_types::ExternalMessage";
+  string value = 1;
+}
+
+enum ExternalEnum {
+  option (carbide.codegen.v1.enum_extern_path) = "::fixture_types::ExternalEnum";
+  EXTERNAL_ENUM_UNSPECIFIED = 0;
+}
+
+message UsesExternalTypes {
+  ExternalMessage message = 1;
+  ExternalEnum state = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}

@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_switch::{ExpectedSwitch, ExpectedSwitchRequest, LinkedExpectedSwitch};
@@ -31,7 +31,12 @@ pub async fn find_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE bmc_mac_address=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
         .fetch_optional(txn)
@@ -46,7 +51,12 @@ pub async fn find_by_nvos_mac_address(
     txn: &mut PgConnection,
     nvos_mac_address: MacAddress,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE $1::macaddr = ANY(nvos_mac_addresses)";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE $1::macaddr = ANY(nvos_mac_addresses)";
     sqlx::query_as(sql)
         .bind(nvos_mac_address)
         .fetch_optional(txn)
@@ -54,11 +64,74 @@ pub async fn find_by_nvos_mac_address(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// Serialize expected-switch writes on a transaction-scoped advisory lock so
+/// two concurrent creates or updates can't both pass the NVOS MAC conflict
+/// check before either row lands (check-then-write under READ COMMITTED).
+/// The lock releases with the transaction; the namespaced key keeps it from
+/// colliding with other subsystems' advisory locks.
+async fn lock_expected_switch_writes(txn: &mut PgConnection) -> DatabaseResult<()> {
+    let sql = "SELECT pg_advisory_xact_lock(hashtextextended('expected_switches:write', 0))";
+    sqlx::query(sql)
+        .execute(txn)
+        .await
+        .map(|_| ())
+        .map_err(|err| DatabaseError::query(sql, err))
+}
+
+/// Return an entry of `nvos_mac_addresses` that a different expected switch
+/// already claims, if any. "Different" follows the same key `update` targets:
+/// `switch.expected_switch_id` when set, otherwise `switch.bmc_mac_address`.
+/// `macaddr` comparison canonicalizes case and separator differences.
+/// `update_nvos_mac_addresses` stays unguarded on purpose -- it records
+/// hardware-observed truth from site-explorer.
+async fn find_nvos_mac_claimed_elsewhere(
+    txn: &mut PgConnection,
+    nvos_mac_addresses: &[MacAddress],
+    switch: &ExpectedSwitch,
+) -> DatabaseResult<Option<MacAddress>> {
+    if nvos_mac_addresses.is_empty() {
+        return Ok(None);
+    }
+
+    let (sql, exclude_key) = match switch.expected_switch_id {
+        Some(id) => (
+            "SELECT nvos_mac_addresses FROM expected_switches WHERE expected_switch_id != $1::uuid AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
+            id.to_string(),
+        ),
+        None => (
+            "SELECT nvos_mac_addresses FROM expected_switches WHERE bmc_mac_address != $1::macaddr AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
+            switch.bmc_mac_address.to_string(),
+        ),
+    };
+
+    let other_macs = sqlx::query_scalar::<_, Vec<MacAddress>>(sql)
+        .bind(exclude_key)
+        .bind(nvos_mac_addresses)
+        .fetch_optional(txn)
+        .await
+        .map_err(|err| DatabaseError::query(sql, err))?;
+
+    Ok(other_macs.map(|other_macs| {
+        nvos_mac_addresses
+            .iter()
+            .find(|mac| other_macs.contains(mac))
+            .copied()
+            // The SQL overlap guarantees a shared entry; the first requested
+            // MAC is a safe stand-in if equality ever disagrees.
+            .unwrap_or(nvos_mac_addresses[0])
+    }))
+}
+
 pub async fn find_by_serial_number(
     txn: &mut PgConnection,
     serial_number: &str,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE serial_number=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE serial_number=$1";
     sqlx::query_as(sql)
         .bind(serial_number)
         .fetch_optional(txn)
@@ -70,7 +143,12 @@ pub async fn find_by_id(
     txn: &mut PgConnection,
     id: Uuid,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE expected_switch_id=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE expected_switch_id=$1";
     sqlx::query_as(sql)
         .bind(id)
         .fetch_optional(txn)
@@ -82,7 +160,12 @@ pub async fn find_by_rack_id(
     txn: &mut PgConnection,
     rack_id: String,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE rack_id=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_optional(txn)
@@ -94,7 +177,12 @@ pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedSwitch>> {
-    let sql = "SELECT * FROM expected_switches WHERE bmc_mac_address=ANY($1)";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedSwitch> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
         .fetch_all(txn)
@@ -122,7 +210,12 @@ pub async fn find_many_by_bmc_mac_address(
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedSwitch>> {
-    let sql = "SELECT * FROM expected_switches";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches";
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -134,7 +227,12 @@ pub async fn find_all_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedSwitch>> {
-    let sql = "SELECT * FROM expected_switches WHERE rack_id=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_all(txn)
@@ -202,11 +300,26 @@ pub async fn create(
     txn: &mut PgConnection,
     switch: ExpectedSwitch,
 ) -> DatabaseResult<ExpectedSwitch> {
+    // NVOS MACs resolve a DHCPing management port to a single expected switch
+    // (`find_by_nvos_mac_address`), so a MAC claimed by another switch is a
+    // conflict. The advisory lock makes the check-then-insert deterministic
+    // under concurrent writers.
+    lock_expected_switch_writes(&mut *txn).await?;
+    if let Some(mac) =
+        find_nvos_mac_claimed_elsewhere(&mut *txn, &switch.nvos_mac_addresses, &switch).await?
+    {
+        return Err(DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(mac));
+    }
+
     let id = switch.expected_switch_id.unwrap_or_else(Uuid::new_v4);
     let query = "INSERT INTO expected_switches
              (expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number, bmc_ip_address, metadata_name, metadata_description, rack_id, metadata_labels, nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials, nvos_ip_address)
              VALUES
-             ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7::varchar, $8::varchar, $9::varchar, $10::jsonb, $11::varchar, $12::varchar, $13::macaddr[], $14, $15::inet) RETURNING *";
+             ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7::varchar, $8::varchar, $9::varchar, $10::jsonb, $11::varchar, $12::varchar, $13::macaddr[], $14, $15::inet)
+             RETURNING expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                 bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                 nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                 nvos_ip_address";
 
     sqlx::query_as(query)
         .bind(id)
@@ -249,6 +362,44 @@ pub async fn find(
             "either expected_switch_id or bmc_mac_address must be provided".into(),
         ))
     }
+}
+
+/// Locks the expected-switch write domain and returns the selected row for update.
+pub async fn find_for_update(
+    txn: &mut PgConnection,
+    req: &ExpectedSwitchRequest,
+) -> DatabaseResult<Option<ExpectedSwitch>> {
+    lock_expected_switch_writes(&mut *txn).await?;
+
+    let (query, key) = if let Some(id) = req.expected_switch_id {
+        (
+            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                nvos_ip_address
+                FROM expected_switches WHERE expected_switch_id=$1::uuid FOR UPDATE",
+            id.to_string(),
+        )
+    } else if let Some(mac) = req.bmc_mac_address {
+        (
+            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                nvos_ip_address
+                FROM expected_switches WHERE bmc_mac_address=$1::macaddr FOR UPDATE",
+            mac.to_string(),
+        )
+    } else {
+        return Err(DatabaseError::InvalidArgument(
+            "either expected_switch_id or bmc_mac_address must be provided".into(),
+        ));
+    };
+
+    sqlx::query_as(query)
+        .bind(key)
+        .fetch_optional(txn)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))
 }
 
 /// delete deletes an expected switch by expected_switch_id if provided,
@@ -320,6 +471,12 @@ pub async fn update_nvos_mac_addresses(
 }
 
 pub async fn clear(txn: &mut PgConnection) -> Result<(), DatabaseError> {
+    // Take the write lock before the DELETE grabs row locks so clear-then-
+    // create flows (`replace_all_expected_switches`) acquire locks in the same
+    // order as `create`/`update` -- advisory first, rows second -- instead of
+    // forming a deadlock cycle with them.
+    lock_expected_switch_writes(&mut *txn).await?;
+
     let query = "DELETE FROM expected_switches";
 
     sqlx::query(query)
@@ -332,6 +489,41 @@ pub async fn clear(txn: &mut PgConnection) -> Result<(), DatabaseError> {
 /// update updates an existing expected switch. If expected_switch_id is set,
 /// matches by ID; otherwise matches by bmc_mac_address.
 pub async fn update(txn: &mut PgConnection, switch: &ExpectedSwitch) -> DatabaseResult<()> {
+    // The lock serializes the existence read, conflict check, and UPDATE as
+    // one unit against concurrent expected-switch writers.
+    lock_expected_switch_writes(&mut *txn).await?;
+
+    // Resolve the target first: a missing switch reports NotFound rather than
+    // a MAC conflict, and the current row bounds the conflict check to newly
+    // claimed MACs -- re-asserting a list the row already holds stays valid
+    // even when pre-existing data or site-explorer's hardware-truth writes
+    // recorded the same MAC on two switches.
+    let current = find(
+        &mut *txn,
+        &ExpectedSwitchRequest {
+            expected_switch_id: switch.expected_switch_id,
+            bmc_mac_address: Some(switch.bmc_mac_address),
+        },
+    )
+    .await?
+    .ok_or_else(|| DatabaseError::NotFoundError {
+        kind: "expected_switch",
+        id: switch
+            .expected_switch_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| switch.bmc_mac_address.to_string()),
+    })?;
+
+    let newly_claimed: Vec<MacAddress> = switch
+        .nvos_mac_addresses
+        .iter()
+        .filter(|mac| !current.nvos_mac_addresses.contains(mac))
+        .copied()
+        .collect();
+    if let Some(mac) = find_nvos_mac_claimed_elsewhere(&mut *txn, &newly_claimed, switch).await? {
+        return Err(DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(mac));
+    }
+
     macro_rules! update_expected_switch_query {
         ($where_clause:literal) => {
             concat!(
@@ -401,8 +593,8 @@ pub async fn create_missing_from(
     for expected_switch in expected_switches {
         if existing_map.contains_key(&expected_switch.bmc_mac_address.to_string()) {
             tracing::debug!(
-                "Not overwriting expected-switch with mac_addr: {}",
-                expected_switch.bmc_mac_address.to_string()
+                bmc_mac_address = %expected_switch.bmc_mac_address,
+                "Expected switch already exists; not overwriting",
             );
             continue;
         }
@@ -412,3 +604,49 @@ pub async fn create_missing_from(
 
     Ok(())
 }
+
+/// RMS rack identity for a switch that does not yet have a `switches` row,
+/// resolved from the expected inventory. Every switch is rack-scale
+/// (RMS-managed), so this serves the pre-ingestion firmware and power paths for
+/// any switch.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionSwitchRmsIdentity {
+    pub bmc_mac_address: MacAddress,
+    pub rack_id: RackId,
+    pub rack_profile_id: Option<RackProfileId>,
+}
+
+/// Resolve RMS rack identities for pre-ingestion switches by BMC MAC.
+///
+/// Every switch is rack-scale (RMS-managed), so its expected record is expected
+/// to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. The rack profile is taken from the live `racks` row when it
+/// exists and otherwise from the `expected_racks` declaration, so the descriptor
+/// resolves before the rack row is created. Rows missing a `rack_id` are a
+/// misconfiguration and are omitted (they cannot resolve an RMS identity).
+/// Mirrors `expected_machine::find_rms_identities_by_bmc_macs`.
+pub async fn find_rms_identities_by_bmc_macs(
+    db: impl crate::db_read::DbReader<'_>,
+    bmc_macs: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionSwitchRmsIdentity>> {
+    let sql = r#"
+        SELECT
+            es.bmc_mac_address AS bmc_mac_address,
+            es.rack_id AS rack_id,
+            COALESCE(r.rack_profile_id, er.rack_profile_id) AS rack_profile_id
+        FROM expected_switches es
+        LEFT JOIN racks r ON r.id = es.rack_id
+        LEFT JOIN expected_racks er ON er.rack_id = es.rack_id
+        WHERE es.bmc_mac_address = ANY($1)
+          AND es.rack_id IS NOT NULL
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(bmc_macs)
+        .fetch_all(db)
+        .await
+        .map_err(|err| DatabaseError::new("expected_switch::find_rms_identities_by_bmc_macs", err))
+}
+
+#[cfg(test)]
+mod tests;

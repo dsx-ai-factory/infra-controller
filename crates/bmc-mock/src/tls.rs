@@ -95,7 +95,11 @@ pub fn server_config(cert_path: Option<impl AsRef<OsStr>>) -> Result<ServerConfi
         cert_file = cert_path.join("tls.crt");
         key_file = cert_path.join("tls.key");
     }
-    tracing::info!("Loading {:?} and {:?}", cert_file, key_file);
+    tracing::info!(
+        cert_file = ?cert_file,
+        key_file = ?key_file,
+        "Loading BMC mock TLS certificate and key",
+    );
     let tls_cert = std::fs::read(cert_file).map_err(Error::CertFileRead)?;
     let tls_key = std::fs::read(key_file).map_err(Error::KeyFileRead)?;
 

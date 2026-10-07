@@ -16,6 +16,8 @@
  */
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -25,22 +27,114 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
+use tokio::sync::OnceCell;
 use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{BmcClient, BoxFuture};
+
+/// Shared, write-once UUID reported by a machine's primary ComputerSystem.
+///
+/// Collectors clone endpoint metadata when they start, so this state must remain
+/// shared for a UUID resolved after collector startup to reach emitted events.
+/// Clones of the same state compare equal. Distinct states compare equal only
+/// after both cells are initialized with the same optional UUID.
+#[derive(Clone, Debug, Default)]
+pub struct SharedSystemUuid(Arc<OnceCell<Option<uuid::Uuid>>>);
+
+impl PartialEq for SharedSystemUuid {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+            || matches!((self.0.get(), other.0.get()), (Some(left), Some(right)) if left == right)
+    }
+}
+
+impl SharedSystemUuid {
+    pub fn get(&self) -> Option<uuid::Uuid> {
+        self.0.get().copied().flatten()
+    }
+
+    pub(crate) async fn get_or_try_init<E, F, Fut>(&self, f: F) -> Result<Option<uuid::Uuid>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Option<uuid::Uuid>, E>>,
+    {
+        self.0.get_or_try_init(f).await.copied()
+    }
+}
+
+impl From<Option<uuid::Uuid>> for SharedSystemUuid {
+    fn from(system_uuid: Option<uuid::Uuid>) -> Self {
+        match system_uuid {
+            Some(system_uuid) => Self(Arc::new(OnceCell::new_with(Some(Some(system_uuid))))),
+            None => Self::default(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct BmcEndpoint {
     pub addr: BmcAddr,
     pub metadata: Option<EndpointMetadata>,
     pub rack_id: Option<RackId>,
+    pub labels: BTreeMap<String, String>,
     pub bmc: Arc<BmcClient>,
 }
 
+/// Authoritative rack lifecycle metadata returned by NICo discovery.
+///
+/// `created_seconds` and `created_nanos` identify the rack-ingestion session used
+/// by the Rack Health Prometheus contract. They remain optional so older or
+/// non-NICo endpoint sources can decline to publish session-scoped inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RackInventory {
+    pub rack_id: RackId,
+    pub created_seconds: Option<i64>,
+    pub created_nanos: Option<i32>,
+}
+
+/// Authoritative metadata for one component assigned to a rack.
+///
+/// This record is independent of collector endpoint construction so components
+/// remain in inventory when their BMC connection details are absent or invalid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComponentInventory {
+    /// Rack to which the component is assigned.
+    pub rack_id: RackId,
+    /// Stable component identity, placement, and domain metadata from the API.
+    pub metadata: EndpointMetadata,
+    /// BMC MAC address when the API supplies a valid value.
+    pub bmc_mac: Option<MacAddress>,
+}
+
+/// One complete authoritative component-inventory observation.
+pub struct InventorySnapshot {
+    /// Rack lifecycle records used to establish inventory sessions.
+    pub racks: Vec<RackInventory>,
+    /// Components assigned to those racks, independent of collector endpoints.
+    pub components: Vec<ComponentInventory>,
+}
+
+/// Endpoints discovered for collection and the optional authoritative inventory
+/// observation made during the same source fetch.
+pub struct EndpointSnapshot {
+    /// Usable endpoints that can be assigned to telemetry collectors.
+    pub endpoints: Vec<Arc<BmcEndpoint>>,
+    /// Authoritative inventory outcome for this fetch.
+    ///
+    /// `Ok(None)` means the source does not provide authoritative inventory,
+    /// `Ok(Some(_))` is a complete observation, and `Err(_)` means inventory was
+    /// incomplete while `endpoints` may still be used for collection.
+    pub inventory: Result<Option<InventorySnapshot>, HealthError>,
+}
+
 impl BmcEndpoint {
+    /// Returns the MAC identity, or `ip:<address>` when the inventory has no MAC.
     pub fn key(&self) -> String {
-        self.addr.mac.to_string()
+        match self.addr.mac {
+            Some(mac) => mac.to_string(),
+            None => format!("ip:{}", self.addr.ip),
+        }
     }
 
     pub fn hash_key(&self) -> Cow<'static, str> {
@@ -52,12 +146,43 @@ impl BmcEndpoint {
         )
     }
 
+    /// Returns the endpoint identity used for collector log state.
+    ///
+    /// Machines prefer their NICo ID, switches use their serial number, and PowerShelves prefer
+    /// their serial number followed by their NICo ID. Other cases use the endpoint key.
     pub fn log_identity(&self) -> Cow<'_, str> {
         match &self.metadata {
-            Some(EndpointMetadata::Machine(machine)) => Cow::Owned(machine.machine_id.to_string()),
-            Some(EndpointMetadata::PowerShelf(power_shelf)) => Cow::Borrowed(&power_shelf.serial),
+            Some(EndpointMetadata::Machine(MachineData {
+                machine_id: Some(id),
+                ..
+            })) => Cow::Owned(id.to_string()),
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => {
+                if let Some(serial) = power_shelf.serial.as_deref() {
+                    Cow::Borrowed(serial)
+                } else if let Some(id) = power_shelf.id {
+                    Cow::Owned(id.to_string())
+                } else {
+                    Cow::Owned(self.key())
+                }
+            }
             Some(EndpointMetadata::Switch(switch)) => Cow::Borrowed(&switch.serial),
-            None => Cow::Owned(self.addr.mac.to_string()),
+            _ => Cow::Owned(self.key()),
+        }
+    }
+
+    /// Returns whether this endpoint supports periodic Redfish log collection.
+    pub(crate) fn supports_periodic_logs(&self) -> bool {
+        match self.metadata.as_ref() {
+            Some(EndpointMetadata::Machine(_)) => true,
+            Some(EndpointMetadata::Switch(switch)) => {
+                switch.endpoint_role == SwitchEndpointRole::Bmc
+            }
+            // LiteOn PF-1333-7R (firmware r1.3.8) exposes a standard
+            // `Managers/bmc/LogServices/EventLog` whose entries carry `Severity`
+            // and `Message` but a null `MessageId`; see `message_identity` in
+            // `collectors/logs/redfish.rs` for how identity is recovered.
+            Some(EndpointMetadata::PowerShelf(_)) => true,
+            None => false,
         }
     }
 
@@ -68,9 +193,20 @@ impl BmcEndpoint {
     pub fn switch_data(&self) -> Option<&SwitchData> {
         self.metadata.as_ref().and_then(EndpointMetadata::as_switch)
     }
+
+    /// Returns the connect host direct switch collectors should place in URIs.
+    ///
+    /// Switch collectors connect to the discovered endpoint IP address. DNS
+    /// names used for TLS verification are handled separately.
+    pub fn switch_connect_host_for_uri(&self) -> Cow<'_, str> {
+        match self.addr.ip {
+            IpAddr::V4(ip) => Cow::Owned(ip.to_string()),
+            IpAddr::V6(ip) => Cow::Owned(format!("[{ip}]")),
+        }
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EndpointMetadata {
     Machine(MachineData),
     PowerShelf(PowerShelfData),
@@ -85,28 +221,73 @@ impl EndpointMetadata {
         }
     }
 
+    /// Returns the hardware serial number when the endpoint metadata provides one.
+    ///
+    /// Machine and PowerShelf serial numbers may be absent; switch serial numbers are always
+    /// present.
     pub fn serial_number(&self) -> Option<&str> {
         match self {
             EndpointMetadata::Machine(machine) => machine.machine_serial.as_deref(),
-            EndpointMetadata::PowerShelf(power_shelf) => Some(power_shelf.serial.as_str()),
+            EndpointMetadata::PowerShelf(power_shelf) => power_shelf.serial.as_deref(),
             EndpointMetadata::Switch(switch) => Some(switch.serial.as_str()),
+        }
+    }
+
+    /// Returns the component category represented by this endpoint metadata.
+    pub const fn component_type(&self) -> &'static str {
+        match self {
+            Self::Machine(_) => "compute_node",
+            Self::PowerShelf(_) => "power_shelf",
+            Self::Switch(_) => "nvlink_switch",
         }
     }
 }
 
-#[derive(Clone, Debug)]
+/// Metadata that describes a machine endpoint for health telemetry.
+#[derive(Clone, Debug, PartialEq)]
 pub struct MachineData {
-    pub machine_id: MachineId,
+    /// Stable NICo machine identifier. None when running without NICo.
+    pub machine_id: Option<MachineId>,
+
+    /// Hardware chassis serial discovered from machine DMI data, when known.
     pub machine_serial: Option<String>,
+
+    /// UUID reported by the primary Redfish ComputerSystem resource.
+    ///
+    /// Endpoint discovery resolves this on demand. The write-once shared state
+    /// propagates enrichment to collectors that already started and records
+    /// both present and absent UUID results so successful BMC queries happen
+    /// only once.
+    pub system_uuid: SharedSystemUuid,
+
+    /// Physical rack slot where the machine is installed, when known.
     pub slot_number: Option<i32>,
+
+    /// Compute tray index where the machine is installed, when known.
     pub tray_index: Option<i32>,
+
+    /// NVLink domain UUID for the machine, when it participates in an NVLink domain.
     pub nvlink_domain_uuid: Option<NvLinkDomainId>,
+
+    /// Machine-level GPU driver version.
+    ///
+    /// This is populated only when API discovery reports exactly one unique
+    /// non-empty GPU driver version for the machine. It stays absent when the
+    /// version is unknown or the discovered GPUs report conflicting versions.
+    pub driver_version: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PowerShelfData {
     pub id: Option<PowerShelfId>,
-    pub serial: String,
+    /// Hardware serial number, when explicitly known.
+    pub serial: Option<String>,
+
+    /// NVLink domain UUID of the rack the shelf powers, when known.
+    ///
+    /// The API power shelf record carries no domain, so API discovery resolves
+    /// it from the machines and switches that share the shelf's rack.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,14 +296,22 @@ pub enum SwitchEndpointRole {
     Host,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SwitchData {
     pub id: Option<SwitchId>,
     pub serial: String,
     pub slot_number: Option<i32>,
     pub tray_index: Option<i32>,
+
+    /// NVLink domain UUID associated with the switch, when known.
+    ///
+    /// Discovery restarts collectors when this value changes so subsequent
+    /// telemetry uses current metadata.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
+
     pub endpoint_role: SwitchEndpointRole,
     pub is_primary: bool,
+    pub nmxc_enabled: bool,
     pub nmxt_enabled: bool,
 }
 
@@ -137,14 +326,25 @@ pub enum BmcCredentials {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BmcAddr {
     pub ip: IpAddr,
     pub port: Option<u16>,
-    pub mac: MacAddress,
+    /// Discovered MAC or the synthetic MAC retained for IPv4 cluster inventory.
+    /// Absent for IPv6 cluster inventory, which uses the full IP as its endpoint key.
+    pub mac: Option<MacAddress>,
 }
 
 impl BmcAddr {
+    /// Keeps registry IDs distinct when Prometheus replaces address punctuation.
+    pub(crate) fn registry_key(&self) -> String {
+        match (self.mac, self.ip) {
+            (Some(mac), _) => mac.to_string(),
+            (None, IpAddr::V4(ip)) => format!("ip_v4_{:08x}", u32::from(ip)),
+            (None, IpAddr::V6(ip)) => format!("ip_v6_{:032x}", u128::from(ip)),
+        }
+    }
+
     /// Builds the BMC base URL. IPv6 literals are bracketed so the URL
     /// authority parses — a bare `IpAddr` Display leaves IPv6 unbracketed,
     /// which `Url::parse` would otherwise reject.
@@ -180,22 +380,46 @@ impl From<BmcCredentials> for nv_redfish::bmc_http::BmcCredentials {
 
 pub trait EndpointSource: Send + Sync {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>>;
+
+    /// Fetches collector endpoints together with any authoritative inventory
+    /// observation supplied by this source.
+    ///
+    /// The default supports auxiliary endpoint sources, which do not define an
+    /// authoritative inventory population. An outer error means endpoint
+    /// discovery itself failed. An inventory error is returned inside the
+    /// snapshot so usable collector endpoints are preserved.
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(async move {
+            Ok(EndpointSnapshot {
+                endpoints: self.fetch_bmc_hosts().await?,
+                inventory: Ok(None),
+            })
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::net::IpAddr;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use carbide_test_support::{Check, check_values};
+    use carbide_uuid::power_shelf::PowerShelfId;
     use mac_address::MacAddress;
 
-    use super::BmcAddr;
+    use super::{
+        BmcAddr, BmcCredentials, EndpointMetadata, MachineData, PowerShelfData, SharedSystemUuid,
+        SwitchData, SwitchEndpointRole,
+    };
+    use crate::endpoint::test_support::{endpoint_with_creds, mac, test_endpoint};
 
     fn addr(ip: &str, port: Option<u16>) -> BmcAddr {
         BmcAddr {
             ip: IpAddr::from_str(ip).unwrap(),
             port,
-            mac: MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
         }
     }
 
@@ -221,5 +445,159 @@ mod tests {
         let url = addr("2001:db8::1", Some(80)).to_url().unwrap();
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.host_str(), Some("[2001:db8::1]"));
+    }
+
+    #[test]
+    fn switch_connect_host_for_uri_brackets_ipv6() {
+        let endpoint = endpoint_with_creds(
+            addr("2001:db8::1", Some(443)),
+            BmcCredentials::UsernamePassword {
+                username: "admin".to_string(),
+                password: Some("pass".to_string()),
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(endpoint.switch_connect_host_for_uri(), "[2001:db8::1]");
+        assert_eq!(endpoint.key(), "00:11:22:33:44:55");
+    }
+
+    #[test]
+    fn periodic_log_collection_endpoint_eligibility() {
+        let switch_bmc = SwitchData {
+            id: None,
+            serial: "switch".to_string(),
+            slot_number: Some(1),
+            tray_index: Some(2),
+            nvlink_domain_uuid: None,
+            endpoint_role: SwitchEndpointRole::Bmc,
+            is_primary: true,
+            nmxc_enabled: false,
+            nmxt_enabled: false,
+        };
+
+        let switch_host = SwitchData {
+            endpoint_role: SwitchEndpointRole::Host,
+            ..switch_bmc.clone()
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "machine BMC is eligible",
+                    input: Some(EndpointMetadata::Machine(MachineData {
+                        machine_id: None,
+                        machine_serial: None,
+                        system_uuid: SharedSystemUuid::default(),
+                        slot_number: None,
+                        tray_index: None,
+                        nvlink_domain_uuid: None,
+                        driver_version: None,
+                    })),
+                    expect: true,
+                },
+                Check {
+                    scenario: "switch BMC is eligible",
+                    input: Some(EndpointMetadata::Switch(switch_bmc)),
+                    expect: true,
+                },
+                Check {
+                    scenario: "switch host is not eligible",
+                    input: Some(EndpointMetadata::Switch(switch_host)),
+                    expect: false,
+                },
+                Check {
+                    scenario: "power shelf is eligible",
+                    input: Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                        id: None,
+                        serial: None,
+                        nvlink_domain_uuid: None,
+                    })),
+                    expect: true,
+                },
+                Check {
+                    scenario: "endpoint without metadata is not eligible",
+                    input: None,
+                    expect: false,
+                },
+            ],
+            |metadata| {
+                let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+                endpoint.metadata = metadata;
+
+                endpoint.supports_periodic_logs()
+            },
+        );
+    }
+
+    #[test]
+    fn power_shelf_log_identity_falls_back_to_id_then_mac() {
+        let power_shelf_id =
+            PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+                .expect("valid power shelf id");
+
+        check_values(
+            [
+                Check {
+                    scenario: "PowerShelf ID is available",
+                    input: Some(power_shelf_id),
+                    expect: power_shelf_id.to_string(),
+                },
+                Check {
+                    scenario: "PowerShelf ID is unavailable",
+                    input: None,
+                    expect: "00:11:22:33:44:55".to_string(),
+                },
+            ],
+            |id| {
+                let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+                endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                    id,
+                    serial: None,
+                    nvlink_domain_uuid: None,
+                }));
+
+                endpoint.log_identity().into_owned()
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_system_uuid_caches_absent_result_across_clones() {
+        let state = SharedSystemUuid::default();
+        let clone = state.clone();
+        let query_count = AtomicUsize::new(0);
+
+        for state in [&state, &clone] {
+            state
+                .get_or_try_init(|| async {
+                    query_count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, Infallible>(None)
+                })
+                .await
+                .expect("infallible UUID initialization");
+        }
+
+        assert_eq!(query_count.load(Ordering::SeqCst), 1);
+        assert_eq!(state.get(), None);
+        assert_eq!(clone.get(), None);
+    }
+
+    #[tokio::test]
+    async fn shared_system_uuid_equality_distinguishes_unresolved_from_absent() {
+        let unresolved = SharedSystemUuid::default();
+        let other_unresolved = SharedSystemUuid::default();
+
+        assert_eq!(unresolved, unresolved.clone());
+        assert_ne!(unresolved, other_unresolved);
+
+        let initialized_absent = SharedSystemUuid::default();
+        initialized_absent
+            .get_or_try_init(|| async { Ok::<_, Infallible>(None) })
+            .await
+            .expect("infallible UUID initialization");
+
+        assert_ne!(initialized_absent, unresolved);
     }
 }

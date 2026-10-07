@@ -32,6 +32,7 @@ use state_controller::state_handler::{
 };
 
 use crate as carbide_rack_controller;
+use crate::write_ops::PersistRackHealthHistory;
 
 //------------------------------------------------------------------------------
 
@@ -44,12 +45,12 @@ impl RackStateHandler {
     fn record_metrics(
         &self,
         state: &Rack,
+        aggregate_health: &health_report::HealthReport,
         ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
     ) {
-        let aggregate_health = derive_rack_aggregate_health(&state.health_reports);
         ctx.metrics.health.populate(
             state.id.to_string(),
-            &aggregate_health,
+            aggregate_health,
             &state.health_reports,
         );
         ctx.services.per_object_metrics_registry.record(
@@ -58,6 +59,21 @@ impl RackStateHandler {
             &ctx.metrics.health.health_alert_classifications,
             vec![],
         );
+    }
+
+    /// Persists a snapshot of the rack's aggregate health so it appears in the
+    /// health history timeline. Deduplication of unchanged observations is
+    /// handled in the database layer.
+    fn record_health_history(
+        &self,
+        state: &Rack,
+        aggregate_health: &health_report::HealthReport,
+        ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    ) {
+        ctx.pending_db_writes.push(PersistRackHealthHistory {
+            rack_id: state.id.clone(),
+            health_report: aggregate_health.clone(),
+        });
     }
 
     async fn attempt_state_transition(
@@ -81,7 +97,10 @@ impl RackStateHandler {
                 handle_validating(id, state, validating_state, ctx).await
             }
             RackState::Ready => handle_ready(id, state, &config, ctx).await,
-            RackState::Error { cause } => handle_error(id, state, &config, cause, ctx).await,
+            RackState::Error {
+                cause,
+                recovery_policy,
+            } => handle_error(id, state, &config, cause, *recovery_policy, ctx).await,
             RackState::Deleting => handle_deleting().await,
         }
     }
@@ -101,15 +120,21 @@ impl StateHandler for RackStateHandler {
         controller_state: &Self::ControllerState,
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-        tracing::info!("Rack {} is in state {}", id, controller_state.to_string());
+        tracing::info!(
+            rack_id = %id,
+            rack_state = %controller_state,
+            "Rack is in state",
+        );
 
-        self.record_metrics(state, ctx);
+        let aggregate_health = derive_rack_aggregate_health(&state.health_reports);
+        self.record_metrics(state, &aggregate_health, ctx);
+        self.record_health_history(state, &aggregate_health, ctx);
 
         if state.deleted.is_some() && !matches!(controller_state, RackState::Deleting) {
             tracing::info!(
-                "Rack {} is marked as deleted, transitioning from {} to Deleting",
-                id,
-                controller_state
+                rack_id = %id,
+                rack_state = %controller_state,
+                "Rack is marked as deleted, transitioning to Deleting",
             );
             return Ok(StateHandlerOutcome::transition(RackState::Deleting));
         }

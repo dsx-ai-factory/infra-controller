@@ -25,17 +25,21 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{EncryptedDek, KmsBackend, KmsError, crypto};
 
-/// KeySource describes where to load a symmetric
-/// encryption key from.
+/// Where to load a base64-encoded 256-bit key from.
+///
+/// `Env` and `File` keep key material out of the carbide config file, which is
+/// Debug-logged at startup and served on the web debug page. `Value` inlines
+/// the key in config instead -- handy for tests and local dev, but it lands in
+/// those debug surfaces, so use `Env` or `File` for real keys.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum KeySource {
-    /// Env loads the base64-encoded key from an environment
-    /// variable.
+    /// Load the key from an environment variable.
     Env { env: String },
-    /// File loads the base64-encoded key from a file path.
+    /// Load the key from a file path.
     File { file: PathBuf },
-    /// Value contains the base64-encoded key directly.
+    /// Use the base64-encoded key inlined directly in config. Convenient for
+    /// tests and local dev; avoid for real keys, since config is Debug-logged.
     Value { value: String },
 }
 
@@ -55,8 +59,7 @@ impl Drop for IntegratedKmsProvider {
     }
 }
 
-/// decode_key decodes a base64-encoded 256-bit key.
-/// The intermediate buffer is zeroized.
+/// Decode a base64-encoded 256-bit key. The intermediate buffer is zeroized.
 fn decode_key(encoded: &str) -> Result<[u8; 32], KmsError> {
     let mut bytes = BASE64
         .decode(encoded.trim())
@@ -70,22 +73,49 @@ fn decode_key(encoded: &str) -> Result<[u8; 32], KmsError> {
     result
 }
 
-/// resolve_key_source loads a key from the given source.
+/// Load a key from the given source. The base64 string read from the
+/// environment or file is zeroized along with the decoded buffer.
 fn resolve_key_source(source: &KeySource) -> Result<[u8; 32], KmsError> {
     match source {
         KeySource::Env { env } => {
-            let val = std::env::var(env)
-                .map_err(|_| KmsError::Other(format!("environment variable {env:?} not set")))?;
+            let val =
+                Zeroizing::new(std::env::var(env).map_err(|_| {
+                    KmsError::Other(format!("environment variable {env:?} not set"))
+                })?);
             decode_key(&val)
         }
         KeySource::File { file } => {
-            let val = std::fs::read_to_string(file)
-                .map_err(|e| KmsError::Other(format!("failed to read key file {file:?}: {e}")))?;
+            warn_if_key_file_is_open(file);
+            let val =
+                Zeroizing::new(std::fs::read_to_string(file).map_err(|e| {
+                    KmsError::Other(format!("failed to read key file {file:?}: {e}"))
+                })?);
             decode_key(&val)
         }
         KeySource::Value { value } => decode_key(value),
     }
 }
+
+/// Warn when a key file is readable by group or other. The provider still
+/// loads the key -- deployments mount these files in ways we cannot always
+/// predict -- but the warning gives operators a clear signal to fix the mode.
+#[cfg(unix)]
+fn warn_if_key_file_is_open(file: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(meta) = std::fs::metadata(file) {
+        let mode = meta.mode() & 0o077;
+        if mode != 0 {
+            tracing::warn!(
+                file = %file.display(),
+                mode = format!("{:o}", meta.mode() & 0o777),
+                "KEK file is readable by group/other; consider mode 0600"
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_key_file_is_open(_file: &std::path::Path) {}
 
 impl IntegratedKmsProvider {
     /// IntegratedKmsProvider::from_config builds a
@@ -119,7 +149,7 @@ impl KmsBackend for IntegratedKmsProvider {
             .keys
             .get(kek_id)
             .ok_or_else(|| KmsError::KeyNotFound(kek_id.to_string()))?;
-        let (ciphertext, nonce) = crypto::encrypt(kek, dek)?;
+        let (ciphertext, nonce) = crypto::encrypt(kek, dek, b"")?;
         Ok(EncryptedDek { ciphertext, nonce })
     }
 
@@ -132,7 +162,7 @@ impl KmsBackend for IntegratedKmsProvider {
             .keys
             .get(kek_id)
             .ok_or_else(|| KmsError::KeyNotFound(kek_id.to_string()))?;
-        let mut plaintext = crypto::decrypt(kek, &encrypted.nonce, &encrypted.ciphertext)?;
+        let mut plaintext = crypto::decrypt(kek, &encrypted.nonce, &encrypted.ciphertext, b"")?;
         let len = plaintext.len();
         let dek: [u8; 32] = plaintext
             .as_slice()
@@ -144,6 +174,10 @@ impl KmsBackend for IntegratedKmsProvider {
 
     fn can_decrypt_kek(&self, kek_id: &str) -> bool {
         self.keys.contains_key(kek_id)
+    }
+
+    fn kek_ids(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
     }
 }
 
@@ -229,12 +263,53 @@ mod tests {
         assert_eq!(*dek, *unwrapped);
     }
 
-    // Verifies that from_config loads keys from
-    // env vars.
+    // Verifies that from_config loads a key from each KeySource variant and
+    // rejects sources whose key material is malformed. Loading a key under a
+    // kek_id is observable through can_decrypt_kek, so each success row yields
+    // whether the configured key is present.
+    #[test]
+    fn from_config_loads_each_key_source_and_rejects_bad_material() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        // A key read from a file: write valid base64 to a temp path the File
+        // source then points at. The tempdir lives for the whole table.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("test-key");
+        std::fs::write(&file_path, encode_key(&make_test_key(2))).expect("write");
+
+        scenarios!(
+            run = |source: KeySource| {
+                let key_map = HashMap::from([("key".to_string(), source)]);
+                IntegratedKmsProvider::from_config(&key_map)
+                    .map(|p| p.can_decrypt_kek("key"))
+                    // KmsError isn't PartialEq; the failing rows assert only that
+                    // malformed material is rejected, so carry the message as a String.
+                    .map_err(|e| e.to_string())
+            };
+            "a valid key loads from any source" {
+                KeySource::File { file: file_path } => Yields(true),
+                KeySource::Value { value: encode_key(&make_test_key(3)) } => Yields(true),
+            }
+            "malformed key material is rejected" {
+                // Not valid base64.
+                KeySource::Value { value: "not-valid-base64!!!".to_string() } => Fails,
+                // Valid base64, but only 16 bytes -- not a 256-bit key.
+                KeySource::Value { value: BASE64.encode([0u8; 16]) } => Fails,
+            }
+        );
+    }
+
+    // Verifies that from_config loads keys from env vars. Kept separate from the
+    // key-source table because it mutates process-wide environment and so must
+    // run serially.
     #[test]
     #[serial]
     fn from_config_env_source() {
         let key = make_test_key(1);
+        // SAFETY: Initial lint enablement: `#[serial]` excludes other participating
+        // tests, but it does not prove Unix process-wide exclusion from environment
+        // readers. This needs owner review.
         unsafe { std::env::set_var("TEST_KMS_KEY_1", encode_key(&key)) };
 
         let mut key_map = HashMap::new();
@@ -248,76 +323,18 @@ mod tests {
         let provider = IntegratedKmsProvider::from_config(&key_map).expect("from_config");
         assert!(provider.can_decrypt_kek("my-key"));
 
+        // SAFETY: Initial lint enablement: `#[serial]` excludes other participating
+        // tests, but it does not prove Unix process-wide exclusion from environment
+        // readers. This needs owner review.
         unsafe { std::env::remove_var("TEST_KMS_KEY_1") };
     }
 
-    // Verifies that from_config loads keys from files.
-    #[test]
-    fn from_config_file_source() {
-        let key = make_test_key(2);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file_path = dir.path().join("test-key");
-        std::fs::write(&file_path, encode_key(&key)).expect("write");
-
-        let mut key_map = HashMap::new();
-        key_map.insert("file-key".to_string(), KeySource::File { file: file_path });
-
-        let provider = IntegratedKmsProvider::from_config(&key_map).expect("from_config");
-        assert!(provider.can_decrypt_kek("file-key"));
-    }
-
-    // Verifies that from_config loads inline base64 values.
-    #[test]
-    fn from_config_value_source() {
-        let key = make_test_key(3);
-        let mut key_map = HashMap::new();
-        key_map.insert(
-            "inline-key".to_string(),
-            KeySource::Value {
-                value: encode_key(&key),
-            },
-        );
-
-        let provider = IntegratedKmsProvider::from_config(&key_map).expect("from_config");
-        assert!(provider.can_decrypt_kek("inline-key"));
-    }
-
-    // Verifies that from_config errors when no keys
-    // are provided.
+    // Verifies that from_config errors when no keys are provided. Kept separate
+    // from the key-source table: this exercises an empty map rather than a single
+    // source variant.
     #[test]
     fn from_config_empty_errors() {
         let result = IntegratedKmsProvider::from_config(&HashMap::new());
-        assert!(result.is_err());
-    }
-
-    // Verifies that from_config errors on invalid base64.
-    #[test]
-    fn from_config_invalid_base64_errors() {
-        let mut key_map = HashMap::new();
-        key_map.insert(
-            "bad-key".to_string(),
-            KeySource::Value {
-                value: "not-valid-base64!!!".to_string(),
-            },
-        );
-
-        let result = IntegratedKmsProvider::from_config(&key_map);
-        assert!(result.is_err());
-    }
-
-    // Verifies that from_config errors when a key
-    // is not 32 bytes.
-    #[test]
-    fn from_config_wrong_key_length_errors() {
-        let mut key_map = HashMap::new();
-        key_map.insert(
-            "short-key".to_string(),
-            KeySource::Value {
-                value: BASE64.encode([0u8; 16]),
-            },
-        );
-
-        let result = IntegratedKmsProvider::from_config(&key_map);
         assert!(result.is_err());
     }
 }

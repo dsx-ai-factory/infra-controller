@@ -29,7 +29,7 @@ Show one domain by ID:
     $ nico-admin-cli domain show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short,
         long,
@@ -37,11 +37,11 @@ pub struct Args {
         conflicts_with = "domain",
         help = "Show all domains (DEPRECATED)"
     )]
-    pub all: bool,
+    pub(crate) all: bool,
 
     #[clap(
         default_value(None),
         help = "The domain to query, leave empty for all (default)"
     )]
-    pub domain: Option<DomainId>,
+    pub(crate) domain: Option<DomainId>,
 }

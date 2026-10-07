@@ -76,6 +76,10 @@ impl KmsBackend for MultiKmsProvider {
         self.providers.iter().any(|p| p.can_decrypt_kek(kek_id))
     }
 
+    fn kek_ids(&self) -> Vec<String> {
+        self.providers.iter().flat_map(|p| p.kek_ids()).collect()
+    }
+
     async fn generate_and_wrap_dek(
         &self,
         kek_id: &str,

@@ -22,7 +22,7 @@ use crate::errors::CarbideCliResult;
 
 /// Produces a table for printing a non-JSON representation of a
 /// compute allocation to standard out.
-pub fn convert_compute_allocations_to_table(
+pub(super) fn convert_compute_allocations_to_table(
     allocations: Vec<forgerpc::ComputeAllocation>,
     verbose: bool,
 ) -> CarbideCliResult<Box<Table>> {

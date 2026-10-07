@@ -45,12 +45,31 @@ legacyAlias:
 
 replicas: 1
 
-## Optional init containers (general-purpose pass-through)
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
+
+## Optional general-purpose init containers, run in list order after bootArtifactContainers.
+## Omitted or empty lists add no general-purpose init containers.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
+## they take precedence over `image`. If either is omitted or empty, supply `image`.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+## No repository or tag defaults are inherited from global.image.
+## All other Kubernetes container fields pass through unchanged; mounts are not injected.
 initContainers: []
+# initContainers:
+#   - name: custom-init
+#     repository: <your-registry>/custom-init
+#     tag: "<tag>"
+#     command: ["sh", "-c", "echo initializing"]
 
 ## Boot-artifact init containers
 ## Each entry is rendered as a Kubernetes init container with the boot-artifacts
-## volume automatically mounted at /boot-artifacts/blobs/internal, then served by
+## volume automatically mounted at /forge-boot-artifacts/blobs/internal, then served by
 ## nico-pxe at /public/blobs/internal.
 ##
 ## REQUIRED for DPU and host HTTP boot: if empty, the DPU/host requests its bootloader
@@ -60,21 +79,30 @@ initContainers: []
 ## NOTE: copy ONLY directories that exist in the image. The boot-artifacts-aarch64 image
 ## ships /aarch64 and /apt (NOT /firmware); copying a missing dir makes `cp` exit non-zero
 ## and the init container crash-loops.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to override `image`. If either is omitted
+## or empty, supply `image` (a tag or digest reference). No global.image defaults apply.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
 bootArtifactContainers: []
 # bootArtifactContainers:
 #   - name: boot-artifacts-x86-64
-#     image: <your-registry>/boot-artifacts-x86_64:<tag>
-#     command: ["sh", "-c", "cp -r /x86_64 /boot-artifacts/blobs/internal"]
+#     repository: <your-registry>/boot-artifacts-x86_64
+#     tag: "<tag>"
+#     command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
 #   - name: boot-artifacts-aarch64
-#     image: <your-registry>/boot-artifacts-aarch64:<tag>
-#     command: ["sh", "-c", "cp -r /aarch64 /apt /boot-artifacts/blobs/internal"]
+#     repository: <your-registry>/boot-artifacts-aarch64
+#     tag: "<tag>"
+#     command: ["sh", "-c", "cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal"]
 #   - name: machine-validation-config
-#     image: <your-registry>/machine-validation-config:<tag>
-#     command: ["sh", "-c", "cp -r /machine-validation /boot-artifacts/blobs/internal"]
+#     repository: <your-registry>/machine-validation-config
+#     tag: "<tag>"
+#     command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
 
 ## Boot artifact serving configuration
 bootArtifacts:
-  servePath: /boot-artifacts
+  servePath: /forge-boot-artifacts
 
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-pxe.name" . }}-env-config'
@@ -97,6 +125,9 @@ certificate:
   extraDnsNames: []
   extraUris: []
 
+## OTLP/gRPC collector endpoint. Empty leaves tracing off unless set through env.
+otlpEndpoint: ""
+
 env:
   FORGE_ROOT_CAFILE_PATH: "/var/run/secrets/spiffe.io/ca.crt"
   NICO_ROOT_CAFILE_PATH: "/var/run/secrets/spiffe.io/ca.crt"
@@ -106,6 +137,17 @@ env:
   NICO_CLIENT_KEY_PATH: "/var/run/secrets/spiffe.io/tls.key"
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
+
+## Optional CA bundle served to bootstrapping clients at /api/v0/tls/root_ca.
+## Set at most one of configMapName or secretName. When neither is set, PXE
+## serves FORGE_ROOT_CAFILE_PATH exactly as it does in legacy deployments.
+## The referenced object must exist in the release namespace. The CA is public,
+## but Secret references are supported for sites that already distribute trust
+## bundles that way.
+bootstrapRootCa:
+  configMapName: ""
+  secretName: ""
+  key: ca.crt
 
 ## ConfigMap settings for the env ConfigMap
 config:
@@ -136,6 +178,12 @@ serviceMonitor:
 externalService:
   enabled: false
   type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
   externalTrafficPolicy: Local
   annotations: {}
   # annotations:

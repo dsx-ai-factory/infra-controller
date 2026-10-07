@@ -34,6 +34,19 @@ pub async fn find_by_chassis_serial(
         .map_err(|e| DatabaseError::new(Q, e))
 }
 
+pub async fn find_by_chassis_serials(
+    txn: impl DbReader<'_>,
+    chassis_serials: &[&str],
+) -> DatabaseResult<Vec<NvlinkNmxcEndpoint>> {
+    const Q: &str =
+        "SELECT chassis_serial, endpoint FROM nvlink_nmxc_endpoints WHERE chassis_serial = ANY($1)";
+    sqlx::query_as(Q)
+        .bind(chassis_serials)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new(Q, e))
+}
+
 pub async fn find_all(txn: impl DbReader<'_>) -> DatabaseResult<Vec<NvlinkNmxcEndpoint>> {
     const Q: &str =
         "SELECT chassis_serial, endpoint FROM nvlink_nmxc_endpoints ORDER BY chassis_serial";
@@ -92,4 +105,64 @@ pub async fn update(
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new(Q, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn find_by_chassis_serials_returns_matching_rows(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        create(txn.as_mut(), "SN-A", "https://a.example:9370")
+            .await
+            .unwrap();
+        create(txn.as_mut(), "SN-B", "https://b.example:9370")
+            .await
+            .unwrap();
+        create(txn.as_mut(), "SN-C", "https://c.example:9370")
+            .await
+            .unwrap();
+
+        let mut rows = find_by_chassis_serials(txn.as_mut(), &["SN-A", "SN-C"])
+            .await
+            .unwrap();
+        rows.sort_by(|a, b| a.chassis_serial.cmp(&b.chassis_serial));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].chassis_serial, "SN-A");
+        assert_eq!(rows[0].endpoint, "https://a.example:9370");
+        assert_eq!(rows[1].chassis_serial, "SN-C");
+        assert_eq!(rows[1].endpoint, "https://c.example:9370");
+
+        txn.rollback().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn find_by_chassis_serials_unknown_serials_are_excluded(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        create(txn.as_mut(), "SN-KNOWN", "https://known.example:9370")
+            .await
+            .unwrap();
+
+        let rows = find_by_chassis_serials(txn.as_mut(), &["SN-KNOWN", "SN-MISSING"])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].chassis_serial, "SN-KNOWN");
+
+        txn.rollback().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn find_by_chassis_serials_empty_slice_returns_empty(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        create(txn.as_mut(), "SN-X", "https://x.example:9370")
+            .await
+            .unwrap();
+
+        let rows = find_by_chassis_serials(txn.as_mut(), &[]).await.unwrap();
+        assert!(rows.is_empty());
+
+        txn.rollback().await.unwrap();
+    }
 }

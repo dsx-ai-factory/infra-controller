@@ -1,0 +1,8 @@
+{
+  "bmc_mac_address": "00:11:22:33:44:55",
+  "bmc_username": "file-user",
+  "bmc_password": "file-password",
+  "chassis_serial_number": "FILE-001",
+  "metadata": null,
+  "interfaces": []
+}

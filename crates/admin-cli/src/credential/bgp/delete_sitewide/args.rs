@@ -19,7 +19,7 @@ use clap::Parser;
 use rpc::{CredentialType, forge as forgerpc};
 
 #[derive(Parser, Debug, Clone)]
-pub struct Args {}
+pub(crate) struct Args {}
 
 impl From<Args> for forgerpc::CredentialDeletionRequest {
     fn from(_: Args) -> Self {
@@ -27,6 +27,7 @@ impl From<Args> for forgerpc::CredentialDeletionRequest {
             credential_type: CredentialType::BgpSiteWideLeafPassword.into(),
             username: None,
             mac_address: None,
+            credential_name: None,
         }
     }
 }

@@ -34,13 +34,13 @@ Reboot into the custom PXE flow:
     --custom-pxe
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long)]
-    pub instance: InstanceId,
+    pub(super) instance: InstanceId,
 
     #[clap(short, long, action)]
-    pub custom_pxe: bool,
+    pub(super) custom_pxe: bool,
 
     #[clap(short, long, action)]
-    pub apply_updates_on_reboot: bool,
+    pub(super) apply_updates_on_reboot: bool,
 }

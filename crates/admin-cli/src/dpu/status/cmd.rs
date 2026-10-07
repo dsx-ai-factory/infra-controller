@@ -26,7 +26,7 @@ use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 use crate::{async_write, async_write_table_as_csv};
 
-pub async fn status(
+pub(super) async fn status(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -51,7 +51,9 @@ impl From<Machine> for DpuStatus {
             None => machine.state,
         };
 
-        let dpu_type = machine
+        let status = machine.status.unwrap_or_default();
+
+        let dpu_type = status
             .discovery_info
             .and_then(|di| di.dmi_data)
             .map(|dmi_data| {
@@ -67,7 +69,7 @@ impl From<Machine> for DpuStatus {
             id: machine.id,
             dpu_type,
             state,
-            healthy: machine
+            healthy: status
                 .health
                 .map(|health| {
                     if health.alerts.is_empty() {
@@ -105,7 +107,7 @@ impl From<DpuStatus> for Row {
     }
 }
 
-pub fn get_dpu_version_status(build_info: &BuildInfo, machine: &Machine) -> String {
+fn get_dpu_version_status(build_info: &BuildInfo, machine: &Machine) -> String {
     let mut version_statuses = Vec::default();
 
     let Some(runtime_config) = build_info.runtime_config.as_ref() else {
@@ -113,24 +115,26 @@ pub fn get_dpu_version_status(build_info: &BuildInfo, machine: &Machine) -> Stri
     };
 
     let expected_agent_version = &build_info.build_version;
-    if machine.dpu_agent_version() != expected_agent_version {
+    let status = machine.status.as_ref();
+    let agent_version = status
+        .and_then(|status| status.dpu_agent_version.as_deref())
+        .unwrap_or_default();
+    if agent_version != expected_agent_version {
         version_statuses.push("Agent update needed");
     }
 
     let expected_nic_versions = &runtime_config.dpu_nic_firmware_update_version;
 
-    let product_name = machine
-        .discovery_info
-        .as_ref()
+    let discovery_info = status.and_then(|status| status.discovery_info.as_ref());
+
+    let product_name = discovery_info
         .and_then(|di| di.dmi_data.as_ref())
         .map(|dmi_data| dmi_data.product_name.as_str())
         .unwrap_or_default();
 
     if let Some(expected_version) = expected_nic_versions.get(product_name)
         && expected_version
-            != machine
-                .discovery_info
-                .as_ref()
+            != discovery_info
                 .and_then(|di| di.dpu_info.as_ref())
                 .map(|dpu| dpu.firmware_version.as_str())
                 .unwrap_or_default()
@@ -162,7 +166,7 @@ pub fn get_dpu_version_status(build_info: &BuildInfo, machine: &Machine) -> Stri
     }
 }
 
-pub async fn handle_dpu_status(
+async fn handle_dpu_status(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -183,7 +187,7 @@ pub async fn handle_dpu_status(
     match output_format {
         OutputFormat::Json => {
             let machines: Vec<DpuStatus> = generate_dpu_status_data(api_client, dpus).await?;
-            async_write!(output_file, "{}", serde_json::to_string(&machines).unwrap())?;
+            async_write!(output_file, "{}", serde_json::to_string(&machines)?)?;
         }
         OutputFormat::Csv => {
             let result = generate_dpu_status_table(api_client, dpus).await?;
@@ -213,7 +217,7 @@ async fn generate_dpu_status_data(
     Ok(dpu_status)
 }
 
-pub async fn generate_dpu_status_table(
+async fn generate_dpu_status_table(
     api_client: &ApiClient,
     machines: Vec<Machine>,
 ) -> CarbideCliResult<Box<Table>> {

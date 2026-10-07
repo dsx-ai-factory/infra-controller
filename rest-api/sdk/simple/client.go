@@ -39,6 +39,7 @@ type ClientInterface interface {
 	// Machine management interfaces
 	GetMachines(ctx context.Context, paginationFilter *PaginationFilter) ([]Machine, *standard.PaginationResponse, *ApiError)
 	GetMachine(ctx context.Context, id string) (*Machine, *ApiError)
+	GetDpuMachines(ctx context.Context, machineID string) ([]standard.DpuMachine, *ApiError)
 
 	// Expected Machine management interfaces
 	CreateExpectedMachine(ctx context.Context, request ExpectedMachineCreateRequest) (*ExpectedMachine, *ApiError)
@@ -326,6 +327,16 @@ func (c *Client) GetMachine(ctx context.Context, id string) (*Machine, *ApiError
 	logger.Info().Msgf("Getting Machine for org: %s", c.Config.Org)
 
 	return NewMachineManager(c).GetMachine(ctx, id)
+}
+
+func (c *Client) GetDpuMachines(ctx context.Context, machineID string) ([]standard.DpuMachine, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Getting DPU Machines for host Machine %s in org: %s", machineID, c.Config.Org)
+
+	return NewMachineManager(c).GetDpuMachines(ctx, machineID)
 }
 
 // ExpectedMachine

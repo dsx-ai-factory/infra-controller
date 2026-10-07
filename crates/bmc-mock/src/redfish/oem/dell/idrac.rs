@@ -30,33 +30,33 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
-pub fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Attributes",
-        get(get_managers_oem_dell_attributes).patch(patch_managers_oem_dell_attributes),
+        get(get_managers_oem_dell_attributes::<C>).patch(patch_managers_oem_dell_attributes::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
-        get(get_managers_oem_dell_attributes).patch(patch_managers_oem_dell_attributes),
+        get(get_managers_oem_dell_attributes::<C>).patch(patch_managers_oem_dell_attributes::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Jobs",
-        post(post_dell_create_bios_job),
+        post(post_dell_create_bios_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs",
-        post(post_dell_create_bios_job),
+        post(post_dell_create_bios_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Jobs/{job_id}",
-        get(get_dell_job),
+        get(get_dell_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}",
-        get(get_dell_job),
+        get(get_dell_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue",
         post(post_delete_job_queue)
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Actions/Oem/EID_674_Manager.ImportSystemConfiguration",
-        post(post_import_sys_configuration)
+        post(post_import_sys_configuration::<C>)
     )
 }
 
@@ -71,7 +71,9 @@ fn attributes_resource() -> redfish::Resource<'static> {
     }
 }
 
-async fn get_managers_oem_dell_attributes(State(state): State<BmcState>) -> Response {
+async fn get_managers_oem_dell_attributes<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -95,8 +97,8 @@ async fn get_managers_oem_dell_attributes(State(state): State<BmcState>) -> Resp
     state.get_attrs(base.clone()).into_ok_response()
 }
 
-async fn patch_managers_oem_dell_attributes(
-    State(state): State<BmcState>,
+async fn patch_managers_oem_dell_attributes<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Json(attrs): Json<serde_json::Value>,
 ) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
@@ -107,12 +109,15 @@ async fn patch_managers_oem_dell_attributes(
 }
 
 #[derive(Debug, Clone)]
-pub enum JobState {
+pub(crate) enum JobState {
     Scheduled,
     Completed,
 }
 
-async fn get_dell_job(State(state): State<BmcState>, Path(job_id): Path<String>) -> Response {
+async fn get_dell_job<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(job_id): Path<String>,
+) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -150,7 +155,7 @@ async fn get_dell_job(State(state): State<BmcState>, Path(job_id): Path<String>)
     .into_ok_response()
 }
 
-pub fn create_job_with_location(state: BmcState) -> Response {
+pub(in crate::redfish) fn create_job_with_location<C: Callbacks>(state: BmcState<C>) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -165,7 +170,7 @@ pub fn create_job_with_location(state: BmcState) -> Response {
     }
 }
 
-async fn post_dell_create_bios_job(State(state): State<BmcState>) -> Response {
+async fn post_dell_create_bios_job<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     create_job_with_location(state)
 }
 
@@ -173,27 +178,27 @@ async fn post_delete_job_queue() -> Response {
     json!({}).into_ok_response()
 }
 
-async fn post_import_sys_configuration(State(state): State<BmcState>) -> Response {
+async fn post_import_sys_configuration<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     create_job_with_location(state)
 }
 
 const DELL_JOB_TYPE: &str = "DellConfiguration";
 
 #[derive(Debug, Clone)]
-pub struct Job {
-    pub job_id: String,
-    pub job_state: JobState,
-    pub job_type: String,
-    pub start_time: chrono::DateTime<chrono::Utc>,
-    pub end_time: Option<chrono::DateTime<chrono::Utc>>,
+pub(crate) struct Job {
+    pub(crate) job_id: String,
+    pub(crate) job_state: JobState,
+    pub(crate) job_type: String,
+    pub(crate) start_time: chrono::DateTime<chrono::Utc>,
+    pub(crate) end_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Job {
-    pub fn is_dell_job(&self) -> bool {
+    pub(crate) fn is_dell_job(&self) -> bool {
         matches!(self.job_type.as_str(), DELL_JOB_TYPE)
     }
 
-    pub fn percent_complete(&self) -> i32 {
+    pub(crate) fn percent_complete(&self) -> i32 {
         match &self.job_state {
             JobState::Completed => 100,
             _ => 0,
@@ -202,9 +207,9 @@ impl Job {
 }
 
 #[derive(Clone)]
-pub struct IdracState {
-    pub jobs: Arc<Mutex<HashMap<String, Job>>>,
-    pub dell_attrs: Arc<Mutex<serde_json::Value>>,
+pub(crate) struct IdracState {
+    pub(crate) jobs: Arc<Mutex<HashMap<String, Job>>>,
+    pub(crate) dell_attrs: Arc<Mutex<serde_json::Value>>,
 }
 
 impl Default for IdracState {
@@ -217,11 +222,11 @@ impl Default for IdracState {
 }
 
 impl IdracState {
-    pub fn get_job(&self, job_id: &String) -> Option<Job> {
+    pub(crate) fn get_job(&self, job_id: &String) -> Option<Job> {
         self.jobs.lock().unwrap().get(job_id).cloned()
     }
 
-    pub fn add_job(&self) -> Result<String, Box<dyn std::error::Error>> {
+    pub(crate) fn add_job(&self) -> Result<String, Box<dyn std::error::Error>> {
         let mut jobs = self.jobs.lock().unwrap();
 
         let job_id = rand::rng()
@@ -242,7 +247,7 @@ impl IdracState {
         Ok(job_id)
     }
 
-    pub fn complete_all_bios_jobs(&self) {
+    pub(crate) fn complete_all_bios_jobs(&self) {
         let mut jobs = self.jobs.lock().unwrap();
 
         let bios_jobs: Vec<Job> = jobs
@@ -257,12 +262,12 @@ impl IdracState {
         }
     }
 
-    pub fn update_attrs(&self, v: serde_json::Value) {
+    pub(crate) fn update_attrs(&self, v: serde_json::Value) {
         let mut dell_attrs = self.dell_attrs.lock().unwrap();
         json_patch(&mut dell_attrs, v);
     }
 
-    pub fn get_attrs(&self, mut base: serde_json::Value) -> serde_json::Value {
+    pub(crate) fn get_attrs(&self, mut base: serde_json::Value) -> serde_json::Value {
         let dell_attrs = self.dell_attrs.lock().unwrap();
         json_patch(&mut base, dell_attrs.clone());
         base

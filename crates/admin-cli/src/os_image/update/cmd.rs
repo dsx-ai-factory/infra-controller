@@ -19,7 +19,7 @@ use super::args::{Args, UpdateRequest};
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn update(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn update(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let req: UpdateRequest = args.try_into()?;
     let image = api_client
         .update_os_image(

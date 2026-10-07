@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -36,37 +37,38 @@ import (
 )
 
 // Old punt stats:
-//     PUNT miss pkts:570458 bytes:44652348
-//     PUNT miss drop pkts:0 bytes:0
-//     PUNT control pkts:6623177 bytes:629089559
-//     PUNT control drop pkts:0 bytes:0
-//     ACL PUNT pkts:4 bytes:438
-//     ACL drop pkts:0 bytes:0
+//
+//	PUNT miss pkts:570458 bytes:44652348
+//	PUNT miss drop pkts:0 bytes:0
+//	PUNT control pkts:6623177 bytes:629089559
+//	PUNT control drop pkts:0 bytes:0
+//	ACL PUNT pkts:4 bytes:438
+//	ACL drop pkts:0 bytes:0
 //
 // New punt stats:
-//     catch_all pkts:4 bytes:240
-//     catch_all drop pkts:0 bytes:0
-//     arp pkts:36 bytes:2160
-//     arp drop pkts:0 bytes:0
-//     bfd pkts:0 bytes:0
-//     bfd drop pkts:0 bytes:0
-//     bgp pkts:1038740 bytes:92338211
-//     bgp drop pkts:0 bytes:0
-//     dhcp pkts:9 bytes:3255
-//     dhcp drop pkts:0 bytes:0
-//     ip2me pkts:13 bytes:2478
-//     ip2me drop pkts:0 bytes:0
-//     icmp pkts:8 bytes:626
-//     icmp drop pkts:0 bytes:0
-//     icmp6_neigh pkts:178078 bytes:14478132
-//     icmp6_neigh drop pkts:0 bytes:0
 //
+//	catch_all pkts:4 bytes:240
+//	catch_all drop pkts:0 bytes:0
+//	arp pkts:36 bytes:2160
+//	arp drop pkts:0 bytes:0
+//	bfd pkts:0 bytes:0
+//	bfd drop pkts:0 bytes:0
+//	bgp pkts:1038740 bytes:92338211
+//	bgp drop pkts:0 bytes:0
+//	dhcp pkts:9 bytes:3255
+//	dhcp drop pkts:0 bytes:0
+//	ip2me pkts:13 bytes:2478
+//	ip2me drop pkts:0 bytes:0
+//	icmp pkts:8 bytes:626
+//	icmp drop pkts:0 bytes:0
+//	icmp6_neigh pkts:178078 bytes:14478132
+//	icmp6_neigh drop pkts:0 bytes:0
 type Format int
 
 const (
-	NullFormat Format = iota
-	OriginalFormat	// old punt stats
-	ProtocolFormat	// new punt stats
+	NullFormat     Format = iota
+	OriginalFormat        // old punt stats
+	ProtocolFormat        // new punt stats
 )
 
 var recognizedProtocols = map[string]struct{}{
@@ -89,7 +91,7 @@ type puntStatsReceiver struct {
 
 // receiver constructor
 func newPuntStatsReceiver(
-	set receiver.CreateSettings,
+	set receiver.Settings,
 	config *Config,
 	next consumer.Metrics,
 ) (receiver.Metrics, error) {
@@ -132,8 +134,8 @@ func (r *puntStatsReceiver) Shutdown(ctx context.Context) error {
 
 func scrapePuntStats(
 	ctx context.Context,
-        filePath string,
-        containerName string,
+	filePath string,
+	containerName string,
 ) (string, error) {
 	var args []string
 
@@ -141,23 +143,32 @@ func scrapePuntStats(
 		// Read directly from DPU filesystem
 		args = []string{"cat", filePath}
 	} else {
-		// 1. Get list of containers
-		psCmd := exec.CommandContext(ctx, "crictl", "ps")
+		// 1. Get list of containers (as structured JSON, so the name match
+		//    below is scoped to the container's name field)
+		psCmd := exec.CommandContext(ctx, "crictl", "ps", "-o", "json")
 		out, err := psCmd.Output()
 		if err != nil {
 			return "", fmt.Errorf("crictl ps failed: %w", err)
 		}
 
-		// 2. Find the container ID by name (grep + awk '{print $1}')
+		// 2. Find the container ID by exact name match
+		var psResult struct {
+			Containers []struct {
+				ID       string `json:"id"`
+				Metadata struct {
+					Name string `json:"name"`
+				} `json:"metadata"`
+			} `json:"containers"`
+		}
+		if err := json.Unmarshal(out, &psResult); err != nil {
+			return "", fmt.Errorf("failed to parse crictl ps output: %w", err)
+		}
+
 		var containerID string
-		lines := strings.Split(string(out), "\n")
-		for _, line := range lines {
-			if strings.Contains(line, containerName) {
-				fields := strings.Fields(line)
-				if len(fields) > 0 {
-					containerID = fields[0]
-					break
-				}
+		for _, c := range psResult.Containers {
+			if c.Metadata.Name == containerName {
+				containerID = c.ID
+				break
 			}
 		}
 		if containerID == "" {

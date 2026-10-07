@@ -8,9 +8,11 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/uptrace/bun"
 )
@@ -35,6 +37,23 @@ type InfrastructureProvider struct {
 	CreatedBy      uuid.UUID  `bun:"type:uuid,notnull"`
 }
 
+// InfrastructureProviderCreateInput input parameters for Create method
+type InfrastructureProviderCreateInput struct {
+	Name           string
+	DisplayName    *string
+	Org            string
+	OrgDisplayName *string
+	CreatedBy      uuid.UUID
+}
+
+// InfrastructureProviderUpdateInput input parameters for Update method
+type InfrastructureProviderUpdateInput struct {
+	InfrastructureProviderID uuid.UUID
+	Name                     *string
+	DisplayName              *string
+	OrgDisplayName           *string
+}
+
 var _ bun.BeforeAppendModelHook = (*InfrastructureProvider)(nil)
 
 // BeforeAppendModel is a hook that is called before the model is appended to the query
@@ -56,29 +75,25 @@ type InfrastructureProviderDAO interface {
 	//
 	GetAllByOrg(ctx context.Context, tx *db.Tx, org string, includeRelations []string) ([]InfrastructureProvider, error)
 	//
-	CreateFromParams(ctx context.Context, tx *db.Tx, name string, displayName *string, org string, orgDisplayName *string, createdBy *User) (*InfrastructureProvider, error)
+	Create(ctx context.Context, tx *db.Tx, input InfrastructureProviderCreateInput) (*InfrastructureProvider, error)
 	//
-	UpdateFromParams(ctx context.Context, tx *db.Tx, id uuid.UUID, name *string, displayName *string, orgDisplayName *string) (*InfrastructureProvider, error)
+	Update(ctx context.Context, tx *db.Tx, input InfrastructureProviderUpdateInput) (*InfrastructureProvider, error)
 	//
-	DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error
+	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
 
 // InfrastructureProviderSQLDAO implements InfrastructureProviderDAO interface for SQL
 type InfrastructureProviderSQLDAO struct {
 	dbSession *db.Session
 	InfrastructureProviderDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // GetByID returns the InfrastructureProvider with the given ID
-func (ipsd InfrastructureProviderSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InfrastructureProvider, error) {
+func (ipsd InfrastructureProviderSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.GetByID")
-	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
-
-		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "id", id.String())
-	}
+	ctx, ipDAOSpan := cotel.StartSpan(ctx, "InfrastructureProviderDAO.GetByID")
+	defer func() { cotel.EndSpan(ipDAOSpan, retErr) }()
+	cotel.SetAttribute(ipDAOSpan, attribute.String("id", id.String()))
 
 	ip := &InfrastructureProvider{}
 
@@ -101,13 +116,11 @@ func (ipsd InfrastructureProviderSQLDAO) GetByID(ctx context.Context, tx *db.Tx,
 }
 
 // GetAllByOrg returns the InfrastructureProviders with the given org
-func (ipsd InfrastructureProviderSQLDAO) GetAllByOrg(ctx context.Context, tx *db.Tx, org string, includeRelations []string) ([]InfrastructureProvider, error) {
+func (ipsd InfrastructureProviderSQLDAO) GetAllByOrg(ctx context.Context, tx *db.Tx, org string, includeRelations []string) (_ []InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.GetAllByOrg")
-	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
-		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "org", org)
-	}
+	ctx, ipDAOSpan := cotel.StartSpan(ctx, "InfrastructureProviderDAO.GetAllByOrg")
+	defer func() { cotel.EndSpan(ipDAOSpan, retErr) }()
+	cotel.SetAttribute(ipDAOSpan, attribute.String("org", org))
 
 	var ips []InfrastructureProvider
 
@@ -126,22 +139,20 @@ func (ipsd InfrastructureProviderSQLDAO) GetAllByOrg(ctx context.Context, tx *db
 	return ips, nil
 }
 
-// CreateFromParams creates a new InfrastructureProvider from the given parameters
-func (ipsd InfrastructureProviderSQLDAO) CreateFromParams(ctx context.Context, tx *db.Tx, name string, displayName *string, org string, orgDisplayName *string, createdBy *User) (*InfrastructureProvider, error) {
+// Create creates a new InfrastructureProvider from the given parameters
+func (ipsd InfrastructureProviderSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfrastructureProviderCreateInput) (_ *InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.CreateFromParams")
-	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
-		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "name", name)
-	}
+	ctx, ipDAOSpan := cotel.StartSpan(ctx, "InfrastructureProviderSQLDAO.Create")
+	defer func() { cotel.EndSpan(ipDAOSpan, retErr) }()
+	cotel.SetAttribute(ipDAOSpan, attribute.String("name", input.Name))
 
 	ip := &InfrastructureProvider{
 		ID:             uuid.New(),
-		Name:           name,
-		DisplayName:    displayName,
-		Org:            org,
-		OrgDisplayName: orgDisplayName,
-		CreatedBy:      createdBy.ID,
+		Name:           input.Name,
+		DisplayName:    input.DisplayName,
+		Org:            input.Org,
+		OrgDisplayName: input.OrgDisplayName,
+		CreatedBy:      input.CreatedBy,
 	}
 
 	_, err := db.GetIDB(tx, ipsd.dbSession).NewInsert().Model(ip).Exec(ctx)
@@ -157,51 +168,41 @@ func (ipsd InfrastructureProviderSQLDAO) CreateFromParams(ctx context.Context, t
 	return nip, nil
 }
 
-// UpdateFromParams updates the InfrastructureProvider with the given parameters
-func (ipsd InfrastructureProviderSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, id uuid.UUID, name *string, displayName *string, orgDisplayName *string) (*InfrastructureProvider, error) {
+// Update updates the InfrastructureProvider with the given parameters
+func (ipsd InfrastructureProviderSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfrastructureProviderUpdateInput) (_ *InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.UpdateFromParams")
-	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
-	}
+	ctx, ipDAOSpan := cotel.StartSpan(ctx, "InfrastructureProviderSQLDAO.Update")
+	defer func() { cotel.EndSpan(ipDAOSpan, retErr) }()
+	cotel.SetAttribute(ipDAOSpan, attribute.String("id", input.InfrastructureProviderID.String()))
 
 	ip := &InfrastructureProvider{
-		ID: id,
+		ID: input.InfrastructureProviderID,
 	}
 
 	updatedFields := []string{}
 
-	if name != nil {
-		ip.Name = *name
+	if input.Name != nil {
+		ip.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-
-		if ipDAOSpan != nil {
-			ipsd.tracerSpan.SetAttribute(ipDAOSpan, "name", *name)
-		}
+		cotel.SetAttribute(ipDAOSpan, attribute.String("name", *input.Name))
 	}
 
-	if displayName != nil {
-		ip.DisplayName = displayName
+	if input.DisplayName != nil {
+		ip.DisplayName = input.DisplayName
 		updatedFields = append(updatedFields, "display_name")
-
-		if ipDAOSpan != nil {
-			ipsd.tracerSpan.SetAttribute(ipDAOSpan, "display_name", *displayName)
-		}
+		cotel.SetAttribute(ipDAOSpan, attribute.String("display_name", *input.DisplayName))
 	}
 
-	if orgDisplayName != nil {
-		ip.OrgDisplayName = orgDisplayName
+	if input.OrgDisplayName != nil {
+		ip.OrgDisplayName = input.OrgDisplayName
 		updatedFields = append(updatedFields, "org_display_name")
-
-		if ipDAOSpan != nil {
-			ipsd.tracerSpan.SetAttribute(ipDAOSpan, "org_display_name", *orgDisplayName)
-		}
+		cotel.SetAttribute(ipDAOSpan, attribute.String("org_display_name", *input.OrgDisplayName))
 	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ipsd.dbSession).NewUpdate().Model(ip).Where("id = ?", id).Column(updatedFields...).Exec(ctx)
+		_, err := db.GetIDB(tx, ipsd.dbSession).NewUpdate().Model(ip).Where("id = ?", input.InfrastructureProviderID).Column(updatedFields...).Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -215,15 +216,12 @@ func (ipsd InfrastructureProviderSQLDAO) UpdateFromParams(ctx context.Context, t
 	return uip, nil
 }
 
-// DeleteByID deletes the InfrastructureProvider with the given ID
-func (ipsd InfrastructureProviderSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+// Delete deletes the InfrastructureProvider with the given ID
+func (ipsd InfrastructureProviderSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.DeleteByID")
-	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
-
-		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "id", id.String())
-	}
+	ctx, ipDAOSpan := cotel.StartSpan(ctx, "InfrastructureProviderSQLDAO.Delete")
+	defer func() { cotel.EndSpan(ipDAOSpan, retErr) }()
+	cotel.SetAttribute(ipDAOSpan, attribute.String("id", id.String()))
 
 	_, err := db.GetIDB(tx, ipsd.dbSession).NewDelete().Model((*InfrastructureProvider)(nil)).Where("id = ?", id).Exec(ctx)
 
@@ -237,7 +235,6 @@ func (ipsd InfrastructureProviderSQLDAO) DeleteByID(ctx context.Context, tx *db.
 // NewInfrastructureProviderDAO creates and returns a new data access object for InfrastructureProvider
 func NewInfrastructureProviderDAO(dbSession *db.Session) InfrastructureProviderDAO {
 	return InfrastructureProviderSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

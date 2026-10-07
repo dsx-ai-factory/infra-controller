@@ -23,7 +23,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 use crate::sku::show::cmd::show_skus_table;
 
-pub async fn create(
+pub(super) async fn create(
     args: Args,
     api_client: &ApiClient,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,

@@ -22,6 +22,7 @@
 //! Decrypt uses the `key_id` embedded in each ciphertext envelope. Encrypt uses site
 //! `[machine_identity].current_encryption_key_id`.
 
+use carbide_instrument::{Event, LabelValue, emit};
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_secrets::key_encryption;
 use model::tenant::{
@@ -31,6 +32,68 @@ use model::tenant::{
 use tonic::Status;
 
 use crate::CarbideError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum StoredMachineIdentitySecretKind {
+    SigningKey,
+    TokenDelegationAuth,
+}
+
+/// A tenant's stored machine-identity secret could not be decrypted. Each
+/// variant is one kind of secret, and picks the wording that path logged.
+#[derive(Event)]
+#[event(
+    event_name = "machine_identity_stored_secret_decryption_failed",
+    metric_name = "carbide_machine_identity_stored_secret_decryption_failures_total",
+    component = "nico-api",
+    metric = counter,
+    log = error,
+    describe = "Number of stored machine identity secret decryption failures, by secret kind.",
+    labels(secret_kind: StoredMachineIdentitySecretKind),
+)]
+pub(crate) enum MachineIdentityStoredSecretDecryptionFailed {
+    #[event(labels(secret_kind = SigningKey), message = "tenant signing key decrypt failed")]
+    SigningKey {
+        #[context]
+        organization_id: String,
+        #[context]
+        error: String,
+    },
+
+    #[event(
+        labels(secret_kind = TokenDelegationAuth),
+        message = "token delegation auth config decrypt failed"
+    )]
+    TokenDelegationAuth {
+        #[context]
+        organization_id: String,
+        #[context]
+        error: String,
+    },
+}
+
+fn emit_stored_secret_decryption_failed(
+    secret_kind: StoredMachineIdentitySecretKind,
+    organization_id: &str,
+    error: &Status,
+) {
+    let organization_id = organization_id.to_string();
+    let error = error.message().to_string();
+    emit(match secret_kind {
+        StoredMachineIdentitySecretKind::SigningKey => {
+            MachineIdentityStoredSecretDecryptionFailed::SigningKey {
+                organization_id,
+                error,
+            }
+        }
+        StoredMachineIdentitySecretKind::TokenDelegationAuth => {
+            MachineIdentityStoredSecretDecryptionFailed::TokenDelegationAuth {
+                organization_id,
+                error,
+            }
+        }
+    });
+}
 
 pub(crate) async fn machine_identity_encryption_secret(
     credentials: &dyn CredentialReader,
@@ -89,17 +152,27 @@ pub(crate) enum ReencryptBlobOutcome {
 pub(crate) async fn reencrypt_ciphertext_if_needed(
     credentials: &dyn CredentialReader,
     ciphertext: &str,
+    secret_kind: StoredMachineIdentitySecretKind,
+    organization_id: &str,
     target_key_id: &EncryptionKeyId,
     target_aes: &key_encryption::Aes256Key,
     dry_run: bool,
 ) -> Result<ReencryptBlobOutcome, Status> {
-    let current_key_id = key_encryption::envelope_key_id(ciphertext).map_err(|e| {
-        CarbideError::internal(format!("stored ciphertext envelope is invalid: {e}"))
-    })?;
+    let current_key_id = key_encryption::envelope_key_id(ciphertext)
+        .map_err(|e| -> Status {
+            CarbideError::internal(format!("stored ciphertext envelope is invalid: {e}")).into()
+        })
+        .inspect_err(|error| {
+            emit_stored_secret_decryption_failed(secret_kind, organization_id, error);
+        })?;
     if current_key_id == target_key_id.as_str() {
         return Ok(ReencryptBlobOutcome::SkippedOnTarget);
     }
-    let plaintext = decrypt_machine_identity_ciphertext(credentials, ciphertext).await?;
+    let plaintext = decrypt_machine_identity_ciphertext(credentials, ciphertext)
+        .await
+        .inspect_err(|error| {
+            emit_stored_secret_decryption_failed(secret_kind, organization_id, error);
+        })?;
     if dry_run {
         return Ok(ReencryptBlobOutcome::DryRunWouldReencrypt);
     }
@@ -166,11 +239,160 @@ pub(crate) fn token_delegation_credentials(
 #[cfg(test)]
 mod tests {
     use base64::Engine;
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_test_support::{Check, check_values};
     use model::tenant::EncryptionKeyId;
 
     use super::*;
+
+    const STORED_SECRET_DECRYPTION_FAILURE_METRIC: &str =
+        "carbide_machine_identity_stored_secret_decryption_failures_total";
+
+    #[derive(Debug, PartialEq)]
+    struct StoredSecretDecryptionFailureObservation {
+        counter_deltas: [f64; 2],
+        log_count: usize,
+        level: tracing::Level,
+        metadata_name: String,
+        message: String,
+        event_name: Option<String>,
+        metric_name: Option<String>,
+        secret_kind: Option<String>,
+        organization_id: Option<String>,
+        error_present: bool,
+        exposes_sensitive_fields: bool,
+    }
+
+    #[test]
+    fn stored_secret_decryption_failures_share_one_bounded_metric() {
+        check_values(
+            [
+                Check {
+                    scenario: "stored signing key",
+                    input: StoredMachineIdentitySecretKind::SigningKey,
+                    expect: StoredSecretDecryptionFailureObservation {
+                        counter_deltas: [1.0, 0.0],
+                        log_count: 1,
+                        level: tracing::Level::ERROR,
+                        metadata_name: "machine_identity_stored_secret_decryption_failed"
+                            .to_string(),
+                        message: "tenant signing key decrypt failed".to_string(),
+                        event_name: Some(
+                            "machine_identity_stored_secret_decryption_failed".to_string(),
+                        ),
+                        metric_name: Some(STORED_SECRET_DECRYPTION_FAILURE_METRIC.to_string()),
+                        secret_kind: Some("signing_key".to_string()),
+                        organization_id: Some("tenant-org".to_string()),
+                        error_present: true,
+                        exposes_sensitive_fields: false,
+                    },
+                },
+                Check {
+                    scenario: "token delegation authentication",
+                    input: StoredMachineIdentitySecretKind::TokenDelegationAuth,
+                    expect: StoredSecretDecryptionFailureObservation {
+                        counter_deltas: [0.0, 1.0],
+                        log_count: 1,
+                        level: tracing::Level::ERROR,
+                        metadata_name: "machine_identity_stored_secret_decryption_failed"
+                            .to_string(),
+                        message: "token delegation auth config decrypt failed".to_string(),
+                        event_name: Some(
+                            "machine_identity_stored_secret_decryption_failed".to_string(),
+                        ),
+                        metric_name: Some(STORED_SECRET_DECRYPTION_FAILURE_METRIC.to_string()),
+                        secret_kind: Some("token_delegation_auth".to_string()),
+                        organization_id: Some("tenant-org".to_string()),
+                        error_present: true,
+                        exposes_sensitive_fields: false,
+                    },
+                },
+            ],
+            |secret_kind| {
+                let metrics = MetricsCapture::start();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let source_key_id = "source-key";
+                let target_key_id: EncryptionKeyId = "target-key".parse().unwrap();
+                let source_aes =
+                    key_encryption::aes256_key_from_stored_secret(&stored_secret(1)).unwrap();
+                let target_aes =
+                    key_encryption::aes256_key_from_stored_secret(&stored_secret(2)).unwrap();
+                let ciphertext =
+                    key_encryption::encrypt(b"stored secret", &source_aes, source_key_id).unwrap();
+                let credentials = TestCredentialManager::default();
+                runtime
+                    .block_on(credentials.set_credentials(
+                        &CredentialKey::MachineIdentityEncryptionKey {
+                            key_id: source_key_id.to_string(),
+                        },
+                        &Credentials::UsernamePassword {
+                            username: String::new(),
+                            password: stored_secret(3),
+                        },
+                    ))
+                    .unwrap();
+                let mut rewrap_result = None;
+                let logs = capture_logs(|| {
+                    rewrap_result = Some(runtime.block_on(reencrypt_ciphertext_if_needed(
+                        &credentials,
+                        &ciphertext,
+                        secret_kind,
+                        "tenant-org",
+                        &target_key_id,
+                        &target_aes,
+                        false,
+                    )));
+                });
+                assert!(rewrap_result.expect("rewrap ran").is_err());
+                let event_logs = logs
+                    .iter()
+                    .filter(|log| {
+                        log.field("metric_name") == Some(STORED_SECRET_DECRYPTION_FAILURE_METRIC)
+                    })
+                    .collect::<Vec<_>>();
+                let log = event_logs
+                    .first()
+                    .expect("decryption failure should emit one Event log");
+
+                StoredSecretDecryptionFailureObservation {
+                    counter_deltas: [
+                        metrics.counter_delta(
+                            STORED_SECRET_DECRYPTION_FAILURE_METRIC,
+                            &[("secret_kind", "signing_key")],
+                        ),
+                        metrics.counter_delta(
+                            STORED_SECRET_DECRYPTION_FAILURE_METRIC,
+                            &[("secret_kind", "token_delegation_auth")],
+                        ),
+                    ],
+                    log_count: event_logs.len(),
+                    level: log.level,
+                    metadata_name: log.metadata_name.clone(),
+                    message: log.message.clone(),
+                    event_name: log.field("event_name").map(str::to_string),
+                    metric_name: log.field("metric_name").map(str::to_string),
+                    secret_kind: log.field("secret_kind").map(str::to_string),
+                    organization_id: log.field("organization_id").map(str::to_string),
+                    error_present: log.field("error").is_some_and(|error| !error.is_empty()),
+                    exposes_sensitive_fields: [
+                        "ciphertext",
+                        "private_key",
+                        "client_id",
+                        "client_secret",
+                        "plaintext",
+                        "token",
+                    ]
+                    .into_iter()
+                    .any(|field| log.field(field).is_some()),
+                }
+            },
+        );
+    }
 
     fn stored_secret(key_byte: u8) -> String {
         base64::engine::general_purpose::STANDARD.encode([key_byte; 32])
@@ -210,24 +432,46 @@ mod tests {
         let target_v2: EncryptionKeyId = key_v2.parse().unwrap();
 
         assert!(matches!(
-            reencrypt_ciphertext_if_needed(&credentials, &ciphertext, &target_v1, &aes_v1, false,)
-                .await
-                .unwrap(),
+            reencrypt_ciphertext_if_needed(
+                &credentials,
+                &ciphertext,
+                StoredMachineIdentitySecretKind::SigningKey,
+                "tenant-org",
+                &target_v1,
+                &aes_v1,
+                false,
+            )
+            .await
+            .unwrap(),
             ReencryptBlobOutcome::SkippedOnTarget
         ));
 
         assert!(matches!(
-            reencrypt_ciphertext_if_needed(&credentials, &ciphertext, &target_v2, &aes_v2, true,)
-                .await
-                .unwrap(),
+            reencrypt_ciphertext_if_needed(
+                &credentials,
+                &ciphertext,
+                StoredMachineIdentitySecretKind::SigningKey,
+                "tenant-org",
+                &target_v2,
+                &aes_v2,
+                true,
+            )
+            .await
+            .unwrap(),
             ReencryptBlobOutcome::DryRunWouldReencrypt
         ));
 
-        let ReencryptBlobOutcome::Reencrypted(reencrypted) =
-            reencrypt_ciphertext_if_needed(&credentials, &ciphertext, &target_v2, &aes_v2, false)
-                .await
-                .unwrap()
-        else {
+        let ReencryptBlobOutcome::Reencrypted(reencrypted) = reencrypt_ciphertext_if_needed(
+            &credentials,
+            &ciphertext,
+            StoredMachineIdentitySecretKind::SigningKey,
+            "tenant-org",
+            &target_v2,
+            &aes_v2,
+            false,
+        )
+        .await
+        .unwrap() else {
             panic!("expected Reencrypted outcome");
         };
         assert_eq!(

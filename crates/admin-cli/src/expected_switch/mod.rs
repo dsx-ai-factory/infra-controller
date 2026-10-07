@@ -23,15 +23,12 @@ mod replace_all;
 mod show;
 mod update;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Show expected switch")]
     Show(show::Args),
     #[clap(about = "Add expected switch")]

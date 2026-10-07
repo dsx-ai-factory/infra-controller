@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn delete(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn delete(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let vpc_prefix_id = args.vpc_prefix_id.to_string();
 
     // Request asynchronous deletion through the API.

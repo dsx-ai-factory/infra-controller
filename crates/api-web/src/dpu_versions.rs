@@ -55,14 +55,15 @@ impl From<forgerpc::Machine> for Row {
             Some((state, _)) => state.to_owned(),
             None => machine.state,
         };
+        let status = machine.status.unwrap_or_default();
 
         Row {
             dpu_machine_id: machine.id.map(|id| id.to_string()).unwrap_or_default(),
-            host_machine_id: machine
+            host_machine_id: status
                 .associated_host_machine_id
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
-            dpu_type: machine
+            dpu_type: status
                 .discovery_info
                 .as_ref()
                 .and_then(|di| di.dmi_data.as_ref())
@@ -76,11 +77,11 @@ impl From<forgerpc::Machine> for Row {
                     inventory
                         .components
                         .iter()
-                        .find(|c| c.name == "forge-dpu-agent")
+                        .find(|c| c.name == "carbide-dpu-agent" || c.name == "forge-dpu-agent")
                         .map(|c| c.version.clone())
                 })
                 .unwrap_or_default(),
-            firmware_version: machine
+            firmware_version: status
                 .discovery_info
                 .as_ref()
                 .and_then(|di| di.dpu_info.as_ref())
@@ -91,7 +92,7 @@ impl From<forgerpc::Machine> for Row {
                 .as_ref()
                 .and_then(|bmc| bmc.firmware_version.clone())
                 .unwrap_or_default(),
-            bios_version: machine
+            bios_version: status
                 .discovery_info
                 .as_ref()
                 .and_then(|di| di.dmi_data.as_ref())
@@ -102,7 +103,7 @@ impl From<forgerpc::Machine> for Row {
                 .and_then(|inv| {
                     inv.components
                         .iter()
-                        .find(|c| c.name == "doca_hbn")
+                        .find(|c| c.name.contains("hbn"))
                         .map(|c| c.version.clone())
                 })
                 .unwrap_or_default(),
@@ -121,14 +122,14 @@ async fn fetch_dpus(api: &Arc<Api>) -> Result<Vec<Row>, tonic::Status> {
     Ok(machines)
 }
 
-pub async fn list_html(
+pub(super) async fn list_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let machines = match fetch_dpus(&state).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "fetch_dpus");
+            tracing::error!(error = %err, "fetch_dpus");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading DPUs").into_response();
         }
     };
@@ -137,16 +138,16 @@ pub async fn list_html(
 
     let tmpl = DpuVersions {
         machines,
-        page: PageContext::new(info, "/admin/dpu-versions"),
+        page: PageContext::new(info, "/admin/dpu/versions"),
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn list_json(AxumState(state): AxumState<Arc<Api>>) -> impl IntoResponse {
+pub(super) async fn list_json(AxumState(state): AxumState<Arc<Api>>) -> impl IntoResponse {
     let machines = match fetch_dpus(&state).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "fetch_dpus");
+            tracing::error!(error = %err, "fetch_dpus");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading DPUs").into_response();
         }
     };

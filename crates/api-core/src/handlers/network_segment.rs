@@ -15,8 +15,10 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_uuid::vpc::VpcId;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
+use ipnetwork::IpNetwork;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
     NewNetworkSegment,
@@ -25,8 +27,8 @@ use model::vpc::VpcVirtualizationTypeCapabilities;
 use sqlx::{PgConnection, PgTransaction};
 use tonic::{Request, Response, Status};
 
-use crate::CarbideError;
 use crate::api::{Api, log_request_data};
+use crate::{CarbideError, CarbideResult};
 
 pub(crate) async fn find_ids(
     api: &Api,
@@ -87,6 +89,31 @@ pub(crate) async fn find_by_ids(
     }))
 }
 
+/// Rejects direct prefixes that conflict with a scoped VPC prefix. Supplying
+/// `vpc_id` also rejects global parents for RPC creation and attachment.
+/// Bootstrap omits it to preserve configured networks over global parents.
+/// Stored scoped prefixes remain protected even when overlap is disabled.
+///
+/// The caller holds the overlap transaction lock from this probe through the
+/// `NetworkSegment` write, so another participating `VpcPrefix` request cannot
+/// commit between them.
+async fn reject_vpc_prefix_overlaps(
+    txn: &mut PgConnection,
+    prefixes: &[IpNetwork],
+    vpc_id: Option<VpcId>,
+) -> CarbideResult<()> {
+    for prefix in prefixes {
+        if db::vpc_prefix::probe(*prefix, &mut *txn)
+            .await?
+            .iter()
+            .any(|overlap| vpc_id.is_some() || overlap.overlap_vpc_id.is_some())
+        {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn create(
     api: &Api,
     request: Request<rpc::NetworkSegmentCreationRequest>,
@@ -131,6 +158,7 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let allocate_svi_ip = if let Some(vpc_id) = new_network_segment.vpc_id {
         let vpcs = db::vpc::find_by(
@@ -141,9 +169,9 @@ pub(crate) async fn create(
 
         let vpc = vpcs
             .first()
-            .ok_or_else(|| CarbideError::internal(format!("VPC ID: {vpc_id} not found.")))?;
+            .ok_or_else(|| CarbideError::internal(format!("VPC ID: {vpc_id} not found")))?;
 
-        let virtualization_type = vpc.network_virtualization_type;
+        let virtualization_type = vpc.config.network_virtualization_type;
 
         // Segment compatibility (segment-type binding + IPv6 support)
         // and SVI allocation are both expressed as capability checks
@@ -155,6 +183,15 @@ pub(crate) async fn create(
     } else {
         false
     };
+
+    if let Some(vpc_id) = new_network_segment.vpc_id {
+        let prefixes = new_network_segment
+            .prefixes
+            .iter()
+            .map(|prefix| prefix.prefix)
+            .collect::<Vec<_>>();
+        reject_vpc_prefix_overlaps(&mut txn, &prefixes, Some(vpc_id)).await?;
+    }
 
     let network_segment = save(api, &mut txn, new_network_segment, false, allocate_svi_ip).await?;
 
@@ -181,6 +218,7 @@ pub(crate) async fn attach_to_vpc(
     let vpc_id = vpc_id.ok_or(CarbideError::MissingArgument("vpc_id"))?;
 
     let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let vpcs = db::vpc::find_by_with_lock(
         txn.as_mut(),
@@ -208,13 +246,14 @@ pub(crate) async fn attach_to_vpc(
 
     if segment.config.segment_type != NetworkSegmentType::HostInband {
         return Err(CarbideError::InvalidArgument(format!(
-            "Only host_inband network segments can be attached to a VPC with this API, got {}",
+            "only host_inband network segments can be attached to a VPC with this API, got {}",
             segment.config.segment_type
         ))
         .into());
     }
 
-    vpc.network_virtualization_type
+    vpc.config
+        .network_virtualization_type
         .ensure_supports_segment(&segment)
         .map_err(CarbideError::from)?;
 
@@ -222,12 +261,21 @@ pub(crate) async fn attach_to_vpc(
         Some(current_vpc_id) if current_vpc_id == vpc_id => segment,
         Some(current_vpc_id) if !allow_replace => {
             return Err(CarbideError::FailedPrecondition(format!(
-                "Network segment {} is already attached to VPC {}",
+                "network segment {} is already attached to VPC {}",
                 segment.id, current_vpc_id
             ))
             .into());
         }
-        _ => db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?,
+        _ => {
+            let prefixes = segment
+                .prefixes
+                .iter()
+                .filter(|prefix| prefix.vpc_prefix_id.is_none())
+                .map(|prefix| prefix.prefix)
+                .collect::<Vec<_>>();
+            reject_vpc_prefix_overlaps(&mut txn, &prefixes, Some(vpc_id)).await?;
+            db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
+        }
     };
 
     txn.commit().await?;
@@ -264,14 +312,21 @@ pub(crate) async fn delete(
         }
     };
 
-    let response = Ok(db::network_segment::mark_as_deleted(&segment, &mut txn)
-        .await
-        .map(|_| rpc::NetworkSegmentDeletionResult {})
-        .map(Response::new)?);
+    db::network_segment::mark_as_deleted(&segment, &mut txn).await?;
+
+    // A network's reverse-DNS zone exists only because the network does, so it
+    // is dropped with the segment -- the inverse of the create-time hook in
+    // `save`.
+    let prefixes = segment
+        .prefixes
+        .iter()
+        .map(|network_prefix| network_prefix.prefix)
+        .collect::<Vec<_>>();
+    db::dns::remove_reverse_zones(&prefixes, segment.id, &mut txn).await?;
 
     txn.commit().await?;
 
-    response
+    Ok(Response::new(rpc::NetworkSegmentDeletionResult {}))
 }
 
 pub(crate) async fn for_vpc(
@@ -332,16 +387,73 @@ pub(crate) async fn find_state_histories(
     Ok(tonic::Response::new(response))
 }
 
-// Called by db_init::create_initial_networks
+/// `save` is the single-segment persistence path used by the
+/// `CreateNetworkSegment` handler. It writes the segment, performs its resource
+/// allocations, and creates every reverse-DNS zone derived from the persisted
+/// prefixes before the caller commits. The segment and its zones therefore
+/// become visible together, and a zone failure rolls the segment back as well.
+/// These rows support rollback to zone-backed DNS; derived PTR lookup ignores
+/// them and does not claim authority over their reverse zones.
+///
+/// Startup uses [`save_without_reverse_zones`] instead. It persists every
+/// configured segment first, resolves config drift through the stored
+/// `network_def.segment_id` links, then acquires the complete sorted zone-lock
+/// set once before creating any missing zones.
 pub(crate) async fn save(
     api: &Api,
-    // Note: This is a PgTransaction, not a PgConnection, because we will be doing table locking,
-    // which must happen in a transaction.
+    txn: &mut PgTransaction<'_>,
+    ns: NewNetworkSegment,
+    set_to_ready: bool,
+    allocate_svi_ip: bool,
+) -> Result<NetworkSegment, CarbideError> {
+    let network_segment =
+        save_without_reverse_zones(api, txn, ns, set_to_ready, allocate_svi_ip).await?;
+    let prefixes = network_segment
+        .prefixes
+        .iter()
+        .map(|network_prefix| network_prefix.prefix)
+        .collect::<Vec<_>>();
+    db::dns::ensure_reverse_zones(&prefixes, txn).await?;
+    Ok(network_segment)
+}
+
+/// `save_without_reverse_zones` performs the segment write, resource-pool
+/// allocations, and optional SVI allocation without updating DNS.
+///
+/// [`save`] follows it immediately with one segment's DNS update.
+/// [`crate::db_init::create_initial_networks`] uses it for configured segments
+/// and the static-assignments anchor so startup can update all reverse zones
+/// once, in the same transaction and with a stable lock order. Any other caller
+/// must arrange the matching DNS update before committing.
+///
+/// Callers hold the overlap transaction lock through validation and persistence.
+pub(crate) async fn save_without_reverse_zones(
+    api: &Api,
     txn: &mut PgTransaction<'_>,
     mut ns: NewNetworkSegment,
     set_to_ready: bool,
     allocate_svi_ip: bool,
 ) -> Result<NetworkSegment, CarbideError> {
+    let prefixes = ns
+        .prefixes
+        .iter()
+        .map(|prefix| prefix.prefix)
+        .collect::<Vec<_>>();
+    for prefix in &prefixes {
+        if !db::network_prefix::containing_prefix(txn.as_mut(), &prefix.to_string())
+            .await?
+            .is_empty()
+        {
+            return Err(CarbideError::InvalidArgument(
+                "prefix overlaps with an existing one".to_string(),
+            ));
+        }
+    }
+    // Configured networks also need these checks: scoped prefixes must not
+    // overlap direct prefixes. Bootstrap still permits global VPC parents;
+    // the RPC's attached-segment rule above is intentionally stricter.
+    reject_vpc_prefix_overlaps(txn.as_mut(), &prefixes, None).await?;
+
     if ns.segment_type != NetworkSegmentType::Underlay {
         ns.vlan_id = Some(allocate_vlan_id(api, txn, &ns.name).await?);
         ns.vni = Some(allocate_vni(api, txn, &ns.name).await?);
@@ -356,9 +468,9 @@ pub(crate) async fn save(
         Err(DatabaseError::Sqlx(AnnotatedSqlxError {
             source: sqlx::Error::Database(e),
             ..
-        })) if e.constraint() == Some("network_prefixes_prefix_excl") => {
+        })) if db::network_prefix::is_overlap_constraint(e.constraint()) => {
             return Err(CarbideError::InvalidArgument(
-                "Prefix overlaps with an existing one".to_string(),
+                "prefix overlaps with an existing one".to_string(),
             ));
         }
         Err(err) => {
@@ -390,7 +502,7 @@ pub(crate) async fn save(
 /// Allocate a value from the vni resource pool.
 ///
 /// If the pool exists but is empty or has en error, return that.
-pub async fn allocate_vni(
+async fn allocate_vni(
     api: &Api,
     txn: &mut PgConnection,
     owner_id: &str,
@@ -405,14 +517,28 @@ pub async fn allocate_vni(
     .await
     {
         Ok(val) => Ok(val),
-        Err(ResourcePoolDatabaseError::ResourcePool(
-            model::resource_pool::ResourcePoolError::Empty,
-        )) => {
-            tracing::error!(owner_id, pool = "vni", "Pool exhausted, cannot allocate");
+        Err(
+            error @ ResourcePoolDatabaseError::ResourcePool(
+                model::resource_pool::ResourcePoolError::Empty,
+            ),
+        ) => {
+            db::resource_pool::emit_allocation_failure(
+                api.common_pools.ethernet.pool_vni.value_type,
+                owner_id,
+                false,
+                "vni",
+                &error,
+            );
             Err(CarbideError::ResourceExhausted("pool vni".to_string()))
         }
         Err(err) => {
-            tracing::error!(owner_id, error = %err, pool = "vni", "Error allocating from resource pool");
+            db::resource_pool::emit_allocation_failure(
+                api.common_pools.ethernet.pool_vni.value_type,
+                owner_id,
+                false,
+                "vni",
+                &err,
+            );
             Err(err.into())
         }
     }
@@ -421,7 +547,7 @@ pub async fn allocate_vni(
 /// Allocate a value from the vlan id resource pool.
 ///
 /// If the pool exists but is empty or has en error, return that.
-pub async fn allocate_vlan_id(
+async fn allocate_vlan_id(
     api: &Api,
     txn: &mut PgConnection,
     owner_id: &str,
@@ -436,18 +562,28 @@ pub async fn allocate_vlan_id(
     .await
     {
         Ok(val) => Ok(val),
-        Err(ResourcePoolDatabaseError::ResourcePool(
-            model::resource_pool::ResourcePoolError::Empty,
-        )) => {
-            tracing::error!(
+        Err(
+            error @ ResourcePoolDatabaseError::ResourcePool(
+                model::resource_pool::ResourcePoolError::Empty,
+            ),
+        ) => {
+            db::resource_pool::emit_allocation_failure(
+                api.common_pools.ethernet.pool_vlan_id.value_type,
                 owner_id,
-                pool = "vlan_id",
-                "Pool exhausted, cannot allocate"
+                false,
+                "vlan_id",
+                &error,
             );
             Err(CarbideError::ResourceExhausted("pool vlan_id".to_string()))
         }
         Err(err) => {
-            tracing::error!(owner_id, error = %err, pool = "vlan_id", "Error allocating from resource pool");
+            db::resource_pool::emit_allocation_failure(
+                api.common_pools.ethernet.pool_vlan_id.value_type,
+                owner_id,
+                false,
+                "vlan_id",
+                &err,
+            );
             Err(err.into())
         }
     }

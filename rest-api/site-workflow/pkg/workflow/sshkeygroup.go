@@ -11,7 +11,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func DiscoverSSHKeyGroupInventory(ctx workflow.Context) error {
@@ -53,7 +53,7 @@ func DiscoverSSHKeyGroupInventory(ctx workflow.Context) error {
 // CreateSSHKeyGroupV2 is a workflow to create new SSH Key Groups using the CreateSSHKeyGroupOnSite activity
 // V1 (CreateSSHKeyGroup) is found in cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func CreateSSHKeyGroupV2(ctx workflow.Context, request *cwssaws.CreateTenantKeysetRequest) error {
+func CreateSSHKeyGroupV2(ctx workflow.Context, request *corev1.CreateTenantKeysetRequest) error {
 	logger := log.With().Str("Workflow", "SSHKeyGroup").Str("Action", "Create").Str("SSHKeyGroup ID", request.GetKeysetIdentifier().GetKeysetId()).Logger()
 
 	logger.Info().Msg("starting workflow")
@@ -88,7 +88,7 @@ func CreateSSHKeyGroupV2(ctx workflow.Context, request *cwssaws.CreateTenantKeys
 }
 
 // UpdateSSHKeyGroupV2 is a workflow to update SSH Key Groups using the UpdateSSHKeyGroupOnSite activity
-func UpdateSSHKeyGroupV2(ctx workflow.Context, request *cwssaws.UpdateTenantKeysetRequest) error {
+func UpdateSSHKeyGroupV2(ctx workflow.Context, request *corev1.UpdateTenantKeysetRequest) error {
 	logger := log.With().Str("Workflow", "SSHKeyGroup").Str("Action", "Update").Str("SSHKeyGroup ID", request.GetKeysetIdentifier().GetKeysetId()).Logger()
 
 	logger.Info().Msg("starting workflow")
@@ -125,7 +125,7 @@ func UpdateSSHKeyGroupV2(ctx workflow.Context, request *cwssaws.UpdateTenantKeys
 // DeleteSSHKeyGroupV2 is a workflow to Delete SSH Key Groups using the DeleteSSHKeyGroupOnSite activity
 // V1 (DeleteSSHKeyGroup) is found in cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func DeleteSSHKeyGroupV2(ctx workflow.Context, request *cwssaws.DeleteTenantKeysetRequest) error {
+func DeleteSSHKeyGroupV2(ctx workflow.Context, request *corev1.DeleteTenantKeysetRequest) error {
 	logger := log.With().Str("Workflow", "SSHKeyGroup").Str("Action", "Delete").Str("SSHKeyGroup ID", request.GetKeysetIdentifier().GetKeysetId()).Logger()
 
 	logger.Info().Msg("starting workflow")

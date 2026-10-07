@@ -448,14 +448,14 @@ mod coverage_tests {
         assert_eq!(err_kind(&empty), "InvalidDeviceId");
         assert_eq!(
             empty.to_string(),
-            "Invalid device ID format: Device ID cannot be empty"
+            "invalid device ID format: Device ID cannot be empty"
         );
 
         let spaced = FlintRunner::validate_device_id("a b").unwrap_err();
         assert_eq!(err_kind(&spaced), "InvalidDeviceId");
         assert_eq!(
             spaced.to_string(),
-            "Invalid device ID format: Device ID cannot contain spaces"
+            "invalid device ID format: Device ID cannot contain spaces"
         );
     }
 
@@ -510,7 +510,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&q), "DryRun");
         assert_eq!(
             q.to_string(),
-            "Dry run - would have executed: flint -d dev0 q"
+            "dry run - would have executed: flint -d dev0 q"
         );
 
         // enable_hw_access: valid key -> DryRun with the enable command string.
@@ -518,7 +518,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&en), "DryRun");
         assert_eq!(
             en.to_string(),
-            "Dry run - would have executed: flint -d dev0 hw_access enable 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 hw_access enable 0a1b2c3d"
         );
 
         // disable_hw_access: valid key -> DryRun with the disable command string.
@@ -526,7 +526,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&dis), "DryRun");
         assert_eq!(
             dis.to_string(),
-            "Dry run - would have executed: flint -d dev0 hw_access disable 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 hw_access disable 0a1b2c3d"
         );
 
         // set_key: valid key -> DryRun with the set_key command string.
@@ -534,7 +534,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&sk), "DryRun");
         assert_eq!(
             sk.to_string(),
-            "Dry run - would have executed: flint -d dev0 set_key 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 set_key 0a1b2c3d"
         );
     }
 
@@ -618,14 +618,14 @@ mod coverage_tests {
         assert_eq!(err_kind(&b), "DryRun");
         assert_eq!(
             b.to_string(),
-            format!("Dry run - would have executed: flint -d dev0 -y -i {img} burn")
+            format!("dry run - would have executed: flint -d dev0 -y -i {img} burn")
         );
 
         let v = runner.verify_image("dev0", &existing).unwrap_err();
         assert_eq!(err_kind(&v), "DryRun");
         assert_eq!(
             v.to_string(),
-            format!("Dry run - would have executed: flint -d dev0 -i {img} verify")
+            format!("dry run - would have executed: flint -d dev0 -i {img} verify")
         );
 
         let _ = std::fs::remove_file(&existing);

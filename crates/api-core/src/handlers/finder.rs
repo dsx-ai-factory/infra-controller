@@ -29,6 +29,7 @@ use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use db::{DatabaseError, ObjectColumnFilter, instance, network_segment, vpc};
 use model::allocation_type::AllocationType;
+use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentSearchConfig;
 use model::resource_pool::ResourcePoolEntryState;
 use model::route_server::RouteServerSourceType;
@@ -36,19 +37,24 @@ use model::route_server::RouteServerSourceType;
 use crate::CarbideError;
 use crate::api::Api;
 
-/// Returns true when this machine-interface address should be labeled as operator/static BMC
-/// (`IpTypeStaticBmcIp`): either explicitly static allocation, or an address on the synthetic
-/// `static-assignments` segment used for external IPs outside Carbide-managed prefixes.
-fn machine_interface_address_is_operator_static(
+/// Returns true when this machine-interface address should be labeled as an operator/static BMC
+/// (`IpTypeStaticBmcIp`).
+///
+/// Static allocation metadata and the synthetic `static-assignments` segment do not identify the
+/// endpoint role, so either condition must be paired with `InterfaceType::Bmc`.
+fn machine_interface_address_is_static_bmc(
     segment_name: &str,
     allocation_type: AllocationType,
+    interface_type: InterfaceType,
 ) -> bool {
-    allocation_type == AllocationType::Static
-        || segment_name == network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME
+    interface_type == InterfaceType::Bmc
+        && (allocation_type == AllocationType::Static
+            || segment_name == network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
 }
 
 /// Resolves an IP to zero or more typed matches (BMC, instance, static BMC, etc.). Static BMC
-/// classification for `machine_interface_addresses` uses [`machine_interface_address_is_operator_static`].
+/// classification for `machine_interface_addresses` uses
+/// [`machine_interface_address_is_static_bmc`].
 pub(crate) async fn find_ip_address(
     api: &Api,
     request: tonic::Request<rpc::FindIpAddressRequest>,
@@ -108,7 +114,7 @@ pub(crate) async fn identify_mac(
     };
     let Ok(mac) = mac_address::MacAddress::from_str(&req.mac_address) else {
         return Err(
-            CarbideError::InvalidArgument("Could not parse MAC address".to_string()).into(),
+            CarbideError::InvalidArgument("could not parse MAC address".to_string()).into(),
         );
     };
     match by_mac(api, mac).await {
@@ -143,7 +149,7 @@ pub(crate) async fn identify_serial(
 
     if machine_ids.len() > 1 {
         tracing::warn!(
-            matches = machine_ids.len(),
+            matching_machine_count = machine_ids.len(),
             serial_number = req.serial_number,
             "identify_serial: More than one match"
         );
@@ -198,10 +204,7 @@ async fn by_ip(api: &Api, ip: &str) -> (Vec<rpc::IpAddressMatch>, Vec<CarbideErr
     let mut errs = vec![];
     for res in results {
         match res {
-            // found
-            Ok(Some(s)) => out.push(s),
-            // not found
-            Ok(None) => {}
+            Ok(matches) => out.extend(matches),
             Err(err) => errs.push(err),
         }
     }
@@ -214,7 +217,7 @@ async fn search(
     finder: Finder,
     api: &Api,
     ip: &str,
-) -> Result<Option<rpc::IpAddressMatch>, CarbideError> {
+) -> Result<Vec<rpc::IpAddressMatch>, CarbideError> {
     let addr: IpAddr = ip.parse()?;
 
     let db = &api.database_connection;
@@ -238,12 +241,12 @@ async fn search(
         ResourcePools => {
             let mut vec_out = db::resource_pool::find_value(db, ip).await?;
             let entry = match vec_out.len() {
-                0 => return Ok(None),
+                0 => return Ok(Vec::new()),
                 1 => vec_out.remove(0),
                 _ => {
                     tracing::warn!(
-                        ip,
-                        matched_pools = vec_out.len(),
+                        ip_address = ip,
+                        matching_resource_pool_count = vec_out.len(),
                         "Multiple resource pools match this IP. This seems like a mistake. Using only first.",
                     );
                     vec_out.remove(0)
@@ -273,29 +276,31 @@ async fn search(
 
         // Look in instance_addresses
         InstanceAddresses => {
-            let instance_address = db::instance_address::find_by_address(db, addr).await?;
-
-            instance_address.map(|e| {
-                let message = format!(
-                    "{ip} belongs to instance {} on segment {}",
-                    e.instance_id, e.segment_id
-                );
-                rpc::IpAddressMatch {
+            return Ok(db::instance_address::find_all_by_address(db, addr)
+                .await?
+                .into_iter()
+                .map(|address| rpc::IpAddressMatch {
                     ip_type: rpc::IpType::InstanceAddress as i32,
-                    owner_id: Some(e.instance_id.to_string()),
-                    message,
-                }
-            })
+                    owner_id: Some(address.instance_id.to_string()),
+                    message: format!(
+                        "{ip} belongs to instance {} in VPC {} on segment {}",
+                        address.instance_id, address.vpc_id, address.segment_id,
+                    ),
+                })
+                .collect());
         }
 
-        // machine_interface_addresses: classify operator/static BMC as StaticBmcIp (see
-        // machine_interface_address_is_operator_static).
+        // machine_interface_addresses: classify operator/static BMC as StaticBmcIp while
+        // retaining static Data addresses as MachineAddress.
         MachineAddresses => {
             let out = db::machine_interface_address::find_by_address(db, addr).await?;
             match out {
                 Some(e) => {
-                    let is_static_bmc =
-                        machine_interface_address_is_operator_static(&e.name, e.allocation_type);
+                    let is_static_bmc = machine_interface_address_is_static_bmc(
+                        &e.name,
+                        e.allocation_type,
+                        e.interface_type,
+                    );
 
                     let (ip_type, type_label) = if is_static_bmc {
                         (rpc::IpType::StaticBmcIp, "static BMC IP")
@@ -303,12 +308,16 @@ async fn search(
                         (rpc::IpType::MachineAddress, "machine address")
                     };
 
-                    let message = match e.machine_id.as_ref() {
-                        Some(machine_id) => format!(
+                    let message = match (e.machine_id.as_ref(), e.switch_id.as_ref()) {
+                        (Some(machine_id), _) => format!(
                             "{ip} is a {type_label} on machine {} (interface {}) on network segment {} of type {}",
                             machine_id, e.id, e.name, e.network_segment_type,
                         ),
-                        None => format!(
+                        (None, Some(switch_id)) => format!(
+                            "{ip} is a {type_label} on switch {} (interface {}) on network segment {} of type {}",
+                            switch_id, e.id, e.name, e.network_segment_type,
+                        ),
+                        (None, None) => format!(
                             "{ip} is a {type_label} on interface {} on network segment {} of type {}. It is not attached to a machine.",
                             e.id, e.name, e.network_segment_type,
                         ),
@@ -333,9 +342,10 @@ async fn search(
                     let is_static = db::machine_interface_address::find_by_address(db, addr)
                         .await?
                         .is_some_and(|row| {
-                            machine_interface_address_is_operator_static(
+                            machine_interface_address_is_static_bmc(
                                 &row.name,
                                 row.allocation_type,
+                                row.interface_type,
                             )
                         });
 
@@ -359,6 +369,7 @@ async fn search(
                 None => None,
             }
         }
+
         ExploredEndpoint => {
             let out = db::explored_endpoints::find_by_ips(db, vec![addr]).await?;
             out.first().map(|ee| rpc::IpAddressMatch {
@@ -370,11 +381,11 @@ async fn search(
 
         // Loopback IP of a DPU
         LoopbackIp => {
-            let out = db::machine::find_by_loopback_ip(db, ip).await?;
+            let out = db::machine::find_by_loopback_ip(db, addr).await?;
             out.map(|machine| rpc::IpAddressMatch {
                 ip_type: rpc::IpType::LoopbackIp as i32,
                 owner_id: Some(machine.id.to_string()),
-                message: format!("{ip} is the loopback for {}", &machine.id),
+                message: format!("{ip} is the loopback for {}", machine.id),
             })
         }
 
@@ -383,22 +394,22 @@ async fn search(
             let host_prefix = addr.address_family().interface_prefix_len();
             let out =
                 db::network_prefix::containing_prefix(db, &format!("{ip}/{host_prefix}")).await?;
-            out.first().map(|prefix| {
-                let message = format!(
-                    "{ip} is in prefix {} of segment {}, gateway {}",
-                    prefix.prefix,
-                    prefix.segment_id,
-                    prefix
-                        .gateway
-                        .map(|g| g.to_string())
-                        .unwrap_or("(no gateway)".to_string()),
-                );
-                rpc::IpAddressMatch {
+            return Ok(out
+                .into_iter()
+                .map(|prefix| rpc::IpAddressMatch {
                     ip_type: rpc::IpType::NetworkSegment as i32,
                     owner_id: Some(prefix.segment_id.to_string()),
-                    message,
-                }
-            })
+                    message: format!(
+                        "{ip} is in prefix {} of segment {}, gateway {}",
+                        prefix.prefix,
+                        prefix.segment_id,
+                        prefix
+                            .gateway
+                            .map(|gateway| gateway.to_string())
+                            .unwrap_or("(no gateway)".to_string()),
+                    ),
+                })
+                .collect());
         }
 
         // Search the RouteServers table to see if it's a "config"
@@ -430,7 +441,7 @@ async fn search(
         }
     };
 
-    Ok(match_result)
+    Ok(match_result.into_iter().collect())
 }
 
 async fn by_uuid(api: &Api, u: &rpc_common::Uuid) -> Result<Option<rpc::UuidType>, CarbideError> {
@@ -515,12 +526,17 @@ async fn by_mac(
         }
         Ok(interfaces) => {
             tracing::error!(
-                "Found {} MachineInterface entries for MAC address {mac}. Should be impossible",
-                interfaces.len()
+                interface_count = interfaces.len(),
+                mac_address = %mac,
+                "Found machine interface entries; should be impossible",
             );
         }
         Err(err) => {
-            tracing::error!(%err, %mac, "DB error db::machine_interface::find_by_mac_address");
+            tracing::error!(
+                error = %err,
+                mac_address = %mac,
+                "DB error db::machine_interface::find_by_mac_address"
+            );
         }
     }
 
@@ -545,14 +561,85 @@ async fn by_mac(
             [iface] => return Ok(Some((iface.id.to_string(), rpc::MacOwner::DpaInterface))),
             [] => {} // expected, continue to search other object types
             _ => tracing::error!(
-                "Found {} DpaInterfaces entries for MAC address {mac}. Should be impossible",
-                ifs.len()
+                dpa_interface_count = ifs.len(),
+                mac_address = %mac,
+                "Found DPA interface entries; should be impossible",
             ),
         },
-        Err(e) => tracing::error!("by_mac - Error from find_by_mac_addr for DPA: {e}"),
+        Err(e) => tracing::error!(
+            mac_address = %mac,
+            error = %e,
+            "Failed to find DPA interface",
+        ),
     };
 
     // Any other MAC addresses to search?
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_bmc_classification_requires_bmc_interface_type() {
+        let static_assignments = network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME;
+        let cases = [
+            (
+                "static BMC allocation",
+                "underlay",
+                AllocationType::Static,
+                InterfaceType::Bmc,
+                true,
+            ),
+            (
+                "BMC on static assignments",
+                static_assignments,
+                AllocationType::Dhcp,
+                InterfaceType::Bmc,
+                true,
+            ),
+            (
+                "dynamic BMC",
+                "underlay",
+                AllocationType::Dhcp,
+                InterfaceType::Bmc,
+                false,
+            ),
+            (
+                "static Data allocation",
+                "underlay",
+                AllocationType::Static,
+                InterfaceType::Data,
+                false,
+            ),
+            (
+                "Data on static assignments",
+                static_assignments,
+                AllocationType::Dhcp,
+                InterfaceType::Data,
+                false,
+            ),
+            (
+                "dynamic Data",
+                "underlay",
+                AllocationType::Dhcp,
+                InterfaceType::Data,
+                false,
+            ),
+        ];
+
+        for (name, segment_name, allocation_type, interface_type, expected) in cases {
+            assert_eq!(
+                machine_interface_address_is_static_bmc(
+                    segment_name,
+                    allocation_type,
+                    interface_type,
+                ),
+                expected,
+                "{name}",
+            );
+        }
+    }
 }

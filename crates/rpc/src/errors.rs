@@ -22,90 +22,92 @@ use tonic::Status;
 /// converting from the RPC data format into the internal data model.
 #[derive(Debug, thiserror::Error)]
 pub enum RpcDataConversionError {
-    #[error("Field {0} is not valid base64")]
+    #[error("field {0} is not valid base64")]
     InvalidBase64Data(&'static str),
-    #[error("Virtual Function ID of value {0} is not in the expected range 1-16")]
+    #[error("virtual function ID of value {0} is not in the expected range 0-15")]
     InvalidVirtualFunctionId(usize),
-    #[error("IP Address {0} is not valid")]
+    #[error("IP address {0} is not valid")]
     InvalidIpAddress(String),
     #[error("MAC address {0} is not valid")]
     InvalidMacAddress(String),
-    #[error("Version string {0} is not valid")]
+    #[error("version string {0} is not valid")]
     InvalidConfigVersion(String),
-    #[error("Machine ID {0} is not valid")]
+    #[error("machine ID {0} is not valid")]
     InvalidMachineId(String),
-    #[error("Network Security Group ID {0} is not valid")]
+    #[error("network security group ID {0} is not valid")]
     InvalidNetworkSecurityGroupId(String),
-    #[error("Instance Type ID {0} is not valid")]
+    #[error("instance type ID {0} is not valid")]
     InvalidInstanceTypeId(String),
-    #[error("Compute Allocation ID {0} is not valid")]
+    #[error("compute allocation ID {0} is not valid")]
     InvalidComputeAllocationId(String),
-    #[error("Timestamp {0} is not valid")]
+    #[error("timestamp {0} is not valid")]
     InvalidTimestamp(String),
-    #[error("Tenant Org {0} is not valid")]
+    #[error("tenant org {0} is not valid")]
     InvalidTenantOrg(String),
-    #[error("Interface Function Type {0} is not valid")]
+    #[error("interface function type {0} is not valid")]
     InvalidInterfaceFunctionType(i32),
-    #[error("Invalid UUID for field of type {0}: {1}")]
+    #[error("invalid UUID for field of type {0}: {1}")]
     InvalidUuid(&'static str, String),
-    #[error("Invalid value {1} for {0}")]
+    #[error("invalid value {1} for {0}")]
     InvalidValue(String, String),
-    #[error("Argument is invalid: {0}")]
+    #[error("argument is invalid: {0}")]
     InvalidArgument(String),
-    #[error("Argument {0} is missing")]
+    #[error("argument {0} is missing")]
     MissingArgument(&'static str),
     #[error(
-        "A unique identifier was specified for a new object.  When creating a new object of type {0}, do not specify an identifier"
+        "A unique identifier was specified for a new object.  when creating a new object of type {0}, do not specify an identifier"
     )]
     IdentifierSpecifiedForNewObject(String),
-    #[error("Machine state {0} is invalid")]
+    #[error("machine state {0} is invalid")]
     InvalidMachineState(String),
-    #[error("Invalid NetworkSegmentType {0} is received.")]
+    #[error("invalid NetworkSegmentType {0} is received")]
     InvalidNetworkSegmentType(i32),
-    #[error("Pci Device Info {0} is invalid")]
+    #[error("pci device info {0} is invalid")]
     InvalidPciDeviceInfo(String),
     #[error("VpcVirtualizationType {0} is invalid")]
     InvalidVpcVirtualizationType(i32),
-    #[error("Invalid enum value received for critical error type: {0}")]
+    #[error("invalid enum value received for critical error type: {0}")]
     InvalidCriticalErrorType(i32),
     #[error("PowerState {0} is not valid")]
     InvalidPowerState(i32),
-    #[error("Instance ID {0} is not valid")]
+    #[error("instance ID {0} is not valid")]
     InvalidInstanceId(String),
-    #[error("Remediation ID {0} is not valid")]
+    #[error("remediation ID {0} is not valid")]
     InvalidRemediationId(String),
     #[error("VPC ID {0} is not valid")]
     InvalidVpcId(String),
     #[error("VPC peering ID {0} is not valid")]
     InvalidVpcPeeringId(String),
-    #[error("IB Partition ID {0} is not valid")]
+    #[error("IB partition ID {0} is not valid")]
     InvalidIbPartitionId(String),
     #[error("PowerShelf ID {0} is not valid")]
     InvalidPowerShelfId(String),
-    #[error("Switch ID {0} is not valid")]
+    #[error("switch ID {0} is not valid")]
     InvalidSwitchId(String),
-    #[error("Network Segment ID {0} is not valid")]
+    #[error("network segment ID {0} is not valid")]
     InvalidNetworkSegmentId(String),
     #[error("CIDR {0} is not valid")]
     InvalidCidr(String),
-    #[error("Label is not valid: {0}")]
+    #[error("label is not valid: {0}")]
     InvalidLabel(String),
-    #[error("Invalid DnsResourceRecordType: {0}")]
+    #[error("invalid DnsResourceRecordType: {0}")]
     InvalidDnsResourceRecordType(String),
-    #[error("Invalid Soa Record: {0}")]
+    #[error("invalid soa record: {0}")]
     InvalidSoaRecord(String),
-    #[error("Could not obtain object from json: {0}")]
+    #[error("could not obtain object from json: {0}")]
     JsonConversionFailure(String),
-    #[error("JSON Parse failure - {0}")]
+    #[error("JSON parse failure - {0}")]
     JsonParseError(#[from] serde_json::Error),
-    #[error("Unable to parse string into IP Network: {0}")]
+    #[error("unable to parse string into IP network: {0}")]
     NetworkParseError(#[from] ipnetwork::IpNetworkError),
-    #[error("Tenant Routing Profile Type {0} is not valid")]
+    #[error("tenant routing profile type {0} is not valid")]
     InvalidRoutingProfileType(String),
-    #[error("NVL Partition ID {0} is not valid")]
+    #[error("NVL partition ID {0} is not valid")]
     InvalidNvlPartitionId(String),
-    #[error("Logical Partition ID {0} is not valid")]
+    #[error("logical partition ID {0} is not valid")]
     InvalidLogicalPartitionId(String),
+    #[error("total memory device count {0} exceeds maximum of {1}")]
+    MemoryDeviceCountExceeded(u64, u32),
 }
 
 impl From<RpcDataConversionError> for tonic::Status {
@@ -124,7 +126,12 @@ impl From<RpcDataConversionError> for tonic::Status {
             if f.len() == 2 {
                 let handler = f[0].trim();
                 let location = f[1].trim().replace("at ", "");
-                tracing::error!("{from} location={location} handler='{handler}'");
+                tracing::error!(
+                    error = %from,
+                    error_location = %location,
+                    handler,
+                    "RPC error conversion",
+                );
                 true
             } else {
                 false
@@ -134,7 +141,7 @@ impl From<RpcDataConversionError> for tonic::Status {
         };
 
         if !printed {
-            tracing::error!("{from}");
+            tracing::error!(error = %from, "RPC error conversion");
         }
 
         Status::invalid_argument(from.to_string())

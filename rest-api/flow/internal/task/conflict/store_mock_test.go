@@ -83,6 +83,18 @@ func (m *mockStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
 	panic("mockStore.CreateTask: not implemented")
 }
 
+func (m *mockStore) LockRack(_ context.Context, _ uuid.UUID) error {
+	panic("mockStore.LockRack: not implemented")
+}
+
+func (m *mockStore) LockIdempotencyKey(_ context.Context, _ string) error {
+	panic("mockStore.LockIdempotencyKey: not implemented")
+}
+
+func (m *mockStore) GetTaskByIdempotencyKey(_ context.Context, _ string) (*taskdef.Task, error) {
+	panic("mockStore.GetTaskByIdempotencyKey: not implemented")
+}
+
 func (m *mockStore) GetTask(_ context.Context, _ uuid.UUID) (*taskdef.Task, error) {
 	panic("mockStore.GetTask: not implemented")
 }
@@ -93,6 +105,17 @@ func (m *mockStore) GetTasks(_ context.Context, _ []uuid.UUID) ([]*taskdef.Task,
 
 func (m *mockStore) ListTasks(_ context.Context, _ *taskcommon.TaskListOptions, _ *dbquery.Pagination) ([]*taskdef.Task, int32, error) {
 	panic("mockStore.ListTasks: not implemented")
+}
+
+func (m *mockStore) ListNonTerminalTasksForRacks(_ context.Context, _ []uuid.UUID) ([]*taskdef.Task, error) {
+	panic("mockStore.ListNonTerminalTasksForRacks: not implemented")
+}
+
+func (m *mockStore) LatestLeakageShutdownTaskStatuses(
+	_ context.Context,
+	_ []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	panic("mockStore.LatestLeakageShutdownTaskStatuses: not implemented")
 }
 
 func (m *mockStore) UpdateScheduledTask(_ context.Context, _ *taskdef.Task) error {

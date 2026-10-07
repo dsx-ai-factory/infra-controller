@@ -5,7 +5,7 @@ templates:
   - id: ddbf83c0-a753-5fde-96c1-6b74e9c9db10
     name: raw-ipxe
     description: Allows for raw iPXE scripting but provides base_url, console and arch variables
-    scope: public
+    visibility: public
     required_params:
       - ipxe
     reserved_params:
@@ -24,7 +24,7 @@ templates:
       # Safety check:
       iseq ${arch} unknown && echo "Unsupported architecture." && sleep 5 && exit 1 ||
 
-      # 2. Get carbide-core-generated reserved values (base URL for local artifacts and console specific to hardware):
+      # 2. Get NICo Core generated reserved values (base URL for local artifacts and console specific to hardware):
       set base_url {{base_url}}
       set console {{console}}
 
@@ -34,7 +34,7 @@ templates:
   - id: ea756ddd-add3-5e42-a202-44bfc2d5aac2
     name: qcow-image
     description: Generic multi-platform template iPXE script for qcow images
-    scope: public
+    visibility: public
     required_params:
       - image_url
     reserved_params:
@@ -53,7 +53,7 @@ templates:
       # Safety check:
       iseq ${arch} unknown && echo "Unsupported architecture." && sleep 5 && exit 1 ||
 
-      # 2. Get carbide-core-generated reserved values (base URL for local artifacts and console specific to hardware):
+      # 2. Get NICo Core generated reserved values (base URL for local artifacts and console specific to hardware):
       set base_url {{base_url}}
       set console {{console}}
 
@@ -64,7 +64,7 @@ templates:
   - id: 5c7cfa88-6003-5ac0-b4c0-201eb5b28153
     name: kernel-only
     description: Boot kernel/EFI without initrd (ESXi, etc.)
-    scope: public
+    visibility: public
     required_params:
       - kernel_params
     required_artifacts:
@@ -83,7 +83,7 @@ templates:
   - id: c4b1d4f6-69ba-5f55-90cd-ab2acd002475
     name: kernel-initrd
     description: Generic kernel + initrd boot (Ubuntu autoinstall, NKE, BCM scout, etc.)
-    scope: public
+    visibility: public
     required_params:
       - kernel_params
     required_artifacts:
@@ -104,7 +104,7 @@ templates:
   - id: a7850943-e3cd-5e9a-93ca-9e12f52939cc
     name: ubuntu-autoinstall
     description: Template for Ubuntu autoinstall
-    scope: public
+    visibility: public
     required_artifacts:
       - install_iso
       - kernel
@@ -115,14 +115,14 @@ templates:
     template: |
       #!ipxe
       # Ubuntu autoinstall template
-      kernel {{kernel}} BOOTIF=01-${netX/mac:hexhyp} ip=dhcp fb=false url={{install_iso}} autoinstall ds=nocloud-net;s=${cloudinit-url} console=tty0 console={{console}},115200 initrd=initrd.magic
+      kernel {{kernel}} BOOTIF=01-${netX/mac:hexhyp} ip=dhcp fb=false url={{install_iso}} autoinstall ds=nocloud-net;s=${tenant-cloudinit-url} console=tty0 console={{console}},115200 initrd=initrd.magic
       initrd {{initrd}}
       boot
 
   - id: ecaf197e-d60e-50f8-a598-c844afccc24d
     name: dgx-os
     description: Template for DGX OS autoinstall
-    scope: public
+    visibility: public
     required_params:
       - force_platform
     required_artifacts:
@@ -135,10 +135,21 @@ templates:
       - console
     template: |
       #!ipxe
-      kernel {{kernel}} fsck.mode=skip autoinstall ip=dhcp BOOTIF=01-${netX/mac:hexhyp} url={{install_iso}} nvme-core.multipath=n nouveau.modeset=0 console=tty0 console={{console}},115200 nooemconfig force-platform={{force_platform}} force-ai={{ai_cfg}} ds=nocloud-net;s=${cloudinit-url}
+      kernel {{kernel}} fsck.mode=skip autoinstall ip=dhcp BOOTIF=01-${netX/mac:hexhyp} url={{install_iso}} nvme-core.multipath=n nouveau.modeset=0 console=tty0 console={{console}},115200 nooemconfig force-platform={{force_platform}} force-ai={{ai_cfg}} ds=nocloud-net;s=${tenant-cloudinit-url}
       initrd {{initrd}}
       boot
 
+  # The kickstart URL comes from the ${dpu-cloudinit-url} iPXE variable that the
+  # boot script sets, not from a stored `cloudinit_url` parameter as it once
+  # did. The cloud-init routes are split by consumer (dpu/, tenant/, scout/), so
+  # a URL captured into an OS definition when the endpoint had no prefix now
+  # points at a route that does not exist, and nothing would report the 404 --
+  # the DPU would simply never get a kickstart. Reading it from the boot script
+  # means the value cannot go stale, needs no migration if the prefixes move
+  # again, and matches character-for-character what
+  # PxeInstructions::get_pxe_instruction_for_arch emits for the same machine.
+  # A `cloudinit_url` left over on an existing definition is now unconsumed and
+  # is swept into {{extra}}; it is inert, and can be removed at leisure.
   - id: fd4f4413-18c4-5159-8cc0-7a64be5f98b9
     name: discovery-scout-aarch64-dpu
     description: Discovery Scout for ARM DPU with initrd
@@ -148,14 +159,13 @@ templates:
     required_params:
       - cli_cmd
       - bfnet
-      - cloudinit_url
       - machine_id
       - server_uri
     template: |
       #!ipxe
       set base_url {{base_url}}
 
-      kernel ${base_url}/internal/aarch64/carbide.efi initrd=initrd.img console=tty0 console=ttyS0,115200 console=ttyAMA0 console=hvc0 ip=dhcp cli_cmd={{cli_cmd}} bfnet={{bfnet}} bfks={{cloudinit_url}}/user-data machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      kernel ${base_url}/internal/aarch64/carbide.efi initrd=initrd.img console=tty0 console=ttyS0,115200 console=ttyAMA0 console=hvc0 ip=dhcp cli_cmd={{cli_cmd}} bfnet={{bfnet}} bfks=${dpu-cloudinit-url}/user-data machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
       imgfetch --name initrd.img ${base_url}/internal/aarch64/carbide.root ||
       boot ||
 
@@ -172,7 +182,7 @@ templates:
       - server_uri
     template: |
       #!ipxe
-      kernel {{base_url}}/internal/aarch64/scout.efi mac={{mac}} console=tty0 console=ttyS0,115200 pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      kernel {{base_url}}/internal/aarch64/scout.efi mac={{mac}} console=tty0 console=ttyS0,115200 pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} ds=nocloud;s=${scout-cloudinit-url} {{extra}} ||
       boot ||
 
   - id: bbfbd1d9-9a19-5ce0-ba56-65d75eb225a1
@@ -188,7 +198,7 @@ templates:
       - server_uri
     template: |
       #!ipxe
-      kernel {{base_url}}/internal/x86_64/scout.efi mac={{mac}} console=tty0 console={{serial_console}} pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      kernel {{base_url}}/internal/x86_64/scout.efi mac={{mac}} console=tty0 console={{serial_console}} pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} ds=nocloud;s=${scout-cloudinit-url} {{extra}} ||
       boot ||
 
   - id: cfff2862-bb55-55c6-bf66-237b5bcf09b3
@@ -267,7 +277,7 @@ templates:
   - id: 9f1b388e-cf6d-52a2-a20a-19eeeaca2f47
     name: openshift-coreos
     description: OpenShift/Assisted Installer - CoreOS live boot with initrd before kernel
-    scope: public
+    visibility: public
     required_artifacts:
       - initrd
       - kernel
@@ -285,7 +295,7 @@ templates:
   - id: 7be5f99b-9719-53cb-9733-7d674c02e887
     name: chain-efi
     description: Chain to arbitrary EFI binary (firmware update, custom loader, etc.)
-    scope: public
+    visibility: public
     required_params:
       - efi_url
     reserved_params:
@@ -302,7 +312,7 @@ templates:
   - id: d38ae593-8f92-5869-9605-e6d8b2359e7d
     name: loader-rootfs
     description: Chain loader.efi with newrootfs (custom root filesystem)
-    scope: public
+    visibility: public
     required_params:
       - loader_url
       - newrootfs_url
@@ -326,66 +336,7 @@ templates:
 
   - id: c816a939-0993-5ebf-82dd-5227ad215703
     name: carbide-menu-static-ipxe
-    description: Carbide Menu
-    scope: public
-    template: |
-      #!ipxe
-      
-      set esc:hex 1b
-      set bold ${esc:string}[1m
-      set boldoff ${esc:string}[22m
-      
-      set white ${esc:string}[37m
-      
-      #color --rgb 0x76b900 7
-      #cpair --foreground 7 --background 9 0
-      
-      :start
-      echo ${bold}${white}Carbide${boldoff} - ${version}
-      prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open carbide menu... && goto carbide_menu || goto carbide
-      
-      :whoami
-      ifconf -c dhcp
-      # carbide-pxe identifies the booting machine by its client IP (read from
-      # X-Forwarded-For when proxied, TCP socket peer otherwise) and resolves
-      # to a machine_interface_id via find_by_ip. iPXE doesn't need to encode
-      # anything identity-related in the URL -- the network layer carries it.
-      time chain --autofree http://${next-server}:8080/api/v0/pxe/whoami
-      goto carbide_menu
-
-      :carbide
-      ifconf -c dhcp
-      time chain --autofree http://${next-server}:8080/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto error_handler
-      
-      :carbide_menu
-      menu Carbide - ${hostname}
-      item carbide Boot according to Carbide workflow
-      item whoami Print information about this machine
-      item localboot Boot to local drive
-      #item netconfig Manual network configuration
-      #item vlan Manual VLAN configuration
-      item retry Retry boot
-      item debug iPXE Debug Shell
-      item reboot Reboot System
-      choose --default carbide --timeout 5000 target && goto ${target}
-      prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open carbide menu...
-      goto carbide_menu
-      
-      :localboot
-      exit
-      
-      :retry
-      goto start
-      
-      :error_handler
-      prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to continue (4 seconds timeout)...
-      goto carbide_menu
-      
-      :debug
-      echo Type "exit" to return to menu
-      shell
-      goto carbide_menu
-      
-      :reboot
-      reboot
-      goto start
+    description: NICo Menu
+    visibility: public
+    # Populated from pxe/ipxe/local/embed.ipxe by DefaultIpxeScriptRenderer::new.
+    template: ""

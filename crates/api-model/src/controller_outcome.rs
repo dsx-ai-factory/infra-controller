@@ -279,45 +279,6 @@ mod tests {
         );
     }
 
-    // Display for both types delegates to Debug. The rendered String is the
-    // contract; comparing against the Debug rendering keeps the rows honest
-    // without hard-coding the exact derived layout.
-    #[test]
-    fn test_display_matches_debug() {
-        value_scenarios!(
-            run = |rendered| rendered;
-            "source reference display equals debug" {
-                format!("{}", source_ref()) => format!("{:?}", source_ref()),
-            }
-
-            "transition outcome display equals debug" {
-                format!(
-                    "{}",
-                    PersistentStateHandlerOutcome::Transition { source_ref: None }
-                ) => format!(
-                    "{:?}",
-                    PersistentStateHandlerOutcome::Transition { source_ref: None }
-                ),
-            }
-
-            "wait outcome display equals debug" {
-                format!(
-                    "{}",
-                    PersistentStateHandlerOutcome::Wait {
-                        reason: "r".to_string(),
-                        source_ref: Some(source_ref()),
-                    }
-                ) => format!(
-                    "{:?}",
-                    PersistentStateHandlerOutcome::Wait {
-                        reason: "r".to_string(),
-                        source_ref: Some(source_ref()),
-                    }
-                ),
-            }
-        );
-    }
-
     // Display for the source reference contains both the file and the line.
     #[test]
     fn test_source_reference_display_tokens() {

@@ -22,8 +22,10 @@ use carbide_uuid::machine::MachineId;
 use clap::Parser;
 use rpc::protos::forge as forge_pb;
 
+use crate::cfg::dispatch::Dispatch;
+
 // ConnectionsCommand are the connections subcommands.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Dispatch)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -34,7 +36,7 @@ Disconnect a machine's scout stream connection:
     $ nico-admin-cli mlx connections disconnect 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub enum ConnectionsCommand {
+pub(crate) enum ConnectionsCommand {
     #[clap(about = "Show all active scout stream connections")]
     Show(ConnectionsShowCommand),
     #[clap(about = "Disconnect a scout stream connection")]
@@ -43,12 +45,12 @@ pub enum ConnectionsCommand {
 
 // ConnectionsShowCommand shows all active scout stream connections.
 #[derive(Parser, Debug)]
-pub struct ConnectionsShowCommand {}
+pub(crate) struct ConnectionsShowCommand {}
 
 // ConnectionsDisconnectCommand disconnects a machine based on machine ID.
 #[derive(Parser, Debug)]
-pub struct ConnectionsDisconnectCommand {
-    pub machine_id: MachineId,
+pub(crate) struct ConnectionsDisconnectCommand {
+    machine_id: MachineId,
 }
 
 impl From<ConnectionsDisconnectCommand> for forge_pb::ScoutStreamDisconnectRequest {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -19,7 +20,9 @@ import (
 // TargetFetcher provides the methods needed to fetch racks and components for target resolution.
 type TargetFetcher interface {
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
+	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier, withComponents bool) ([]*rack.Rack, error)
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*component.Component, error)
+	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*component.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
 }
 
@@ -38,13 +41,34 @@ func resolveTargetSpecToRacks(
 		return resolveRackTargetSpec(ctx, fetcher, targetSpec.Racks)
 	}
 
+	if targetSpec.IsNVLDomainTargeting() {
+		return resolveNVLDomainTargetSpec(ctx, fetcher, targetSpec.NVLDomains)
+	}
+
 	if targetSpec.IsComponentTargeting() {
 		return resolveComponentTargetSpec(ctx, fetcher, targetSpec.Components)
 	}
 
 	// This should be detected by Validate() and should never be here, but
 	// just in case, handle it anyway.
-	return nil, fmt.Errorf("target spec must have either racks or components set")
+	return nil, fmt.Errorf("target spec must have one of racks, NVLink domains, or components set")
+}
+
+func resolveNVLDomainTargetSpec(
+	ctx context.Context,
+	fetcher TargetFetcher,
+	targets []operation.NVLDomainTarget,
+) (map[uuid.UUID]*rack.Rack, error) {
+	rackTargets, err := inventoryresolver.ResolveNVLDomainRackTargets(
+		ctx,
+		fetcher,
+		targets,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve NVLink domain targets: %w", err)
+	}
+
+	return resolveRackTargetSpec(ctx, fetcher, rackTargets)
 }
 
 func resolveRackTargetSpec(
@@ -78,12 +102,12 @@ func resolveRackTarget(
 	rt *operation.RackTarget,
 ) (*rack.Rack, error) {
 	rackObj, err := fetcher.GetRackByIdentifier(ctx, rt.Identifier, true)
-	if rackObj == nil {
-		return nil, fmt.Errorf("rack not found for identifier %+v", rt.Identifier)
-	}
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rack by identifier %+v: %w", rt.Identifier, err)
+	}
+
+	if rackObj == nil {
+		return nil, fmt.Errorf("rack not found for identifier %+v", rt.Identifier)
 	}
 
 	var components []component.Component
@@ -159,16 +183,12 @@ func fetchComponentTarget(
 	}
 
 	if ct.External != nil {
-		comps, err := fetcher.GetComponentsByExternalIDs(ctx, []string{ct.External.ID})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get component by external id %s: %w", ct.External.ID, err)
-		}
-
-		if len(comps) == 0 {
-			return nil, fmt.Errorf("component with external id %s not found", ct.External.ID)
-		}
-
-		return comps[0], nil
+		return inventoryresolver.ResolveComponentIdentifier(
+			ctx,
+			fetcher,
+			ct.External.ID,
+			ct.External.Type,
+		)
 	}
 
 	return nil, fmt.Errorf("invalid component target: %+v", ct)

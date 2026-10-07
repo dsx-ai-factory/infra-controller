@@ -19,7 +19,7 @@
 
 use carbide_uuid::network::NetworkSegmentId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError, ObjectColumnFilter};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::network_segment::{self, NetworkSegment, NetworkSegmentControllerState};
@@ -76,7 +76,7 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
                 "db::network_segment::find()",
                 sqlx::Error::Decode(
                     eyre::eyre!(
-                        "Searching for NetworkSegment {} returned multiple results",
+                        "searching for NetworkSegment {} returned multiple results",
                         segment_id
                     )
                     .into(),
@@ -103,7 +103,7 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db::network_segment::try_update_controller_state(
             txn,
             *object_id,

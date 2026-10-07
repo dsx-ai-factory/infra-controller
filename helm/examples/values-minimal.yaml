@@ -15,43 +15,61 @@ global:
     tag: ""          # e.g. v2025.12.30
 
 ## ---------------------------------------------------------------------------
-## All core services enabled by default — disable any you don't need
+## Core services are mandatory and always installed (no enabled toggle).
+## Only optional services (nico-dsx-exchange-consumer, nico-ntp, unbound,
+## nico-machine-a-tron) can be disabled.
 ## ---------------------------------------------------------------------------
 
 ## nico-api: Core API requires site config at minimum
 nico-api:
-  enabled: true
   hostname: "nico.example.com"
   siteConfig:
     enabled: true
     nicoApiSiteConfig: |
-      # Site-specific overrides for nico-api-config.toml
-      # At minimum, configure DHCP servers and route servers for your site:
-      # dhcp_servers=["nico-dhcp.nico-system.svc.cluster.local:67"]
+      dhcp_servers = ["nico-dhcp.nico-system.svc.cluster.local:67"]
+      # route_servers = ["FRR_ROUTING_0_EXTERNAL_IP"]
+      enable_route_servers = true
+      initial_domain_name = "site.example.com"
+      sitename = "site"
+      attestation_enabled = false
+      bypass_rbac = true  # set false in production
+
+      # Resource pools are required — nico-api exits at startup without them.
+      # Adjust ranges to match your site's address plan.
+      [pools.lo-ip]
+      type = "ipv4"
+      ranges = [{ start = "10.0.0.0", end = "10.0.1.0" }]
+
+      [pools.vlan-id]
+      type = "integer"
+      ranges = [{ start = "100", end = "501" }]
+
+      [pools.vni]
+      type = "integer"
+      ranges = [{ start = "1024500", end = "1024800" }]
+
+      [pools.vpc-vni]
+      type = "integer"
+      ranges = [{ start = "0", end = "100" }]
 
 ## nico-dhcp: Configure subnets and IPs for your environment
-nico-dhcp:
-  enabled: true
+nico-dhcp: {}
 
 ## nico-dns: Authoritative DNS for managed machines
-nico-dns:
-  enabled: true
+nico-dns: {}
 
-## nico-dsx-exchange-consumer: DSX telemetry consumer
+## nico-dsx-exchange-consumer: DSX telemetry consumer (optional, on by default)
 nico-dsx-exchange-consumer:
   enabled: true
 
 ## nico-hardware-health: Hardware health metrics
-nico-hardware-health:
-  enabled: true
+nico-hardware-health: {}
 
 ## nico-pxe: PXE boot server
-nico-pxe:
-  enabled: true
+nico-pxe: {}
 
 ## nico-ssh-console-rs: SSH console proxy
 nico-ssh-console-rs:
-  enabled: true
   ## Loki log collector sidecar — disabled by default.
   ## Enable if you have a Loki instance at http://loki.loki.svc.cluster.local:3100.
   # lokiLogCollector:
@@ -65,15 +83,15 @@ nico-ssh-console-rs:
 ## resolver with forwarding rules for NICo internal domains.
 # unbound:
 #   enabled: true
-  image:
-    repository: ""   # e.g. your-registry.example.com/unbound
-    tag: ""
-  exporterImage:
-    repository: ""   # e.g. your-registry.example.com/unbound-exporter
-    tag: ""
-  localConfig:
-    forwarders.conf: |
-      forward-zone:
-        name: "."
-        forward-addr: 8.8.8.8
-        forward-addr: 8.8.4.4
+#   image:
+#     repository: ""   # e.g. your-registry.example.com/unbound
+#     tag: ""
+#   exporterImage:
+#     repository: ""   # e.g. your-registry.example.com/unbound-exporter
+#     tag: ""
+#   localConfig:
+#     forwarders.conf: |
+#       forward-zone:
+#         name: "."
+#         forward-addr: 8.8.8.8
+#         forward-addr: 8.8.4.4

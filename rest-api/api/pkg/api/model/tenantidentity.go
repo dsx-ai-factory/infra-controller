@@ -6,9 +6,12 @@ package model
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
+	"strings"
 	"time"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 )
 
@@ -18,10 +21,10 @@ type APITenantIdentityConfigCreateOrUpdateRequest struct {
 	Issuer                   string   `json:"issuer"`
 	DefaultAudience          string   `json:"defaultAudience"`
 	AllowedAudiences         []string `json:"allowedAudiences"`
-	TokenTtlSeconds          int      `json:"tokenTtlSeconds"`
+	TokenTtlSeconds          uint32   `json:"tokenTtlSeconds"`
 	SubjectPrefix            *string  `json:"subjectPrefix"`
 	RotateKey                *bool    `json:"rotateKey"`
-	SigningKeyOverlapSeconds *int     `json:"signingKeyOverlapSeconds"`
+	SigningKeyOverlapSeconds *uint32  `json:"signingKeyOverlapSeconds"`
 }
 
 // Validate enforces the REST-layer contract. Enabled is optional; nil
@@ -31,7 +34,7 @@ func (req APITenantIdentityConfigCreateOrUpdateRequest) Validate() error {
 	if err := validation.ValidateStruct(&req,
 		validation.Field(&req.Issuer, validation.Required.Error(validationErrorValueRequired)),
 		validation.Field(&req.DefaultAudience, validation.Required.Error(validationErrorValueRequired)),
-		validation.Field(&req.TokenTtlSeconds, validation.Required.Error(validationErrorValueRequired), validation.Min(1)),
+		validation.Field(&req.TokenTtlSeconds, validation.Required.Error(validationErrorValueRequired), validation.Min(uint32(1))),
 	); err != nil {
 		return err
 	}
@@ -70,24 +73,23 @@ func (req APITenantIdentityConfigCreateOrUpdateRequest) Validate() error {
 // ToProto converts the request to its gRPC form. The Core proto field
 // names retain the `_sec` suffix (`token_ttl_sec`, `signing_key_overlap_sec`);
 // only the REST/JSON spelling uses `Seconds`.
-func (req APITenantIdentityConfigCreateOrUpdateRequest) ToProto(org string) *cwssaws.SetTenantIdentityConfigRequest {
-	cfg := &cwssaws.TenantIdentityConfig{
+func (req APITenantIdentityConfigCreateOrUpdateRequest) ToProto(org string) *corev1.SetTenantIdentityConfigRequest {
+	cfg := &corev1.TenantIdentityConfig{
 		DefaultAudience:  req.DefaultAudience,
 		AllowedAudiences: req.AllowedAudiences,
 		SubjectPrefix:    req.SubjectPrefix,
 		Issuer:           req.Issuer,
-		TokenTtlSec:      uint32(req.TokenTtlSeconds),
+		TokenTtlSec:      req.TokenTtlSeconds,
 	}
 	cfg.Enabled = req.Enabled == nil || *req.Enabled
 	if req.RotateKey != nil {
 		cfg.RotateKey = *req.RotateKey
 	}
 	if req.SigningKeyOverlapSeconds != nil {
-		v := uint32(*req.SigningKeyOverlapSeconds)
-		cfg.SigningKeyOverlapSec = &v
+		cfg.SigningKeyOverlapSec = req.SigningKeyOverlapSeconds
 	}
 
-	return &cwssaws.SetTenantIdentityConfigRequest{
+	return &corev1.SetTenantIdentityConfigRequest{
 		OrganizationId: org,
 		Config:         cfg,
 	}
@@ -108,7 +110,7 @@ type APITenantIdentityConfig struct {
 	Issuer           string                        `json:"issuer"`
 	DefaultAudience  string                        `json:"defaultAudience"`
 	AllowedAudiences []string                      `json:"allowedAudiences"`
-	TokenTtlSeconds  int                           `json:"tokenTtlSeconds"`
+	TokenTtlSeconds  uint32                        `json:"tokenTtlSeconds"`
 	SubjectPrefix    string                        `json:"subjectPrefix"`
 	SigningKeys      []APITenantIdentitySigningKey `json:"signingKeys"`
 	Created          time.Time                     `json:"created"`
@@ -116,7 +118,7 @@ type APITenantIdentityConfig struct {
 }
 
 // FromResponseProto populates the response from the gRPC reply.
-func (resp *APITenantIdentityConfig) FromResponseProto(proto *cwssaws.TenantIdentityConfigResponse) {
+func (resp *APITenantIdentityConfig) FromResponseProto(proto *corev1.TenantIdentityConfigResponse) {
 	if proto == nil {
 		return
 	}
@@ -126,7 +128,7 @@ func (resp *APITenantIdentityConfig) FromResponseProto(proto *cwssaws.TenantIden
 		resp.Issuer = cfg.GetIssuer()
 		resp.DefaultAudience = cfg.GetDefaultAudience()
 		resp.AllowedAudiences = cfg.GetAllowedAudiences()
-		resp.TokenTtlSeconds = int(cfg.GetTokenTtlSec())
+		resp.TokenTtlSeconds = cfg.GetTokenTtlSec()
 		resp.SubjectPrefix = cfg.GetSubjectPrefix()
 	}
 	if keys := proto.GetSigningKeys(); len(keys) > 0 {
@@ -199,20 +201,20 @@ func (req APITenantIdentityTokenDelegationCreateOrUpdateRequest) Validate() erro
 }
 
 // ToProto converts the request to its gRPC form.
-func (req APITenantIdentityTokenDelegationCreateOrUpdateRequest) ToProto(org string) *cwssaws.TokenDelegationRequest {
-	cfg := &cwssaws.TokenDelegation{
+func (req APITenantIdentityTokenDelegationCreateOrUpdateRequest) ToProto(org string) *corev1.TokenDelegationRequest {
+	cfg := &corev1.TokenDelegation{
 		TokenEndpoint:        req.TokenEndpoint,
 		SubjectTokenAudience: req.SubjectTokenAudience,
 	}
 	if req.ClientSecretBasic != nil {
-		cfg.AuthMethodConfig = &cwssaws.TokenDelegation_ClientSecretBasic{
-			ClientSecretBasic: &cwssaws.ClientSecretBasic{
+		cfg.AuthMethodConfig = &corev1.TokenDelegation_ClientSecretBasic{
+			ClientSecretBasic: &corev1.ClientSecretBasic{
 				ClientId:     req.ClientSecretBasic.ClientID,
 				ClientSecret: req.ClientSecretBasic.ClientSecret,
 			},
 		}
 	}
-	return &cwssaws.TokenDelegationRequest{
+	return &corev1.TokenDelegationRequest{
 		OrganizationId: org,
 		Config:         cfg,
 	}
@@ -228,7 +230,7 @@ type APITenantIdentityTokenDelegation struct {
 }
 
 // FromResponseProto populates the response from the gRPC reply.
-func (resp *APITenantIdentityTokenDelegation) FromResponseProto(proto *cwssaws.TokenDelegationResponse) {
+func (resp *APITenantIdentityTokenDelegation) FromResponseProto(proto *corev1.TokenDelegationResponse) {
 	if proto == nil {
 		return
 	}
@@ -271,7 +273,7 @@ type APIOpenIDConfiguration struct {
 }
 
 // FromResponseProto populates the response from the gRPC reply.
-func (resp *APIOpenIDConfiguration) FromResponseProto(proto *cwssaws.OpenIdConfiguration) {
+func (resp *APIOpenIDConfiguration) FromResponseProto(proto *corev1.OpenIdConfiguration) {
 	if proto == nil {
 		return
 	}
@@ -286,4 +288,88 @@ func (resp *APIOpenIDConfiguration) FromResponseProto(proto *cwssaws.OpenIdConfi
 // APITenantIdentityJWKS is the .well-known/jwks.json response body.
 type APITenantIdentityJWKS struct {
 	Keys []json.RawMessage `json:"keys"`
+}
+
+var tenantIdentityReencryptOrgRegex = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// APITenantIdentityReencryptSecretsRequest is the POST /tenant-identity/re-encrypt body.
+// Both fields are optional: omitting organizationId or setting it to null targets
+// all orgs; dryRun validates without writing.
+type APITenantIdentityReencryptSecretsRequest struct {
+	OrganizationID *string `json:"organizationId"`
+	DryRun         bool    `json:"dryRun"`
+}
+
+// Validate accepts an omitted/null scope or a non-empty Core tenant organization
+// identifier (ASCII letters, digits, underscores, and hyphens). Blank scopes are
+// rejected instead of broadening a single-org request to all organizations. The
+// scope is matched case-insensitively, so the handler lowercases it before the
+// Tenant lookup and validates that the organization has access to the Site.
+func (req APITenantIdentityReencryptSecretsRequest) Validate() error {
+	return validation.ValidateStruct(&req,
+		validation.Field(&req.OrganizationID,
+			validation.NilOrNotEmpty.Error("organizationId must not be empty"),
+			validation.Match(tenantIdentityReencryptOrgRegex).Error("organizationId must contain only ASCII letters, digits, underscores, and hyphens")),
+	)
+}
+
+// NormalizeOrganizationID lowercases a supplied scope. Tenant.Org and Core's
+// tenant_identity_config.organization_id are both written from the lowercased URL
+// org, so a mixed-case scope would otherwise match neither.
+func (req *APITenantIdentityReencryptSecretsRequest) NormalizeOrganizationID() {
+	if req.OrganizationID == nil {
+		return
+	}
+	req.OrganizationID = cutil.GetPtr(strings.ToLower(*req.OrganizationID))
+}
+
+// ToProto converts the request to its gRPC form. organizationId comes from the body
+// (not the path), so no org argument is taken.
+func (req APITenantIdentityReencryptSecretsRequest) ToProto() *corev1.ReencryptTenantIdentitySecretsRequest {
+	return &corev1.ReencryptTenantIdentitySecretsRequest{
+		OrganizationId: req.OrganizationID,
+		DryRun:         req.DryRun,
+	}
+}
+
+// APITenantIdentityReencryptFailure describes one per-field re-wrap failure.
+type APITenantIdentityReencryptFailure struct {
+	OrganizationID string `json:"organizationId"`
+	Field          string `json:"field"`
+	Error          string `json:"error"`
+}
+
+// APITenantIdentityReencryptSecretsResponse is the POST /tenant-identity/re-encrypt response body.
+type APITenantIdentityReencryptSecretsResponse struct {
+	RowsExamined           int                                 `json:"rowsExamined"`
+	RowsUpdated            int                                 `json:"rowsUpdated"`
+	RowsSkippedAllOnTarget int                                 `json:"rowsSkippedAllOnTarget"`
+	FieldsReencrypted      int                                 `json:"fieldsReencrypted"`
+	FieldsSkippedOnTarget  int                                 `json:"fieldsSkippedOnTarget"`
+	RowsFailed             int                                 `json:"rowsFailed"`
+	Failures               []APITenantIdentityReencryptFailure `json:"failures"`
+	CurrentEncryptionKeyID string                              `json:"currentEncryptionKeyId"`
+}
+
+// FromProto populates the response from the gRPC reply.
+func (resp *APITenantIdentityReencryptSecretsResponse) FromProto(proto *corev1.ReencryptTenantIdentitySecretsResponse) {
+	if proto == nil {
+		return
+	}
+	resp.RowsExamined = int(proto.GetRowsExamined())
+	resp.RowsUpdated = int(proto.GetRowsUpdated())
+	resp.RowsSkippedAllOnTarget = int(proto.GetRowsSkippedAllOnTarget())
+	resp.FieldsReencrypted = int(proto.GetFieldsReencrypted())
+	resp.FieldsSkippedOnTarget = int(proto.GetFieldsSkippedOnTarget())
+	resp.RowsFailed = int(proto.GetRowsFailed())
+	resp.CurrentEncryptionKeyID = proto.GetCurrentEncryptionKeyId()
+	failures := proto.GetFailures()
+	resp.Failures = make([]APITenantIdentityReencryptFailure, 0, len(failures))
+	for _, f := range failures {
+		resp.Failures = append(resp.Failures, APITenantIdentityReencryptFailure{
+			OrganizationID: f.GetOrganizationId(),
+			Field:          f.GetField(),
+			Error:          f.GetError(),
+		})
+	}
 }

@@ -29,20 +29,20 @@ use health_report::{
 use crate::Event;
 
 #[derive(thiserror::Error, Debug)]
-pub enum ReportingError {
-    #[error("Unable to connect to carbide API: {0}")]
+pub(super) enum ReportingError {
+    #[error("unable to connect to carbide API: {0}")]
     ApiConnectFailed(String),
 
-    #[error("The API call to the Forge API server returned {0}")]
+    #[error("the API call to the forge API server returned {0}")]
     ApiInvocationError(tonic::Status),
 
-    #[error("Generic Error: {0}")]
+    #[error("generic error: {0}")]
     GenericError(String),
 
-    #[error("Error while handling json: {0}")]
+    #[error("error while handling json: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    #[error("Tokio Task Join Error {0}")]
+    #[error("tokio task join error {0}")]
     TokioJoinError(#[from] tokio::task::JoinError),
 }
 

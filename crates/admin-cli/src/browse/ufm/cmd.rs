@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn browse(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn browse(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let resp = api_client
         .0
         .ufm_browse(forgerpc::UfmBrowseRequest {

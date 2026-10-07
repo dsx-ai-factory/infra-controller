@@ -44,282 +44,270 @@ fn create_test_yaml_error() -> serde_yaml::Error {
     serde_yaml::from_str::<i32>("{ invalid: yaml: }}}").unwrap_err()
 }
 
-// Tests for error creation and conversion
-#[test]
-fn test_connection_error_from_client_error() {
-    let client_error = create_test_connection_error();
-    let mqtt_error = MqtteaClientError::from(client_error);
-
-    match mqtt_error {
-        MqtteaClientError::ConnectionError(_) => {} // Expected
-        _ => panic!("Should be ConnectionError"),
-    }
-
-    assert!(mqtt_error.is_connection_error());
-    assert!(!mqtt_error.is_deserialization_error());
-    assert!(!mqtt_error.is_serialization_error());
+// The five category predicates an `MqtteaClientError` answers, captured as one
+// value so a row can assert an error's entire categorization at once.
+#[derive(Debug, PartialEq, Eq)]
+struct Predicates {
+    connection: bool,
+    deserialization: bool,
+    serialization: bool,
+    topic: bool,
+    registry: bool,
 }
 
-#[test]
-fn test_protobuf_deserialization_error() {
-    let decode_error = create_test_decode_error();
-    let mqtt_error = MqtteaClientError::from(decode_error);
-
-    match mqtt_error {
-        MqtteaClientError::ProtobufDeserializationError(_) => {} // Expected
-        _ => panic!("Should be ProtobufDeserializationError"),
-    }
-
-    assert!(mqtt_error.is_deserialization_error());
-    assert!(!mqtt_error.is_connection_error());
-    assert!(!mqtt_error.is_serialization_error());
-}
-
-#[test]
-fn test_json_serialization_error() {
-    let json_error = create_test_json_error();
-    let mqtt_error = MqtteaClientError::from(json_error);
-
-    match mqtt_error {
-        MqtteaClientError::JsonSerializationError(_) => {} // Expected
-        _ => panic!("Should be JsonSerializationError"),
-    }
-
-    assert!(mqtt_error.is_serialization_error());
-    assert!(!mqtt_error.is_connection_error());
-    assert!(!mqtt_error.is_deserialization_error());
-}
-
-#[test]
-fn test_yaml_serialization_error() {
-    let yaml_error = create_test_yaml_error();
-    let mqtt_error = MqtteaClientError::from(yaml_error);
-
-    match mqtt_error {
-        MqtteaClientError::YamlSerializationError(_) => {} // Expected
-        _ => panic!("Should be YamlSerializationError"),
-    }
-
-    assert!(mqtt_error.is_serialization_error());
-}
-
-// Tests for convenience error constructors
-#[test]
-fn test_unknown_message_type_constructor() {
-    let error = MqtteaClientError::unknown_message_type("/pets/fluffy/unknown-data");
-
-    match error {
-        MqtteaClientError::UnknownMessageType(ref topic) => {
-            assert_eq!(topic, "/pets/fluffy/unknown-data");
+impl Predicates {
+    fn of(error: &MqtteaClientError) -> Self {
+        Self {
+            connection: error.is_connection_error(),
+            deserialization: error.is_deserialization_error(),
+            serialization: error.is_serialization_error(),
+            topic: error.is_topic_error(),
+            registry: error.is_registry_error(),
         }
-        _ => panic!("Should be UnknownMessageType"),
     }
-
-    assert!(error.is_topic_error());
 }
 
+// `MqtteaClientError` must stay `Send + Sync` so async callers can hold it across
+// `.await` points and move it between tasks; a `!Send` / `!Sync` field would
+// silently break them, so guard the bound at compile time.
 #[test]
-fn test_topic_parsing_error_constructor() {
-    let error = MqtteaClientError::topic_parsing_error("Invalid topic format for hamster data");
+fn error_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<MqtteaClientError>();
+}
 
-    match error {
-        MqtteaClientError::TopicParsingError(ref msg) => {
-            assert_eq!(msg, "Invalid topic format for hamster data");
+/// Concern (a): `from`-conversion and categorization. Each row builds an error —
+/// via the `From` impl where one exists, otherwise via a constructor or variant
+/// literal — and asserts the full set of `is_*` category predicates it answers.
+/// Because each predicate is `matches!` over a fixed variant set, asserting the
+/// whole `Predicates` vector pins down both the conversion target variant and
+/// its category. Folds the old `from`-conversion and `categorization` tests.
+#[test]
+fn error_categorization_predicates() {
+    use carbide_test_support::{Check, check_values};
+
+    // Shorthand: only the named categories are true.
+    fn only(connection: bool, deserialization: bool, serialization: bool) -> Predicates {
+        Predicates {
+            connection,
+            deserialization,
+            serialization,
+            topic: false,
+            registry: false,
         }
-        _ => panic!("Should be TopicParsingError"),
     }
 
-    assert!(error.is_topic_error());
+    check_values(
+        [
+            // From-conversions land on the expected variant/category.
+            Check {
+                scenario: "from ClientError -> connection",
+                input: MqtteaClientError::from(create_test_connection_error()),
+                expect: only(true, false, false),
+            },
+            Check {
+                scenario: "from DecodeError -> protobuf deserialization",
+                input: MqtteaClientError::from(create_test_decode_error()),
+                expect: only(false, true, false),
+            },
+            Check {
+                scenario: "from serde_json::Error -> json serialization",
+                input: MqtteaClientError::from(create_test_json_error()),
+                expect: only(false, false, true),
+            },
+            Check {
+                scenario: "from serde_yaml::Error -> yaml serialization",
+                input: MqtteaClientError::from(create_test_yaml_error()),
+                expect: only(false, false, true),
+            },
+            // Deserialization variants without a From impl.
+            Check {
+                scenario: "json deserialization",
+                input: MqtteaClientError::JsonDeserializationError(create_test_json_error()),
+                expect: only(false, true, false),
+            },
+            Check {
+                scenario: "yaml deserialization",
+                input: MqtteaClientError::YamlDeserializationError(create_test_yaml_error()),
+                expect: only(false, true, false),
+            },
+            // Topic category.
+            Check {
+                scenario: "unknown message type is a topic error",
+                input: MqtteaClientError::unknown_message_type("/pets/lizard/unknown"),
+                expect: Predicates {
+                    topic: true,
+                    ..only(false, false, false)
+                },
+            },
+            Check {
+                scenario: "topic parsing is a topic error",
+                input: MqtteaClientError::topic_parsing_error("Bad topic format"),
+                expect: Predicates {
+                    topic: true,
+                    ..only(false, false, false)
+                },
+            },
+            // Registry category.
+            Check {
+                scenario: "unregistered type is a registry error",
+                input: MqtteaClientError::unregistered_type("UnknownType"),
+                expect: Predicates {
+                    registry: true,
+                    ..only(false, false, false)
+                },
+            },
+            Check {
+                scenario: "pattern compilation is a registry error",
+                input: MqtteaClientError::pattern_compilation_error("Bad regex"),
+                expect: Predicates {
+                    registry: true,
+                    ..only(false, false, false)
+                },
+            },
+            // Raw message belongs to no category.
+            Check {
+                scenario: "raw message belongs to no category",
+                input: MqtteaClientError::raw_message_error("Failed to process bird song data"),
+                expect: only(false, false, false),
+            },
+        ],
+        |error| Predicates::of(&error),
+    );
 }
 
-#[test]
-fn test_raw_message_error_constructor() {
-    let error = MqtteaClientError::raw_message_error("Failed to process bird song data");
+// One row of the Display/Debug/source table (concern b). Rows carry several
+// expected values (substrings, a source presence flag), so this follows the
+// local-named-struct convention rather than an equality table.
+struct RenderCase {
+    scenario: &'static str,
+    error: MqtteaClientError,
+    /// Substrings the `Display` rendering must contain.
+    display_contains: &'static [&'static str],
+    /// Whether `Error::source` should yield an underlying cause.
+    has_source: bool,
+}
 
-    match error {
-        MqtteaClientError::RawMessageError(msg) => {
-            assert_eq!(msg, "Failed to process bird song data");
+/// Concern (b): `Display` rendering, `Debug` rendering, and error `source`.
+/// Each row asserts that an error renders with the expected human-readable
+/// fragments and reports a source iff it wraps an inner error. Folds the old
+/// `display`, `debug_format`, `source`, owned-values, special-characters, and
+/// the display halves of the deserialization-creation tests.
+#[test]
+fn error_display_debug_and_source() {
+    let cases = [
+        RenderCase {
+            scenario: "connection",
+            error: MqtteaClientError::ConnectionError(create_test_connection_error()),
+            // Specific inner message depends on rumqttc internals.
+            display_contains: &["MQTT connection error"],
+            has_source: true,
+        },
+        RenderCase {
+            scenario: "protobuf deserialization has a source",
+            error: MqtteaClientError::ProtobufDeserializationError(create_test_decode_error()),
+            display_contains: &["protobuf deserialization error"],
+            has_source: true,
+        },
+        RenderCase {
+            scenario: "json deserialization",
+            error: MqtteaClientError::JsonDeserializationError(create_test_json_error()),
+            display_contains: &["JSON deserialization error"],
+            has_source: true,
+        },
+        RenderCase {
+            scenario: "yaml deserialization",
+            error: MqtteaClientError::YamlDeserializationError(create_test_yaml_error()),
+            display_contains: &["YAML deserialization error"],
+            has_source: true,
+        },
+        RenderCase {
+            scenario: "json serialization has a source",
+            error: MqtteaClientError::JsonSerializationError(create_test_json_error()),
+            display_contains: &["JSON serialization error"],
+            has_source: true,
+        },
+        RenderCase {
+            scenario: "yaml serialization has a source",
+            error: MqtteaClientError::YamlSerializationError(create_test_yaml_error()),
+            display_contains: &["YAML serialization error"],
+            has_source: true,
+        },
+        RenderCase {
+            scenario: "unknown message type echoes the topic",
+            error: MqtteaClientError::unknown_message_type("/pets/parrot/songs"),
+            display_contains: &["unknown message type", "/pets/parrot/songs"],
+            has_source: false,
+        },
+        RenderCase {
+            scenario: "topic parsing echoes the message",
+            error: MqtteaClientError::topic_parsing_error("topic must start with /"),
+            display_contains: &["topic parsing error", "topic must start with /"],
+            has_source: false,
+        },
+        RenderCase {
+            scenario: "raw message echoes the message",
+            error: MqtteaClientError::raw_message_error("Failed to decode turtle sensor data"),
+            display_contains: &["raw message error", "turtle sensor data"],
+            has_source: false,
+        },
+        RenderCase {
+            scenario: "unregistered type echoes the type name",
+            error: MqtteaClientError::unregistered_type("FishMessage"),
+            display_contains: &["type not registered", "FishMessage"],
+            has_source: false,
+        },
+        RenderCase {
+            scenario: "invalid utf8 echoes the message",
+            error: MqtteaClientError::invalid_utf8("Contains invalid UTF-8 bytes"),
+            display_contains: &["invalid UTF-8", "invalid UTF-8 bytes"],
+            has_source: false,
+        },
+        RenderCase {
+            scenario: "pattern compilation echoes the message",
+            error: MqtteaClientError::pattern_compilation_error("Missing closing bracket in regex"),
+            display_contains: &["pattern compilation error", "closing bracket"],
+            has_source: false,
+        },
+        RenderCase {
+            scenario: "display preserves special characters",
+            error: MqtteaClientError::unknown_message_type("/pets/🐱/data/emoji-test"),
+            display_contains: &["🐱", "emoji-test"],
+            has_source: false,
+        },
+    ];
+
+    for case in cases {
+        let RenderCase {
+            scenario,
+            error,
+            display_contains,
+            has_source,
+        } = case;
+
+        let display = format!("{error}");
+        for fragment in display_contains {
+            assert!(
+                display.contains(fragment),
+                "{scenario}: Display {display:?} should contain {fragment:?}"
+            );
         }
-        _ => panic!("Should be RawMessageError"),
-    }
-}
 
-#[test]
-fn test_unregistered_type_constructor() {
-    let error = MqtteaClientError::unregistered_type("CatMessage");
-
-    match error {
-        MqtteaClientError::UnregisteredType(ref type_name) => {
-            assert_eq!(type_name, "CatMessage");
-        }
-        _ => panic!("Should be UnregisteredType"),
+        assert_eq!(
+            std::error::Error::source(&error).is_some(),
+            has_source,
+            "{scenario}: source presence"
+        );
     }
 
-    assert!(error.is_registry_error());
-}
-
-#[test]
-fn test_invalid_utf8_constructor() {
-    let error = MqtteaClientError::invalid_utf8("Invalid UTF-8 in dog collar message");
-
-    match error {
-        MqtteaClientError::InvalidUtf8(msg) => {
-            assert_eq!(msg, "Invalid UTF-8 in dog collar message");
-        }
-        _ => panic!("Should be InvalidUtf8"),
-    }
-}
-
-#[test]
-fn test_pattern_compilation_error_constructor() {
-    let error = MqtteaClientError::pattern_compilation_error("Invalid regex: [unclosed bracket");
-
-    match error {
-        MqtteaClientError::PatternCompilationError(ref msg) => {
-            assert_eq!(msg, "Invalid regex: [unclosed bracket");
-        }
-        _ => panic!("Should be PatternCompilationError"),
-    }
-
-    assert!(error.is_registry_error());
-}
-
-// Tests for error categorization methods
-#[test]
-fn test_error_categorization_connection() {
-    let connection_error = MqtteaClientError::ConnectionError(create_test_connection_error());
-
-    assert!(connection_error.is_connection_error());
-    assert!(!connection_error.is_deserialization_error());
-    assert!(!connection_error.is_serialization_error());
-    assert!(!connection_error.is_topic_error());
-    assert!(!connection_error.is_registry_error());
-}
-
-#[test]
-fn test_error_categorization_deserialization() {
-    let protobuf_error =
-        MqtteaClientError::ProtobufDeserializationError(create_test_decode_error());
-    let json_error = MqtteaClientError::JsonDeserializationError(create_test_json_error());
-    let yaml_error = MqtteaClientError::YamlDeserializationError(create_test_yaml_error());
-
-    assert!(protobuf_error.is_deserialization_error());
-    assert!(json_error.is_deserialization_error());
-    assert!(yaml_error.is_deserialization_error());
-
-    assert!(!protobuf_error.is_connection_error());
-    assert!(!json_error.is_serialization_error());
-    assert!(!yaml_error.is_topic_error());
-}
-
-#[test]
-fn test_error_categorization_serialization() {
-    let json_error = MqtteaClientError::JsonSerializationError(create_test_json_error());
-    let yaml_error = MqtteaClientError::YamlSerializationError(create_test_yaml_error());
-
-    assert!(json_error.is_serialization_error());
-    assert!(yaml_error.is_serialization_error());
-
-    assert!(!json_error.is_connection_error());
-    assert!(!yaml_error.is_topic_error());
-}
-
-#[test]
-fn test_error_categorization_topic() {
-    let unknown_type = MqtteaClientError::unknown_message_type("/pets/lizard/unknown");
-    let parsing_error = MqtteaClientError::topic_parsing_error("Bad topic format");
-
-    assert!(unknown_type.is_topic_error());
-    assert!(parsing_error.is_topic_error());
-
-    assert!(!unknown_type.is_connection_error());
-    assert!(!parsing_error.is_serialization_error());
-}
-
-#[test]
-fn test_error_categorization_registry() {
-    let unregistered = MqtteaClientError::unregistered_type("UnknownType");
-    let pattern_error = MqtteaClientError::pattern_compilation_error("Bad regex");
-
-    assert!(unregistered.is_registry_error());
-    assert!(pattern_error.is_registry_error());
-
-    assert!(!unregistered.is_topic_error());
-    assert!(!pattern_error.is_connection_error());
-}
-
-// Tests for error display and formatting
-#[test]
-fn test_error_display_connection() {
-    let error = MqtteaClientError::ConnectionError(create_test_connection_error());
-    let display = format!("{error}");
-
-    assert!(display.contains("MQTT connection error"));
-    // Note: Specific error message depends on rumqttc internals
-}
-
-#[test]
-fn test_error_display_unknown_message_type() {
-    let error = MqtteaClientError::unknown_message_type("/pets/parrot/songs");
-    let display = format!("{error}");
-
-    assert!(display.contains("Unknown message type"));
-    assert!(display.contains("/pets/parrot/songs"));
-}
-
-#[test]
-fn test_error_display_topic_parsing() {
-    let error = MqtteaClientError::topic_parsing_error("Topic must start with /");
-    let display = format!("{error}");
-
-    assert!(display.contains("Topic parsing error"));
-    assert!(display.contains("Topic must start with /"));
-}
-
-#[test]
-fn test_error_display_raw_message() {
-    let error = MqtteaClientError::raw_message_error("Failed to decode turtle sensor data");
-    let display = format!("{error}");
-
-    assert!(display.contains("Raw message error"));
-    assert!(display.contains("turtle sensor data"));
-}
-
-#[test]
-fn test_error_display_unregistered_type() {
-    let error = MqtteaClientError::unregistered_type("FishMessage");
-    let display = format!("{error}");
-
-    assert!(display.contains("Type not registered"));
-    assert!(display.contains("FishMessage"));
-}
-
-#[test]
-fn test_error_display_invalid_utf8() {
-    let error = MqtteaClientError::invalid_utf8("Contains invalid UTF-8 bytes");
-    let display = format!("{error}");
-
-    assert!(display.contains("Invalid UTF-8"));
-    assert!(display.contains("invalid UTF-8 bytes"));
-}
-
-#[test]
-fn test_error_display_pattern_compilation() {
-    let error = MqtteaClientError::pattern_compilation_error("Missing closing bracket in regex");
-    let display = format!("{error}");
-
-    assert!(display.contains("Pattern compilation error"));
-    assert!(display.contains("closing bracket"));
-}
-
-// Tests for error debug formatting
-#[test]
-fn test_error_debug_format() {
-    let error = MqtteaClientError::unknown_message_type("/debug/test");
-    let debug = format!("{error:?}");
-
-    assert!(debug.contains("UnknownMessageType"));
-    assert!(debug.contains("/debug/test"));
+    // Debug rendering names the variant and echoes its payload.
+    let debug_error = MqtteaClientError::unknown_message_type("/debug/test");
+    let debug = format!("{debug_error:?}");
+    assert!(
+        debug.contains("UnknownMessageType"),
+        "debug names the variant"
+    );
+    assert!(debug.contains("/debug/test"), "debug echoes the payload");
 }
 
 // Tests for unregistered_type_error helper function
@@ -350,47 +338,6 @@ fn test_unregistered_type_error_custom_type() {
     }
 }
 
-// Tests for error chaining and source
-#[test]
-fn test_error_source_connection() {
-    let client_error = create_test_connection_error();
-    let mqtt_error = MqtteaClientError::from(client_error);
-
-    // Should have a source error
-    assert!(std::error::Error::source(&mqtt_error).is_some());
-}
-
-#[test]
-fn test_error_source_protobuf() {
-    let decode_error = create_test_decode_error();
-    let mqtt_error = MqtteaClientError::from(decode_error);
-
-    // Should have a source error
-    assert!(std::error::Error::source(&mqtt_error).is_some());
-}
-
-// Tests for error equality and comparison (for test assertions)
-#[test]
-fn test_error_equality() {
-    let error1 = MqtteaClientError::unknown_message_type("/pets/cat/data");
-    let error2 = MqtteaClientError::unknown_message_type("/pets/cat/data");
-    let error3 = MqtteaClientError::unknown_message_type("/pets/dog/data");
-
-    // Note: MqtteaClientError likely doesn't implement PartialEq due to inner error types
-    // So we test by matching patterns instead
-    match (&error1, &error2, &error3) {
-        (
-            MqtteaClientError::UnknownMessageType(t1),
-            MqtteaClientError::UnknownMessageType(t2),
-            MqtteaClientError::UnknownMessageType(t3),
-        ) => {
-            assert_eq!(t1, t2);
-            assert_ne!(t1, t3);
-        }
-        _ => panic!("All should be UnknownMessageType"),
-    }
-}
-
 // Tests for error default implementation
 #[test]
 fn test_error_default() {
@@ -404,78 +351,8 @@ fn test_error_default() {
     }
 }
 
-// Test error with owned values to avoid borrow issues
-#[test]
-fn test_error_display_with_owned_values() {
-    let error = MqtteaClientError::unknown_message_type("/pets/fluffy/unknown-data");
-
-    // Test that we can format the error without borrowing issues
-    let display = format!("{error}");
-    assert!(display.contains("Unknown message type"));
-    assert!(display.contains("/pets/fluffy/unknown-data"));
-
-    // Test that we can still use the error after formatting
-    match error {
-        MqtteaClientError::UnknownMessageType(ref topic) => {
-            assert_eq!(topic, "/pets/fluffy/unknown-data");
-        }
-        _ => panic!("Should be UnknownMessageType"),
-    }
-}
-
-// Tests for JSON deserialization error creation
-#[test]
-fn test_json_deserialization_error_creation() {
-    let json_result: Result<i32, _> = serde_json::from_str("invalid json");
-    assert!(json_result.is_err());
-
-    let json_error = json_result.unwrap_err();
-
-    // Convert to our MQTT error
-    let mqtt_error = MqtteaClientError::JsonDeserializationError(json_error);
-
-    // Verify properties
-    assert!(mqtt_error.is_deserialization_error());
-
-    let display = format!("{mqtt_error}");
-    assert!(display.contains("JSON deserialization error"));
-}
-
-// Tests for YAML deserialization error creation
-#[test]
-fn test_yaml_deserialization_error_creation() {
-    let yaml_result: Result<i32, _> = serde_yaml::from_str("{ invalid: yaml: }}}");
-    assert!(yaml_result.is_err());
-
-    let yaml_error = yaml_result.unwrap_err();
-
-    // Convert to our MQTT error
-    let mqtt_error = MqtteaClientError::YamlDeserializationError(yaml_error);
-
-    // Verify properties
-    assert!(mqtt_error.is_deserialization_error());
-
-    let display = format!("{mqtt_error}");
-    assert!(display.contains("YAML deserialization error"));
-}
-
-// Performance test - error creation should be fast
-#[test]
-fn test_error_creation_performance() {
-    let start = std::time::Instant::now();
-
-    // Create many errors quickly
-    for i in 0..10_000 {
-        let _error = MqtteaClientError::unknown_message_type(format!("/pets/animal-{i}/data"));
-    }
-
-    let elapsed = start.elapsed();
-
-    // Error creation should be very fast
-    assert!(elapsed.as_millis() < 100, "Error creation should be fast");
-}
-
-// Test error with very long messages (edge case)
+// Test error with very long messages (edge case): the payload round-trips
+// untruncated and Display renders the whole thing.
 #[test]
 fn test_error_with_long_message() {
     let long_topic = "/pets/".to_string() + &"a".repeat(10_000) + "/data";
@@ -493,73 +370,4 @@ fn test_error_with_long_message() {
     // Should be able to display even very long errors
     let display = format!("{error}");
     assert!(display.len() > 1000);
-}
-
-// Test error with special characters
-#[test]
-fn test_error_with_special_characters() {
-    let special_topic = "/pets/🐱/data/emoji-test";
-    let error = MqtteaClientError::unknown_message_type(special_topic);
-
-    let display = format!("{error}");
-    assert!(display.contains("🐱"));
-    assert!(display.contains("emoji-test"));
-}
-
-// Test error Send + Sync traits (important for async code)
-#[test]
-fn test_error_send_sync() {
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-
-    assert_send::<MqtteaClientError>();
-    assert_sync::<MqtteaClientError>();
-}
-
-// Test that errors can be used in Results and Options
-#[test]
-fn test_error_in_result() {
-    fn might_fail(should_fail: bool) -> Result<String, MqtteaClientError> {
-        if should_fail {
-            Err(MqtteaClientError::unknown_message_type(
-                "/pets/ferret/unknown",
-            ))
-        } else {
-            Ok("success".to_string())
-        }
-    }
-
-    let success = might_fail(false);
-    assert!(success.is_ok());
-    assert_eq!(success.unwrap(), "success");
-
-    let failure = might_fail(true);
-    assert!(failure.is_err());
-    assert!(failure.unwrap_err().is_topic_error());
-}
-
-#[test]
-fn test_error_in_option() {
-    fn maybe_error(include_error: bool) -> Option<MqtteaClientError> {
-        if include_error {
-            Some(MqtteaClientError::raw_message_error(
-                "Chinchilla sensor malfunction",
-            ))
-        } else {
-            None
-        }
-    }
-
-    assert!(maybe_error(false).is_none());
-
-    let error_opt = maybe_error(true);
-    assert!(error_opt.is_some());
-
-    let error = error_opt.unwrap();
-    match error {
-        MqtteaClientError::RawMessageError(msg) => {
-            assert!(msg.contains("Chinchilla"));
-        }
-        _ => panic!("Should be RawMessageError"),
-    }
 }

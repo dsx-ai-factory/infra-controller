@@ -30,7 +30,7 @@ Check whether a BMC belongs to a discovered managed host:
     $ nico-admin-cli site-explorer is-bmc-in-managed-host 192.0.2.10
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: ExploreOptions,
+    pub(super) inner: ExploreOptions,
 }

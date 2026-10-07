@@ -21,7 +21,10 @@ use crate::dpf::snapshot::args::SnapshotQuery;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn snapshot(query: &SnapshotQuery, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn snapshot(
+    query: &SnapshotQuery,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
     if query.host_machine_id.machine_type() == MachineType::Dpu {
         return Err(CarbideCliError::GenericError(
             "Only host machine id is expected".to_string(),

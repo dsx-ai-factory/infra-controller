@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -105,7 +105,7 @@ func TestManageNVLinkLogicalPartitionInventory_DiscoverNVLinkLogicalPartitionInv
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.NVLinkLogicalPartitionInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.NVLinkLogicalPartitionInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -114,12 +114,12 @@ func TestManageNVLinkLogicalPartitionInventory_DiscoverNVLinkLogicalPartitionInv
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.Partitions))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -135,7 +135,7 @@ func TestManageNVLinkLogicalPartition_CreateNVLinkLogicalPartitionOnSite(t *test
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.NVLinkLogicalPartitionCreationRequest
+		request *corev1.NVLinkLogicalPartitionCreationRequest
 	}
 	tests := []struct {
 		name    string
@@ -150,10 +150,10 @@ func TestManageNVLinkLogicalPartition_CreateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionCreationRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+				request: &corev1.NVLinkLogicalPartitionCreationRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "test_name",
 						},
 						TenantOrganizationId: "test_org",
@@ -169,10 +169,10 @@ func TestManageNVLinkLogicalPartition_CreateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionCreationRequest{
+				request: &corev1.NVLinkLogicalPartitionCreationRequest{
 					Id: nil,
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "test_name",
 						},
 						TenantOrganizationId: "test_org",
@@ -188,10 +188,10 @@ func TestManageNVLinkLogicalPartition_CreateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionCreationRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+				request: &corev1.NVLinkLogicalPartitionCreationRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "",
 						},
 						TenantOrganizationId: "test_org",
@@ -207,10 +207,10 @@ func TestManageNVLinkLogicalPartition_CreateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionCreationRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+				request: &corev1.NVLinkLogicalPartitionCreationRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "test_name",
 						},
 						TenantOrganizationId: "",
@@ -261,7 +261,7 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionOnSite(t *test
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.NVLinkLogicalPartitionUpdateRequest
+		request *corev1.NVLinkLogicalPartitionUpdateRequest
 	}
 	tests := []struct {
 		name    string
@@ -276,10 +276,10 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionUpdateRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+				request: &corev1.NVLinkLogicalPartitionUpdateRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "test_name",
 						},
 					},
@@ -294,10 +294,10 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionUpdateRequest{
+				request: &corev1.NVLinkLogicalPartitionUpdateRequest{
 					Id: nil,
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "test_name",
 						},
 					},
@@ -312,10 +312,10 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionUpdateRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.NVLinkLogicalPartitionConfig{
-						Metadata: &cwssaws.Metadata{
+				request: &corev1.NVLinkLogicalPartitionUpdateRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.NVLinkLogicalPartitionConfig{
+						Metadata: &corev1.Metadata{
 							Name: "",
 						},
 					},
@@ -359,7 +359,7 @@ func TestManageNVLinkLogicalPartition_DeleteNVLinkLogicalPartitionOnSite(t *test
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.NVLinkLogicalPartitionDeletionRequest
+		request *corev1.NVLinkLogicalPartitionDeletionRequest
 	}
 	tests := []struct {
 		name    string
@@ -374,8 +374,8 @@ func TestManageNVLinkLogicalPartition_DeleteNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionDeletionRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.NVLinkLogicalPartitionDeletionRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 				},
 			},
 			wantErr: false,
@@ -387,8 +387,8 @@ func TestManageNVLinkLogicalPartition_DeleteNVLinkLogicalPartitionOnSite(t *test
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.NVLinkLogicalPartitionDeletionRequest{
-					Id: &cwssaws.NVLinkLogicalPartitionId{Value: ""},
+				request: &corev1.NVLinkLogicalPartitionDeletionRequest{
+					Id: &corev1.NVLinkLogicalPartitionId{Value: ""},
 				},
 			},
 			wantErr: true,

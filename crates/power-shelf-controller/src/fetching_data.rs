@@ -36,8 +36,8 @@ pub async fn handle_fetching_data(
     _ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(
-        "Fetching PowerShelf {} data, transitioning to Configuring",
-        power_shelf_id
+        %power_shelf_id,
+        "Fetching PowerShelf data; transitioning to Configuring"
     );
     Ok(StateHandlerOutcome::transition(
         PowerShelfControllerState::Configuring,

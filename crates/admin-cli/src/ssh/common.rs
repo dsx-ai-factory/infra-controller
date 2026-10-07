@@ -20,17 +20,17 @@ use std::net::SocketAddr;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-pub struct BmcCredentials {
+pub(super) struct BmcCredentials {
     #[clap(help = "BMC IP Address")]
-    pub bmc_ip_address: SocketAddr,
+    pub(super) bmc_ip_address: SocketAddr,
     #[clap(help = "BMC Username")]
-    pub bmc_username: String,
+    pub(super) bmc_username: String,
     #[clap(help = "BMC Password")]
-    pub bmc_password: String,
+    pub(super) bmc_password: String,
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct SshArgs {
+pub(super) struct SshArgs {
     #[clap(flatten)]
-    pub credentials: BmcCredentials,
+    pub(super) credentials: BmcCredentials,
 }

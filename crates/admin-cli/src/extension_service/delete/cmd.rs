@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn handle_delete(
+pub(super) async fn handle_delete(
     args: Args,
     _output_format: OutputFormat,
     api_client: &ApiClient,

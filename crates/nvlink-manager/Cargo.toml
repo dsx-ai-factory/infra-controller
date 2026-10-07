@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Carbide NVLink Manager"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_nvlink_manager"
@@ -16,10 +17,13 @@ test-support = []
 [dependencies]
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }
+carbide-instrument = { path = "../instrument" }
+carbide-rack = { path = "../rack" }
 carbide-secrets = { path = "../secrets" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
 config-version = { path = "../config-version" }
+component-manager = { path = "../component-manager" }
 libnmxc = { path = "../libnmxc" }
 libnmxm = { path = "../libnmxm" }
 
@@ -28,17 +32,37 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 duration-str = { workspace = true }
 eyre = { workspace = true }
+futures = { workspace = true, features = ["std"] }
+hex = { workspace = true }
 http = { workspace = true }
+librms = { workspace = true }
 opentelemetry = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 rand = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { features = ["v4", "serde"], workspace = true }
+x509-parser = { workspace = true }
+
+[dev-dependencies]
+carbide-api-db = { path = "../api-db", features = ["test-support"] }
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-macros = { path = "../macros" }
+carbide-sqlx-testing = { path = "../sqlx-testing" }
+carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
+rcgen = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

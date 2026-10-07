@@ -4,27 +4,61 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
-	"gopkg.in/yaml.v3"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+// ValidatePowerProfile validates and normalizes set operations when direct DPS
+// integration is enabled. Omitted values and explicit clears do not require
+// policy discovery.
+func ValidatePowerProfile(ctx context.Context, dpsEnabled bool, provider dpsclient.PolicyProvider, powerProfile *string) *cutil.APIError {
+	if !dpsEnabled || powerProfile == nil || *powerProfile == "" {
+		return nil
+	}
+	if provider == nil {
+		return cutil.NewAPIError(http.StatusServiceUnavailable, "DPS power-profile validation is unavailable", nil)
+	}
+
+	normalized, err := dpsclient.ValidatePowerProfile(ctx, provider, *powerProfile)
+	if err == nil {
+		*powerProfile = normalized
+		return nil
+	}
+	if errors.Is(err, dpsclient.ErrPowerProfileRequired) {
+		return cutil.NewAPIError(http.StatusBadRequest, "Power profile must not be empty", nil)
+	}
+	if errors.Is(err, dpsclient.ErrPowerProfileNotFound) {
+		return cutil.NewAPIError(http.StatusBadRequest, "Power profile does not exist in DPS", nil)
+	}
+
+	return cutil.NewAPIError(http.StatusServiceUnavailable, "Failed to validate power profile with DPS", nil)
+}
 
 const (
 	// MaxInterfaceCount is the maximum number of Interfaces allowed per Instance
 	MaxInterfaceCount = 16
+	// MaxSpectrumXAttachmentCount is the maximum number of SpectrumX Attachments allowed per Instance.
+	// Core caps the usable count at the Machine's SpectrumX PFs, and multiplane splits each port into
+	// one PF per plane, so an 8-SuperNIC HGX node on the 4-plane Astra profile exposes 32. This only
+	// keeps an unbounded list from reaching the Site, so it sits above that rather than near it.
+	MaxSpectrumXAttachmentCount = 64
 	// MachineIssueCategoryHardware is the category for hardware issues
 	MachineIssueCategoryHardware = "Hardware"
 	// MachineIssueCategoryNetwork is the category for network issues
@@ -35,19 +69,17 @@ const (
 	MachineIssueCategoryOther = "Other"
 )
 
-var (
-	// SitePhoneHomeCloudInit default cloudinit with phone home config
-	SitePhoneHomeCloudInit = `#cloud-config
-     phone_home:
-        url: %s
-        post: all`
+// validationErrorUserDataLength derives from util.MaxUserDataBytes so the
+// message and the enforced limit cannot drift apart.
+var validationErrorUserDataLength = fmt.Sprintf("`userData` must not exceed %d KiB", util.MaxUserDataBytes/1024)
 
+var (
 	// MachineIssueCategoriesFromAPIToProtobuf is the map of instance issue categories to their corresponding values
 	MachineIssueCategoriesFromAPIToProtobuf = map[string]int32{
-		MachineIssueCategoryHardware:    int32(cwssaws.IssueCategory_HARDWARE),
-		MachineIssueCategoryNetwork:     int32(cwssaws.IssueCategory_NETWORK),
-		MachineIssueCategoryPerformance: int32(cwssaws.IssueCategory_PERFORMANCE),
-		MachineIssueCategoryOther:       int32(cwssaws.IssueCategory_OTHER),
+		MachineIssueCategoryHardware:    int32(corev1.IssueCategory_HARDWARE),
+		MachineIssueCategoryNetwork:     int32(corev1.IssueCategory_NETWORK),
+		MachineIssueCategoryPerformance: int32(corev1.IssueCategory_PERFORMANCE),
+		MachineIssueCategoryOther:       int32(corev1.IssueCategory_OTHER),
 	}
 )
 
@@ -117,23 +149,26 @@ func ValidateMultiEthernetDeviceInterfaces(itNetworkCaps []cdbm.MachineCapabilit
 // ValidateInterfaces validates the Interfaces for the Instance
 func ValidateInterfaces(ifcs *[]APIInterfaceCreateOrUpdateRequest) error {
 	// Validate Interfaces
-	vpcPrefixInterfaceCount := 0
+	vpcInterfaceCount := 0
 	subnetInterfaceCount := 0
+	hasVpcSelection := false
 
 	multiEthernetInterfaceCount := 0
 	singleEthernetInterfaceCount := 0
 
 	physicalInterfaceCount := 0
 
-	for _, ifcr := range *ifcs {
+	for index := range *ifcs {
+		ifcr := &(*ifcs)[index]
 		err := ifcr.Validate()
 
 		if err != nil {
 			return err
 		}
 
-		if ifcr.VpcPrefixID != nil {
-			vpcPrefixInterfaceCount++
+		if ifcr.VpcPrefixID != nil || ifcr.VpcID != nil {
+			vpcInterfaceCount++
+			hasVpcSelection = hasVpcSelection || ifcr.VpcID != nil
 		} else {
 			subnetInterfaceCount++
 		}
@@ -149,7 +184,12 @@ func ValidateInterfaces(ifcs *[]APIInterfaceCreateOrUpdateRequest) error {
 		}
 	}
 
-	if vpcPrefixInterfaceCount > 0 && subnetInterfaceCount > 0 {
+	if vpcInterfaceCount > 0 && subnetInterfaceCount > 0 {
+		if hasVpcSelection {
+			return validation.Errors{
+				validationCommonErrorField: errors.New("either all interfaces must be VPC based or all of them must be Subnet based"),
+			}
+		}
 		return validation.Errors{
 			validationCommonErrorField: errors.New("either all interfaces must be VPC Prefix based or all of them must be Subnet based"),
 		}
@@ -173,6 +213,91 @@ func ValidateInterfaces(ifcs *[]APIInterfaceCreateOrUpdateRequest) error {
 	}
 
 	return nil
+}
+
+// InfiniBandInterfaceRequestMatchResult captures whether a machine can satisfy an InfiniBand interface request.
+type InfiniBandInterfaceRequestMatchResult struct {
+	Satisfied                 bool
+	CountSatisfiable          bool
+	SuggestedByDevice         map[string][]int
+	UnsatisfiedRequestIndices []int
+}
+
+// ValidateInfiniBandRequestForMachineCapability checks whether machine InfiniBand capabilities
+// can satisfy the requested interfaces.
+func (req *APIInstanceCreateRequest) ValidateInfiniBandRequestForMachineCapability(machineIbCaps []cdbm.MachineCapability) InfiniBandInterfaceRequestMatchResult {
+	capByDevice := make(map[string]cdbm.MachineCapability, len(machineIbCaps))
+	for _, cap := range machineIbCaps {
+		capByDevice[cap.Name] = cap
+	}
+
+	result := InfiniBandInterfaceRequestMatchResult{
+		Satisfied:         true,
+		CountSatisfiable:  true,
+		SuggestedByDevice: make(map[string][]int, len(capByDevice)),
+	}
+
+	// Build the available by device map from the capabilities
+	for device, cap := range capByDevice {
+		// If the count is nil, skip the device
+		if cap.Count == nil {
+			continue
+		}
+
+		inactive := make(map[int]bool, len(cap.InactiveDevices))
+		for _, deviceInstance := range cap.InactiveDevices {
+			inactive[deviceInstance] = true
+		}
+
+		active := make([]int, 0, *cap.Count)
+		for deviceInstance := 0; deviceInstance < *cap.Count; deviceInstance++ {
+			if !inactive[deviceInstance] {
+				active = append(active, deviceInstance)
+			}
+		}
+		// Add the active device instances to the available by device map
+		result.SuggestedByDevice[device] = active
+	}
+
+	requestedByDevice := make(map[string]int)
+	for idx, ibifc := range req.InfiniBandInterfaces {
+		cap, found := capByDevice[ibifc.Device]
+		if !found {
+			result.Satisfied = false
+			result.CountSatisfiable = false
+			result.UnsatisfiedRequestIndices = append(result.UnsatisfiedRequestIndices, idx)
+			continue
+		}
+
+		if ibifc.Vendor != nil && cap.Vendor != nil && *ibifc.Vendor != *cap.Vendor {
+			result.Satisfied = false
+			result.UnsatisfiedRequestIndices = append(result.UnsatisfiedRequestIndices, idx)
+		}
+
+		activeDeviceInstance := make(map[int]bool, len(result.SuggestedByDevice[ibifc.Device]))
+		for _, deviceInstance := range result.SuggestedByDevice[ibifc.Device] {
+			activeDeviceInstance[deviceInstance] = true
+		}
+		if !activeDeviceInstance[ibifc.DeviceInstance] {
+			result.Satisfied = false
+			result.UnsatisfiedRequestIndices = append(result.UnsatisfiedRequestIndices, idx)
+		}
+
+		requestedByDevice[ibifc.Device]++
+	}
+
+	for device, requestedCount := range requestedByDevice {
+		if len(result.SuggestedByDevice[device]) < requestedCount {
+			result.CountSatisfiable = false
+		}
+	}
+
+	if len(req.InfiniBandInterfaces) == 0 {
+		result.Satisfied = true
+		result.CountSatisfiable = true
+	}
+
+	return result
 }
 
 // ValidateInfiniBandInterfaces validates the InfiniBand Interfaces for Instance create/update request
@@ -214,7 +339,7 @@ func ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability, ibifcs []AP
 				}
 			}
 
-			// Check if the infiniband device name is present in the Instance Type's InfiniBand Capabilities
+			// Check if the infiniband device name is present in the  Instance Type's InfiniBand Capabilities
 			_, exists = deviceInstanceCountMap[ibifc.Device]
 			if !exists {
 				return validation.Errors{
@@ -222,7 +347,7 @@ func ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability, ibifcs []AP
 				}
 			}
 
-			// Check if the infiniband device vendor is present in the Instance Type's InfiniBand Capabilities
+			// Check if the infiniband device vendor is present in the  Instance Type's InfiniBand Capabilities
 			if ibifc.Vendor != nil && !deviceVendorMap[*ibifc.Vendor] {
 				return validation.Errors{
 					"vendor": fmt.Errorf("Vendor %v is not present in Instance Type's InfiniBand Capabilities", *ibifc.Vendor),
@@ -235,7 +360,7 @@ func ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability, ibifcs []AP
 				}
 			}
 
-			// Check if the specified InfiniBand device instance is inactive
+			// Check if the specified Instance Type's InfiniBand device instance is inactive
 			_, exists = deviceInactiveInstanceMap[ibifc.Device]
 			if exists {
 				_, exists = deviceInactiveInstanceMap[ibifc.Device][ibifc.DeviceInstance]
@@ -273,6 +398,41 @@ func ValidateDpuExtensionServiceDeployments(desdrs []APIDpuExtensionServiceDeplo
 			}
 		}
 		desVersionMap[desvID] = true
+	}
+
+	return nil
+}
+
+// ValidateSpectrumXAttachments validates the SpectrumX Attachments for the Instance create/update request.
+// Each attachment consumes one device instance in Core's allocate_spx_port_mac, which rejects a repeated
+// device and device instance pair irrespective of virtualFunctionId. Reject it here so the caller gets a
+// 400 instead of a Site failure. Core bounds the real count by the Machine's SpectrumX interfaces, so
+// MaxSpectrumXAttachmentCount only keeps an unbounded list from reaching it.
+func ValidateSpectrumXAttachments(sacs []APISpectrumXAttachmentCreateOrUpdateRequest) error {
+	if len(sacs) > MaxSpectrumXAttachmentCount {
+		return validation.Errors{
+			"spectrumXAttachments": fmt.Errorf("at most %v SpectrumX Attachments can be specified", MaxSpectrumXAttachmentCount),
+		}
+	}
+
+	deviceInstanceMap := map[string]bool{}
+
+	for _, sac := range sacs {
+		err := sac.Validate()
+		if err != nil {
+			return err
+		}
+
+		deviceInstanceID := fmt.Sprintf("%s-%d", sac.Device, *sac.DeviceInstance)
+
+		_, exists := deviceInstanceMap[deviceInstanceID]
+		if exists {
+			return validation.Errors{
+				"spectrumXAttachments": fmt.Errorf("duplicate SpectrumX Attachment specified for Device %v, Device Instance: %v", sac.Device, *sac.DeviceInstance),
+			}
+		}
+
+		deviceInstanceMap[deviceInstanceID] = true
 	}
 
 	return nil
@@ -325,11 +485,11 @@ type APIInstanceCreateRequest struct {
 	InstanceTypeID *string `json:"instanceTypeId"`
 	// VpcID is the ID of the VPC containing the Instance
 	VpcID string `json:"vpcId"`
-	// SecondaryVpcIDs lists additional VPC UUIDs for prefix-backed, non-primary
-	// network interfaces on the Instance. Validate() rejects this field unless
-	// every entry in Interfaces uses vpcPrefixId, and the create handler then
+	// SecondaryVpcIDs lists additional VPC UUIDs for non-primary interfaces on
+	// the Instance that select a prefix. Validate() rejects this field unless
+	// every entry in Interfaces uses vpcPrefixId or vpcId, and the create handler then
 	// verifies that the supplied UUIDs exactly match the VPCs resolved from those
-	// prefix-backed interfaces.
+	// interfaces.
 	SecondaryVpcIDs []string `json:"secondaryVpcIds"`
 	// OperatingSystemID is the ID of the Operating System
 	OperatingSystemID *string `json:"operatingSystemId"`
@@ -352,6 +512,8 @@ type APIInstanceCreateRequest struct {
 	AutoNetwork bool `json:"autoNetwork"`
 	// InfiniBandInterfaces is the list of InfiniBandInterface to create for the Instance
 	InfiniBandInterfaces []APIInfiniBandInterfaceCreateOrUpdateRequest `json:"infinibandInterfaces"`
+	// SpectrumXAttachments is the list of SpectrumX Partition attachments to create for the Instance
+	SpectrumXAttachments []APISpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments"`
 	// DpuExtensionServiceDeployments is the list of DpuExtensionServiceDeployments to create for the Instance
 	DpuExtensionServiceDeployments []APIDpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments"`
 	// NVLinkInterfaces is the list of NVLinkInterface to create for the Instance
@@ -365,8 +527,14 @@ type APIInstanceCreateRequest struct {
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
 	// MachineID is the ID of the Machine. Only MachineID or InstanceTypeID can be present
 	MachineID *string `json:"machineId"`
+	// MachineLabelSelector restricts automatic Machine selection, or validates a
+	// specifically requested Machine, by exact Machine label key/value matches.
+	// All entries must match.
+	MachineLabelSelector map[string]string `json:"machineLabelSelector"`
 	// AllowUnhealthyMachine is a flag that can be used to target Machines are in maintenance or have health alerts preventing regular provision flow.
 	AllowUnhealthyMachine *bool `json:"allowUnhealthyMachine"`
+	// PowerProfile is the external power provisioning profile for the Instance.
+	PowerProfile *string `json:"powerProfile"`
 }
 
 // APIBatchInstanceCreateRequest is the data structure to capture request to create multiple instances in a single request
@@ -383,13 +551,16 @@ type APIBatchInstanceCreateRequest struct {
 	TenantID string `json:"tenantId"`
 	// InstanceTypeID is the ID of the Instance Type
 	InstanceTypeID string `json:"instanceTypeId"`
+	// MachineLabelSelector restricts Machine selection by exact Machine label
+	// key/value matches. All entries must match.
+	MachineLabelSelector map[string]string `json:"machineLabelSelector"`
 	// VpcID is the ID of the VPC containing the Instances
 	VpcID string `json:"vpcId"`
-	// SecondaryVpcIDs lists additional VPC UUIDs for prefix-backed, non-primary
-	// network interfaces on each Instance in the batch. Validate() rejects this
-	// field unless every entry in Interfaces uses vpcPrefixId, and batch create
+	// SecondaryVpcIDs lists additional VPC UUIDs for non-primary interfaces on
+	// each Instance in the batch that select a prefix. Validate() rejects this
+	// field unless every entry in Interfaces uses vpcPrefixId or vpcId, and batch create
 	// processing expects these UUIDs to align with the VPCs implied by those
-	// prefix-backed interfaces.
+	// interfaces.
 	SecondaryVpcIDs []string `json:"secondaryVpcIds"`
 	// OperatingSystemID is the ID of the Operating System
 	OperatingSystemID *string `json:"operatingSystemId"`
@@ -401,6 +572,8 @@ type APIBatchInstanceCreateRequest struct {
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled"`
 	// UserData is the user data for the instances
 	UserData *string `json:"userData"`
+	// PowerProfile is the external power provisioning profile for every Instance in the batch.
+	PowerProfile *string `json:"powerProfile"`
 	// Interfaces is the list of Interfaces to create for each instance (shared across all instances).
 	// Mutually exclusive with `AutoNetwork`: when `AutoNetwork` is true this MUST be empty.
 	Interfaces []APIInterfaceCreateOrUpdateRequest `json:"interfaces"`
@@ -411,6 +584,8 @@ type APIBatchInstanceCreateRequest struct {
 	AutoNetwork bool `json:"autoNetwork"`
 	// InfiniBandInterfaces is the list of InfiniBandInterface to create for each instance (shared across all instances)
 	InfiniBandInterfaces []APIInfiniBandInterfaceCreateOrUpdateRequest `json:"infinibandInterfaces"`
+	// SpectrumXAttachments is the list of SpectrumX Partition attachments to create for each instance (shared across all instances)
+	SpectrumXAttachments []APISpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments"`
 	// NVLinkInterfaces is the list of NVLinkInterface to create for each instance (shared across all instances)
 	NVLinkInterfaces []APINVLinkInterfaceCreateOrUpdateRequest `json:"nvLinkInterfaces"`
 	// DpuExtensionServiceDeployments is the list of DpuExtensionServiceDeployments to create for each Instance (shared across all instances)
@@ -446,6 +621,12 @@ func (icr APIInstanceCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&icr.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&icr.UserData,
+			validation.When(icr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
+		validation.Field(&icr.PowerProfile,
+			validation.When(icr.PowerProfile != nil, validation.Required.Error("`powerProfile` must not be empty"))),
 		validation.Field(&icr.Interfaces,
 			// When AutoNetwork is true, the Instance has NICo auto-resolve interfaces
 			// from the host's HostInband segments, so the explicit list MUST
@@ -469,9 +650,9 @@ func (icr APIInstanceCreateRequest) Validate() error {
 			}
 		}
 		for _, iface := range icr.Interfaces {
-			if iface.VpcPrefixID == nil {
+			if iface.VpcPrefixID == nil && iface.VpcID == nil {
 				return validation.Errors{
-					"secondaryVpcIds": errors.New("`secondaryVpcIds` can only be specified when `vpcPrefixId` is specified within `interfaces`"),
+					"secondaryVpcIds": errors.New("`secondaryVpcIds` can only be specified when `vpcPrefixId` or `vpcId` is specified within `interfaces`"),
 				}
 			}
 		}
@@ -511,6 +692,12 @@ func (icr APIInstanceCreateRequest) Validate() error {
 		}
 	}
 
+	// Validate SpectrumX Attachments
+	err = ValidateSpectrumXAttachments(icr.SpectrumXAttachments)
+	if err != nil {
+		return err
+	}
+
 	// Validate DpuExtensionServiceDeployments
 	err = ValidateDpuExtensionServiceDeployments(icr.DpuExtensionServiceDeployments)
 	if err != nil {
@@ -526,7 +713,12 @@ func (icr APIInstanceCreateRequest) Validate() error {
 		}
 	}
 
-	if err := util.ValidateLabels(icr.Labels); err != nil {
+	err = util.ValidateLabels(icr.Labels)
+	if err != nil {
+		return err
+	}
+	err = validateMachineLabelSelector(icr.MachineLabelSelector)
+	if err != nil {
 		return err
 	}
 
@@ -549,6 +741,21 @@ func (icr APIInstanceCreateRequest) ValidateForVpc(vpc *cdbm.Vpc) error {
 	return nil
 }
 
+// phoneHomeUserDataError names the operation that failed, so a failure to take
+// phone-home out does not send whoever reads it looking at the path that puts it
+// in.
+func phoneHomeUserDataError(enabled bool) validation.Errors {
+	if enabled {
+		return validation.Errors{
+			"userData": errors.New("failed to insert phone-home into userData"),
+		}
+	}
+
+	return validation.Errors{
+		"userData": errors.New("failed to remove phone-home from userData"),
+	}
+}
+
 // Validate the OS against any additional option combinations specified.
 func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *config.Config, os *cdbm.OperatingSystem) error {
 	// The OS passed in will either be:
@@ -563,6 +770,13 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 	mergedPhoneHomeEnabled := icr.PhoneHomeEnabled
 	mergedIpxeScript := icr.IpxeScript
 	mergedAlwaysBootWithCustomIpxe := icr.AlwaysBootWithCustomIpxe
+
+	// If the request supplies no user-data of its own, the document being
+	// edited is the base OS's blob, whose phone-home block NICo authored
+	// whenever the OS was stored with phone-home enabled. That block is
+	// removed by key, because the URL frozen into it may predate a change
+	// to site.phoneHomeUrl. Caller-supplied user-data stays URL-matched.
+	nicoAuthoredPhoneHome := icr.UserData == nil && os != nil && os.PhoneHomeEnabled
 
 	if os == nil {
 		// If no OS is being chosen...
@@ -678,88 +892,37 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 
 	// If the request is setting PhoneHomeEnabled
 	if icr.PhoneHomeEnabled != nil {
-		// If there's some existing user-data,
-		// we'll need to modify it to either insert phone-home
-		// settings or snip them out
-		if mergedUserData != nil && *mergedUserData != "" {
-			userDataMap := &yaml.Node{}
+		var userData *string
+		var err error
 
-			var documentRoot *yaml.Node
-
-			isUserDataValidYAML := false
-			err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-
-			if err == nil {
-
-				// We have a slightly more restrictive view of what
-				// counts as valid YAML.
-				if len(userDataMap.Content) > 0 {
-					documentRoot = userDataMap.Content[0]
-
-					if documentRoot.Kind == yaml.MappingNode {
-						isUserDataValidYAML = true
-					}
-				}
-			}
-
-			if *mergedPhoneHomeEnabled {
-				// Phone home can only be enabled if the user-data is valid YAML
-				if !isUserDataValidYAML {
-					return validation.Errors{
-						"userData": errors.New("userData specified in request must be valid CloudInit YAML to enable phone home"),
-					}
-				}
-
-				if err := util.InsertPhoneHomeIntoUserData(documentRoot, cfg.GetSitePhoneHomeUrl()); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to insert phone-home into userData"),
-					}
-				}
-
-			} else if isUserDataValidYAML {
-				// We have to make sure we don't try to remove from invalid yaml,
-				// but the UI will always send false if phone-home is unchecked,
-				// so we want to do this check silently and not alert people who
-				// are using non-YAML user-data.
-
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, cutil.GetPtr(cfg.GetSitePhoneHomeUrl())); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
-					}
-				}
-
-			}
-
-			// If there's still user-data, marshal so that it can be stored in the DB later
-			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
-
-				byteUserData, err := yaml.Marshal(userDataMap)
-				if err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to re-construct userData after processing phone home config"),
-					}
-				}
-				icr.UserData = cutil.GetPtr(string(byteUserData))
-			} else if isUserDataValidYAML && !*mergedPhoneHomeEnabled {
-				// This would be a case of valid YAML where the user
-				// disabled phone-home.
-				// If the only user-data _was_ the phone-home data but phone-home
-				// is being disabled, then we'll blank out the field in the DB.
-				icr.UserData = cutil.GetPtr("")
-			}
-			// There's an implied case here of invalid YAML
-			// In that case, we do nothing, and icr.UserData will stay untouched.
+		if *mergedPhoneHomeEnabled {
+			userData, err = util.EnablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		} else if nicoAuthoredPhoneHome {
+			userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 		} else {
-			// If user-data is nil or empty, but phone-home is being enabled,
-			// we need to set the default phone-home settings string.
-			// (Nothing to do if user-data is nil or empty and phone-home is being disabled.)
+			userData, err = util.DisablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		}
+
+		switch {
+		case errors.Is(err, util.ErrUnsupportedUserData):
+			// Phone-home can only be enabled in cloud-init user-data. The UI
+			// always sends false when the box is unchecked, so on disable such
+			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
-				icr.UserData = cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg.GetSitePhoneHomeUrl()))
+				return validation.Errors{
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+				}
 			}
+		case err != nil:
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+		case userData != nil:
+			// Empty means phone-home was all the user-data held, so the field is
+			// blanked.
+			icr.UserData = userData
 		}
 	}
 
-	return nil
+	return util.ValidateEffectiveUserData(icr.UserData)
 }
 
 // ValidateMultiEthernetDeviceInterfaces validates the Multi-Ethernet Device Interfaces for the Instance
@@ -788,6 +951,8 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Min(2).Error("Count must be at least 2"),
 			// TODO: the number 18 is a temporary limit until we have a better way to handle topology-optimized allocation. 18 is the largest possible GB200 domain size.
+			// Batch allocation keeps one Postgres subtransaction per allocated Machine until the create commits.
+			// Keep this below 64, past which the per-backend subtransaction cache overflows and slows snapshots on every connection.
 			validation.Max(18).Error("Count cannot exceed 18")),
 		validation.Field(&bicr.Description,
 			validation.When(bicr.Description != nil,
@@ -803,6 +968,12 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&bicr.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&bicr.UserData,
+			validation.When(bicr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
+		validation.Field(&bicr.PowerProfile,
+			validation.When(bicr.PowerProfile != nil, validation.Required.Error("`powerProfile` must not be empty"))),
 		validation.Field(&bicr.Interfaces,
 			// When AutoNetwork is true, the batch has NICo auto-resolve interfaces
 			// from the host's HostInband segments, so the explicit list MUST
@@ -826,9 +997,9 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			}
 		}
 		for _, iface := range bicr.Interfaces {
-			if iface.VpcPrefixID == nil {
+			if iface.VpcPrefixID == nil && iface.VpcID == nil {
 				return validation.Errors{
-					"secondaryVpcIds": errors.New("`secondaryVpcIds` can only be specified when `vpcPrefixId` is specified within `interfaces`"),
+					"secondaryVpcIds": errors.New("`secondaryVpcIds` can only be specified when `vpcPrefixId` or `vpcId` is specified within `interfaces`"),
 				}
 			}
 		}
@@ -868,6 +1039,12 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 		}
 	}
 
+	// Validate SpectrumX Attachments
+	err = ValidateSpectrumXAttachments(bicr.SpectrumXAttachments)
+	if err != nil {
+		return err
+	}
+
 	// Validate DpuExtensionServiceDeployments
 	err = ValidateDpuExtensionServiceDeployments(bicr.DpuExtensionServiceDeployments)
 	if err != nil {
@@ -883,12 +1060,43 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 		}
 	}
 
-	if err := util.ValidateLabels(bicr.Labels); err != nil {
+	err = util.ValidateLabels(bicr.Labels)
+	if err != nil {
+		return err
+	}
+	err = validateMachineLabelSelector(bicr.MachineLabelSelector)
+	if err != nil {
 		return err
 	}
 
 	// err should be nil at this point
 	return err
+}
+
+// validateMachineLabelSelector applies the shared label-map contract while
+// reporting validation errors against the public request field.
+func validateMachineLabelSelector(selector map[string]string) error {
+	err := util.ValidateLabels(selector)
+	if err == nil {
+		return nil
+	}
+
+	labelErrors, ok := err.(validation.Errors)
+	if !ok {
+		return validation.Errors{"machineLabelSelector": err}
+	}
+
+	labelErr, found := labelErrors["labels"]
+	if !found {
+		return validation.Errors{"machineLabelSelector": err}
+	}
+	if errors.Is(labelErr, util.ErrValidationLabelNUL) {
+		return validation.Errors{
+			"machineLabelSelector": errors.New("machine label selector keys and values must not contain the Unicode NUL character (U+0000)"),
+		}
+	}
+
+	return validation.Errors{"machineLabelSelector": labelErr}
 }
 
 // ValidateForVpc validates request fields whose legality depends on the
@@ -917,6 +1125,13 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 	mergedPhoneHomeEnabled := bicr.PhoneHomeEnabled
 	mergedIpxeScript := bicr.IpxeScript
 	mergedAlwaysBootWithCustomIpxe := bicr.AlwaysBootWithCustomIpxe
+
+	// If the request supplies no user-data of its own, the document being
+	// edited is the base OS's blob, whose phone-home block NICo authored
+	// whenever the OS was stored with phone-home enabled. That block is
+	// removed by key, because the URL frozen into it may predate a change
+	// to site.phoneHomeUrl. Caller-supplied user-data stays URL-matched.
+	nicoAuthoredPhoneHome := bicr.UserData == nil && os != nil && os.PhoneHomeEnabled
 
 	if os == nil {
 		// If no OS is being chosen...
@@ -1003,75 +1218,37 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 
 	// If the request is setting PhoneHomeEnabled
 	if bicr.PhoneHomeEnabled != nil {
-		// If there's some existing user-data,
-		// we'll need to modify it to either insert phone-home
-		// settings or snip them out
-		if mergedUserData != nil && *mergedUserData != "" {
-			userDataMap := &yaml.Node{}
+		var userData *string
+		var err error
 
-			var documentRoot *yaml.Node
-
-			isUserDataValidYAML := false
-			err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-
-			if err == nil {
-
-				// We have a slightly more restrictive view of what
-				// counts as valid YAML.
-				if len(userDataMap.Content) > 0 {
-					documentRoot = userDataMap.Content[0]
-
-					if documentRoot.Kind == yaml.MappingNode {
-						isUserDataValidYAML = true
-					}
-				}
-			}
-
-			if *mergedPhoneHomeEnabled {
-				// Phone home can only be enabled if the user-data is valid YAML
-				if !isUserDataValidYAML {
-					return validation.Errors{
-						"userData": errors.New("userData specified in request must be valid CloudInit YAML to enable phone home"),
-					}
-				}
-
-				if err := util.InsertPhoneHomeIntoUserData(documentRoot, cfg.GetSitePhoneHomeUrl()); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to insert phone-home into userData"),
-					}
-				}
-
-			} else if isUserDataValidYAML {
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, cutil.GetPtr(cfg.GetSitePhoneHomeUrl())); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
-					}
-				}
-			}
-
-			// If there's still user-data, marshal so that it can be stored in the DB later
-			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
-
-				byteUserData, err := yaml.Marshal(userDataMap)
-				if err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to re-construct userData after processing phone home config"),
-					}
-				}
-				bicr.UserData = cutil.GetPtr(string(byteUserData))
-			} else if isUserDataValidYAML && !*mergedPhoneHomeEnabled {
-				bicr.UserData = cutil.GetPtr("")
-			}
+		if *mergedPhoneHomeEnabled {
+			userData, err = util.EnablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		} else if nicoAuthoredPhoneHome {
+			userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 		} else {
-			// If user-data is nil or empty, but phone-home is being enabled,
-			// we need to set the default phone-home settings string.
+			userData, err = util.DisablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		}
+
+		switch {
+		case errors.Is(err, util.ErrUnsupportedUserData):
+			// Phone-home can only be enabled in cloud-init user-data. The UI
+			// always sends false when the box is unchecked, so on disable such
+			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
-				bicr.UserData = cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg.GetSitePhoneHomeUrl()))
+				return validation.Errors{
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+				}
 			}
+		case err != nil:
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+		case userData != nil:
+			// Empty means phone-home was all the user-data held, so the field is
+			// blanked.
+			bicr.UserData = userData
 		}
 	}
 
-	return nil
+	return util.ValidateEffectiveUserData(bicr.UserData)
 }
 
 // ValidateNVLinkInterfaces validates the NVLink interfaces for the Instance
@@ -1103,11 +1280,11 @@ type APIInstanceUpdateRequest struct {
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled"`
 	// AlwaysBootWithCustomIpxe is an attribute which is specified by user if instance boot with ipxe or not
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe"`
-	// SecondaryVpcIDs lists additional VPC IDs for prefix-backed, non-primary
-	// network interfaces on the Instance. This field will be rejected unless
+	// SecondaryVpcIDs lists additional VPC IDs for non-primary interfaces on the
+	// Instance that select a prefix. This field will be rejected unless
 	// Interfaces is provided and non-empty and every entry in Interfaces uses
-	// vpcPrefixId. The update handler then verifies that the supplied UUIDs
-	// exactly match the VPCs resolved from those prefix-backed interfaces.
+	// vpcPrefixId or vpcId. The update handler then verifies that the supplied UUIDs
+	// exactly match the VPCs resolved from those interfaces.
 	SecondaryVpcIDs []string `json:"secondaryVpcIds"`
 	// Interfaces is the list of Interfaces to update for the Instance.
 	// Mutually exclusive with `AutoNetwork`: when `AutoNetwork` is true this MUST be empty.
@@ -1119,6 +1296,9 @@ type APIInstanceUpdateRequest struct {
 	AutoNetwork *bool `json:"autoNetwork"`
 	// InfiniBandInterfaces is the list of InfiniBandInterface to update for the Instance
 	InfiniBandInterfaces []APIInfiniBandInterfaceCreateOrUpdateRequest `json:"infinibandInterfaces"`
+	// SpectrumXAttachments is the list of SpectrumX Partition attachments to update for the Instance. `nil` leaves
+	// the Instance's SpectrumX attachments unchanged; a non-nil (possibly empty) list replaces them entirely.
+	SpectrumXAttachments []APISpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments"`
 	// DpuExtensionServiceDeployments is the list of DpuExtensionServiceDeployments to update for the Instance
 	DpuExtensionServiceDeployments []APIDpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments"`
 	// NVLinkInterfaces is the list of NVLinkInterface to update for the Instance
@@ -1127,6 +1307,8 @@ type APIInstanceUpdateRequest struct {
 	SSHKeyGroupIDs []string `json:"sshKeyGroupIds"`
 	// NetworkSecurityGroupID is the ID of Network Security Group to attach to the Instance
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
+	// PowerProfile updates the external power provisioning profile. An empty string clears it.
+	PowerProfile *string `json:"powerProfile"`
 }
 
 // Validate the OS against any additional option combinations specified.
@@ -1146,6 +1328,22 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 	mergedPhoneHomeEnabled := iur.PhoneHomeEnabled
 	mergedIpxeScript := iur.IpxeScript
 	mergedAlwaysBootWithCustomIpxe := iur.AlwaysBootWithCustomIpxe
+
+	// If the request supplies no user-data of its own, the document being
+	// edited is a stored blob — the new base OS's when the request changes
+	// the OS, otherwise the instance's — and any phone-home block in it was
+	// authored by NICo whenever that blob was stored with phone-home
+	// enabled. Such a block is removed by key, because the URL frozen into
+	// it may predate a change to site.phoneHomeUrl. Caller-supplied
+	// user-data stays URL-matched.
+	nicoAuthoredPhoneHome := false
+	if iur.UserData == nil {
+		if iur.OperatingSystemID != nil {
+			nicoAuthoredPhoneHome = os != nil && os.PhoneHomeEnabled
+		} else {
+			nicoAuthoredPhoneHome = instance.PhoneHomeEnabled
+		}
+	}
 
 	if os == nil {
 		// If the OS is being cleared...
@@ -1290,87 +1488,47 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 	// which could have updated the user-data,
 	// then we'll need to make sure we update user-data accordingly.
 	if iur.PhoneHomeEnabled != nil || iur.UserData != nil || iur.OperatingSystemID != nil {
-		// If there's some existing user-data,
-		// we'll need to modify it to either insert phone-home
-		// settings or snip them out
-		if mergedUserData != nil && *mergedUserData != "" {
-			userDataMap := &yaml.Node{}
+		var userData *string
+		var err error
 
-			var documentRoot *yaml.Node
-
-			isUserDataValidYAML := false
-			err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-
-			if err == nil {
-
-				// We have a slightly more restrictive view of what
-				// counts as valid YAML.
-				if len(userDataMap.Content) > 0 {
-					documentRoot = userDataMap.Content[0]
-
-					if documentRoot.Kind == yaml.MappingNode {
-						isUserDataValidYAML = true
-					}
-				}
-			}
-
-			if *mergedPhoneHomeEnabled {
-				// Phone home can only be enabled if the user-data is valid YAML
-				if !isUserDataValidYAML {
-					return validation.Errors{
-						"userData": errors.New("must be valid CloudInit YAML to enable phone home"),
-					}
-				}
-
-				if err := util.InsertPhoneHomeIntoUserData(documentRoot, cfg.GetSitePhoneHomeUrl()); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to insert phone-home into userData"),
-					}
-				}
-
-			} else if isUserDataValidYAML {
-				// We have to make sure we don't try to remove from invalid yaml,
-				// but the UI will always send false if phone-home is unchecked,
-				// so we want to do this check silently and not alert people who
-				// are using non-YAML user-data.
-
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, cutil.GetPtr(cfg.GetSitePhoneHomeUrl())); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
-					}
-				}
-			}
-
-			// If there's still user-data, marshal so that it can be stored in the DB later
-			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
-
-				byteUserData, err := yaml.Marshal(userDataMap)
-				if err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to re-construct userData after processing phone home config"),
-					}
-				}
-				iur.UserData = cutil.GetPtr(string(byteUserData))
-			} else if isUserDataValidYAML && !*mergedPhoneHomeEnabled {
-				// This would be a case of valid YAML where the user
-				// disabled phone-home.
-				// If the only user-data _was_ the phone-home data but phone-home
-				// is being disabled, then we'll blank out the field in the DB.
-				iur.UserData = cutil.GetPtr("")
-			}
-			// There's an implied case here of invalid YAML
-			// In that case, we do nothing, and iur.UserData will stay untouche
+		if *mergedPhoneHomeEnabled {
+			userData, err = util.EnablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		} else if nicoAuthoredPhoneHome {
+			userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 		} else {
-			// If user-data is nil or empty, but phone-home is being enabled,
-			// we need to set the default phone-home settings string.
-			// (Nothing to do if user-data is nil or empty and phone-home is being disabled.)
+			userData, err = util.DisablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		}
+
+		switch {
+		case errors.Is(err, util.ErrUnsupportedUserData):
+			// Phone-home can only be enabled in cloud-init user-data. The UI
+			// always sends false when the box is unchecked, so on disable such
+			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
-				iur.UserData = cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg.GetSitePhoneHomeUrl()))
+				return validation.Errors{
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+				}
 			}
+		case err != nil:
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+		case userData != nil:
+			// Empty means phone-home was all the user-data held, so the field is
+			// blanked.
+			iur.UserData = userData
 		}
 	}
 
-	return nil
+	// An update that touches none of user-data, the base OS, or phone-home
+	// leaves iur.UserData nil, so the value heading to the Site is the stored
+	// blob that mergedUserData resolved to. Checking it here rather than
+	// assigning it back keeps the field absent from the update, so an
+	// unrelated update cannot rewrite a column the caller never named.
+	effectiveUserData := iur.UserData
+	if effectiveUserData == nil {
+		effectiveUserData = mergedUserData
+	}
+
+	return util.ValidateEffectiveUserData(effectiveUserData)
 }
 
 // ValidateMultiEthernetDeviceInterfaces validates the Multi-Ethernet Device Interfaces for the Instance
@@ -1407,14 +1565,17 @@ func (iur *APIInstanceUpdateRequest) IsUpdateRequest() bool {
 		iur.Interfaces != nil ||
 		iur.AutoNetwork != nil ||
 		iur.InfiniBandInterfaces != nil ||
+		iur.SpectrumXAttachments != nil ||
 		iur.NVLinkInterfaces != nil ||
 		iur.SSHKeyGroupIDs != nil ||
-		iur.NetworkSecurityGroupID != nil
+		iur.NetworkSecurityGroupID != nil ||
+		iur.PowerProfile != nil
 }
 
 // IsInterfaceUpdateRequest checks if the request is an instance interface update request
 func (iur *APIInstanceUpdateRequest) IsInterfaceUpdateRequest() bool {
-	return iur.Interfaces != nil || iur.AutoNetwork != nil || iur.InfiniBandInterfaces != nil || iur.NVLinkInterfaces != nil
+	return iur.Interfaces != nil || iur.AutoNetwork != nil || iur.InfiniBandInterfaces != nil || iur.NVLinkInterfaces != nil ||
+		iur.SpectrumXAttachments != nil
 }
 
 // IsRebootRequest checks if the request is an instance reboot request
@@ -1434,6 +1595,10 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 		),
 		validation.Field(&iur.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+		validation.Field(&iur.UserData,
+			validation.When(iur.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
 		),
 		validation.Field(&iur.Interfaces,
 			validation.When(len(iur.Interfaces) > 0, validation.Length(1, MaxInterfaceCount).Error(fmt.Sprintf("at most %v Interfaces can be specified", MaxInterfaceCount))),
@@ -1465,9 +1630,9 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 		}
 
 		for _, iface := range iur.Interfaces {
-			if iface.VpcPrefixID == nil {
+			if iface.VpcPrefixID == nil && iface.VpcID == nil {
 				return validation.Errors{
-					"secondaryVpcIds": errors.New("`secondaryVpcIds` can only be specified when `vpcPrefixId` is specified within `interfaces`"),
+					"secondaryVpcIds": errors.New("`secondaryVpcIds` can only be specified when `vpcPrefixId` or `vpcId` is specified within `interfaces`"),
 				}
 			}
 		}
@@ -1508,6 +1673,12 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Validate SpectrumX Attachments
+	err = ValidateSpectrumXAttachments(iur.SpectrumXAttachments)
+	if err != nil {
+		return err
 	}
 
 	// Validate DpuExtensionServiceDeployments
@@ -1604,11 +1775,11 @@ func (idr *APIInstanceDeleteRequest) Validate() error {
 // cannot see. In particular, the `IsRepairTenant` capability gate
 // (TargetedInstanceCreation on the Tenant config) is an authorization
 // check that stays in the handler before this method runs.
-func (idr *APIInstanceDeleteRequest) ToProto(instance *cdbm.Instance) *cwssaws.InstanceReleaseRequest {
+func (idr *APIInstanceDeleteRequest) ToProto(instance *cdbm.Instance, user *cdbm.User) *corev1.InstanceReleaseRequest {
 	req := instance.ToReleaseRequestProto()
 	if idr.MachineHealthIssue != nil {
-		req.Issue = &cwssaws.Issue{
-			Category: cwssaws.IssueCategory(MachineIssueCategoriesFromAPIToProtobuf[idr.MachineHealthIssue.Category]),
+		req.Issue = &corev1.Issue{
+			Category: corev1.IssueCategory(MachineIssueCategoriesFromAPIToProtobuf[idr.MachineHealthIssue.Category]),
 		}
 		if idr.MachineHealthIssue.Summary != nil {
 			req.Issue.Summary = *idr.MachineHealthIssue.Summary
@@ -1619,6 +1790,19 @@ func (idr *APIInstanceDeleteRequest) ToProto(instance *cdbm.Instance) *cwssaws.I
 	}
 	if idr.IsRepairTenant != nil {
 		req.IsRepairTenant = idr.IsRepairTenant
+	}
+
+	// Build the delete attribution proto
+	initiatedBy := &corev1.DeleteInitiatedBy{
+		Org:      instance.Tenant.Org,
+		UserId:   user.ID.String(),
+		TenantId: instance.Tenant.ID.String(),
+	}
+	if instance.Tenant.OrgDisplayName != nil {
+		initiatedBy.OrgDisplayName = *instance.Tenant.OrgDisplayName
+	}
+	req.DeleteAttribution = &corev1.DeleteAttribution{
+		InitiatedBy: initiatedBy,
 	}
 	return req
 }
@@ -1670,7 +1854,7 @@ type APIInstance struct {
 	Vpc *APIVpcSummary `json:"vpc,omitempty"`
 	// SecondaryVpcIDs lists non-primary VPC UUIDs derived from prefix-backed
 	// interfaces attached to the Instance. These values are populated from
-	// interface relations rather than stored directly on the Instance record.
+	// interface intent or relations rather than stored directly on the Instance record.
 	SecondaryVpcIDs []string `json:"secondaryVpcIds"`
 	// MachineID is the ID of the Machine
 	MachineID *string `json:"machineId"`
@@ -1689,7 +1873,7 @@ type APIInstance struct {
 	// UserData is inherited from Operating System or specified by user if allowed
 	UserData *string `json:"userData"`
 	// Labels is Instace labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// IsUpdatePending is an attribute suggest if instance update pending or not
 	IsUpdatePending bool `json:"isUpdatePending"`
 	// SerialConsoleURL is the ssh serial console URL associated with the instance
@@ -1706,6 +1890,8 @@ type APIInstance struct {
 	TpmEkCertificate *string `json:"tpmEkCertificate"`
 	// Status is the status of the Instance
 	Status string `json:"status"`
+	// PowerProfile is the external power provisioning profile associated with the Instance.
+	PowerProfile *string `json:"powerProfile"`
 	// AutoNetwork is true when this Instance had its network interfaces
 	// auto-resolved by NICo from the host's HostInband segments. When
 	// true, `Interfaces` reflects the resolved set; the caller's request
@@ -1715,6 +1901,8 @@ type APIInstance struct {
 	Interfaces []APIInterface `json:"interfaces"`
 	// InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance
 	InfiniBandInterfaces []APIInfiniBandInterface `json:"infinibandInterfaces"`
+	// SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance
+	SpectrumXAttachments []APISpectrumXAttachment `json:"spectrumXAttachments"`
 	// DpuExtensionServiceDeployments are list of the DpuExtensionServiceDeployments associated with the Instance
 	DpuExtensionServiceDeployments []APIDpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments"`
 	// NVLinkInterfaces are list of the NVLinkInterface associated with the Instance
@@ -1733,10 +1921,36 @@ type APIInstance struct {
 	Deprecations []APIDeprecation `json:"deprecations,omitempty"`
 }
 
+// APIInstanceStats holds aggregated instance status counts at the API layer.
+type APIInstanceStats = cdbm.InstanceCountByStatus
+
+var (
+	// instanceQueryParamDeprecationTime is when the deprecated infrastructureProviderId
+	// query parameter on the list-Instances endpoint will no longer be accepted.
+	instanceQueryParamDeprecationTime = time.Date(2026, time.October, 10, 0, 0, 0, 0, time.UTC)
+
+	// instanceListQueryParamDeprecations are the deprecated query parameters accepted by the
+	// list-Instances endpoint. Instances will no longer be filtered by Infrastructure Provider;
+	// results are scoped to the org's Tenant.
+	instanceListQueryParamDeprecations = []DeprecatedEntity{
+		{OldValue: "infrastructureProviderId", Type: DeprecationTypeQueryParam, TakeActionBy: instanceQueryParamDeprecationTime},
+	}
+)
+
+// InstanceListQueryParamDeprecations returns the deprecation notices for the deprecated query
+// parameters accepted by the list-Instances endpoint.
+func InstanceListQueryParamDeprecations() []APIDeprecation {
+	deprecations := make([]APIDeprecation, 0, len(instanceListQueryParamDeprecations))
+	for _, d := range instanceListQueryParamDeprecations {
+		deprecations = append(deprecations, NewAPIDeprecation(d))
+	}
+	return deprecations
+}
+
 // NewAPIInstance accepts a DB layer Instance object returns an API layer object.
-// SecondaryVpcIDs are derived from interface relations, so callers must preload
-// Interface.VpcPrefix on prefix-backed interfaces when they want those IDs populated.
-func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
+// SecondaryVpcIDs are derived from Interface.VpcID or the explicit prefix relation, so
+// callers must preload Interface.VpcPrefix when explicit-prefix IDs should be populated.
+func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbsxas []cdbm.SpectrumXAttachment, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
 	var instanceTypeID *string
 	if dbinst.InstanceTypeID != nil {
 		instanceTypeID = cutil.GetPtr(dbinst.InstanceTypeID.String())
@@ -1758,8 +1972,9 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		PhoneHomeEnabled:                       dbinst.PhoneHomeEnabled,
 		UserData:                               dbinst.UserData,
 		AutoNetwork:                            dbinst.AutoNetwork,
-		Labels:                                 dbinst.Labels,
+		Labels:                                 APILabels(dbinst.Labels),
 		IsUpdatePending:                        dbinst.IsUpdatePending,
+		PowerProfile:                           dbinst.PowerProfile,
 		Created:                                dbinst.Created,
 		Updated:                                dbinst.Updated,
 	}
@@ -1809,7 +2024,11 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	}
 
 	if dbinst.ControllerInstanceID != nil && dbSite != nil && dbSite.SerialConsoleHostname != nil {
-		serialConsoleURL := fmt.Sprintf("ssh://%s@%s", dbinst.ControllerInstanceID.String(), *dbSite.SerialConsoleHostname)
+		host := *dbSite.SerialConsoleHostname
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		serialConsoleURL := fmt.Sprintf("ssh://%s@%s", dbinst.ControllerInstanceID.String(), host)
 		apiInstance.SerialConsoleURL = cutil.GetPtr(serialConsoleURL)
 	}
 
@@ -1817,7 +2036,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		apiInstance.TpmEkCertificate = dbinst.TpmEkCertificate
 	}
 
-	apiInstance.Status = cdbm.AggregatedInstanceStatus(dbinst.Status, dbinst.PowerStatus)
+	apiInstance.Status = dbinst.GetAggregatedStatus(dbinst.Status, dbinst.PowerStatus)
 
 	secondaryVpcIDs := goset.NewSet[string]()
 
@@ -1825,7 +2044,9 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	for _, dbis := range dbiss {
 		curis := dbis
 		apiInstance.Interfaces = append(apiInstance.Interfaces, *NewAPIInterface(&curis))
-		if dbis.VpcPrefix != nil && dbis.VpcPrefix.VpcID != dbinst.VpcID {
+		if dbis.VpcID != nil && *dbis.VpcID != dbinst.VpcID {
+			secondaryVpcIDs.Add(dbis.VpcID.String())
+		} else if dbis.VpcID == nil && dbis.VpcPrefix != nil && dbis.VpcPrefix.VpcID != dbinst.VpcID {
 			secondaryVpcIDs.Add(dbis.VpcPrefix.VpcID.String())
 		}
 	}
@@ -1837,6 +2058,12 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	for _, dbibi := range dbibis {
 		curibi := dbibi
 		apiInstance.InfiniBandInterfaces = append(apiInstance.InfiniBandInterfaces, *NewAPIInfiniBandInterface(&curibi))
+	}
+
+	apiInstance.SpectrumXAttachments = []APISpectrumXAttachment{}
+	for _, dbsxa := range dbsxas {
+		cursxa := dbsxa
+		apiInstance.SpectrumXAttachments = append(apiInstance.SpectrumXAttachments, *NewAPISpectrumXAttachment(&cursxa))
 	}
 
 	apiInstance.NVLinkInterfaces = []APINVLinkInterface{}
@@ -1891,7 +2118,7 @@ func NewAPIInstanceSummary(dbist *cdbm.Instance) *APIInstanceSummary {
 		Name:                     dbist.Name,
 		InfrastructureProviderID: dbist.InfrastructureProviderID.String(),
 		SiteID:                   dbist.SiteID.String(),
-		Status:                   cdbm.AggregatedInstanceStatus(dbist.Status, dbist.PowerStatus),
+		Status:                   dbist.GetAggregatedStatus(dbist.Status, dbist.PowerStatus),
 	}
 
 	// Check if the instance type is set.  If so, use it.  If not set, it's a targeted Instance.

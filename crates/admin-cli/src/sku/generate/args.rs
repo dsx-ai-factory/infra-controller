@@ -29,9 +29,9 @@ Generate and override the resulting SKU ID:
     $ nico-admin-cli sku generate 12345678-1234-5678-90ab-cdef01234567 --id DGX-H100-640GB
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The machine id of the machine to use to generate a SKU")]
-    pub machine_id: MachineId,
+    pub(super) machine_id: MachineId,
     #[clap(help = "override the ID of the SKU", long)]
-    pub id: Option<String>,
+    pub(super) id: Option<String>,
 }

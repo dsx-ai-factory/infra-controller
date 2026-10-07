@@ -31,7 +31,8 @@ type rackInput struct {
 		Room       string `json:"room"`
 		Position   string `json:"position"`
 	} `json:"location"`
-	Components []rackComponentInput `json:"components"`
+	NVLinkDomainIDs []string             `json:"nvl_domain_ids"`
+	Components      []rackComponentInput `json:"components"`
 }
 
 // rackComponentInput is the JSON input structure for a single component within a rack definition.
@@ -104,6 +105,17 @@ func parseRackJSON(data []byte) (*types.Rack, error) {
 		rack.Info.ID = id
 	} else {
 		rack.Info.ID = uuid.New()
+	}
+
+	rack.NVLDomainIDs = make([]uuid.UUID, 0, len(input.NVLinkDomainIDs))
+	for _, domainID := range input.NVLinkDomainIDs {
+		id, err := uuid.Parse(domainID)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid NVLink domain UUID %q: %w", domainID, err,
+			)
+		}
+		rack.NVLDomainIDs = append(rack.NVLDomainIDs, id)
 	}
 
 	rack.Components = make([]types.Component, 0, len(input.Components))

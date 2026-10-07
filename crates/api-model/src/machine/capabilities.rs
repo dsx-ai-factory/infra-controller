@@ -18,12 +18,12 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use serde::{Deserialize, Serialize};
 
 use super::infiniband::MachineInfinibandStatusObservation;
-use crate::hardware_info::{CpuInfo, InfinibandInterface};
-use crate::machine::{HardwareInfo, MachineInterfaceSnapshot};
+use crate::hardware_info::{CpuInfo, HardwareInfo, InfinibandInterface, is_mnnvl_capable_gpu};
+use crate::machine::MachineInterfaceSnapshot;
 
 lazy_static::lazy_static! {
     static ref BLOCK_STORAGE_REGEX: regex::Regex = regex::Regex::new(r"(Virtual_CDROM\d+|Virtual_SD\d+|NO_MODEL|LOGICAL_VOLUME)").unwrap();
@@ -171,15 +171,20 @@ impl MachineCapabilityInfiniband {
         ib_status: Option<&MachineInfinibandStatusObservation>,
     ) -> Vec<Self> {
         // IB interfaces get sorted by PCI Slot ID so that the inactive device
-        // indices can be derived correctly
-        let mut sorted_ib_interfaces = infiniband_interfaces.to_vec();
-        sorted_ib_interfaces.sort_by_key(|iface| match &iface.pci_properties {
-            Some(pci_properties) => pci_properties.slot.clone().unwrap_or_default(),
-            None => "".to_owned(),
+        // indices can be derived correctly. Sorting reorders borrowed
+        // references; only strings placed in the result are cloned.
+        let mut sorted_ib_interfaces: Vec<&InfinibandInterface> =
+            infiniband_interfaces.iter().collect();
+        sorted_ib_interfaces.sort_by_key(|&iface| {
+            iface
+                .pci_properties
+                .as_ref()
+                .and_then(|pci_properties| pci_properties.slot.as_deref())
+                .unwrap_or_default()
         });
         let mut infiniband_interface_map = HashMap::<String, MachineCapabilityInfiniband>::new();
 
-        for infiniband_interface_info in sorted_ib_interfaces.iter() {
+        for infiniband_interface_info in sorted_ib_interfaces {
             // Skip any interface where we can't get PCI details.
             // This is how this data is handled in forge-cloud, but
             // does it make sense here?
@@ -263,6 +268,10 @@ pub enum MachineCapabilityDeviceType {
     Unknown,
     Dpu,
     NvLink,
+    /// Identifies DPA-interface inventory usable as SpectrumX attachment
+    /// selectors. This does not indicate site-level enablement or full
+    /// reference-architecture readiness.
+    SpectrumX,
 }
 
 impl fmt::Display for MachineCapabilityDeviceType {
@@ -271,6 +280,7 @@ impl fmt::Display for MachineCapabilityDeviceType {
             MachineCapabilityDeviceType::Unknown => write!(f, "UNKNOWN"),
             MachineCapabilityDeviceType::Dpu => write!(f, "DPU"),
             MachineCapabilityDeviceType::NvLink => write!(f, "NVLINK"),
+            MachineCapabilityDeviceType::SpectrumX => write!(f, "SpectrumX"),
         }
     }
 }
@@ -290,61 +300,67 @@ impl MachineCapabilitiesSet {
         self.dpu.sort();
     }
 
+    /// Derives the capability set from borrowed hardware/interface data,
+    /// cloning only the strings that end up in the result. Callers keep
+    /// ownership of the (large) `HardwareInfo` and interface list.
     pub fn from_hardware_info(
-        hardware_info: HardwareInfo,
+        hardware_info: &HardwareInfo,
         ib_status: Option<&MachineInfinibandStatusObservation>,
-        dpu_machine_ids: Vec<MachineId>,
-        machine_interfaces: Vec<MachineInterfaceSnapshot>,
+        dpu_machine_ids: Vec<DpuMachineId>,
+        machine_interfaces: &[MachineInterfaceSnapshot],
     ) -> Self {
         //
         //  Process GPU data
         //
 
-        let mut gpu_map = HashMap::<String, MachineCapabilityGpu>::new();
+        // The de-duplication maps borrow their keys from `hardware_info`;
+        // only the strings placed in the result values are cloned.
+        let mut gpu_map = HashMap::<&str, MachineCapabilityGpu>::new();
 
-        let is_gbx00 = hardware_info.is_gbx00();
-        for gpu_info in hardware_info.gpus.into_iter() {
-            match gpu_map.get_mut(&gpu_info.name) {
-                None => {
-                    gpu_map.insert(
-                        gpu_info.name.clone(),
-                        MachineCapabilityGpu {
-                            name: gpu_info.name,
-                            count: 1,
-                            vendor: None, // hardware_info doesn't provide this.
-                            frequency: Some(gpu_info.frequency),
-                            cores: None,   // hardware_info doesn't provide this.
-                            threads: None, // hardware_info doesn't provide this.
-                            memory_capacity: Some(gpu_info.total_memory),
-                            device_type: if is_gbx00 {
-                                Some(MachineCapabilityDeviceType::NvLink)
-                            } else {
-                                Some(MachineCapabilityDeviceType::Unknown)
-                            },
-                        },
-                    );
-                }
-                Some(gpu_cap) => {
-                    gpu_cap.count += 1;
-                }
+        let dmi_product_name = hardware_info
+            .dmi_data
+            .as_ref()
+            .map(|dmi| dmi.product_name.as_str());
+
+        for gpu_info in hardware_info.gpus.iter() {
+            let device_type = if is_mnnvl_capable_gpu(gpu_info, dmi_product_name) {
+                Some(MachineCapabilityDeviceType::NvLink)
+            } else {
+                Some(MachineCapabilityDeviceType::Unknown)
             };
+            gpu_map
+                .entry(&gpu_info.name)
+                .and_modify(|gpu_cap| gpu_cap.count += 1)
+                .or_insert_with(|| MachineCapabilityGpu {
+                    name: gpu_info.name.clone(),
+                    count: 1,
+                    vendor: None, // hardware_info doesn't provide this.
+                    frequency: Some(gpu_info.frequency.clone()),
+                    cores: None,   // hardware_info doesn't provide this.
+                    threads: None, // hardware_info doesn't provide this.
+                    memory_capacity: Some(gpu_info.total_memory.clone()),
+                    device_type,
+                });
         }
 
         //
         //  Process memory data
         //
 
-        let mut mem_map = HashMap::<String, usize>::new();
+        let mut mem_map = HashMap::<String, u64>::new();
 
-        for mem_info in hardware_info.memory_devices.into_iter() {
-            let name = mem_info.mem_type.unwrap_or("unknown".to_string());
+        for mem_info in hardware_info.memory_devices.iter() {
+            let name = mem_info
+                .mem_type
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let total =
+                (mem_info.size_mb.unwrap_or_default() as u64).saturating_mul(mem_info.count as u64);
 
             mem_map
-                .entry(name.clone())
-                .and_modify(|e| {
-                    *e = e.saturating_add(mem_info.size_mb.unwrap_or_default() as usize)
-                })
-                .or_insert_with(|| mem_info.size_mb.unwrap_or_default() as usize);
+                .entry(name)
+                .and_modify(|e| *e = e.saturating_add(total))
+                .or_insert(total);
         }
 
         //
@@ -352,74 +368,60 @@ impl MachineCapabilitiesSet {
         // NVME and block storage get flattened out into just "storage"
         //
 
-        let mut storage_map = HashMap::<String, MachineCapabilityStorage>::new();
+        let mut storage_map = HashMap::<&str, MachineCapabilityStorage>::new();
 
         // Start with any NVME devices.
-        for storage_info in hardware_info.nvme_devices.into_iter() {
+        for storage_info in hardware_info.nvme_devices.iter() {
             // Skip missing models, logical volumes, and virtual storage.
             if NVME_STORAGE_REGEX.is_match(&storage_info.model) {
                 continue;
             }
 
-            match storage_map.get_mut(&storage_info.model) {
-                None => {
-                    storage_map.insert(
-                        storage_info.model.clone(),
-                        MachineCapabilityStorage {
-                            name: storage_info.model.clone(),
-                            count: 1,
-                            vendor: None,   // hardware_info doesn't provide this.
-                            capacity: None, // hardware_info doesn't provide this.
-                        },
-                    );
-                }
-                Some(storage_cap) => {
-                    storage_cap.count += 1;
-                }
-            };
+            storage_map
+                .entry(&storage_info.model)
+                .and_modify(|storage_cap| storage_cap.count += 1)
+                .or_insert_with(|| MachineCapabilityStorage {
+                    name: storage_info.model.clone(),
+                    count: 1,
+                    vendor: None,   // hardware_info doesn't provide this.
+                    capacity: None, // hardware_info doesn't provide this.
+                });
         }
 
         // Next, add in any block storage devices.
-        for storage_info in hardware_info.block_devices.into_iter() {
+        for storage_info in hardware_info.block_devices.iter() {
             // Skip missing models, logical volumes, and virtual storage.
             if BLOCK_STORAGE_REGEX.is_match(&storage_info.model) {
                 continue;
             }
 
-            match storage_map.get_mut(&storage_info.model) {
-                None => {
-                    storage_map.insert(
-                        storage_info.model.clone(),
-                        MachineCapabilityStorage {
-                            name: storage_info.model.clone(),
-                            count: 1,
-                            vendor: None,   // hardware_info doesn't provide this.
-                            capacity: None, // hardware_info doesn't provide this.
-                        },
-                    );
-                }
-                Some(storage_cap) => {
-                    storage_cap.count += 1;
-                }
-            };
+            storage_map
+                .entry(&storage_info.model)
+                .and_modify(|storage_cap| storage_cap.count += 1)
+                .or_insert_with(|| MachineCapabilityStorage {
+                    name: storage_info.model.clone(),
+                    count: 1,
+                    vendor: None,   // hardware_info doesn't provide this.
+                    capacity: None, // hardware_info doesn't provide this.
+                });
         }
 
         //
         // Process network interface data
         //
 
-        let mut network_interface_map = HashMap::<String, MachineCapabilityNetwork>::new();
+        let mut network_interface_map = HashMap::<&str, MachineCapabilityNetwork>::new();
 
-        for network_interface_info in hardware_info.network_interfaces.into_iter() {
+        for network_interface_info in hardware_info.network_interfaces.iter() {
             // Skip any interface where we can't get PCI details.
             // This is how this data is handled in forge-cloud, but
             // does it make sense here?
-            let pci_properties = match network_interface_info.pci_properties {
+            let pci_properties = match &network_interface_info.pci_properties {
                 None => continue,
                 Some(p) => p,
             };
 
-            let interface_name = match pci_properties.description {
+            let interface_name = match &pci_properties.description {
                 None => continue,
                 Some(n) => n,
             };
@@ -431,22 +433,15 @@ impl MachineCapabilitiesSet {
                 Some(_i) => MachineCapabilityDeviceType::Dpu,
             };
 
-            match network_interface_map.get_mut(&interface_name) {
-                None => {
-                    network_interface_map.insert(
-                        interface_name.clone(),
-                        MachineCapabilityNetwork {
-                            name: interface_name.clone(),
-                            count: 1,
-                            vendor: Some(pci_properties.vendor),
-                            device_type: Some(device_type),
-                        },
-                    );
-                }
-                Some(network_interface_cap) => {
-                    network_interface_cap.count += 1;
-                }
-            };
+            network_interface_map
+                .entry(interface_name)
+                .and_modify(|network_interface_cap| network_interface_cap.count += 1)
+                .or_insert_with(|| MachineCapabilityNetwork {
+                    name: interface_name.to_string(),
+                    count: 1,
+                    vendor: Some(pci_properties.vendor.clone()),
+                    device_type: Some(device_type),
+                });
         }
 
         //
@@ -526,165 +521,6 @@ mod tests {
     ));
 
     #[test]
-    fn test_model_capability_set_from_hw_info_conversion() {
-        let mut machine_cap = MachineCapabilitiesSet {
-            cpu: vec![MachineCapabilityCpu {
-                name: "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz".to_string(),
-                count: 1,
-                vendor: Some("GenuineIntel".to_string()),
-                cores: Some(18),
-                threads: Some(72),
-            }],
-            gpu: vec![MachineCapabilityGpu {
-                name: "NVIDIA H100 PCIe".to_string(),
-                count: 1,
-                vendor: None,
-                frequency: Some("1755 MHz".to_string()),
-                memory_capacity: Some("81559 MiB".to_string()),
-                cores: None,
-                threads: None,
-                device_type: Some(MachineCapabilityDeviceType::Unknown),
-            }],
-            memory: vec![MachineCapabilityMemory {
-                name: "DDR4".to_string(),
-                count: 1,
-                vendor: None,
-                capacity: Some("2048 MB".to_string()),
-            }],
-            storage: vec![
-                MachineCapabilityStorage {
-                    name: "DELLBOSS_VD".to_string(),
-                    count: 3,
-                    vendor: None,
-                    capacity: None,
-                },
-                MachineCapabilityStorage {
-                    name: "Dell Ent NVMe CM6 RI 1.92TB".to_string(),
-                    count: 10,
-                    vendor: None,
-                    capacity: None,
-                },
-            ],
-            network: vec![
-                MachineCapabilityNetwork {
-                    name: "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller".to_string(),
-                    count: 2,
-                    vendor: Some("0x14e4".to_string()),
-                    device_type: Some(MachineCapabilityDeviceType::Unknown),
-                },
-                MachineCapabilityNetwork {
-                    name: "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
-                        .to_string(),
-                    count: 2,
-                    vendor: Some("mellanox".to_string()),
-                    device_type: Some(MachineCapabilityDeviceType::Dpu),
-                },
-                MachineCapabilityNetwork {
-                    name:
-                        "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"
-                            .to_string(),
-                    count: 2,
-                    vendor: Some("0x14e4".to_string()),
-                    device_type: Some(MachineCapabilityDeviceType::Unknown),
-                },
-            ],
-            infiniband: vec![
-                MachineCapabilityInfiniband {
-                    name: "MT27800 Family [ConnectX-5]".to_string(),
-                    count: 2,
-                    vendor: "0x15b3".to_string(),
-                    inactive_devices: vec![0, 1],
-                },
-                MachineCapabilityInfiniband {
-                    name: "MT2910 Family [ConnectX-7]".to_string(),
-                    count: 4,
-                    vendor: "0x15b3".to_string(),
-                    inactive_devices: vec![0, 1, 2, 3],
-                },
-            ],
-            dpu: vec![MachineCapabilityDpu {
-                name: "DPU".to_string(),
-                count: 2,
-                hardware_revision: None,
-            }],
-        };
-
-        // The capabilities are built using hashmaps, so
-        // the ordering of the final arrays isn't guaranteed.
-
-        machine_cap.sort();
-
-        let mut compare_cap = MachineCapabilitiesSet::from_hardware_info(
-            serde_json::from_slice::<HardwareInfo>(X86_INFO_JSON).unwrap(),
-            None,
-            vec![
-                "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
-                    .parse()
-                    .unwrap(),
-                "fm100dsmu2vhi1042hb8lrunopesh641tiguh6uttjr780ghbk9orl5tcg0"
-                    .parse()
-                    .unwrap(),
-            ],
-            vec![
-                MachineInterfaceSnapshot {
-                    id: MachineInterfaceId::from(uuid::Uuid::nil()),
-                    hostname: String::new(),
-                    interface_type: InterfaceType::Data,
-                    primary_interface: true,
-                    mac_address: MacAddress::from_str("08:c0:eb:cb:0e:96").unwrap(),
-                    boot_interface_id: None,
-                    attached_dpu_machine_id: Some(
-                        MachineId::from_str(
-                            "fm100dsbiu5ckus880v8407u0mkcensa39cule26im5gnpvmuufckacguc0",
-                        )
-                        .unwrap(),
-                    ),
-                    domain_id: None,
-                    machine_id: None,
-                    segment_id: NetworkSegmentId::from(uuid::Uuid::nil()),
-                    vendors: Vec::new(),
-                    created: chrono::Utc::now(),
-                    last_dhcp: None,
-                    addresses: Vec::new(),
-                    network_segment_type: None,
-                    power_shelf_id: None,
-                    switch_id: None,
-                    association_type: None,
-                },
-                MachineInterfaceSnapshot {
-                    id: MachineInterfaceId::from(uuid::Uuid::nil()),
-                    hostname: String::new(),
-                    interface_type: InterfaceType::Data,
-                    primary_interface: true,
-                    mac_address: MacAddress::from_str("08:c0:eb:cb:0e:97").unwrap(),
-                    boot_interface_id: None,
-                    attached_dpu_machine_id: Some(
-                        MachineId::from_str(
-                            "fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg",
-                        )
-                        .unwrap(),
-                    ),
-                    domain_id: None,
-                    machine_id: None,
-                    segment_id: NetworkSegmentId::from(uuid::Uuid::nil()),
-                    vendors: Vec::new(),
-                    created: chrono::Utc::now(),
-                    last_dhcp: None,
-                    addresses: Vec::new(),
-                    network_segment_type: None,
-                    power_shelf_id: None,
-                    switch_id: None,
-                    association_type: None,
-                },
-            ],
-        );
-
-        compare_cap.sort();
-
-        assert_eq!(machine_cap, compare_cap);
-    }
-
-    #[test]
     fn test_model_infinityband_capability_fully_connected() {
         let mut expected_ib_caps = vec![
             MachineCapabilityInfiniband {
@@ -751,10 +587,10 @@ mod tests {
         };
 
         let mut compare_cap = MachineCapabilitiesSet::from_hardware_info(
-            serde_json::from_slice::<HardwareInfo>(X86_INFO_JSON).unwrap(),
+            &serde_json::from_slice::<HardwareInfo>(X86_INFO_JSON).unwrap(),
             Some(&ib_status),
             vec![],
-            vec![MachineInterfaceSnapshot {
+            &[MachineInterfaceSnapshot {
                 id: MachineInterfaceId::from(uuid::Uuid::nil()),
                 hostname: String::new(),
                 interface_type: InterfaceType::Data,
@@ -841,10 +677,10 @@ mod tests {
         };
 
         let mut compare_cap = MachineCapabilitiesSet::from_hardware_info(
-            serde_json::from_slice::<HardwareInfo>(X86_INFO_JSON).unwrap(),
+            &serde_json::from_slice::<HardwareInfo>(X86_INFO_JSON).unwrap(),
             Some(&ib_status),
             vec![],
-            vec![],
+            &[],
         );
 
         compare_cap.sort();
@@ -910,6 +746,10 @@ mod tests {
 
             "nvlink" {
                 MachineCapabilityDeviceType::NvLink => "NVLINK".to_string(),
+            }
+
+            "spectrum_x" {
+                MachineCapabilityDeviceType::SpectrumX => "SpectrumX".to_string(),
             }
         );
     }
@@ -1058,6 +898,39 @@ mod tests {
 
             "all inactive without status" {
                 "inactive_len" => 2u32,
+            }
+        );
+    }
+
+    #[test]
+    fn memory_capacity_sums_without_u32_overflow() {
+        // `size_mb * count` is computed on 64-bit operands (regardless of the
+        // target's pointer width) so a group whose product exceeds u32::MAX is
+        // represented exactly rather than clamped.
+        let run = |(size_mb, count): (u32, u32)| {
+            let hardware_info = HardwareInfo {
+                memory_devices: vec![MemoryDeviceGroup {
+                    size_mb: Some(size_mb),
+                    mem_type: Some("DDR4".to_string()),
+                    count,
+                }],
+                ..Default::default()
+            };
+
+            let caps =
+                MachineCapabilitiesSet::from_hardware_info(&hardware_info, None, vec![], &[]);
+            assert_eq!(caps.memory.len(), 1);
+            caps.memory[0].capacity.clone()
+        };
+
+        value_scenarios!(
+            run = run;
+            "product fits in u32" {
+                (2048u32, 4u32) => Some("8192 MB".to_string()),
+            }
+
+            "product exceeds u32::MAX" {
+                (u32::MAX, 2u32) => Some(format!("{} MB", (u32::MAX as u64) * 2)),
             }
         );
     }

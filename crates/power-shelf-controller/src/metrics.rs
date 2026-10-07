@@ -45,7 +45,7 @@ impl MetricsEmitter for PowerShelfMetricsEmitter {
         register_health_gauges::<_, (), _>(
             "carbide_power_shelves",
             "power_shelf_id",
-            "Power Shelves",
+            "power shelves",
             meter,
             shared_metrics,
             |m| &m.health,

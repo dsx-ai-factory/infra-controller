@@ -25,6 +25,7 @@ global:
 ## Override the release namespace (defaults to helm install -n <namespace>)
 namespaceOverride: ""
 
+## DHCPv4 replica count; DHCPv6 independently runs one replica.
 replicas: 1
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-dhcp.name" . }}-config'
@@ -33,7 +34,30 @@ service:
   port: 67
   protocol: UDP
 metrics:
+  ## Metrics Service port for both pods and DHCPv6 hook port (1..65535).
+  ## Accepts an integer or a quoted decimal port number without leading zeros.
   port: 1089
+
+## DHCPv6 is opt-in and uses its own pod, ConfigMap, and IPv6 relay Service.
+## DHCPv6 uses one replica while leases are stored in pod-local memfiles.
+dhcp:
+  v6Enabled: false
+  ## Pod interface with a routable IPv6 address; selected at container startup.
+  interface: eth0
+  ## Required when enabled: site-unique, stable 12 hexadecimal digits (quote it).
+  v6ServerIdentifier: ""
+  ## Comma-separated IPv6 literals; empty means omit the corresponding option.
+  v6DnsServers: ""
+  v6NtpServers: ""
+  ## Optional IPv6 literal, reserved for future boot options; accepted but unused.
+  v6ProvisioningServer: ""
+  ## Boolean: permit a single REPLY only when the client requests Rapid Commit.
+  v6RapidCommit: false
+
+## Separate IPv6 relay VIP; ignored while dhcp.v6Enabled is false.
+v6ExternalService:
+  enabled: false
+  annotations: {}
 
 apiServiceName: nico-api
 
@@ -63,6 +87,8 @@ env:
 ## ConfigMap created by this chart (config.enabled=true) or external (false).
 ## The ConfigMap is mounted at /tmp in the pod, and kea-dhcp4 reads
 ## /tmp/kea_config.json.
+## These controls apply to DHCPv4. Enabled DHCPv6 always gets its own chart-managed
+## ConfigMap, including the shared declineProbationPeriod and nicoApiUrl values.
 ##
 ## The kea_config.json content comes from one of two paths:
 ##
@@ -99,6 +125,13 @@ config:
   ## Note: placeholder substitution applies ONLY to this raw string, NOT
   ## to values inside `config.kea` below — set those values to fully
   ## resolved strings (or leave empty to use the helper's derivation).
+  ##
+  ## ⚠ The server-identifier pinning (issue #3663, `config.kea.serverIdentifier`
+  ## below) does NOT apply to a raw blob. Include the equivalent option-data
+  ## in the raw JSON yourself, or unicast renewals will target the ephemeral
+  ## pod IP and orphan clients on pod replacement. Setting
+  ## `config.kea.serverIdentifier` together with a raw blob fails at render
+  ## time to make this conflict loud.
   keaConfigJsonRaw: ""
 
   ## Structured kea-dhcp4 configuration. The configmap template assembles
@@ -127,6 +160,25 @@ config:
     renewTimer: 900
     rebindTimer: 1800
     validLifetime: 3600
+    declineProbationPeriod: 900
+
+    ## DHCP server identifier (option 54) advertised to clients — issue #3663.
+    ##
+    ## Kea defaults option 54 to the POD IP, which is unreachable from BMCs.
+    ## After a pod replacement, clients unicast-renew against the dead pod IP
+    ## and stay orphaned until the rebind timer (rebindTimer above) forces a
+    ## broadcast. Pinning option 54 to the stable DHCP VIP makes unicast
+    ## renewals survive pod churn.
+    ##
+    ## Leave empty (default) to AUTO-DERIVE from the first entry of the
+    ## externalService `metallb.universe.tf/loadBalancerIPs` annotation —
+    ## sites that already pin the DHCP VIP there get the fix with no values
+    ## change. Set explicitly only when the advertised identifier must differ
+    ## from that annotation (e.g. externalService managed outside this chart).
+    ## An explicit value must be a single IPv4 address (render fails
+    ## otherwise); when neither source yields a valid IPv4 the option is
+    ## omitted and kea falls back to the pod IP (pre-#3663 behavior).
+    serverIdentifier: ""
 
     ## libdhcp hook parameters — these become the JSON object at
     ## Dhcp4.hooks-libraries[0].parameters and are read by the
@@ -148,7 +200,7 @@ config:
       ## install path it can be set to e.g. `carbide-api`). DPUs reach
       ## this URL via the nameservers IP below.
       nicoApiUrl: ""
-      ## Where the hook publishes its own Prometheus metrics.
+      ## DHCPv4 hook metrics bind address and port; match metrics.port for Service scraping.
       nicoMetricsEndpoint: "[::]:1089"
       ## DNS server IP. Operators MUST override in site values.
       ## Set to nico-dns externalService LoadBalancer IP (single string

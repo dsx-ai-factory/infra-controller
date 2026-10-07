@@ -45,7 +45,7 @@ fn format_compute_tray_component(value: i32) -> String {
     }
 }
 
-pub async fn list_versions(
+pub(super) async fn list_versions(
     opts: Args,
     format: OutputFormat,
     api_client: &ApiClient,

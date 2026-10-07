@@ -5,27 +5,26 @@ package vpcprefix
 
 import (
 	"fmt"
-	"time"
 
+	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	vpcPrefixActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpcprefix"
 )
 
 // UpdateVpcPrefixInventory is a workflow called by Site Agent to update vpc prefixes for a Site
-func UpdateVpcPrefixInventory(ctx workflow.Context, siteID string, vpcPrefixInventory *cwssaws.VpcPrefixInventory) (err error) {
+func UpdateVpcPrefixInventory(ctx workflow.Context, siteID string, vpcPrefixInventory *corev1.VpcPrefixInventory) (err error) {
 	logger := log.With().Str("Workflow", "UpdateVpcPrefixInventory").Str("Site ID", siteID).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	startTime := time.Now()
+	startTime := workflow.Now(ctx)
 
 	parsedSiteID, err := uuid.Parse(siteID)
 	if err != nil {
@@ -33,20 +32,7 @@ func UpdateVpcPrefixInventory(ctx workflow.Context, siteID string, vpcPrefixInve
 		return err
 	}
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
-	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    5 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    30 * time.Second,
-		MaximumAttempts:    2,
-	}
-
-	options := workflow.ActivityOptions{
-		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 30 * time.Second,
-		// Optionally provide a customized RetryPolicy.
-		RetryPolicy: retrypolicy,
-	}
+	options := cwi.ActivityOptions()
 
 	ctx = workflow.WithActivityOptions(ctx, options)
 
@@ -60,7 +46,7 @@ func UpdateVpcPrefixInventory(ctx workflow.Context, siteID string, vpcPrefixInve
 	// Record latency for this inventory call
 	var inventoryMetricsManager cwm.ManageInventoryMetrics
 
-	serr := workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, parsedSiteID, "UpdateVpcPrefixInventory", err != nil, time.Since(startTime)).Get(ctx, nil)
+	serr := workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, parsedSiteID, "UpdateVpcPrefixInventory", err != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
 	if serr != nil {
 		logger.Warn().Err(serr).Msg("failed to execute activity: RecordLatency")
 	}

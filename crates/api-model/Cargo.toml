@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Domain models for carbide-api"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "model"
@@ -76,7 +77,7 @@ strum = { workspace = true }
 strum_macros = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 uuid = { features = ["v4", "serde"], workspace = true }
 version-compare = { workspace = true }
 tokio = { workspace = true }
@@ -93,10 +94,16 @@ carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }
+criterion = { workspace = true }
 lazy_static = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
 toml = { workspace = true }
+
+[[bench]]
+name = "machine_snapshot_decode"
+harness = false
+required-features = ["test-support"]
 
 [lints]
 workspace = true

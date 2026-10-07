@@ -14,7 +14,7 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
@@ -41,12 +41,12 @@ func (s *UpdateNetworkSecurityGroupTestSuite) Test_UpdateNetworkSecurityGroup_Su
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.UpdateNetworkSecurityGroupRequest{
+	request := &corev1.UpdateNetworkSecurityGroupRequest{
 		Id: uuid.NewString(),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -71,12 +71,12 @@ func (s *UpdateNetworkSecurityGroupTestSuite) Test_UpdateNetworkSecurityGroup_Fa
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.UpdateNetworkSecurityGroupRequest{
+	request := &corev1.UpdateNetworkSecurityGroupRequest{
 		Id: uuid.NewString(),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -122,12 +122,12 @@ func (s *CreateNetworkSecurityGroupTestSuite) Test_CreateNetworkSecurityGroup_Su
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.CreateNetworkSecurityGroupRequest{
+	request := &corev1.CreateNetworkSecurityGroupRequest{
 		Id: util.GetStrPtr(uuid.NewString()),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -152,12 +152,12 @@ func (s *CreateNetworkSecurityGroupTestSuite) Test_CreateNetworkSecurityGroup_Fa
 	labelKey := "key1"
 	labelValue := "value1"
 
-	request := &cwssaws.CreateNetworkSecurityGroupRequest{
+	request := &corev1.CreateNetworkSecurityGroupRequest{
 		Id: util.GetStrPtr(uuid.NewString()),
-		Metadata: &cwssaws.Metadata{
+		Metadata: &corev1.Metadata{
 			Name:        "updated_name",
 			Description: "updated_description",
-			Labels: []*cwssaws.Label{
+			Labels: []*corev1.Label{
 				{
 					Key:   labelKey,
 					Value: &labelValue,
@@ -200,7 +200,7 @@ func (s *DeleteNetworkSecurityGroupTestSuite) AfterTest(suiteName, testName stri
 func (s *DeleteNetworkSecurityGroupTestSuite) Test_DeleteNetworkSecurityGroup_Success() {
 	var networkSecurityGroupManager iActivity.ManageNetworkSecurityGroup
 
-	request := &cwssaws.DeleteNetworkSecurityGroupRequest{
+	request := &corev1.DeleteNetworkSecurityGroupRequest{
 		Id: uuid.NewString(),
 	}
 
@@ -217,7 +217,7 @@ func (s *DeleteNetworkSecurityGroupTestSuite) Test_DeleteNetworkSecurityGroup_Su
 func (s *DeleteNetworkSecurityGroupTestSuite) Test_DeleteNetworkSecurityGroup_Failure() {
 	var machineManager iActivity.ManageNetworkSecurityGroup
 
-	request := &cwssaws.DeleteNetworkSecurityGroupRequest{
+	request := &corev1.DeleteNetworkSecurityGroupRequest{
 		Id: uuid.NewString(),
 	}
 

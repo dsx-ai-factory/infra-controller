@@ -81,6 +81,9 @@ type ClaimMapping struct {
 	// Roles: static role list. Used when RolesAttribute is empty and IsServiceAccount is false.
 	Roles []string `mapstructure:"roles"`
 
+	// Audiences: optional token audiences allowed to authorize this mapping. Any one exact match is sufficient.
+	Audiences []string `mapstructure:"audiences"`
+
 	// IsServiceAccount: if true, assigns admin roles (PROVIDER_ADMIN, TENANT_ADMIN). Ignores RolesAttribute/Roles.
 	IsServiceAccount bool `mapstructure:"isServiceAccount"`
 }
@@ -139,15 +142,17 @@ func (cm *ClaimMapping) GetOrgNameAndDisplayName(claims jwt.MapClaims) (orgName 
 
 // JwksConfig holds configuration for a JWKS endpoint and token validation.
 type JwksConfig struct {
-	Name         string
-	IsUpdating   uint32        // atomic flag for concurrent JWKS updates
-	sync.RWMutex               // protects JWKS access
-	URL          string        // JWKS endpoint URL
-	Issuer       string        // expected "iss" claim value
-	Origin       string        // token origin type (e.g., "kas-legacy", "kas-ssa", "keycloak", "custom")
-	LastUpdated  time.Time     // last JWKS update timestamp
-	jwks         *core.JWKS    // cached JWKS keys
-	JWKSTimeout  time.Duration // fetch timeout (default: 5s)
+	Name          string
+	IsUpdating    uint32        // atomic flag for concurrent JWKS updates
+	sync.RWMutex                // protects JWKS access
+	URL           string        // JWKS endpoint URL
+	Issuer        string        // expected "iss" claim value
+	Origin        string        // token origin type (e.g., "kas-legacy", "kas-ssa", "keycloak", "custom", "kas")
+	LastUpdated   time.Time     // last successful JWKS update timestamp
+	LastAttempted time.Time     // last JWKS update attempt timestamp
+	jwks          *core.JWKS    // cached JWKS keys
+	updateDone    chan struct{} // closed when the current JWKS update finishes
+	JWKSTimeout   time.Duration // fetch timeout (default: 5s)
 
 	Audiences []string // allowed audience values (token must have at least one)
 	Scopes    []string // required scopes (token must have ALL)
@@ -237,36 +242,40 @@ func (jcfg *JwksConfig) MatchesIssuer(issuer string) bool {
 	return issuer == jcfg.Issuer
 }
 
-// shouldAllowJWKSUpdate checks if we should allow JWKS update based on throttling
-func (jcfg *JwksConfig) shouldAllowJWKSUpdate() bool {
-	jcfg.RLock()
-	defer jcfg.RUnlock()
-
-	// Always allow if we've never updated
-	if jcfg.LastUpdated.IsZero() {
-		return true
-	}
-
-	// Allow if enough time has passed since last update (regardless of success/failure)
-	return time.Since(jcfg.LastUpdated) >= minUpdateInterval
-}
-
 // UpdateJWKS fetches and validates JWKS from the configured URL. Throttled to minUpdateInterval.
 func (jcfg *JwksConfig) UpdateJWKS() error {
+	jcfg.Lock()
 	if jcfg.URL == "" {
+		jcfg.Unlock()
 		return core.ErrJWKSURLEmpty
 	}
-	if !jcfg.shouldAllowJWKSUpdate() {
+	if !jcfg.LastAttempted.IsZero() && time.Since(jcfg.LastAttempted) < minUpdateInterval {
+		if atomic.LoadUint32(&jcfg.IsUpdating) != 0 {
+			jcfg.Unlock()
+			return core.ErrJWKSUpdateInProgress
+		}
+		hasCachedKeys := jcfg.jwks != nil
+		jcfg.Unlock()
+		if !hasCachedKeys {
+			return core.ErrJWKSNotInitialized
+		}
 		return nil
 	}
 	if !atomic.CompareAndSwapUint32(&jcfg.IsUpdating, 0, 1) {
+		jcfg.Unlock()
 		return core.ErrJWKSUpdateInProgress
 	}
-	defer atomic.StoreUint32(&jcfg.IsUpdating, 0)
-
-	jcfg.RLock()
+	jcfg.updateDone = make(chan struct{})
 	urlCopy, timeout := jcfg.URL, jcfg.JWKSTimeout
-	jcfg.RUnlock()
+	jcfg.LastAttempted = time.Now()
+	jcfg.Unlock()
+	defer func() {
+		jcfg.Lock()
+		atomic.StoreUint32(&jcfg.IsUpdating, 0)
+		close(jcfg.updateDone)
+		jcfg.updateDone = nil
+		jcfg.Unlock()
+	}()
 
 	jwks, err := core.NewJWKSFromURL(urlCopy, timeout)
 	if err != nil {
@@ -366,30 +375,25 @@ func (jcfg *JwksConfig) getPublicKey(token *jwt.Token) (interface{}, error) {
 
 // tryUpdateJWKSWithRetry attempts to update JWKS with retry logic for concurrent updates
 func (jcfg *JwksConfig) tryUpdateJWKSWithRetry() error {
-	const maxRetries = 5
-	const retryDelay = 1 * time.Second
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt == 1 {
-			updateErr := jcfg.UpdateJWKS()
-			if updateErr == nil {
-				return nil
-			}
-			if !errors.Is(updateErr, core.ErrJWKSUpdateInProgress) {
-				return updateErr
-			}
-		}
-
-		if attempt < maxRetries {
-			time.Sleep(retryDelay)
-		}
-
-		if jcfg.GetJWKS() != nil {
-			return nil
-		}
+	updateErr := jcfg.UpdateJWKS()
+	if updateErr == nil {
+		return nil
+	}
+	if !errors.Is(updateErr, core.ErrJWKSUpdateInProgress) {
+		return updateErr
 	}
 
-	return core.ErrJWKSUpdateInProgress
+	jcfg.RLock()
+	updateDone := jcfg.updateDone
+	jcfg.RUnlock()
+	if updateDone != nil {
+		<-updateDone
+	}
+
+	if jcfg.GetJWKS() == nil {
+		return core.ErrJWKSNotInitialized
+	}
+	return nil
 }
 
 // tryMultipleKeysForValidation tries all candidate keys for algorithm-only validation
@@ -534,18 +538,24 @@ func (jcfg *JwksConfig) GetSubjectPrefix() string {
 	return jcfg.subjectPrefix
 }
 
-// ValidateAudience checks token has at least one configured audience. Returns nil if none configured.
-func (jcfg *JwksConfig) ValidateAudience(claims jwt.MapClaims) error {
-	if len(jcfg.Audiences) == 0 {
-		return nil
+// hasAnyAudience checks if the token has any of the configured audiences.
+func (jcfg *JwksConfig) hasAnyAudience(claims jwt.MapClaims, audiences []string) bool {
+	if audiences == nil || len(audiences) == 0 {
+		return true
 	}
+
 	tokenAudiences, err := claims.GetAudience()
 	if err != nil {
-		return core.ErrInvalidAudience
+		return false
 	}
 	tokenAudSet := mapset.NewSet([]string(tokenAudiences)...)
-	requiredAudSet := mapset.NewSet(jcfg.Audiences...)
-	if tokenAudSet.Intersect(requiredAudSet).Cardinality() == 0 {
+	allowedAudSet := mapset.NewSet(audiences...)
+	return tokenAudSet.Intersect(allowedAudSet).Cardinality() > 0
+}
+
+// ValidateAudience checks token has at least one configured audience. Returns nil if none configured.
+func (jcfg *JwksConfig) ValidateAudience(claims jwt.MapClaims) error {
+	if !jcfg.hasAnyAudience(claims, jcfg.Audiences) {
 		return core.ErrInvalidAudience
 	}
 	return nil
@@ -568,6 +578,7 @@ func (jcfg *JwksConfig) ValidateScopes(claims jwt.MapClaims) error {
 // GetOrgDataFromClaim extracts org data for the requested org from claim mappings.
 // This method validates org access and returns errors if:
 //   - core.ErrReservedOrgName: dynamic org claims a statically-configured org name
+//   - core.ErrInvalidAudience: token audience is not authorized for the requested org
 //   - core.ErrInvalidConfiguration: no claim mapping configured for the requested org
 //   - core.ErrNoClaimRoles: no roles found for the requested org
 //
@@ -583,6 +594,10 @@ func (jcfg *JwksConfig) GetOrgDataFromClaim(claims jwt.MapClaims, reqOrgFromRout
 
 		if cm.IsOrgDynamic() && jcfg.ReservedOrgNames != nil && jcfg.ReservedOrgNames[orgName] {
 			return nil, false, core.ErrReservedOrgName
+		}
+
+		if !jcfg.hasAnyAudience(claims, cm.Audiences) {
+			return nil, false, core.ErrInvalidAudience
 		}
 
 		roles, err := cm.GetRoles(claims)

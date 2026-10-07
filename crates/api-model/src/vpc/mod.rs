@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 pub mod capability;
+pub mod routing_profile;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -23,49 +24,92 @@ pub use capability::{
     ALL_VPC_VIRTUALIZATION_TYPES, DataPlaneKind, FabricInterfaceType, VpcCapabilities,
     VpcCapabilityError, VpcVirtualizationTypeCapabilities,
 };
+use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
+use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
+pub use routing_profile::{PrefixFilterPolicyEntry, RouteTargetConfig, VpcRoutingProfileOverrides};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
 use crate::metadata::{LabelFilter, Metadata};
 
+/// Returns the prefix length allocated to one instance interface.
+///
+/// IPv4 always uses a point-to-point `/31`. IPv6 uses a `/64` when SLAAC is
+/// enabled and a point-to-point `/127` otherwise.
+pub const fn instance_prefix_len(address_family: IpAddressFamily, slaac_enabled: bool) -> u8 {
+    match (address_family, slaac_enabled) {
+        (IpAddressFamily::Ipv4, _) => 31,
+        (IpAddressFamily::Ipv6, true) => 64,
+        (IpAddressFamily::Ipv6, false) => 127,
+    }
+}
+
+/// Returns whether a VPC prefix can contain an instance interface prefix.
+///
+/// Interface prefixes must be narrower than their parent. An IPv4 `/31` is
+/// also allowed to back one interface directly for compatibility with the
+/// existing point-to-point allocation model. IPv6 keeps the strict parent
+/// rule, so an exact `/64` or `/127` parent has no allocatable capacity.
+pub const fn vpc_prefix_can_allocate_interface_prefix(
+    address_family: IpAddressFamily,
+    parent_prefix_len: u8,
+    interface_prefix_len: u8,
+) -> bool {
+    parent_prefix_len < interface_prefix_len
+        || matches!(
+            (address_family, parent_prefix_len, interface_prefix_len),
+            (IpAddressFamily::Ipv4, 31, 31)
+        )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VpcConfig {
+    pub tenant_organization_id: String,
+    pub tenant_keyset_id: Option<String>,
+    pub network_virtualization_type: VpcVirtualizationType,
+    pub network_security_group_id: Option<NetworkSecurityGroupId>,
+    pub default_nvlink_logical_partition_id: Option<NvLinkLogicalPartitionId>,
+    pub vni: Option<i32>,
+    pub routing_profile_type: Option<String>,
+    pub routing_profile_overrides: Option<VpcRoutingProfileOverrides>,
+    pub power_resource_group: Option<String>,
+    /// Whether the VPC uses SLAAC allocation mode for instance IPv6 interfaces.
+    pub slaac_enabled: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct VpcStatus {
+    /// Allocated VNI.
     pub vni: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Vpc {
     pub id: VpcId,
-    pub tenant_organization_id: String,
-    pub network_security_group_id: Option<NetworkSecurityGroupId>,
     pub version: ConfigVersion,
+    pub config: VpcConfig,
+    pub status: VpcStatus,
+    pub metadata: Metadata,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
-    pub tenant_keyset_id: Option<String>,
-    pub network_virtualization_type: VpcVirtualizationType,
-    pub routing_profile_type: Option<String>,
-    // Option because we can't allocate it until DB generates an id for us
-    // TODO: Update - Seems this isn't true since we generate a UUID if not found
-    // in the original creation request.
-    pub vni: Option<i32>,
-    pub metadata: Metadata,
-    pub status: Option<VpcStatus>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VpcDefinition {
     pub organization_id: Option<String>,
     pub network_virtualization_type: VpcVirtualizationType,
     pub routing_profile_type: Option<String>,
+    pub routing_profile_overrides: Option<VpcRoutingProfileOverrides>,
     pub vni: Option<i32>,
 }
 
@@ -73,6 +117,7 @@ pub struct VpcDefinition {
 pub struct VpcSearchFilter {
     pub name: Option<String>,
     pub tenant_org_id: Option<String>,
+    pub network_virtualization_type: Option<VpcVirtualizationType>,
     pub label: Option<LabelFilter>,
 }
 
@@ -84,15 +129,44 @@ pub struct NewVpc {
     pub metadata: Metadata,
     pub network_security_group_id: Option<NetworkSecurityGroupId>,
     pub routing_profile_type: Option<String>,
+    pub routing_profile_overrides: Option<VpcRoutingProfileOverrides>,
+    pub power_resource_group: Option<String>,
     pub vni: Option<i32>,
+    /// Whether the VPC uses SLAAC allocation mode for instance IPv6 interfaces.
+    pub slaac_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct UpdateVpc {
     pub id: VpcId,
     pub network_security_group_id: Option<NetworkSecurityGroupId>,
+    pub routing_profile_overrides: Option<VpcRoutingProfileOverrides>,
+    pub power_resource_group: Option<PowerResourceGroupUpdate>,
     pub if_version_match: Option<ConfigVersion>,
     pub metadata: Metadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PowerResourceGroupUpdate {
+    Set(String),
+    Clear,
+}
+
+/// Changes a VPC's named routing profile using an observed version.
+///
+/// Core validates the destination against the persisted tenant and retains
+/// the previous VNI until the operator explicitly releases it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeVpcRoutingProfile {
+    /// VPC whose profile and active VNI will change.
+    pub id: VpcId,
+    /// Original observed version; callers must not refresh it during retries.
+    pub if_version_match: ConfigVersion,
+    /// Configuration-defined destination profile name.
+    pub routing_profile_type: String,
+    /// Optional exact destination VNI in 1..=16777215. Must match retained
+    /// destination ownership; omission reuses it or allocates automatically.
+    pub vni: Option<i32>,
 }
 
 /// UpdateVpcVirtualization exists as a mechanism to translate
@@ -115,26 +189,31 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
             labels: vpc_labels.0,
         };
 
-        let routing_profile_type: Option<String> = row.try_get("routing_profile_type")?;
-        let status: Option<sqlx::types::Json<VpcStatus>> = row.try_get("status")?;
+        let status: sqlx::types::Json<VpcStatus> = row.try_get("status")?;
 
-        // TODO(chet): Once `tenant_keyset_id` is taken care of,
-        // this entire FromRow implementation can go away with a
-        // rename of `tenant_organization_id` to match (or just
-        // a rename of the `organization_id` column).
         Ok(Vpc {
             id: row.try_get("id")?,
             version: row.try_get("version")?,
-            tenant_organization_id: row.try_get("organization_id")?,
-            network_security_group_id: row.try_get("network_security_group_id")?,
+            config: VpcConfig {
+                tenant_organization_id: row.try_get("organization_id")?,
+                tenant_keyset_id: None, // TODO: fix this once DB gets updated
+                network_security_group_id: row.try_get("network_security_group_id")?,
+                network_virtualization_type: row.try_get("network_virtualization_type")?,
+                routing_profile_type: row.try_get("routing_profile_type")?,
+                routing_profile_overrides: row
+                    .try_get::<Option<sqlx::types::Json<VpcRoutingProfileOverrides>>, _>(
+                        "routing_profile_overrides",
+                    )?
+                    .map(|profile| profile.0),
+                power_resource_group: row.try_get("power_resource_group")?,
+                slaac_enabled: row.try_get("slaac_enabled")?,
+                vni: row.try_get("vni")?,
+                default_nvlink_logical_partition_id: None,
+            },
+            status: status.0,
             created: row.try_get("created")?,
             updated: row.try_get("updated")?,
             deleted: row.try_get("deleted")?,
-            tenant_keyset_id: None, //TODO: fix this once DB gets updated
-            status: status.map(|s| s.0),
-            network_virtualization_type: row.try_get("network_virtualization_type")?,
-            routing_profile_type,
-            vni: row.try_get("vni")?,
             metadata,
         })
     }
@@ -142,13 +221,13 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
 
 #[derive(Clone, Debug, FromRow)]
 pub struct VpcDpuLoopback {
-    pub dpu_id: MachineId,
+    pub dpu_id: DpuMachineId,
     pub vpc_id: VpcId,
     pub loopback_ip: IpAddr,
 }
 
 impl VpcDpuLoopback {
-    pub fn new(dpu_id: MachineId, vpc_id: VpcId, loopback_ip: IpAddr) -> Self {
+    pub fn new(dpu_id: DpuMachineId, vpc_id: VpcId, loopback_ip: IpAddr) -> Self {
         Self {
             dpu_id,
             vpc_id,
@@ -157,11 +236,18 @@ impl VpcDpuLoopback {
     }
 }
 
+/// A retained peering reserves both endpoints until DPU permission removal completes.
 #[derive(Clone, Debug)]
 pub struct VpcPeering {
+    /// Stable identity used for discovery and deletion.
     pub id: VpcPeeringId,
+    /// The first endpoint in the database's ordered VPC pair.
     pub vpc_id: VpcId,
+    /// The second endpoint in the database's ordered VPC pair.
     pub peer_vpc_id: VpcId,
+    /// The committed deletion request, set once and never incremented. Its
+    /// timestamp identifies the request; `None` keeps the peering active.
+    pub deletion_version: Option<ConfigVersion>,
 }
 
 impl<'r> FromRow<'r, PgRow> for VpcPeering {
@@ -170,6 +256,59 @@ impl<'r> FromRow<'r, PgRow> for VpcPeering {
             id: row.try_get("id")?,
             vpc_id: row.try_get("vpc1_id")?,
             peer_vpc_id: row.try_get("vpc2_id")?,
+            deletion_version: row.try_get("deletion_version")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_network::ip::IpAddressFamily;
+    use carbide_test_support::value_scenarios;
+
+    use super::{instance_prefix_len, vpc_prefix_can_allocate_interface_prefix};
+
+    #[test]
+    fn instance_prefix_length_follows_address_family_and_slaac_policy() {
+        value_scenarios!(
+            run = |(address_family, slaac_enabled)| {
+                instance_prefix_len(address_family, slaac_enabled)
+            };
+            "stateful allocation" {
+                (IpAddressFamily::Ipv4, false) => 31,
+                (IpAddressFamily::Ipv6, false) => 127,
+            }
+
+            "SLAAC allocation" {
+                (IpAddressFamily::Ipv4, true) => 31,
+                (IpAddressFamily::Ipv6, true) => 64,
+            }
+        );
+    }
+
+    #[test]
+    fn vpc_prefix_eligibility_preserves_the_ipv4_31_exception() {
+        value_scenarios!(
+            run = |(address_family, parent_prefix_len, interface_prefix_len)| {
+                vpc_prefix_can_allocate_interface_prefix(
+                    address_family,
+                    parent_prefix_len,
+                    interface_prefix_len,
+                )
+            };
+            "eligible parents" {
+                (IpAddressFamily::Ipv4, 30, 31) => true,
+                (IpAddressFamily::Ipv4, 31, 31) => true,
+                (IpAddressFamily::Ipv6, 63, 64) => true,
+                (IpAddressFamily::Ipv6, 126, 127) => true,
+            }
+
+            "ineligible parents" {
+                (IpAddressFamily::Ipv4, 24, 24) => false,
+                (IpAddressFamily::Ipv4, 32, 31) => false,
+                (IpAddressFamily::Ipv6, 64, 64) => false,
+                (IpAddressFamily::Ipv6, 127, 127) => false,
+            }
+        );
     }
 }

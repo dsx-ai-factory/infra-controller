@@ -26,12 +26,12 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 EXAMPLES:
 
 Set the site-wide SuperNIC lockdown IKM (input key material):
-    $ carbide-admin-cli credential add-nic-lockdown-ikm --password mypassword
+    $ nico-admin-cli credential add-nic-lockdown-ikm --password mypassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, required(true), help = "The site-wide NIC lockdown IKM value")]
-    pub password: String,
+    password: String,
 }
 
 impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
@@ -44,6 +44,30 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password,
             mac_address: None,
             vendor: None,
+            credential_name: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rpc::forge::CredentialType;
+
+    use super::*;
+
+    #[test]
+    fn add_nic_lockdown_ikm_maps_to_proto() {
+        let args = Args {
+            password: "ikm-secret".to_string(),
+        };
+        let request = forgerpc::CredentialCreationRequest::try_from(args).expect("convert");
+
+        assert_eq!(
+            request.credential_type,
+            CredentialType::SiteWideNicLockdownIkm as i32
+        );
+        assert_eq!(request.password, "ikm-secret");
+        assert!(request.username.is_none());
+        assert!(request.mac_address.is_none());
     }
 }

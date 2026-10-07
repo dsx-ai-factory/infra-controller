@@ -23,9 +23,9 @@ enable_route_servers = true
 dpu_ipmi_tool_impl = "test"
 initial_domain_name = "forge.local"
 initial_dpu_agent_upgrade_policy = "off"
-nvue_enabled = true
 attestation_enabled = false
 bypass_rbac = true
+allow_insecure_discovery = true
 
 [site_explorer]
 enabled = true

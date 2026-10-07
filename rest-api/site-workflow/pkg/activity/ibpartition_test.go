@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -101,7 +101,7 @@ func TestManageIBPartitionInventory_DiscoverInfiniBandPartitionInventory(t *test
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.InfiniBandPartitionInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.InfiniBandPartitionInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -110,12 +110,12 @@ func TestManageIBPartitionInventory_DiscoverInfiniBandPartitionInventory(t *test
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.IbPartitions))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -134,7 +134,7 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.IBPartitionCreationRequest
+		request *corev1.IBPartitionCreationRequest
 	}
 	tests := []struct {
 		name    string
@@ -149,9 +149,9 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionCreationRequest{
-					Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.IBPartitionConfig{
+				request: &corev1.IBPartitionCreationRequest{
+					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.IBPartitionConfig{
 						Name:                 name,
 						TenantOrganizationId: org,
 					},
@@ -166,9 +166,9 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionCreationRequest{
-					Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.IBPartitionConfig{
+				request: &corev1.IBPartitionCreationRequest{
+					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.IBPartitionConfig{
 						Name:                 "",
 						TenantOrganizationId: org,
 					},
@@ -183,9 +183,9 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionCreationRequest{
-					Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.IBPartitionConfig{
+				request: &corev1.IBPartitionCreationRequest{
+					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.IBPartitionConfig{
 						Name:                 name,
 						TenantOrganizationId: "",
 					},
@@ -200,9 +200,9 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionCreationRequest{
+				request: &corev1.IBPartitionCreationRequest{
 					Id: nil,
-					Config: &cwssaws.IBPartitionConfig{
+					Config: &corev1.IBPartitionConfig{
 						Name:                 name,
 						TenantOrganizationId: org,
 					},
@@ -228,12 +228,12 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionCreationRequest{
-					Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.IBPartitionConfig{
+				request: &corev1.IBPartitionCreationRequest{
+					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.IBPartitionConfig{
 						TenantOrganizationId: org,
 					},
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name: name,
 					},
 				},
@@ -247,9 +247,9 @@ func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionCreationRequest{
-					Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &cwssaws.IBPartitionConfig{
+				request: &corev1.IBPartitionCreationRequest{
+					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					Config: &corev1.IBPartitionConfig{
 						Name:                 name,
 						TenantOrganizationId: org,
 					},
@@ -282,7 +282,7 @@ func TestManageIBPartition_DeleteIBPartitionOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.IBPartitionDeletionRequest
+		request *corev1.IBPartitionDeletionRequest
 	}
 	tests := []struct {
 		name    string
@@ -297,8 +297,8 @@ func TestManageIBPartition_DeleteIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionDeletionRequest{
-					Id: &cwssaws.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.IBPartitionDeletionRequest{
+					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 				},
 			},
 			wantErr: false,
@@ -310,8 +310,8 @@ func TestManageIBPartition_DeleteIBPartitionOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.IBPartitionDeletionRequest{
-					Id: &cwssaws.IBPartitionId{Value: ""},
+				request: &corev1.IBPartitionDeletionRequest{
+					Id: &corev1.IBPartitionId{Value: ""},
 				},
 			},
 			wantErr: true,

@@ -1,0 +1,58 @@
+datacenterAsn: 65034
+siteControllerRoutesAsn: 65034
+bgpAsnStart: 4244766860
+
+siteControllerMtuSize: 1500
+nameServer: 8.8.8.8
+
+# Optional. Set to true where the datacenter enforces BGP TCP MD5 authentication on
+# DPU-facing ToR ports. The build then asks for the password (or reads
+# BGP_LEAF_SESSION_PASSWORD), renders it onto the leaf-facing sessions (p0/p1) of every
+# startup.yaml, and requires --encrypt-artifacts so the ISO never holds it in plaintext.
+# The password is never written to this file.
+#installWithLeafPassword: true
+
+# Generate with: openssl passwd -6 'yourpassword'
+ubuntuPasswordHash: "$6$rounds=4096$examplesalt$hashedvalue"
+
+
+forgeDpuLoopbackPrefix: 10.180.63.128/28
+forgeServiceVipPrefix: 10.180.126.192/27
+forgeControlPlanePrefix: 10.180.248.88/29
+
+fnn:
+  controlPlaneVni: 60000
+
+  # Optional to allow testing of the overlay from directly in the HBN container without having to be in a tenant os.
+  # SHould be large enough to support all required VPC/DPU combinations
+  #vpcVrfLoopbackPrefix: 
+  
+  # Required route targets
+  commonManagedNodeBmcRouteTarget: 900
+  commonSiteControllerRouteTarget: 50100
+  commonAdminNetworkTarget: 50400
+
+  # Optional: additional EVPN route-targets to import in the DPU startup config.
+  # Use this for any site-specific targets (e.g. infra egress, jumphosts, UFM, tenants).
+  # These are appended after the 3 mandatory targets above, before 'auto'.
+  # KEEP THIS KEY INSIDE THE fnn BLOCK, indented like the keys above. At the top
+  # level of the file the build rejects it ("Unsupported field in site config
+  # (top level)") and it would not be rendered into startup.yaml.
+  # A map, one '<asn>:<n>: {}' entry per target, NOT a list: the build rejects a
+  # list or a non-numeric key. Keys are full numeric targets; nothing is substituted.
+  #routeTargetsToImport:
+  #  65034:101: {}    # Jumphosts
+  #  65034:1003: {}   # Power shelves
+
+# If you do not know the mac address of the site controller nodes, use aa:aa:aa:aa:aa:aa.
+# post-power-cycle.sh will detect the actual value and use it in netplan.
+siteControllerNodes:
+  - hostName: rno1-m04-d04-cpu-4
+    mac: aa:aa:aa:aa:aa:aa
+    nodeId: 1
+  - hostName: rno1-m04-d04-cpu-5
+    mac: aa:aa:aa:aa:aa:aa
+    nodeId: 2
+  - hostName: rno1-m04-d04-cpu-6
+    mac: aa:aa:aa:aa:aa:aa
+    nodeId: 3

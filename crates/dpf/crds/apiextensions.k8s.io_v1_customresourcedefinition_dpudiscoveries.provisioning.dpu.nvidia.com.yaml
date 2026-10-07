@@ -111,6 +111,12 @@ spec:
                   scan
                 format: date-time
                 type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the generation of the spec that was last applied by a successful scan.
+                  When spec (e.g. IP range) changes, reconciliation runs a scan immediately instead of waiting for the next interval.
+                format: int64
+                type: integer
             type: object
         type: object
     served: true

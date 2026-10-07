@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 //! Rack Validation Service (RVS)
 //!
@@ -155,7 +156,10 @@ async fn run_validation(ctx: &RvsCtx, cancel_token: CancellationToken) -> Result
             let report = validation::validate_partition(job).await?;
             validation::submit_report(report).await?;
         }
-        tracing::info!(poll_interval_secs, "validation: cycle complete, sleeping");
+        tracing::info!(
+            poll_interval_seconds = poll_interval_secs,
+            "validation: cycle complete, sleeping"
+        );
         if cancel_token
             .run_until_cancelled(tokio::time::sleep(interval))
             .await

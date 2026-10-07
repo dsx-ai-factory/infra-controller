@@ -17,23 +17,33 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::str::FromStr;
+use std::time::Duration;
 
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
+use carbide_instrument::LabelValue;
 use carbide_utils::HostPortPair;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
-use serde::{Deserialize, Serialize};
+use http::StatusCode;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
 
 use crate::acl::AclConfig;
+use crate::class::{ClassTable, ClassTableError};
 
 #[derive(thiserror::Error, Debug)]
-pub enum ConfigError {
+pub(crate) enum ConfigError {
     #[error("{0}")]
     Read(String),
     #[error(transparent)]
     Figment(Box<figment::Error>),
+    #[error("admission.{0}")]
+    AdmissionBreaker(BreakerConfigError),
+    #[error(transparent)]
+    Classes(#[from] ClassTableError),
 }
 
 impl From<figment::Error> for ConfigError {
@@ -43,18 +53,245 @@ impl From<figment::Error> for ConfigError {
 }
 
 #[derive(Deserialize)]
-pub struct Config {
+pub(crate) struct Config {
     #[serde(default = "Defaults::listen")]
-    pub listen: SocketAddr,
+    pub(crate) listen: SocketAddr,
     #[serde(default = "Defaults::metrics_endpoint")]
-    pub metrics_endpoint: SocketAddr,
+    pub(crate) metrics_endpoint: SocketAddr,
     #[serde(default)]
-    pub allowed_principals: HashSet<String>,
-    pub tls: TlsConfig,
-    pub auth: AuthConfig,
+    pub(crate) allowed_principals: HashSet<String>,
+    pub(crate) tls: TlsConfig,
+    pub(crate) auth: AuthConfig,
     #[serde(default)]
-    pub carbide_api: CarbideApiConfig,
-    pub bmc_proxy: Option<HostPortPair>,
+    pub(crate) carbide_api: CarbideApiConfig,
+    pub(crate) bmc_proxy: Option<HostPortPair>,
+    #[serde(default)]
+    pub(crate) redirects: RedirectConfig,
+    #[serde(default)]
+    pub(crate) tracing: TracingConfig,
+    /// Request classes, written as `[[class]]` tables. Absent keeps every
+    /// request in the implicit default class.
+    #[serde(rename = "class", default)]
+    pub(crate) classes: ClassTable,
+    #[serde(default)]
+    pub(crate) admission: AdmissionConfig,
+}
+
+/// Limits on the requests one proxy replica sends to each BMC, across every
+/// class. A class's own limit applies within this one.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdmissionConfig {
+    /// Requests one replica sends to one BMC at a time. Absent is unlimited.
+    #[serde(default)]
+    pub(crate) max_in_flight_per_bmc: Option<NonZeroU32>,
+    /// Settings every class's breaker takes where its own `breaker` sets
+    /// none. Present turns a breaker on for every class; absent, only for
+    /// classes with a `breaker` of their own.
+    #[serde(default)]
+    pub(crate) breaker: Option<BreakerSettings>,
+}
+
+/// Longest `cool_down` a breaker may set: a BMC back up is served again
+/// within this long.
+const MAX_BREAKER_COOL_DOWN: Duration = Duration::from_secs(10 * 60);
+
+/// Most exchanges a breaker remembers: each BMC in use keeps this many
+/// outcomes for each class with a breaker.
+const MAX_BREAKER_WINDOW: u32 = 1024;
+
+/// A breaker's settings where neither its class nor `[admission.breaker]`
+/// sets them.
+const DEFAULT_FAILURE_THRESHOLD: f32 = 0.5;
+const DEFAULT_WINDOW: u32 = 32;
+const DEFAULT_MIN_SAMPLES: u32 = 5;
+const DEFAULT_COOL_DOWN: Duration = Duration::from_secs(10);
+const DEFAULT_TRIP_ON: [Trip; 2] = [Trip::Unreachable, Trip::Timeout];
+
+/// A breaker's settings as written, in `[admission.breaker]` or a class's
+/// `breaker`. A class's breaker takes each setting from its own table, then
+/// from `[admission.breaker]`, then the default.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BreakerSettings {
+    failure_threshold: Option<f32>,
+    window: Option<u32>,
+    min_samples: Option<u32>,
+    #[serde(with = "humantime_serde", default)]
+    cool_down: Option<Duration>,
+    trip_on: Option<Vec<Trip>>,
+}
+
+/// A class's circuit breaker at each BMC: once at least `min_samples` of the
+/// class's last `window` exchanges with a BMC were seen, and at least
+/// `failure_threshold` of them failed in one of the ways `trip_on` names, the
+/// proxy sends that BMC none of the class's requests for `cool_down`, then
+/// one whose outcome decides whether to resume.
+pub(crate) struct BreakerConfig {
+    pub(crate) failure_threshold: f32,
+    pub(crate) window: u32,
+    pub(crate) min_samples: u32,
+    pub(crate) cool_down: Duration,
+    trip_on: Vec<Trip>,
+}
+
+/// How an exchange with a BMC can fail, as a breaker's `trip_on` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trip {
+    /// `"unreachable"`: the proxy could not connect to the BMC.
+    Unreachable,
+    /// `"timeout"`: the BMC did not answer in time.
+    Timeout,
+    /// `"5xx"`: the BMC answered with any 5xx status.
+    ServerError,
+    /// A status from 400 to 599, such as `"503"`: the BMC answered with it.
+    Status(StatusCode),
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error(
+    r#"breaker trip_on value {0:?} must be "unreachable", "timeout", "5xx", or a status from 400 to 599"#
+)]
+pub(crate) struct UnknownTrip(String);
+
+impl FromStr for Trip {
+    type Err = UnknownTrip;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "unreachable" => Ok(Self::Unreachable),
+            "timeout" => Ok(Self::Timeout),
+            "5xx" => Ok(Self::ServerError),
+            status => StatusCode::from_bytes(status.as_bytes())
+                .ok()
+                .filter(|status| status.is_client_error() || status.is_server_error())
+                .map(Self::Status)
+                .ok_or_else(|| UnknownTrip(value.to_string())),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Trip {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum BreakerConfigError {
+    #[error("breaker failure_threshold must be above 0 and at most 1")]
+    FailureThreshold,
+    #[error("breaker min_samples must be at least 1")]
+    MinSamples,
+    #[error("breaker window must be from min_samples to {MAX_BREAKER_WINDOW}")]
+    Window,
+    #[error("breaker cool_down must be above zero and at most {MAX_BREAKER_COOL_DOWN:?}")]
+    CoolDown,
+}
+
+impl BreakerConfig {
+    /// The breaker of a class whose own settings are `own`, under
+    /// `[admission.breaker]`'s `inherited`: none when neither is set, or when
+    /// `trip_on` is empty.
+    pub(crate) fn resolve(
+        own: Option<&BreakerSettings>,
+        inherited: Option<&BreakerSettings>,
+    ) -> Result<Option<Self>, BreakerConfigError> {
+        let unset = BreakerSettings::default();
+        let (own, inherited) = match (own, inherited) {
+            (None, None) => return Ok(None),
+            (own, inherited) => (own.unwrap_or(&unset), inherited.unwrap_or(&unset)),
+        };
+        let failure_threshold = own
+            .failure_threshold
+            .or(inherited.failure_threshold)
+            .unwrap_or(DEFAULT_FAILURE_THRESHOLD);
+        let window = own.window.or(inherited.window).unwrap_or(DEFAULT_WINDOW);
+        let min_samples = own
+            .min_samples
+            .or(inherited.min_samples)
+            .unwrap_or(DEFAULT_MIN_SAMPLES);
+        let cool_down = own
+            .cool_down
+            .or(inherited.cool_down)
+            .unwrap_or(DEFAULT_COOL_DOWN);
+        if !(failure_threshold > 0.0 && failure_threshold <= 1.0) {
+            return Err(BreakerConfigError::FailureThreshold);
+        }
+        if min_samples == 0 {
+            return Err(BreakerConfigError::MinSamples);
+        }
+        if window < min_samples || window > MAX_BREAKER_WINDOW {
+            return Err(BreakerConfigError::Window);
+        }
+        if cool_down.is_zero() || cool_down > MAX_BREAKER_COOL_DOWN {
+            return Err(BreakerConfigError::CoolDown);
+        }
+        let trip_on = own
+            .trip_on
+            .as_ref()
+            .or(inherited.trip_on.as_ref())
+            .map_or_else(|| DEFAULT_TRIP_ON.to_vec(), Clone::clone);
+        if trip_on.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            failure_threshold,
+            window,
+            min_samples,
+            cool_down,
+            trip_on,
+        }))
+    }
+
+    /// Whether an exchange that ended as `ended`, a `Status` for any answer,
+    /// counts as a failure.
+    pub(crate) fn trips_on(&self, ended: Trip) -> bool {
+        self.trip_on.iter().any(|&trip| {
+            trip == ended
+                || (trip == Trip::ServerError
+                    && matches!(ended, Trip::Status(status) if status.is_server_error()))
+        })
+    }
+}
+
+/// How the proxy handles redirect responses from a BMC.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, LabelValue, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RedirectMode {
+    /// Follow redirects only when the destination has the original request's
+    /// scheme, host, and effective port.
+    #[default]
+    FollowSameOrigin,
+    /// Return safe same-BMC redirects to the caller for a separately
+    /// authorized follow-up request.
+    ReturnToClient,
+}
+
+/// Redirect handling settings.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RedirectConfig {
+    /// Redirect behavior. Defaults to [`RedirectMode::FollowSameOrigin`].
+    pub(crate) mode: RedirectMode,
+}
+
+/// OpenTelemetry trace export settings for proxied BMC requests.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct TracingConfig {
+    /// Whether to record and export OTLP spans. Default: false.
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Collector endpoint for OTLP/gRPC traces. Overridden by the standard
+    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_ENDPOINT`
+    /// variables when either is set.
+    #[serde(default)]
+    pub(crate) otlp_endpoint: Option<String>,
 }
 
 struct Defaults;
@@ -70,7 +307,7 @@ impl Defaults {
 
     fn trust_config() -> TrustConfig {
         TrustConfig {
-            spiffe_trust_domain: "forge.local".to_string(),
+            spiffe_trust_domain: "nico.local".to_string(),
             spiffe_service_base_paths: vec![
                 "/forge-system/sa/".to_string(),
                 "/default/sa/".to_string(),
@@ -82,11 +319,11 @@ impl Defaults {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct TlsConfig {
-    pub identity_pemfile_path: String,
-    pub identity_keyfile_path: String,
-    pub root_cafile_path: String,
-    pub admin_root_cafile_path: String,
+pub(crate) struct TlsConfig {
+    pub(crate) identity_pemfile_path: String,
+    pub(crate) identity_keyfile_path: String,
+    pub(crate) root_cafile_path: String,
+    pub(crate) admin_root_cafile_path: String,
 }
 
 impl Default for TlsConfig {
@@ -102,11 +339,11 @@ impl Default for TlsConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct CarbideApiConfig {
-    pub root_ca: String,
-    pub client_cert: String,
-    pub client_key: String,
-    pub api_url: Url,
+pub(crate) struct CarbideApiConfig {
+    pub(crate) root_ca: String,
+    pub(crate) client_cert: String,
+    pub(crate) client_key: String,
+    pub(crate) api_url: Url,
 }
 
 impl Default for CarbideApiConfig {
@@ -122,32 +359,41 @@ impl Default for CarbideApiConfig {
 
 /// Authentication related configuration
 #[derive(Clone, Deserialize)]
-pub struct AuthConfig {
+pub(crate) struct AuthConfig {
     /// Additional nico-admin-cli certs allowed.  This does not include actually allowing the cert to connect, just that certs that can be verified which match these criteria can do GRPC requests.
     #[serde(default)]
-    pub cli_certs: Option<AllowedCertCriteria>,
+    pub(crate) cli_certs: Option<AllowedCertCriteria>,
 
     /// Configuration for the root of trust for client cert auth
     #[serde(default = "Defaults::trust_config")]
-    pub trust: TrustConfig,
+    pub(crate) trust: TrustConfig,
 
     #[serde(default)]
-    pub acls: AclConfig,
+    pub(crate) acls: AclConfig,
 }
 
 impl Config {
-    pub fn parse(s: &str) -> Result<Config, ConfigError> {
-        Figment::new()
+    pub(crate) fn parse(s: &str) -> Result<Config, ConfigError> {
+        let mut config: Config = Figment::new()
             .merge(Toml::string(s))
-            .merge(Env::prefixed("CARBIDE_BMC_PROXY_"))
-            .extract()
-            .map_err(Into::into)
+            .merge(Env::prefixed("CARBIDE_BMC_PROXY_")) // legacy, will be deprecated
+            .merge(Env::prefixed("NICO_BMC_PROXY__").split("__"))
+            .extract()?;
+        // Checked alone first, so that its errors name it rather than a class
+        // inheriting them, and are found even when every class overrides it.
+        BreakerConfig::resolve(None, config.admission.breaker.as_ref())
+            .map_err(ConfigError::AdmissionBreaker)?;
+        config
+            .classes
+            .resolve_breakers(config.admission.breaker.as_ref())?;
+        Ok(config)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
 
@@ -170,6 +416,8 @@ mod tests {
         ProxyPortOnly,
         ProxyHostAndPort,
         ExplicitCarbideApi,
+        RedirectsSection,
+        TracingSection,
     }
 
     #[derive(Debug, PartialEq)]
@@ -183,6 +431,9 @@ mod tests {
         service_base_paths: Vec<String>,
         carbide_api_url: String,
         bmc_proxy: Option<String>,
+        redirect_mode: RedirectMode,
+        tracing_enabled: bool,
+        tracing_otlp_endpoint: Option<String>,
     }
 
     fn config_source(case: ConfigCase) -> String {
@@ -223,6 +474,19 @@ mod tests {
                 api_url = "https://api.example.com:1079"
             "#
             }
+            ConfigCase::RedirectsSection => {
+                r#"
+                [redirects]
+                mode = "return_to_client"
+            "#
+            }
+            ConfigCase::TracingSection => {
+                r#"
+                [tracing]
+                enabled = true
+                otlp_endpoint = "http://collector.example.com:4317"
+            "#
+            }
         };
 
         format!("{extra}\n{MINIMAL_TLS}")
@@ -245,6 +509,9 @@ mod tests {
             service_base_paths: config.auth.trust.spiffe_service_base_paths,
             carbide_api_url: config.carbide_api.api_url.to_string(),
             bmc_proxy: config.bmc_proxy.map(|pair| pair.to_string()),
+            redirect_mode: config.redirects.mode,
+            tracing_enabled: config.tracing.enabled,
+            tracing_otlp_endpoint: config.tracing.otlp_endpoint,
         }
     }
 
@@ -259,7 +526,7 @@ mod tests {
                     allowed_principals: vec![],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
@@ -267,6 +534,9 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
             }
 
@@ -277,7 +547,7 @@ mod tests {
                     allowed_principals: vec![],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
@@ -285,6 +555,9 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
             }
 
@@ -298,7 +571,7 @@ mod tests {
                     ],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
@@ -306,6 +579,9 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
             }
 
@@ -316,7 +592,7 @@ mod tests {
                     allowed_principals: vec![],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
@@ -324,6 +600,9 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("proxy.local".to_string()),
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
             }
 
@@ -334,7 +613,7 @@ mod tests {
                     allowed_principals: vec![],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
@@ -342,6 +621,9 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("8443".to_string()),
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
             }
 
@@ -352,7 +634,7 @@ mod tests {
                     allowed_principals: vec![],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
@@ -360,6 +642,9 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("proxy.local:8443".to_string()),
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
             }
 
@@ -370,14 +655,243 @@ mod tests {
                     allowed_principals: vec![],
                     identity_pemfile_path: "/tls/cert.pem".to_string(),
                     root_cafile_path: "/tls/ca.pem".to_string(),
-                    trust_domain: "forge.local".to_string(),
+                    trust_domain: "nico.local".to_string(),
                     service_base_paths: vec![
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
                     carbide_api_url: "https://api.example.com:1079/".to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
                 },
+            }
+
+            "redirect handling mode" {
+                ConfigCase::RedirectsSection => ConfigSummary {
+                    listen: "[::]:1079".to_string(),
+                    metrics_endpoint: "[::]:1080".to_string(),
+                    allowed_principals: vec![],
+                    identity_pemfile_path: "/tls/cert.pem".to_string(),
+                    root_cafile_path: "/tls/ca.pem".to_string(),
+                    trust_domain: "nico.local".to_string(),
+                    service_base_paths: vec![
+                        "/forge-system/sa/".to_string(),
+                        "/default/sa/".to_string(),
+                    ],
+                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                        .to_string(),
+                    bmc_proxy: None,
+                    redirect_mode: RedirectMode::ReturnToClient,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
+                },
+            }
+
+            "tracing section" {
+                ConfigCase::TracingSection => ConfigSummary {
+                    listen: "[::]:1079".to_string(),
+                    metrics_endpoint: "[::]:1080".to_string(),
+                    allowed_principals: vec![],
+                    identity_pemfile_path: "/tls/cert.pem".to_string(),
+                    root_cafile_path: "/tls/ca.pem".to_string(),
+                    trust_domain: "nico.local".to_string(),
+                    service_base_paths: vec![
+                        "/forge-system/sa/".to_string(),
+                        "/default/sa/".to_string(),
+                    ],
+                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                        .to_string(),
+                    bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: true,
+                    tracing_otlp_endpoint: Some("http://collector.example.com:4317".to_string()),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_redirect_mode() {
+        let source = format!(
+            r#"
+            [redirects]
+            mode = "follow_anywhere"
+
+            {MINIMAL_TLS}
+            "#
+        );
+
+        let error = Config::parse(&source)
+            .err()
+            .expect("unknown redirect mode must fail");
+        let message = error.to_string();
+        assert!(message.contains("follow_anywhere"));
+        assert!(message.contains("follow_same_origin"));
+        assert!(message.contains("return_to_client"));
+    }
+
+    /// A breaker's (failure_threshold, window, min_samples, cool_down in
+    /// milliseconds, trip_on).
+    type BreakerSummary = (f32, u32, u32, u128, Vec<Trip>);
+
+    /// The config with `admission`, and a `power` class with `power` as its
+    /// own breaker settings.
+    fn with_power_class((admission, power): (&str, &str)) -> Result<Config, ConfigError> {
+        Config::parse(&format!(
+            r#"
+            {admission}
+
+            [[class]]
+            name = "power"
+            match = ["PATCH /redfish/v1/**"]
+            {power}
+            {MINIMAL_TLS}
+            "#
+        ))
+    }
+
+    /// The breakers of the `power` class and of the default class in
+    /// [`with_power_class`].
+    fn breakers_of(settings: (&str, &str)) -> Result<[Option<BreakerSummary>; 2], ()> {
+        let config = with_power_class(settings).map_err(drop)?;
+        let breaker_of = |method| {
+            config
+                .classes
+                .classify(&method, "/redfish/v1/Chassis", &[])
+                .breaker
+                .as_ref()
+                .map(|breaker| {
+                    (
+                        breaker.failure_threshold,
+                        breaker.window,
+                        breaker.min_samples,
+                        breaker.cool_down.as_millis(),
+                        breaker.trip_on.clone(),
+                    )
+                })
+        };
+        Ok([
+            breaker_of(http::Method::PATCH),
+            breaker_of(http::Method::GET),
+        ])
+    }
+
+    /// `[admission.breaker]` turns a breaker on for every class, and a
+    /// class's `breaker` for that class. A class's breaker takes each setting
+    /// from its own table, then `[admission.breaker]`, then the default, and
+    /// an empty `trip_on` turns it off. Settings out of bounds, alone or
+    /// together, or unknown, do not load.
+    #[test]
+    fn breaker_settings_parse() {
+        let defaults = || Some((0.5, 32, 5, 10_000, vec![Trip::Unreachable, Trip::Timeout]));
+        scenarios!(
+            run = breakers_of;
+            "loaded" {
+                ("", "") => Yields([None, None]),
+                ("[admission.breaker]", "") => Yields([defaults(), defaults()]),
+                (
+                    "[admission.breaker]\nfailure_threshold = 1.0\nwindow = 1024\nmin_samples = 1\ncool_down = \"10m\"\ntrip_on = [\"5xx\", \"429\"]",
+                    "",
+                ) => Yields(
+                    [(); 2].map(|()| {
+                        Some((1.0, 1024, 1, 600_000, vec![Trip::ServerError, Trip::Status(StatusCode::TOO_MANY_REQUESTS)]))
+                    }),
+                ),
+                ("[admission.breaker]\nwindow = 5\nmin_samples = 5", "") => Yields(
+                    [(); 2].map(|()| Some((0.5, 5, 5, 10_000, vec![Trip::Unreachable, Trip::Timeout]))),
+                ),
+                ("", r#"breaker = { trip_on = ["503"] }"#) => Yields([
+                    Some((0.5, 32, 5, 10_000, vec![Trip::Status(StatusCode::SERVICE_UNAVAILABLE)])),
+                    None,
+                ]),
+                ("[admission.breaker]\nwindow = 8\nmin_samples = 2", "breaker = { min_samples = 8 }") => Yields([
+                    Some((0.5, 8, 8, 10_000, vec![Trip::Unreachable, Trip::Timeout])),
+                    Some((0.5, 8, 2, 10_000, vec![Trip::Unreachable, Trip::Timeout])),
+                ]),
+                ("[admission.breaker]", "breaker = { trip_on = [] }") => Yields([None, defaults()]),
+            }
+
+            "rejected" {
+                ("[admission.breaker]\nfailure_threshold = 0.0", "") => Fails,
+                ("[admission.breaker]\nfailure_threshold = 1.5", "") => Fails,
+                ("[admission.breaker]\nmin_samples = 0", "") => Fails,
+                ("[admission.breaker]\nwindow = 4\nmin_samples = 5", "") => Fails,
+                ("[admission.breaker]\nfailure_threshold = nan", "") => Fails,
+                ("[admission.breaker]\nwindow = 1025", "") => Fails,
+                ("[admission.breaker]\ncool_down = \"0s\"", "") => Fails,
+                ("[admission.breaker]\ncool_down = \"11m\"", "") => Fails,
+                ("[admission.breaker]\ncooldown = \"10s\"", "") => Fails,
+                ("[admission.breaker]\ntrip_on = [\"4xx\"]", "") => Fails,
+                ("[admission.breaker]\ntrip_on = [\"200\"]", "") => Fails,
+                ("[admission.breaker]\nwindow = 4\nmin_samples = 2", "breaker = { min_samples = 5 }") => Fails,
+            }
+        );
+    }
+
+    /// A breaker setting out of bounds is reported where it was written: in
+    /// `[admission.breaker]`, or in a class, alone or with what it inherits.
+    #[test]
+    fn breaker_errors_name_where_they_were_written() {
+        value_scenarios!(
+            run = |settings| with_power_class(settings).err().map(|error| error.to_string());
+            "named" {
+                ("[admission.breaker]\nfailure_threshold = 1.5", "") => Some(
+                    "admission.breaker failure_threshold must be above 0 and at most 1".to_string(),
+                ),
+                ("[admission.breaker]\nwindow = 4\nmin_samples = 2", "breaker = { min_samples = 5 }") => Some(
+                    r#"class "power" breaker window must be from min_samples to 1024"#.to_string(),
+                ),
+            }
+        );
+    }
+
+    /// A breaker counts an answer as a failure when its `trip_on` names the
+    /// answer's status, or names `5xx` and the status is one.
+    #[test]
+    fn trip_on_names_the_answers_that_fail() {
+        value_scenarios!(
+            run = |(trip, status): (&str, u16)| {
+                let settings = BreakerSettings {
+                    trip_on: Some(vec![trip.parse().expect("a trip")]),
+                    ..BreakerSettings::default()
+                };
+                BreakerConfig::resolve(Some(&settings), None)
+                    .expect("valid settings")
+                    .expect("a breaker")
+                    .trips_on(Trip::Status(StatusCode::from_u16(status).expect("a status")))
+            };
+            "counted" {
+                ("5xx", 503) => true,
+                ("429", 429) => true,
+            }
+
+            "not counted" {
+                ("5xx", 429) => false,
+                ("503", 500) => false,
+            }
+        );
+    }
+
+    /// `[admission]` sets the per-BMC limit; without it there is none. A
+    /// zero limit or an unknown key does not load.
+    #[test]
+    fn admission_limits_parse() {
+        scenarios!(
+            run = |admission: &str| {
+                Config::parse(&format!("{admission}\n{MINIMAL_TLS}"))
+                    .map(|config| config.admission.max_in_flight_per_bmc.map(NonZeroU32::get))
+                    .map_err(drop)
+            };
+            "loaded" {
+                "" => Yields(None),
+                "[admission]\nmax_in_flight_per_bmc = 4" => Yields(Some(4)),
+            }
+
+            "rejected" {
+                "[admission]\nmax_in_flight_per_bmc = 0" => Fails,
+                "[admission]\nmax_in_flight = 4" => Fails,
             }
         );
     }

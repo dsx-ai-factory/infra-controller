@@ -6,18 +6,21 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
-	"github.com/google/uuid"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -47,29 +50,133 @@ var (
 type ExpectedMachine struct {
 	bun.BaseModel `bun:"table:expected_machine,alias:em"`
 
-	ID                       uuid.UUID `bun:"id,pk"`
-	SiteID                   uuid.UUID `bun:"site_id,type:uuid,notnull"`
-	Site                     *Site     `bun:"rel:belongs-to,join:site_id=id"`
-	BmcMacAddress            string    `bun:"bmc_mac_address,notnull"`
-	ChassisSerialNumber      string    `bun:"chassis_serial_number,notnull"`
-	SkuID                    *string   `bun:"sku_id"`
-	Sku                      *SKU      `bun:"rel:belongs-to,join:sku_id=id"`
-	MachineID                *string   `bun:"machine_id"`
-	Machine                  *Machine  `bun:"rel:belongs-to,join:machine_id=id"`
-	FallbackDpuSerialNumbers []string  `bun:"fallback_dpu_serial_numbers,array"`
-	BmcIpAddress             *string   `bun:"bmc_ip_address"`
-	RackID                   *string   `bun:"rack_id"`
-	Name                     *string   `bun:"name"`
-	Manufacturer             *string   `bun:"manufacturer"`
-	Model                    *string   `bun:"model"`
-	Description              *string   `bun:"description"`
-	SlotID                   *int32    `bun:"slot_id"`
-	TrayIdx                  *int32    `bun:"tray_idx"`
-	HostID                   *int32    `bun:"host_id"`
-	Labels                   Labels    `bun:"labels,type:jsonb"`
-	Created                  time.Time `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated                  time.Time `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	CreatedBy                uuid.UUID `bun:"type:uuid,notnull"`
+	ID                       uuid.UUID                  `bun:"id,pk"`
+	SiteID                   uuid.UUID                  `bun:"site_id,type:uuid,notnull"`
+	Site                     *Site                      `bun:"rel:belongs-to,join:site_id=id"`
+	BmcMacAddress            string                     `bun:"bmc_mac_address,notnull"`
+	ChassisSerialNumber      string                     `bun:"chassis_serial_number,notnull"`
+	SkuID                    *string                    `bun:"sku_id"`
+	Sku                      *SKU                       `bun:"rel:belongs-to,join:sku_id=id"`
+	MachineID                *string                    `bun:"machine_id"`
+	Machine                  *Machine                   `bun:"rel:belongs-to,join:machine_id=id"`
+	FallbackDpuSerialNumbers []string                   `bun:"fallback_dpu_serial_numbers,array"`
+	Interfaces               []ExpectedMachineInterface `bun:"interfaces,type:jsonb,notnull,default:'[]'::jsonb"`
+	BmcIpAddress             *string                    `bun:"bmc_ip_address"`
+	RackID                   *string                    `bun:"rack_id"`
+	Name                     *string                    `bun:"name"`
+	Manufacturer             *string                    `bun:"manufacturer"`
+	Model                    *string                    `bun:"model"`
+	Description              *string                    `bun:"description"`
+	SlotID                   *int32                     `bun:"slot_id"`
+	TrayIdx                  *int32                     `bun:"tray_idx"`
+	HostID                   *int32                     `bun:"host_id"`
+	IsDpfEnabled             *bool                      `bun:"is_dpf_enabled"`
+	Labels                   Labels                     `bun:"labels,type:jsonb"`
+	HostLifecycleProfile     HostLifecycleProfile       `bun:"host_lifecycle_profile,type:jsonb,notnull"`
+	Created                  time.Time                  `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated                  time.Time                  `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	CreatedBy                uuid.UUID                  `bun:"type:uuid,notnull"`
+}
+
+// ExpectedMachineInterface is host NIC intent persisted by REST and forwarded
+// to Core's ExpectedMachine.host_nics field.
+type ExpectedMachineInterface struct {
+	MacAddress         string                               `json:"mac_address"`
+	NicType            *string                              `json:"nic_type,omitempty"`
+	FixedIP            *string                              `json:"fixed_ip,omitempty"`
+	FixedMask          *string                              `json:"fixed_mask,omitempty"`
+	FixedGateway       *string                              `json:"fixed_gateway,omitempty"`
+	Primary            *bool                                `json:"primary,omitempty"`
+	NetworkSegmentType *ExpectedInterfaceNetworkSegmentType `json:"network_segment_type,omitempty"`
+	Role               *ExpectedInterfaceRole               `json:"role,omitempty"`
+	IPAllocation       *ExpectedInterfaceIPAllocation       `json:"ip_allocation,omitempty"`
+}
+
+// ToProto converts persisted REST interface intent to Core's wire shape.
+func (i ExpectedMachineInterface) ToProto() *corev1.ExpectedHostNic {
+	result := &corev1.ExpectedHostNic{
+		MacAddress:   i.MacAddress,
+		NicType:      i.NicType,
+		FixedIp:      i.FixedIP,
+		FixedMask:    i.FixedMask,
+		FixedGateway: i.FixedGateway,
+		Primary:      i.Primary,
+	}
+	if i.NetworkSegmentType != nil {
+		result.NetworkSegmentType = i.NetworkSegmentType.ToProto().Enum()
+	}
+	if i.Role != nil {
+		result.Role = i.Role.ToProto().Enum()
+	}
+	if i.IPAllocation != nil {
+		result.IpAllocation = i.IPAllocation.ToProto().Enum()
+	}
+	return result
+}
+
+// FromProto replaces this interface with the REST-supported fields from Core.
+func (i *ExpectedMachineInterface) FromProto(proto *corev1.ExpectedHostNic) {
+	if proto == nil {
+		*i = ExpectedMachineInterface{}
+		return
+	}
+	i.MacAddress = proto.MacAddress
+	i.NicType = proto.NicType
+	i.FixedIP = proto.FixedIp
+	i.FixedMask = proto.FixedMask
+	i.FixedGateway = proto.FixedGateway
+	i.Primary = proto.Primary
+	i.NetworkSegmentType = nil
+	if proto.NetworkSegmentType != nil {
+		i.NetworkSegmentType = new(ExpectedInterfaceNetworkSegmentType)
+		i.NetworkSegmentType.FromProto(*proto.NetworkSegmentType)
+	}
+	i.Role = nil
+	if proto.Role != nil {
+		i.Role = new(ExpectedInterfaceRole)
+		i.Role.FromProto(*proto.Role)
+	}
+	i.IPAllocation = nil
+	if proto.IpAllocation != nil {
+		i.IPAllocation = new(ExpectedInterfaceIPAllocation)
+		i.IPAllocation.FromProto(*proto.IpAllocation)
+	}
+}
+
+// HostLifecycleProfile holds per-host lifecycle settings that affect how a host
+// progresses through its state machine. It is persisted alongside the
+// ExpectedMachine as JSONB and mirrored to Core via the workflow proto.
+type HostLifecycleProfile struct {
+	// DisableLockdown, when non-nil, controls whether the host is locked down
+	// during lifecycle management. A nil value means the setting is unset, so
+	// Core preserves its existing value (patch semantics).
+	DisableLockdown *bool `json:"disable_lockdown,omitempty"`
+}
+
+// HasSetFields reports whether the profile carries at least one explicitly set
+// field. Keep this method in sync when adding fields to HostLifecycleProfile so
+// update paths do not mistake an empty patch object for a requested write.
+func (h HostLifecycleProfile) HasSetFields() bool {
+	return h.DisableLockdown != nil
+}
+
+// ToProto returns the workflow proto for this profile, or nil when no setting
+// is present so the outer field stays unset and Core preserves its DB value.
+func (h HostLifecycleProfile) ToProto() *corev1.HostLifecycleProfile {
+	if !h.HasSetFields() {
+		return nil
+	}
+	return &corev1.HostLifecycleProfile{DisableLockdown: h.DisableLockdown}
+}
+
+// FromProto populates the receiver from a workflow proto profile. A nil proto
+// clears the receiver to its zero value.
+func (h *HostLifecycleProfile) FromProto(proto *corev1.HostLifecycleProfile) {
+	if proto == nil {
+		*h = HostLifecycleProfile{}
+		return
+	}
+	h.DisableLockdown = proto.DisableLockdown
 }
 
 // ExpectedMachineCredentials carries the BMC credentials for one
@@ -83,20 +190,24 @@ type ExpectedMachineCredentials struct {
 // ToProto builds the workflow proto for this ExpectedMachine. BMC
 // credentials are passed in because they aren't persisted on the record;
 // labels are read from em.Labels.
-func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *cwssaws.ExpectedMachine {
-	proto := &cwssaws.ExpectedMachine{
-		Id:                       &cwssaws.UUID{Value: em.ID.String()},
+func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.ExpectedMachine {
+	proto := &corev1.ExpectedMachine{
+		Id:                       &corev1.UUID{Value: em.ID.String()},
 		BmcMacAddress:            em.BmcMacAddress,
 		ChassisSerialNumber:      em.ChassisSerialNumber,
 		FallbackDpuSerialNumbers: em.FallbackDpuSerialNumbers,
 		SkuId:                    em.SkuID,
+	}
+	proto.HostNics = make([]*corev1.ExpectedHostNic, 0, len(em.Interfaces))
+	for _, expectedInterface := range em.Interfaces {
+		proto.HostNics = append(proto.HostNics, expectedInterface.ToProto())
 	}
 
 	if em.BmcIpAddress != nil {
 		proto.BmcIpAddress = em.BmcIpAddress
 	}
 	if em.RackID != nil {
-		proto.RackId = &cwssaws.RackId{Id: *em.RackID}
+		proto.RackId = &corev1.RackId{Id: *em.RackID}
 	}
 	if em.Name != nil {
 		proto.Name = em.Name
@@ -119,6 +230,10 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *cwssaws.Ex
 	if em.HostID != nil {
 		proto.HostId = em.HostID
 	}
+	if em.IsDpfEnabled != nil {
+		proto.IsDpfEnabled = em.IsDpfEnabled
+	}
+	proto.HostLifecycleProfile = em.HostLifecycleProfile.ToProto()
 
 	if creds.Username != nil {
 		proto.BmcUsername = *creds.Username
@@ -127,7 +242,7 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *cwssaws.Ex
 		proto.BmcPassword = *creds.Password
 	}
 
-	metadata := &cwssaws.Metadata{
+	metadata := &corev1.Metadata{
 		Labels: expectedComponentLabelsInput{
 			Manufacturer: em.Manufacturer,
 			Model:        em.Model,
@@ -154,7 +269,7 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *cwssaws.Ex
 // table). A nil proto is a no-op. An invalid or missing proto.Id leaves
 // em.ID unchanged so the caller can validate the proto's UUID before
 // calling.
-func (em *ExpectedMachine) FromProto(proto *cwssaws.ExpectedMachine, linkedMachineID *string) {
+func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachineID *string) {
 	if proto == nil {
 		return
 	}
@@ -168,6 +283,12 @@ func (em *ExpectedMachine) FromProto(proto *cwssaws.ExpectedMachine, linkedMachi
 	em.SkuID = proto.SkuId
 	em.MachineID = linkedMachineID
 	em.FallbackDpuSerialNumbers = proto.FallbackDpuSerialNumbers
+	em.Interfaces = make([]ExpectedMachineInterface, 0, len(proto.HostNics))
+	for _, expectedInterface := range proto.HostNics {
+		var restInterface ExpectedMachineInterface
+		restInterface.FromProto(expectedInterface)
+		em.Interfaces = append(em.Interfaces, restInterface)
+	}
 	em.BmcIpAddress = proto.BmcIpAddress
 	if proto.RackId != nil {
 		rackID := proto.RackId.Id
@@ -183,6 +304,8 @@ func (em *ExpectedMachine) FromProto(proto *cwssaws.ExpectedMachine, linkedMachi
 	em.TrayIdx = proto.TrayIdx
 	em.HostID = proto.HostId
 	em.Labels.FromProto(proto.Metadata.GetLabels())
+	em.IsDpfEnabled = proto.IsDpfEnabled
+	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
 
 // ExpectedMachineCreateInput input parameters for Create method
@@ -194,6 +317,7 @@ type ExpectedMachineCreateInput struct {
 	SkuID                    *string
 	MachineID                *string
 	FallbackDpuSerialNumbers []string
+	Interfaces               []ExpectedMachineInterface
 	BmcIpAddress             *string
 	RackID                   *string
 	Name                     *string
@@ -204,6 +328,8 @@ type ExpectedMachineCreateInput struct {
 	TrayIdx                  *int32
 	HostID                   *int32
 	Labels                   map[string]string
+	IsDpfEnabled             *bool
+	HostLifecycleProfile     HostLifecycleProfile
 	CreatedBy                uuid.UUID
 }
 
@@ -215,6 +341,7 @@ type ExpectedMachineUpdateInput struct {
 	SkuID                    *string
 	MachineID                *string
 	FallbackDpuSerialNumbers []string
+	Interfaces               []ExpectedMachineInterface
 	BmcIpAddress             *string
 	RackID                   *string
 	Name                     *string
@@ -225,6 +352,8 @@ type ExpectedMachineUpdateInput struct {
 	TrayIdx                  *int32
 	HostID                   *int32
 	Labels                   map[string]string
+	IsDpfEnabled             *bool
+	HostLifecycleProfile     *HostLifecycleProfile
 }
 
 // ExpectedMachineClearInput input parameters for Clear method
@@ -293,18 +422,27 @@ type ExpectedMachineDAO interface {
 	UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
+	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
+	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
+	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
+	GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedMachine, error)
+	// LockForUpdate locks rows in canonical ID order for the transaction
+	LockForUpdate(ctx context.Context, tx *db.Tx, expectedMachineIDs []uuid.UUID) error
 }
 
 // ExpectedMachineSQLDAO is an implementation of the ExpectedMachineDAO interface
 type ExpectedMachineSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 
 	ExpectedMachineDAO
 }
@@ -313,12 +451,10 @@ type ExpectedMachineSQLDAO struct {
 // The returned ExpectedMachine will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedMachineCreateInput) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedMachineCreateInput) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Create")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.Create")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
 
 	results, err := emsd.CreateMultiple(ctx, tx, []ExpectedMachineCreateInput{input})
 	if err != nil {
@@ -331,13 +467,10 @@ func (emsd ExpectedMachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input E
 // The returned ExpectedMachines will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineCreateInput) (_ []ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.CreateMultiple")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []ExpectedMachine{}, nil
@@ -356,6 +489,7 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 			SkuID:                    input.SkuID,
 			MachineID:                input.MachineID,
 			FallbackDpuSerialNumbers: input.FallbackDpuSerialNumbers,
+			Interfaces:               input.Interfaces,
 			BmcIpAddress:             input.BmcIpAddress,
 			RackID:                   input.RackID,
 			Name:                     input.Name,
@@ -366,6 +500,8 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 			TrayIdx:                  input.TrayIdx,
 			HostID:                   input.HostID,
 			Labels:                   input.Labels,
+			IsDpfEnabled:             input.IsDpfEnabled,
+			HostLifecycleProfile:     input.HostLifecycleProfile,
 			CreatedBy:                input.CreatedBy,
 		}
 		expectedMachines = append(expectedMachines, em)
@@ -373,10 +509,10 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 	}
 
 	// Add summary tracing attributes
-	if expectedMachineDAOSpan != nil && len(inputs) > 0 {
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "first_id", ids[0].String())
+	if len(inputs) > 0 {
+		cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("first_id", ids[0].String()))
 		if len(ids) > 1 {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "last_id", ids[len(ids)-1].String())
+			cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("last_id", ids[len(ids)-1].String()))
 		}
 	}
 
@@ -411,14 +547,11 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 
 // Get returns an ExpectedMachine by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (emsd ExpectedMachineSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Get")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "id", expectedMachineID.String())
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.Get")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("id", expectedMachineID.String()))
 
 	em := &ExpectedMachine{}
 
@@ -443,48 +576,84 @@ func (emsd ExpectedMachineSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedMa
 	return em, nil
 }
 
+// LockForUpdate locks ExpectedMachine rows in canonical ID order until the
+// transaction completes. Batch writers call this before any row-specific
+// writes so later operations cannot acquire overlapping row sets in a
+// conflicting order.
+func (emsd ExpectedMachineSQLDAO) LockForUpdate(ctx context.Context, tx *db.Tx, expectedMachineIDs []uuid.UUID) (retErr error) {
+	if tx == nil {
+		return errors.New("transaction is required to lock ExpectedMachine rows")
+	}
+	if len(expectedMachineIDs) == 0 {
+		return nil
+	}
+
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.LockForUpdate")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+
+	uniqueIDs := make([]uuid.UUID, 0, len(expectedMachineIDs))
+	seenIDs := make(map[uuid.UUID]struct{}, len(expectedMachineIDs))
+	for _, expectedMachineID := range expectedMachineIDs {
+		if _, seen := seenIDs[expectedMachineID]; seen {
+			continue
+		}
+		seenIDs[expectedMachineID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, expectedMachineID)
+	}
+
+	var locked []ExpectedMachine
+	err := db.GetIDB(tx, emsd.dbSession).
+		NewSelect().
+		Model(&locked).
+		Column("id").
+		Where("em.id IN (?)", bun.In(uniqueIDs)).
+		OrderExpr("em.id ASC").
+		For("UPDATE").
+		Scan(ctx)
+	if err != nil {
+		return err
+	}
+	if len(locked) != len(uniqueIDs) {
+		lockedIDs := make(map[uuid.UUID]struct{}, len(locked))
+		for _, expectedMachine := range locked {
+			lockedIDs[expectedMachine.ID] = struct{}{}
+		}
+		missingIDs := make([]uuid.UUID, 0, len(uniqueIDs)-len(locked))
+		for _, expectedMachineID := range uniqueIDs {
+			if _, ok := lockedIDs[expectedMachineID]; !ok {
+				missingIDs = append(missingIDs, expectedMachineID)
+			}
+		}
+		return fmt.Errorf("ExpectedMachine rows %v were not found while locking: %w", missingIDs, db.ErrDoesNotExist)
+	}
+
+	return nil
+}
+
 // setQueryWithFilter populates the lookup query based on specified filter
-func (emsd ExpectedMachineSQLDAO) setQueryWithFilter(filter ExpectedMachineFilterInput, query *bun.SelectQuery, expectedMachineDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (emsd ExpectedMachineSQLDAO) setQueryWithFilter(filter ExpectedMachineFilterInput, query *bun.SelectQuery, expectedMachineDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.SiteIDs != nil {
 		query = query.Where("em.site_id IN (?)", bun.In(filter.SiteIDs))
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.ExpectedMachineIDs != nil {
 		query = query.Where("em.id IN (?)", bun.In(filter.ExpectedMachineIDs))
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "expected_machine_ids", filter.ExpectedMachineIDs)
-		}
 	}
 
 	if filter.BmcMacAddresses != nil {
 		query = query.Where("em.bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "bmc_mac_addresses", filter.BmcMacAddresses)
-		}
 	}
 
 	if filter.ChassisSerialNumbers != nil {
 		query = query.Where("em.chassis_serial_number IN (?)", bun.In(filter.ChassisSerialNumbers))
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "chassis_serial_numbers", filter.ChassisSerialNumbers)
-		}
 	}
 
 	if filter.SkuIDs != nil {
 		query = query.Where("em.sku_id IN (?)", bun.In(filter.SkuIDs))
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "sku_ids", filter.SkuIDs)
-		}
 	}
 
 	if filter.MachineIDs != nil {
 		query = query.Where("em.machine_id IN (?)", bun.In(filter.MachineIDs))
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "machine_ids", filter.MachineIDs)
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -501,9 +670,7 @@ func (emsd ExpectedMachineSQLDAO) setQueryWithFilter(filter ExpectedMachineFilte
 				WhereOr("em.id::text ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("em.site_id::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		if expectedMachineDAOSpan != nil {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	return query, nil
@@ -513,12 +680,10 @@ func (emsd ExpectedMachineSQLDAO) setQueryWithFilter(filter ExpectedMachineFilte
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedMachineOrderByDefault in ascending order
-func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error) {
+func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedMachine, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.GetAll")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetAll")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
 
 	var expectedMachines []ExpectedMachine
 
@@ -556,18 +721,95 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	return expectedMachines, expectedMachinePaginator.Total, nil
 }
 
+// GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.
+func (emsd ExpectedMachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) (_ []string, _ int, retErr error) {
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetDistinctLabelKeys")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+
+	keys := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return keys, 0, nil
+	}
+
+	idb := db.GetIDB(tx, emsd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("expected_machine AS em").
+		ColumnExpr("DISTINCT label.key AS key").
+		Join("CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(em.labels) = 'object' THEN em.labels ELSE '{}'::jsonb END) AS label(key)")
+
+	distinctQuery, err := emsd.setQueryWithFilter(filter, distinctQuery, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_expected_machine_label_keys", distinctQuery).
+		Column("key")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelKeyOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelKeyOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, labelPaginator.Total, nil
+}
+
+// GetDistinctLabelValues returns paginated, distinct ExpectedMachine label values for a label key.
+func (emsd ExpectedMachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter ExpectedMachineFilterInput, page paginator.PageInput) (_ []string, _ int, retErr error) {
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetDistinctLabelValues")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("label_key", labelKey))
+
+	values := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return values, 0, nil
+	}
+
+	idb := db.GetIDB(tx, emsd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("expected_machine AS em").
+		ColumnExpr("DISTINCT jsonb_extract_path_text(em.labels, ?) AS value", labelKey).
+		Where("jsonb_extract_path_text(em.labels, ?) IS NOT NULL", labelKey)
+
+	distinctQuery, err := emsd.setQueryWithFilter(filter, distinctQuery, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_expected_machine_label_values", distinctQuery).
+		Column("value")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelValueOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelValueOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &values)
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, labelPaginator.Total, nil
+}
+
 // Update updates specified fields of an existing ExpectedMachine
 // The updated fields are assumed to be set to non-null values
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedMachineUpdateInput) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedMachineUpdateInput) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Update")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-		// Detailed per-field tracing is recorded in the UpdateMultiple child span.
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.Update")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+	// Detailed per-field tracing is recorded in the UpdateMultiple child span.
 
 	results, err := emsd.UpdateMultiple(ctx, tx, []ExpectedMachineUpdateInput{input})
 	if err != nil {
@@ -576,18 +818,17 @@ func (emsd ExpectedMachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input E
 	return &results[0], nil
 }
 
-// UpdateMultiple updates multiple ExpectedMachines with the given parameters using a single bulk UPDATE query
-// All inputs should update the same set of fields for optimal performance
+// UpdateMultiple updates multiple ExpectedMachines with the given parameters.
+// Fields shared by the inputs use one bulk UPDATE. BMC IP and host lifecycle
+// profile updates may be omitted by individual rows, so they are applied only
+// to the rows that provide them.
 // The updated fields are assumed to be set to non-null values.
-// Since there are 2 operations (UPDATE, SELECT), it is required that
-// this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error) {
+// Since the updates are followed by a SELECT, this library call must happen
+// within a transaction.
+func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) (_ []ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.UpdateMultiple")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.UpdateMultiple")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []ExpectedMachine{}, nil
@@ -597,6 +838,12 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	expectedMachines := make([]*ExpectedMachine, 0, len(inputs))
 	ids := make([]uuid.UUID, 0, len(inputs))
 	columnsSet := make(map[string]bool)
+	// `bmc_ip_address` is applied only to rows that provide it. The shared
+	// column list would otherwise clear rows whose PATCH input omitted it.
+	bmcIPUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	// host_lifecycle_profile is applied in its own bulk update scoped to only the
+	// rows that set it (see below), so rows that omit it keep their existing value.
+	hlpUpdates := make([]*ExpectedMachine, 0, len(inputs))
 
 	for _, input := range inputs {
 		em := &ExpectedMachine{
@@ -615,6 +862,10 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.FallbackDpuSerialNumbers = input.FallbackDpuSerialNumbers
 			columnsSet["fallback_dpu_serial_numbers"] = true
 		}
+		if input.Interfaces != nil {
+			em.Interfaces = input.Interfaces
+			columnsSet["interfaces"] = true
+		}
 		if input.Labels != nil {
 			em.Labels = input.Labels
 			columnsSet["labels"] = true
@@ -628,8 +879,10 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			columnsSet["machine_id"] = true
 		}
 		if input.BmcIpAddress != nil {
-			em.BmcIpAddress = input.BmcIpAddress
-			columnsSet["bmc_ip_address"] = true
+			bmcIPUpdates = append(bmcIPUpdates, &ExpectedMachine{
+				ID:           input.ExpectedMachineID,
+				BmcIpAddress: input.BmcIpAddress,
+			})
 		}
 		if input.RackID != nil {
 			em.RackID = input.RackID
@@ -663,9 +916,27 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.HostID = input.HostID
 			columnsSet["host_id"] = true
 		}
+		if input.IsDpfEnabled != nil {
+			em.IsDpfEnabled = input.IsDpfEnabled
+			columnsSet["is_dpf_enabled"] = true
+		}
 
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, input.ExpectedMachineID)
+
+		// host_lifecycle_profile is deliberately kept out of the shared
+		// columnsSet. The bulk UPDATE applies one column list to every row, so
+		// folding it in would write the column for rows that omitted it (their
+		// model carries the zero value here), silently clearing the persisted
+		// profile. Apply it separately only to rows that included the field and
+		// merge the JSONB patch below so empty or partial profiles preserve
+		// existing stored values.
+		if input.HostLifecycleProfile != nil {
+			hlpUpdates = append(hlpUpdates, &ExpectedMachine{
+				ID:                   input.ExpectedMachineID,
+				HostLifecycleProfile: *input.HostLifecycleProfile,
+			})
+		}
 	}
 
 	// Build column list
@@ -676,11 +947,18 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	columns = append(columns, "updated")
 
 	// Add summary tracing attributes
-	if expectedMachineDAOSpan != nil && len(inputs) > 0 {
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "columns_updated", strings.Join(columns, ","))
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "first_id", ids[0].String())
+	if len(inputs) > 0 {
+		traceColumns := append([]string(nil), columns...)
+		if len(bmcIPUpdates) > 0 {
+			traceColumns = append(traceColumns, "bmc_ip_address")
+		}
+		if len(hlpUpdates) > 0 {
+			traceColumns = append(traceColumns, "host_lifecycle_profile")
+		}
+		cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("columns_updated", strings.Join(traceColumns, ",")))
+		cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("first_id", ids[0].String()))
 		if len(ids) > 1 {
-			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "last_id", ids[len(ids)-1].String())
+			cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("last_id", ids[len(ids)-1].String()))
 		}
 	}
 
@@ -692,6 +970,32 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		Exec(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(bmcIPUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&bmcIPUpdates).
+			Column("bmc_ip_address").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Apply host_lifecycle_profile only to the rows that provided it. Rows that
+	// omitted it are absent here and keep their persisted value. Merge the JSONB
+	// patch like Site config updates so an empty object is a no-op and future
+	// profile fields can be updated independently.
+	for _, em := range hlpUpdates {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model((*ExpectedMachine)(nil)).
+			Set("host_lifecycle_profile = host_lifecycle_profile || ?::jsonb", em.HostLifecycleProfile).
+			Where("id = ?", em.ID).
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Fetch the updated expected machines
@@ -719,12 +1023,10 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 }
 
 // Clear sets parameters of an existing ExpectedMachine to null values in db
-func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Clear")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.Clear")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
 
 	em := &ExpectedMachine{
 		ID: input.ExpectedMachineID,
@@ -802,14 +1104,11 @@ func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Ex
 
 // Delete deletes an ExpectedMachine by ID
 // Error is returned only if there is a db error
-func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error {
+func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Delete")
-	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-
-		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "id", expectedMachineID.String())
-	}
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.Delete")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("id", expectedMachineID.String()))
 
 	em := &ExpectedMachine{
 		ID: expectedMachineID,
@@ -825,10 +1124,58 @@ func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expecte
 	return nil
 }
 
+// DeleteAll deletes all ExpectedMachines matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (emsd ExpectedMachineSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) (retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedMachineDAO.DeleteAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+
+	query := db.GetIDB(tx, emsd.dbSession).NewDelete().Model((*ExpectedMachine)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedMachineIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedMachineIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.ChassisSerialNumbers != nil {
+		query = query.Where("chassis_serial_number IN (?)", bun.In(filter.ChassisSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedMachines and creates the
+// supplied replacement set in the caller's transaction.
+func (emsd ExpectedMachineSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, inputs []ExpectedMachineCreateInput) (_ []ExpectedMachine, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedMachineDAO.ReplaceAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	err := emsd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedMachine{}, nil
+	}
+	return emsd.CreateMultiple(ctx, tx, inputs)
+}
+
 // NewExpectedMachineDAO returns a new ExpectedMachineDAO
 func NewExpectedMachineDAO(dbSession *db.Session) ExpectedMachineDAO {
 	return &ExpectedMachineSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

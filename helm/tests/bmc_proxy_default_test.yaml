@@ -1,0 +1,23 @@
+suite: BMC proxy default deployment
+templates:
+  - charts/nico-bmc-proxy/templates/deployment.yaml
+release:
+  name: test-nico
+  namespace: nico-system
+tests:
+  - it: deploys BMC proxy by default with the shared Core image
+    set:
+      global.image.repository: registry.example.com/nvmetal-carbide
+      global.image.tag: test
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: nico-bmc-proxy
+      - equal:
+          path: metadata.namespace
+          value: nico-system
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/nvmetal-carbide:test

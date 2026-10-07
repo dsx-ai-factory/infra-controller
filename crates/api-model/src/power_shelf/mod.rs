@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use chrono::prelude::*;
@@ -27,12 +28,13 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
 use crate::StateSla;
+use crate::bmc_info::BmcInfo;
 use crate::controller_outcome::PersistentStateHandlerOutcome;
 use crate::health::HealthReportSources;
 use crate::metadata::Metadata;
 
 pub mod power_shelf_id;
-pub mod slas;
+mod slas;
 
 #[derive(Debug, Clone)]
 pub struct NewPowerShelf {
@@ -73,10 +75,45 @@ pub struct PowerShelf {
 
     pub bmc_mac_address: Option<MacAddress>,
 
+    /// Operator "force-converge this power shelf PMC now" request. When
+    /// `true`, the power-shelf state controller enters `RotatingBmc` and
+    /// force-converges the PMC on its next sweep, bypassing the passive
+    /// site-wide gate and the device's backoff quarantine. A power shelf has
+    /// exactly one BMC, so the flag's presence on the row names the target
+    /// device.
+    pub bmc_credential_rotation_requested: bool,
+
+    /// When set by the API, the state controller transitions a Ready power shelf
+    /// into the decommissioning workflow and clears the marker atomically.
+    pub decommission_requested: bool,
+
+    /// BMC/PMC endpoint (MAC/IP + machine-interface id) resolved from the `Bmc`
+    /// machine_interface linked back to this power shelf. Populated by the
+    /// standard power-shelf load query, so every consumer (handlers, state
+    /// machines) gets it without re-resolving. `None` when no BMC interface is
+    /// linked yet.
+    pub bmc_info: Option<BmcInfo>,
+
     /// The rack that this power shelf is associated with.
     pub rack_id: Option<RackId>,
 
+    /// The NVLink domain of the shelf's rack, as last reported by the rack's
+    /// NMX-C endpoint. Written by NVLink Manager alongside the rack's switches;
+    /// `None` until a valid domain has been observed.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
+
     pub power_shelf_maintenance_requested: Option<PowerShelfMaintenanceRequest>,
+
+    /// Set by rack maintenance to request power-shelf participation in a
+    /// rack-level firmware upgrade. When the power shelf is Ready and
+    /// rack-firmware reprovisioning is enabled on the controller, it
+    /// transitions to `ReProvisioning`.
+    pub power_shelf_reprovisioning_requested: Option<PowerShelfReprovisionRequest>,
+
+    /// Per-device firmware upgrade status written by the rack state machine
+    /// during rack-level firmware upgrades. Read by
+    /// `ReProvisioning::WaitingForRackFirmwareUpgrade`.
+    pub firmware_upgrade_status: Option<crate::rack::RackFirmwareUpgradeStatus>,
 
     // Columns for these exist, but are unused in rust code
     // pub created: DateTime<Utc>,
@@ -97,6 +134,12 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
         let power_shelf_maintenance_requested: Option<
             sqlx::types::Json<PowerShelfMaintenanceRequest>,
         > = row.try_get("power_shelf_maintenance_requested").ok();
+        let power_shelf_reprovisioning_requested: Option<
+            sqlx::types::Json<PowerShelfReprovisionRequest>,
+        > = row.try_get("power_shelf_reprovisioning_requested").ok();
+        let firmware_upgrade_status: Option<
+            sqlx::types::Json<crate::rack::RackFirmwareUpgradeStatus>,
+        > = row.try_get("firmware_upgrade_status").ok();
 
         let health_reports: HealthReportSources = row
             .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
@@ -108,12 +151,22 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             description: row.try_get("description")?,
             labels: labels.0,
         };
+        let bmc_info = row
+            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")
+            .ok()
+            .flatten()
+            .map(|j| j.0);
         Ok(PowerShelf {
             id: row.try_get("id")?,
             config: config.0,
             status: status.map(|s| s.0),
             deleted: row.try_get("deleted")?,
             bmc_mac_address: row.try_get("bmc_mac_address").ok().flatten(),
+            bmc_credential_rotation_requested: row
+                .try_get("bmc_credential_rotation_requested")
+                .unwrap_or(false),
+            decommission_requested: row.try_get("decommission_requested").unwrap_or(false),
+            bmc_info,
             controller_state: Versioned {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
@@ -122,7 +175,10 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             metadata,
             version: row.try_get("version")?,
             rack_id: row.try_get("rack_id").ok().flatten(),
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
             power_shelf_maintenance_requested: power_shelf_maintenance_requested.map(|r| r.0),
+            power_shelf_reprovisioning_requested: power_shelf_reprovisioning_requested.map(|r| r.0),
+            firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
             health_reports,
         })
     }
@@ -155,7 +211,10 @@ pub enum PowerShelfMaintenanceOperation {
     /// Power on the PowerShelf.
     PowerOn,
     /// Power off the PowerShelf.
-    PowerOff,
+    PowerOff {
+        #[serde(default)]
+        graceful: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +222,30 @@ pub struct PowerShelfMaintenanceRequest {
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: PowerShelfMaintenanceOperation,
+}
+
+/// Set by an external entity (typically rack maintenance) to request power-shelf
+/// participation in rack-level reprovisioning. When the power shelf is Ready and
+/// rack-firmware reprovisioning is enabled, the controller transitions to
+/// `ReProvisioning`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerShelfReprovisionRequest {
+    pub requested_at: DateTime<Utc>,
+    pub initiator: String,
+    /// Rack maintenance activities that initiated this request. The power shelf
+    /// controller uses these to decide whether to wait for firmware. Empty means
+    /// all activities.
+    #[serde(default)]
+    pub activities: Vec<crate::rack::MaintenanceActivity>,
+}
+
+/// Sub-state for PowerShelfControllerState::ReProvisioning
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
+pub enum ReProvisioningState {
+    /// Rack-level firmware upgrade in progress; the rack state machine manages the
+    /// upgrade and clears `power_shelf_reprovisioning_requested` when done.
+    WaitingForRackFirmwareUpgrade,
 }
 
 /// State of a PowerShelf as tracked by the controller
@@ -178,13 +261,54 @@ pub enum PowerShelfControllerState {
     /// The PowerShelf is ready for use.
     Ready,
 
+    /// The PowerShelf's BMC (PMC) credential is being converged to the staged
+    /// site-wide rotation target, entered from `Ready` at lowest
+    /// precedence. The shared engine owns crash-safety and per-device backoff,
+    /// so this state carries only a retry budget for transient handler failures.
+    RotatingBmc {
+        #[serde(default)]
+        retry_count: u32,
+    },
+
     Maintenance {
         operation: PowerShelfMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<PowerShelfMaintenanceRequest>,
+    },
+
+    /// Rack-driven firmware wait in progress.
+    ReProvisioning {
+        reprovisioning_state: ReProvisioningState,
+    },
+    /// Managed decommissioning workflow in progress.
+    Decommissioning {
+        decommissioning_state: PowerShelfDecommissioningState,
     },
     /// There is error in PowerShelf; PowerShelf can not be used if it's in error.
     Error { cause: String },
     /// The PowerShelf is in the process of deleting.
     Deleting,
+}
+
+/// Progress through managed power-shelf decommissioning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum PowerShelfDecommissioningState {
+    /// Site Explorer is being suppressed before the destructive reset.
+    SuppressingSiteExplorer,
+    /// BMC DHCP is suppressed before the BMC factory reset so post-reset discovers are ignored.
+    SuppressingBmcDhcp,
+    /// Issues the BMC factory reset.
+    FactoryResetBmc,
+    /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    WaitingForBmcDhcpAcknowledgement,
+    /// Managed per-device credentials are being removed after factory reset.
+    DeletingManagedCredentials,
+    /// Terminal substate: the power shelf has been removed from managed service.
+    Decommissioned,
 }
 
 /// Returns the SLA for the current state
@@ -208,10 +332,43 @@ pub fn state_sla(state: &PowerShelfControllerState, state_version: &ConfigVersio
             time_in_state,
         ),
         PowerShelfControllerState::Ready => StateSla::no_sla(),
+        PowerShelfControllerState::RotatingBmc { .. } => StateSla::with_sla(
+            std::time::Duration::from_secs(slas::ROTATING_BMC),
+            time_in_state,
+        ),
         PowerShelfControllerState::Maintenance { .. } => StateSla::with_sla(
             std::time::Duration::from_secs(slas::MAINTENANCE),
             time_in_state,
         ),
+        PowerShelfControllerState::ReProvisioning { .. } => StateSla::with_sla(
+            std::time::Duration::from_secs(slas::REPROVISIONING),
+            time_in_state,
+        ),
+        PowerShelfControllerState::Decommissioning {
+            decommissioning_state,
+        } => match decommissioning_state {
+            PowerShelfDecommissioningState::SuppressingSiteExplorer => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER),
+                time_in_state,
+            ),
+            PowerShelfDecommissioningState::SuppressingBmcDhcp => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_BMC_DHCP),
+                time_in_state,
+            ),
+            PowerShelfDecommissioningState::FactoryResetBmc => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_BMC),
+                time_in_state,
+            ),
+            PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACK),
+                time_in_state,
+            ),
+            PowerShelfDecommissioningState::DeletingManagedCredentials => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS),
+                time_in_state,
+            ),
+            PowerShelfDecommissioningState::Decommissioned => StateSla::no_sla(),
+        },
         PowerShelfControllerState::Error { .. } => StateSla::no_sla(),
         PowerShelfControllerState::Deleting => StateSla::with_sla(
             std::time::Duration::from_secs(slas::DELETING),
@@ -276,6 +433,13 @@ mod tests {
                 )),
             }
 
+            "rotatingbmc carries its retry count" {
+                PowerShelfControllerState::RotatingBmc { retry_count: 4 } => Yields((
+                    r#"{"state":"rotatingbmc","retry_count":4}"#.to_string(),
+                    PowerShelfControllerState::RotatingBmc { retry_count: 4 },
+                )),
+            }
+
             "error with cause" {
                 PowerShelfControllerState::Error {
                     cause: "cause goes here".to_string(),
@@ -297,23 +461,130 @@ mod tests {
             "maintenance power-on" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 } => Yields((
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
                         operation: PowerShelfMaintenanceOperation::PowerOn,
+                        request: None,
                     },
                 )),
             }
 
-            "maintenance power-off" {
+            "maintenance power-off (forced, default)" {
                 PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                    request: None,
                 } => Yields((
-                    r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":false}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
-                        operation: PowerShelfMaintenanceOperation::PowerOff,
+                        operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                        request: None,
+                    },
+                )),
+            }
+
+            "maintenance graceful power-off" {
+                PowerShelfControllerState::Maintenance {
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                    request: None,
+                } => Yields((
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":true}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Maintenance {
+                        operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                        request: None,
+                    },
+                )),
+            }
+
+            "reprovisioning waiting for rack firmware" {
+                PowerShelfControllerState::ReProvisioning {
+                    reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
+                } => Yields((
+                    r#"{"state":"reprovisioning","reprovisioning_state":"WaitingForRackFirmwareUpgrade"}"#
+                        .to_string(),
+                    PowerShelfControllerState::ReProvisioning {
+                        reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
+                    },
+                )),
+            }
+
+            "decommissioning: suppressing Site Explorer" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state:
+                        PowerShelfDecommissioningState::SuppressingSiteExplorer,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"suppressingsiteexplorer"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state:
+                            PowerShelfDecommissioningState::SuppressingSiteExplorer,
+                    },
+                )),
+            }
+
+            "decommissioning: suppressing BMC DHCP" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::SuppressingBmcDhcp,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"suppressingbmcdhcp"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state: PowerShelfDecommissioningState::SuppressingBmcDhcp,
+                    },
+                )),
+            }
+
+            "decommissioning: factory resetting BMC" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::FactoryResetBmc,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"factoryresetbmc"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state: PowerShelfDecommissioningState::FactoryResetBmc,
+                    },
+                )),
+            }
+
+            "decommissioning: waiting for BMC DHCP acknowledgement" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state:
+                        PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"waitingforbmcdhcpacknowledgement"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state:
+                            PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+                    },
+                )),
+            }
+
+            "decommissioning: deleting managed credentials" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::DeletingManagedCredentials,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"deletingmanagedcredentials"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state:
+                            PowerShelfDecommissioningState::DeletingManagedCredentials,
+                    },
+                )),
+            }
+
+            "decommissioning: decommissioned" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::Decommissioned,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state: PowerShelfDecommissioningState::Decommissioned,
                     },
                 )),
             }
@@ -339,10 +610,17 @@ mod tests {
                 )),
             }
 
-            "power off" {
-                PowerShelfMaintenanceOperation::PowerOff => Yields((
-                    r#"{"operation":"poweroff"}"#.to_string(),
-                    PowerShelfMaintenanceOperation::PowerOff,
+            "power off (forced, default)" {
+                PowerShelfMaintenanceOperation::PowerOff { graceful: false } => Yields((
+                    r#"{"operation":"poweroff","graceful":false}"#.to_string(),
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                )),
+            }
+
+            "graceful power off" {
+                PowerShelfMaintenanceOperation::PowerOff { graceful: true } => Yields((
+                    r#"{"operation":"poweroff","graceful":true}"#.to_string(),
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                 )),
             }
         );
@@ -370,7 +648,7 @@ mod tests {
             }
 
             "power off" {
-                PowerShelfMaintenanceOperation::PowerOff => Yields(request(PowerShelfMaintenanceOperation::PowerOff)),
+                PowerShelfMaintenanceOperation::PowerOff { graceful: true } => Yields(request(PowerShelfMaintenanceOperation::PowerOff { graceful: true })),
             }
         );
     }
@@ -379,9 +657,11 @@ mod tests {
     fn maintenance_state_distinguishes_on_and_off() {
         let on = PowerShelfControllerState::Maintenance {
             operation: PowerShelfMaintenanceOperation::PowerOn,
+            request: None,
         };
         let off = PowerShelfControllerState::Maintenance {
-            operation: PowerShelfMaintenanceOperation::PowerOff,
+            operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+            request: None,
         };
         assert_ne!(on, off);
     }
@@ -409,6 +689,18 @@ mod tests {
                 r#"{"state":"ready"}"# => Yields(PowerShelfControllerState::Ready),
             }
 
+            "rotatingbmc round-trips its retry count" {
+                r#"{"state":"rotatingbmc","retry_count":4}"# => Yields(PowerShelfControllerState::RotatingBmc {
+                    retry_count: 4,
+                }),
+            }
+
+            "rotatingbmc absent retry_count defaults to 0" {
+                r#"{"state":"rotatingbmc"}"# => Yields(PowerShelfControllerState::RotatingBmc {
+                    retry_count: 0,
+                }),
+            }
+
             "deleting tag" {
                 r#"{"state":"deleting"}"# => Yields(PowerShelfControllerState::Deleting),
             }
@@ -428,13 +720,23 @@ mod tests {
             "maintenance power-on" {
                 r#"{"state":"maintenance","operation":{"operation":"poweron"}}"# => Yields(PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 }),
             }
 
             "maintenance power-off" {
                 r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"# => Yields(PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                    request: None,
                 }),
+            }
+
+            "reprovisioning waiting for rack firmware" {
+                r#"{"state":"reprovisioning","reprovisioning_state":"WaitingForRackFirmwareUpgrade"}"# => Yields(
+                    PowerShelfControllerState::ReProvisioning {
+                        reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
+                    },
+                ),
             }
 
             "unknown tag is rejected" {
@@ -477,8 +779,12 @@ mod tests {
                 r#"{"operation":"poweron"}"# => Yields(PowerShelfMaintenanceOperation::PowerOn),
             }
 
-            "poweroff tag" {
-                r#"{"operation":"poweroff"}"# => Yields(PowerShelfMaintenanceOperation::PowerOff),
+            "poweroff tag defaults to forced" {
+                r#"{"operation":"poweroff"}"# => Yields(PowerShelfMaintenanceOperation::PowerOff { graceful: false }),
+            }
+
+            "poweroff tag with explicit graceful" {
+                r#"{"operation":"poweroff","graceful":true}"# => Yields(PowerShelfMaintenanceOperation::PowerOff { graceful: true }),
             }
 
             "unknown operation is rejected" {
@@ -646,13 +952,63 @@ mod tests {
             "maintenance power-on has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 } => (secs(slas::MAINTENANCE), true),
             }
 
             "maintenance power-off has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                    request: None,
                 } => (secs(slas::MAINTENANCE), true),
+            }
+
+            "reprovisioning has the reprovisioning SLA" {
+                PowerShelfControllerState::ReProvisioning {
+                    reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
+                } => (secs(slas::REPROVISIONING), true),
+            }
+
+            "rotatingbmc has the rotating-bmc SLA" {
+                PowerShelfControllerState::RotatingBmc { retry_count: 0 } => (secs(slas::ROTATING_BMC), true),
+            }
+
+            "decommissioning suppressing-site-explorer has an SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state:
+                        PowerShelfDecommissioningState::SuppressingSiteExplorer,
+                } => (secs(slas::DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER), true),
+            }
+
+            "decommissioning suppressing-bmc-dhcp has an SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::SuppressingBmcDhcp,
+                } => (secs(slas::DECOMMISSIONING_SUPPRESSING_BMC_DHCP), true),
+            }
+
+            "decommissioning factory-reset-bmc has an SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::FactoryResetBmc,
+                } => (secs(slas::DECOMMISSIONING_FACTORY_RESET_BMC), true),
+            }
+
+            "decommissioning waiting-for-bmc-dhcp-ack has an SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state:
+                        PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+                } => (secs(slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACK), true),
+            }
+
+            "decommissioning deleting-managed-credentials has an SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::DeletingManagedCredentials,
+                } => (secs(slas::DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS), true),
+            }
+
+            "decommissioning decommissioned carries no SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state: PowerShelfDecommissioningState::Decommissioned,
+                } => (None, false),
             }
 
             "ready carries no SLA" {

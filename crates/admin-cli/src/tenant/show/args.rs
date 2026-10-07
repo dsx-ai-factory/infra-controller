@@ -29,9 +29,9 @@ Show details for one tenant org:
     $ nico-admin-cli tenant show fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Optional, tenant org ID to restrict the search")]
-    pub tenant_org: Option<String>,
+    tenant_org: Option<String>,
 }
 
 impl From<&Args> for Option<FindTenantRequest> {

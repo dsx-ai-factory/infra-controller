@@ -26,7 +26,7 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
 
-pub async fn profile_sync(
+pub(crate) async fn profile_sync(
     api: &Api,
     request: Request<mlx_device::MlxAdminProfileSyncRequest>,
 ) -> Result<Response<mlx_device::MlxAdminProfileSyncResponse>, Status> {
@@ -39,7 +39,7 @@ pub async fn profile_sync(
     Ok(Response::new(response))
 }
 
-pub fn profile_show(
+pub(crate) fn profile_show(
     api: &Api,
     request: Request<mlx_device::MlxAdminProfileShowRequest>,
 ) -> Result<Response<mlx_device::MlxAdminProfileShowResponse>, Status> {
@@ -49,7 +49,7 @@ pub fn profile_show(
     Ok(Response::new(response))
 }
 
-pub async fn profile_compare(
+pub(crate) async fn profile_compare(
     api: &Api,
     request: Request<mlx_device::MlxAdminProfileCompareRequest>,
 ) -> Result<Response<mlx_device::MlxAdminProfileCompareResponse>, Status> {
@@ -61,7 +61,7 @@ pub async fn profile_compare(
     Ok(Response::new(response))
 }
 
-pub fn profile_list(
+pub(crate) fn profile_list(
     api: &Api,
     request: Request<mlx_device::MlxAdminProfileListRequest>,
 ) -> Result<Response<mlx_device::MlxAdminProfileListResponse>, Status> {
@@ -70,7 +70,7 @@ pub fn profile_list(
     Ok(Response::new(response))
 }
 
-pub async fn lockdown_lock(
+pub(crate) async fn lockdown_lock(
     api: &Api,
     request: Request<mlx_device::MlxAdminLockdownLockRequest>,
 ) -> Result<Response<mlx_device::MlxAdminLockdownLockResponse>, Status> {
@@ -81,7 +81,7 @@ pub async fn lockdown_lock(
     Ok(Response::new(response))
 }
 
-pub async fn lockdown_unlock(
+pub(crate) async fn lockdown_unlock(
     api: &Api,
     request: Request<mlx_device::MlxAdminLockdownUnlockRequest>,
 ) -> Result<Response<mlx_device::MlxAdminLockdownUnlockResponse>, Status> {
@@ -92,7 +92,7 @@ pub async fn lockdown_unlock(
     Ok(Response::new(response))
 }
 
-pub async fn lockdown_status(
+pub(crate) async fn lockdown_status(
     api: &Api,
     request: Request<mlx_device::MlxAdminLockdownStatusRequest>,
 ) -> Result<Response<mlx_device::MlxAdminLockdownStatusResponse>, Status> {
@@ -103,7 +103,7 @@ pub async fn lockdown_status(
     Ok(Response::new(response))
 }
 
-pub async fn show_device_info(
+pub(crate) async fn show_device_info(
     api: &Api,
     request: Request<mlx_device::MlxAdminDeviceInfoRequest>,
 ) -> Result<Response<mlx_device::MlxAdminDeviceInfoResponse>, Status> {
@@ -114,7 +114,7 @@ pub async fn show_device_info(
     Ok(Response::new(response))
 }
 
-pub async fn show_device_report(
+pub(crate) async fn show_device_report(
     api: &Api,
     request: Request<mlx_device::MlxAdminDeviceReportRequest>,
 ) -> Result<Response<mlx_device::MlxAdminDeviceReportResponse>, Status> {
@@ -125,7 +125,7 @@ pub async fn show_device_report(
     Ok(Response::new(response))
 }
 
-pub async fn registry_list(
+pub(crate) async fn registry_list(
     api: &Api,
     request: Request<mlx_device::MlxAdminRegistryListRequest>,
 ) -> Result<Response<mlx_device::MlxAdminRegistryListResponse>, Status> {
@@ -136,7 +136,7 @@ pub async fn registry_list(
     Ok(Response::new(response))
 }
 
-pub async fn registry_show(
+pub(crate) async fn registry_show(
     api: &Api,
     request: Request<mlx_device::MlxAdminRegistryShowRequest>,
 ) -> Result<Response<mlx_device::MlxAdminRegistryShowResponse>, Status> {
@@ -147,7 +147,7 @@ pub async fn registry_show(
     Ok(Response::new(response))
 }
 
-pub async fn config_query(
+pub(crate) async fn config_query(
     api: &Api,
     request: Request<mlx_device::MlxAdminConfigQueryRequest>,
 ) -> Result<Response<mlx_device::MlxAdminConfigQueryResponse>, Status> {
@@ -165,7 +165,7 @@ pub async fn config_query(
     Ok(Response::new(response))
 }
 
-pub async fn config_set(
+pub(crate) async fn config_set(
     api: &Api,
     request: Request<mlx_device::MlxAdminConfigSetRequest>,
 ) -> Result<Response<mlx_device::MlxAdminConfigSetResponse>, Status> {
@@ -183,7 +183,7 @@ pub async fn config_set(
     Ok(Response::new(response))
 }
 
-pub async fn config_sync(
+pub(crate) async fn config_sync(
     api: &Api,
     request: Request<mlx_device::MlxAdminConfigSyncRequest>,
 ) -> Result<Response<mlx_device::MlxAdminConfigSyncResponse>, Status> {
@@ -201,7 +201,7 @@ pub async fn config_sync(
     Ok(Response::new(response))
 }
 
-pub async fn config_compare(
+pub(crate) async fn config_compare(
     api: &Api,
     request: Request<mlx_device::MlxAdminConfigCompareRequest>,
 ) -> Result<Response<mlx_device::MlxAdminConfigCompareResponse>, Status> {
@@ -1304,8 +1304,10 @@ async fn get_device_lockdown_key(
     // refer to as the "pci_name".
     //
     // In other words, device_id == pci_name.
+    let host_machine_id = carbide_uuid::machine::HostMachineId::try_from(machine_id)
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     let dpa_interface =
-        db::dpa_interface::get_for_pci_name(&api.database_connection, &machine_id, device_id)
+        db::dpa_interface::get_for_pci_name(&api.database_connection, &host_machine_id, device_id)
             .await
             .map_err(|e| {
                 CarbideError::NotFoundError {
@@ -1316,10 +1318,47 @@ async fn get_device_lockdown_key(
                 }
             })?;
 
-    let lockdown_key = crate::dpa::lockdown::build_supernic_lockdown_key(
+    // Derive at the version the card is tracked under: the in-flight
+    // `rotating_to_version` if a lock is mid-flight, else the last-confirmed
+    // `current_version`, else the seed. This admin escape hatch does not stage or
+    // promote convergence, so it must not silently migrate a card: unlock uses
+    // the IKM the card is actually locked under, and lock re-locks at that same
+    // version rather than the (possibly advanced) site-wide target.
+    let mut conn = api.database_connection.acquire().await.map_err(|e| {
+        CarbideError::Internal {
+            message: format!(
+                "failed to acquire connection to resolve lockdown IKM version (machine_id={machine_id}, device_id={device_id}): {e}"
+            ),
+        }
+    })?;
+    // Versions are DB-native `i32` (Postgres has no unsigned int); convert to
+    // `u32` once for the derivation call. No row / no tracked version falls back
+    // to the seed version.
+    let version = db::credential_rotation::device_rotation_operation_state(
+        &mut *conn,
+        db::credential_rotation::CredentialRotationType::LockdownIkm,
+        dpa_interface.mac_address,
+    )
+    .await
+    .map_err(|e| CarbideError::Internal {
+        message: format!(
+            "failed to read lockdown rotation state (machine_id={machine_id}, device_id={device_id}): {e}"
+        ),
+    })?
+    .and_then(|s| s.rotating_to_version.or(s.current_version))
+    .unwrap_or(crate::dpa::lockdown::SEED_LOCKDOWN_IKM_VERSION as i32);
+    let ikm_version = u32::try_from(version).map_err(|e| CarbideError::Internal {
+        message: format!(
+            "lockdown IKM version {version} is negative (machine_id={machine_id}, device_id={device_id}): {e}"
+        ),
+    })?;
+    drop(conn);
+
+    let key = crate::dpa::lockdown::build_supernic_lockdown_key(
         &api.database_connection,
         dpa_interface.id,
         &*api.credential_manager,
+        ikm_version,
     )
     .await
     .map_err(|e| CarbideError::Internal {
@@ -1328,5 +1367,5 @@ async fn get_device_lockdown_key(
         ),
     })?;
 
-    Ok(lockdown_key)
+    Ok(key)
 }

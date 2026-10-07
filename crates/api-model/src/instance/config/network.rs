@@ -19,9 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
-use carbide_uuid::vpc::VpcPrefixId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use serde::ser::SerializeMap;
@@ -110,7 +110,7 @@ pub struct InstanceNetworkConfig {
     /// hosts (well, no DPU, *or* DPU in NIC mode).
     ///
     /// It is also important to note that on the wire (request AND response),
-    /// `auto: true` only travels with `interfaces: []`, but internally some
+    /// `auto_config: {...}` only travels with `interfaces: []`, but internally some
     /// other things are happening.
     ///
     /// On allocation/update, NICo resolves the empty interfaces: [] into
@@ -120,12 +120,67 @@ pub struct InstanceNetworkConfig {
     ///
     /// Then, at the model <-> RPC boundary, the resolved interfaces are
     /// stripped off to `[]`, so callers reading the instance config back
-    /// simply see what they originally sent (`auto: true` with no interfaces).
+    /// simply see what they originally sent (`auto: {...}` with no interfaces).
     ///
     /// The resolved per-interface details (IP, MAC, gateway, prefix) appear in
     /// `Instance.status.network.interfaces` like usual.
+    pub auto_config: Option<InstanceNetworkAutoConfig>,
+
+    /// Server-owned service interfaces that never appear as tenant OS interfaces.
     #[serde(default)]
-    pub auto: bool,
+    pub service_interfaces: Vec<InstanceServiceInterfaceConfig>,
+}
+
+/// Stored DPU-local service-interface record for one attachment and fixed slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceServiceInterfaceConfig {
+    /// Attachment associated with this service-interface record.
+    pub attachment_id: uuid::Uuid,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// DPU on which this service interface is configured.
+    pub dpu_id: DpuMachineId,
+    /// Fixed service slot used on that DPU.
+    pub slot_index: u32,
+    /// VPC connected to this service interface.
+    pub vpc_id: VpcId,
+    /// VPC prefix from which this service interface's network was allocated.
+    pub vpc_prefix_id: VpcPrefixId,
+    /// Network segment created for this service interface.
+    pub network_segment_id: NetworkSegmentId,
+    /// Network prefix created for this service interface.
+    pub network_prefix_id: NetworkPrefixId,
+    /// Canonical IPv4 /31 or IPv6 /127 shared by HBN and the service.
+    pub link_prefix: IpNetwork,
+    /// Service-scoped MAC reused for this interface on every DPU.
+    pub mac_address: MacAddress,
+    /// Stable ID used to correlate this service interface across reconciliation.
+    pub internal_uuid: uuid::Uuid,
+}
+
+impl InstanceServiceInterfaceConfig {
+    /// Validates that the link prefix is a canonical IPv4 /31 or IPv6 /127.
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let expected_prefix = if self.link_prefix.is_ipv4() { 31 } else { 127 };
+        if self.link_prefix.prefix() != expected_prefix
+            || self.link_prefix.ip() != self.link_prefix.network()
+        {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} must be a canonical IPv4 /31 or IPv6 /127",
+                self.link_prefix
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceNetworkAutoConfig {
+    /// The logical VPC to allocate into when `auto` networking is used.
+    ///
+    /// Auto networking resolves the concrete HostInband segment from the host,
+    /// so the segment itself does not have to carry VPC ownership.
+    pub vpc_id: VpcId,
 }
 
 /// Struct to store instance network config updated request with current config.
@@ -147,6 +202,7 @@ impl InstanceNetworkConfig {
     pub fn for_segment_ids(
         network_segment_ids: &[NetworkSegmentId],
         device_locators: &[DeviceLocator],
+        vpc_ids: &[VpcId],
     ) -> Self {
         if device_locators.is_empty() {
             Self {
@@ -156,6 +212,7 @@ impl InstanceNetworkConfig {
                     network_details: Some(NetworkDetails::NetworkSegment(
                         network_segment_ids.first().copied().unwrap(),
                     )),
+                    vpc_selection: None,
                     ip_addrs: HashMap::default(),
                     requested_ip_addr: None,
                     ipv6_interface_config: None,
@@ -165,8 +222,10 @@ impl InstanceNetworkConfig {
                     host_inband_mac_address: None,
                     device_locator: None,
                     internal_uuid: uuid::Uuid::nil(),
+                    vpc_id: vpc_ids.first().copied(),
                 }],
-                auto: false,
+                auto_config: None,
+                service_interfaces: vec![],
             }
         } else {
             Self {
@@ -179,6 +238,7 @@ impl InstanceNetworkConfig {
                         network_details: Some(NetworkDetails::NetworkSegment(
                             network_segment_ids[dl_index],
                         )),
+                        vpc_selection: None,
                         ip_addrs: HashMap::default(),
                         requested_ip_addr: None,
                         ipv6_interface_config: None,
@@ -188,23 +248,23 @@ impl InstanceNetworkConfig {
                         host_inband_mac_address: None,
                         device_locator: Some(dl.clone()),
                         internal_uuid: uuid::Uuid::nil(),
+                        vpc_id: vpc_ids.get(dl_index).copied(),
                     })
                     .collect(),
-                auto: false,
+                auto_config: None,
+                service_interfaces: vec![],
             }
         }
     }
 
     /// Returns a network configuration for a single physical interface
-    pub fn for_vpc_prefix_id(
-        vpc_prefix_id: VpcPrefixId,
-        _dpu_machine_id: Option<MachineId>,
-    ) -> Self {
+    pub fn for_vpc_prefix_id(vpc_prefix_id: VpcPrefixId, vpc_id: Option<VpcId>) -> Self {
         Self {
             interfaces: vec![InstanceInterfaceConfig {
                 function_id: InterfaceFunctionId::Physical {},
                 network_segment_id: None,
                 network_details: Some(NetworkDetails::VpcPrefixId(vpc_prefix_id)),
+                vpc_selection: None,
                 ip_addrs: HashMap::default(),
                 requested_ip_addr: None,
                 ipv6_interface_config: None,
@@ -214,8 +274,10 @@ impl InstanceNetworkConfig {
                 host_inband_mac_address: None,
                 device_locator: None,
                 internal_uuid: uuid::Uuid::nil(),
+                vpc_id,
             }],
-            auto: false,
+            auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -223,29 +285,33 @@ impl InstanceNetworkConfig {
     /// configs, the resolved interfaces are stripped so external callers see
     /// just their request (`{ auto: true, interfaces: [] }`). The fully-
     /// resolved interfaces still drive `InstanceNetworkStatus` population
-    /// from the internal model. For non-auto configs, returns `self`
-    /// unchanged.
+    /// from the internal model. For non-auto configs, caller-owned interfaces
+    /// remain unchanged.
     ///
     /// This exists to keep the input config from the user represented
     /// back to them as they sent it, and mask any internal interface
     /// resolution that happened as a result of `auto`.
+    ///
+    /// Service-interface records are always stripped because they must not
+    /// appear in the tenant OS network configuration.
     pub fn into_external_view(self) -> Self {
-        if self.auto {
-            Self {
-                interfaces: vec![],
-                auto: true,
-            }
-        } else {
-            self
+        Self {
+            interfaces: if self.auto_config.is_some() {
+                vec![]
+            } else {
+                self.interfaces
+            },
+            auto_config: self.auto_config,
+            service_interfaces: vec![],
         }
     }
 
     /// Returns the DPU machine IDs used by the instance network configuration.
     pub fn get_used_dpus(
         &self,
-        device_to_id_map: &HashMap<String, Vec<MachineId>>,
-        primary_dpu_machine_id: Option<MachineId>,
-    ) -> Vec<MachineId> {
+        device_to_id_map: &HashMap<String, Vec<DpuMachineId>>,
+        primary_dpu_machine_id: Option<DpuMachineId>,
+    ) -> Vec<DpuMachineId> {
         let device_locators: Vec<&DeviceLocator> = self
             .interfaces
             .iter()
@@ -269,7 +335,7 @@ impl InstanceNetworkConfig {
             return primary_dpu_machine_id.into_iter().collect();
         }
 
-        let used_dpus: Vec<MachineId> = device_locators
+        let used_dpus: Vec<DpuMachineId> = device_locators
             .iter()
             .filter_map(|device_locator| {
                 device_to_id_map
@@ -301,7 +367,10 @@ impl InstanceNetworkConfig {
     /// underlying interfaces), so it must not reject the combination
     /// `auto: true` + non-empty interfaces here. The "auto must arrive with
     /// empty interfaces" rule is enforced in RPC <-> model conversion, which
-    /// only runs on user input.
+    /// only runs on user input. A resolved `auto` interface is identified by
+    /// its HostInband segment (one bare `Physical {}` per segment), so those
+    /// configs are validated against that rule rather than the per-device
+    /// function-id bucketing.
     pub fn validate(&self, allow_instance_vf: bool) -> Result<(), ConfigValidationError> {
         if !allow_instance_vf
             && self
@@ -314,12 +383,33 @@ impl InstanceNetworkConfig {
             ));
         }
 
-        validate_interface_function_ids(
-            &self.interfaces,
-            |iface| &iface.function_id,
-            |iface| iface.device_locator.as_ref(),
-        )
-        .map_err(ConfigValidationError::InvalidValue)?;
+        if self.auto_config.is_some() {
+            // Resolved `auto` interfaces are system-injected by
+            // `add_inband_interfaces_to_config`: one bare `Physical {}` per
+            // HostInband segment on the host, with no `device_locator` (a
+            // zero-DPU host has no DPU to locate). Their identity is the
+            // network segment itself -- enforced by the uniqueness check
+            // below -- so the per-device function-id bucketing doesn't apply
+            // here; it would read every injected PF beyond the first as a
+            // duplicate of one device.
+            if let Some(iface) = self.interfaces.iter().find(|iface| {
+                !matches!(iface.function_id, InterfaceFunctionId::Physical {})
+                    || iface.device_locator.is_some()
+            }) {
+                return Err(ConfigValidationError::InvalidValue(format!(
+                    "auto network configs hold only system-resolved physical host-inband \
+                     interfaces; found function {:?} with device locator {:?}",
+                    iface.function_id, iface.device_locator,
+                )));
+            }
+        } else {
+            validate_interface_function_ids(
+                &self.interfaces,
+                |iface| &iface.function_id,
+                |iface| iface.device_locator.as_ref(),
+            )
+            .map_err(ConfigValidationError::InvalidValue)?;
+        }
 
         // Note: We can't fully validate the network segment IDs here
         // We validate that the ID is not duplicated, but not whether it actually exists
@@ -344,25 +434,23 @@ impl InstanceNetworkConfig {
                 )));
             }
 
-            // Verify the list of network prefix IDs between the interface
-            // IP addresses and interface prefix allocations match. There
-            // should be a 1:1 correlation, as in, for network prefix ID XYZ,
-            // there should be an entry in `ip_addrs` and `instance_prefixes`.
+            // Every concrete address must retain its interface prefix. An IPv6
+            // interface prefix may intentionally have no address when the
+            // owning VPC uses SLAAC; IPv4 retains the one-to-one invariant.
             //
             // TODO(chet): Only do this if there are actual prefixes set for
             // this interface. If there aren't, its because this is an old
             // instance which existed prior to introducing instance_prefixes.
             // Once all instances are configured with prefixes, then there's
             // no need for an empty check.
-            if iface.interface_prefixes.keys().len() > 0
-                && iface
+            if !iface.interface_prefixes.is_empty()
+                && (iface
                     .ip_addrs
                     .keys()
-                    .collect::<std::collections::HashSet<_>>()
-                    != iface
-                        .interface_prefixes
-                        .keys()
-                        .collect::<std::collections::HashSet<_>>()
+                    .any(|prefix_id| !iface.interface_prefixes.contains_key(prefix_id))
+                    || iface.interface_prefixes.iter().any(|(prefix_id, prefix)| {
+                        !iface.ip_addrs.contains_key(prefix_id) && prefix.is_ipv4()
+                    }))
             {
                 return Err(ConfigValidationError::NetworkPrefixAllocationMismatch);
             }
@@ -382,25 +470,49 @@ impl InstanceNetworkConfig {
         // Remove all service-generated properties before validating the config
         let mut current = self.clone();
         let mut new_config = new_config.clone();
+        current.service_interfaces.clear();
+        new_config.service_interfaces.clear();
         for iface in &mut current.interfaces {
             iface.ip_addrs.clear();
             iface.interface_prefixes.clear();
             iface.network_segment_gateways.clear();
             iface.host_inband_mac_address = None;
             iface.internal_uuid = uuid::Uuid::nil();
+            iface.vpc_id = None;
+
+            // Automatic intent is compared independently of its generated
+            // prefix, segment, and any legacy explicit-IP representation.
+            if iface.vpc_selection.is_some() {
+                iface.network_details = None;
+                iface.requested_ip_addr = None;
+                iface.ipv6_interface_config = None;
+            }
 
             // It is possible that cloud sends network_segment_id with network_details as well.
-            if iface.network_details.is_some() {
+            if iface.network_details.is_some() || iface.vpc_selection.is_some() {
                 iface.network_segment_id = None;
             }
         }
 
         for iface in &mut new_config.interfaces {
+            // A resolved automatic selection may be resubmitted from an
+            // internal caller; compare only its VPC and family intent.
+            if iface.vpc_selection.is_some() {
+                iface.network_details = None;
+                iface.requested_ip_addr = None;
+                iface.ipv6_interface_config = None;
+                iface.ip_addrs.clear();
+                iface.interface_prefixes.clear();
+                iface.network_segment_gateways.clear();
+                iface.host_inband_mac_address = None;
+            }
+
             // It is possible that cloud sends network_segment_id with network_details as well.
-            if iface.network_details.is_some() {
+            if iface.network_details.is_some() || iface.vpc_selection.is_some() {
                 iface.network_segment_id = None;
             }
             iface.internal_uuid = uuid::Uuid::nil();
+            iface.vpc_id = None;
         }
 
         current != new_config
@@ -423,20 +535,58 @@ impl InstanceNetworkConfig {
         // config only with vf id as 0,1,3.
         for interface in &mut self.interfaces {
             let existing_interface = current_config.interfaces.iter().find(|x| {
-                let is_network_same = if interface.network_details.is_some() {
-                    // TODO:  && x.requested_ip_addr == interface.requested_ip_addr
-                    // There's originally a gap here where it wasn't possible to change
-                    // IPs without switching to a different prefix.  It's technically
-                    // possible to test requested_ip_addr so that explicit IP changes
-                    // could trigger the update, even for the same VPC prefix, but it appears
-                    // to trigger postgres table constraints.  For now, the existing implementation
-                    // gap is being maintained, and both will need to be resolved together.
-                    x.network_details == interface.network_details
-                        && x.ipv6_interface_config == interface.ipv6_interface_config
-                } else if interface.network_segment_id.is_some() {
-                    x.network_segment_id == interface.network_segment_id
-                } else {
-                    false
+                // An unresolved request may inherit the active resolution. Once
+                // both sides are resolved, prefix and segment identity must match
+                // so cleanup does not classify distinct resources as common.
+                let requested_resolution_matches = match interface.resolved_vpc_prefixes() {
+                    None => true,
+                    Some(requested_resolution) => {
+                        x.resolved_vpc_prefixes() == Some(requested_resolution)
+                            && x.generated_network_segment_id()
+                                == interface.generated_network_segment_id()
+                    }
+                };
+
+                let is_network_same = match (&interface.vpc_selection, &x.vpc_selection) {
+                    (Some(requested), Some(existing)) => {
+                        requested == existing && requested_resolution_matches
+                    }
+                    (Some(requested), None) => {
+                        // Explicit-prefix intent may become automatic intent without
+                        // replacing resources when its resolved VPC and families match.
+                        // `requested_resolution_matches` accepts unresolved intent, so require
+                        // the exact family shape before copied addresses suppress allocation.
+                        x.vpc_id == Some(requested.vpc_id)
+                            && x.resolved_vpc_prefixes().is_some_and(|resolved| {
+                                match requested.family_mode {
+                                    InstanceInterfaceIpFamilyMode::Ipv4Only => {
+                                        resolved.ipv4_vpc_prefix_id.is_some()
+                                            && resolved.ipv6_vpc_prefix_id.is_none()
+                                    }
+                                    InstanceInterfaceIpFamilyMode::Ipv6Only => {
+                                        resolved.ipv4_vpc_prefix_id.is_none()
+                                            && resolved.ipv6_vpc_prefix_id.is_some()
+                                    }
+                                    InstanceInterfaceIpFamilyMode::DualStack => {
+                                        resolved.ipv4_vpc_prefix_id.is_some()
+                                            && resolved.ipv6_vpc_prefix_id.is_some()
+                                    }
+                                }
+                            })
+                            && requested_resolution_matches
+                    }
+                    _ if interface.network_details.is_some() => {
+                        // TODO: Compare requested_ip_addr once explicit address replacement is
+                        // safe. Matching VPC-prefix intent currently reuses the active address;
+                        // a replacement in the same linknet can violate PostgreSQL's network-prefix
+                        // overlap constraint because allocation precedes old-resource cleanup.
+                        x.network_details == interface.network_details
+                            && x.ipv6_interface_config == interface.ipv6_interface_config
+                    }
+                    _ => {
+                        interface.network_segment_id.is_some()
+                            && x.network_segment_id == interface.network_segment_id
+                    }
                 };
 
                 if is_network_same {
@@ -449,17 +599,35 @@ impl InstanceNetworkConfig {
             });
 
             if let Some(existing_interface) = existing_interface {
-                // Copy all allocated resources
-                // TODO: Zero DPU changes.
+                // Copy all allocated resources.
                 interface.ip_addrs = existing_interface.ip_addrs.clone();
-                interface.requested_ip_addr = existing_interface.requested_ip_addr;
-                interface.ipv6_interface_config = existing_interface.ipv6_interface_config.clone();
                 interface.interface_prefixes = existing_interface.interface_prefixes.clone();
                 interface.network_segment_gateways =
                     existing_interface.network_segment_gateways.clone();
+                interface.host_inband_mac_address = existing_interface.host_inband_mac_address;
+
+                if interface.vpc_selection.is_some() {
+                    // Automatic intent reuses the resolution without reviving
+                    // explicit address intent from an earlier configuration.
+                    interface.network_details = existing_interface.network_details.clone();
+                    interface.requested_ip_addr = None;
+                    interface.ipv6_interface_config = existing_interface
+                        .ipv6_interface_config
+                        .as_ref()
+                        .map(|ipv6| Ipv6InterfaceConfig {
+                            vpc_prefix_id: ipv6.vpc_prefix_id,
+                            requested_ip_addr: None,
+                        });
+                } else {
+                    interface.requested_ip_addr = existing_interface.requested_ip_addr;
+                    interface.ipv6_interface_config =
+                        existing_interface.ipv6_interface_config.clone();
+                }
+
                 if interface.network_details.is_some() {
                     interface.network_segment_id = existing_interface.network_segment_id;
                 }
+                interface.vpc_id = existing_interface.vpc_id;
                 common_function_ids.push(existing_interface);
             }
         }
@@ -473,6 +641,13 @@ impl InstanceNetworkConfig {
     /// instance sees an overlay network.
     pub fn is_host_inband(&self) -> bool {
         self.interfaces.iter().all(|i| i.is_host_inband())
+    }
+
+    /// `uses_operator_managed_networking` returns true when every configured interface uses the
+    /// operator's HostInband network instead of the NICo DPU data plane. The config must be
+    /// nonempty because `is_host_inband` is vacuously true for an empty interface list.
+    pub fn uses_operator_managed_networking(&self) -> bool {
+        !self.interfaces.is_empty() && self.is_host_inband()
     }
 }
 
@@ -554,6 +729,36 @@ pub fn validate_interface_function_ids<
     Ok(())
 }
 
+/// Address families requested for automatic VPC prefix and address selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceInterfaceIpFamilyMode {
+    /// Allocate one IPv4 prefix and interface address.
+    Ipv4Only,
+    /// Allocate one IPv6 prefix and interface address.
+    Ipv6Only,
+    /// Allocate one prefix and interface address from each family.
+    DualStack,
+}
+
+/// Caller intent for automatic prefix and address selection from one VPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceInterfaceVpcSelection {
+    /// The single logical VPC from which prefixes must be selected.
+    pub vpc_id: VpcId,
+    /// The exact address families Core must allocate.
+    pub family_mode: InstanceInterfaceIpFamilyMode,
+}
+
+/// VPC prefixes resolved for an instance interface, keyed by address family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceInterfaceResolvedVpcPrefixes {
+    /// The selected IPv4 parent prefix, when IPv4 was requested.
+    pub ipv4_vpc_prefix_id: Option<VpcPrefixId>,
+    /// The selected IPv6 parent prefix, when IPv6 was requested.
+    pub ipv6_vpc_prefix_id: Option<VpcPrefixId>,
+}
+
 /// Enum to keep either network segment id or vpc_prefix id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkDetails {
@@ -596,6 +801,13 @@ pub struct InstanceInterfaceConfig {
     /// In case of vpc_prefix_id, carbide should allocate a new network segment and use it for
     /// further IP allocation.
     pub network_details: Option<NetworkDetails>,
+
+    /// Caller intent for automatic selection from a VPC.
+    ///
+    /// Resolved prefix IDs remain in the legacy-readable explicit fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vpc_selection: Option<InstanceInterfaceVpcSelection>,
+
     /// The network segment this interface is attached to.
     /// In case vpc_prefix_id is provided, a new segment has to be created and assign here.
     pub network_segment_id: Option<NetworkSegmentId>,
@@ -624,10 +836,12 @@ pub struct InstanceInterfaceConfig {
     /// network prefix for this interface (e.g. in FNN we might carve out
     /// a /31 for an interface, whereas in ETV we just allocate a /32).
     ///
-    /// There should be a 1:1 correlation between this and the `ip_addrs`,
-    /// as in, for each network prefix ID entry in the `ip_addrs` map, there
-    /// should be a corresponding `inteface_prefixes` entry here (even if it's
-    /// just a /32 for derived from the ip_addr).
+    /// Every concrete address in `ip_addrs` has a corresponding entry here
+    /// (even if it is only the host prefix derived from that address). Model
+    /// validation permits an IPv6 prefix without an `ip_addrs` entry so the
+    /// owning VPC layer can represent SLAAC; this model does not itself know
+    /// or enforce the VPC's allocation mode. IPv4 interfaces may not retain a
+    /// prefix without an address.
     ///
     /// TODO(chet): Allow a default value to be set here for backwards
     /// compatibility, since InstanceInterfaceConfigs for existing instances
@@ -659,9 +873,105 @@ pub struct InstanceInterfaceConfig {
 
     /// An internal ID used to associate an interface status with the interface config
     pub internal_uuid: uuid::Uuid,
+
+    /// Logical VPC ownership for this resolved interface.
+    ///
+    /// For legacy segment-bound allocations this is derived from the segment.
+    /// For Flat zero-DPU auto allocations this is copied from
+    /// [`InstanceNetworkConfig::vpc_id`] after HostInband segment resolution.
+    pub vpc_id: Option<VpcId>,
 }
 
 impl InstanceInterfaceConfig {
+    /// Returns the resolved VPC prefix IDs keyed by address family.
+    pub fn resolved_vpc_prefixes(&self) -> Option<InstanceInterfaceResolvedVpcPrefixes> {
+        let primary_vpc_prefix_id = match self.network_details.as_ref() {
+            Some(NetworkDetails::VpcPrefixId(vpc_prefix_id)) => *vpc_prefix_id,
+            _ => return None,
+        };
+
+        let ipv6_vpc_prefix_id = self
+            .ipv6_interface_config
+            .as_ref()
+            .map(|ipv6| ipv6.vpc_prefix_id);
+
+        if let Some(selection) = self.vpc_selection {
+            return Some(match selection.family_mode {
+                InstanceInterfaceIpFamilyMode::Ipv4Only => InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(primary_vpc_prefix_id),
+                    ipv6_vpc_prefix_id: None,
+                },
+                InstanceInterfaceIpFamilyMode::Ipv6Only => InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: None,
+                    ipv6_vpc_prefix_id: Some(primary_vpc_prefix_id),
+                },
+                InstanceInterfaceIpFamilyMode::DualStack => InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(primary_vpc_prefix_id),
+                    ipv6_vpc_prefix_id,
+                },
+            });
+        }
+
+        // In explicit-prefix storage, an IPv6 sidecar represents dual stack,
+        // with `network_details` holding the primary IPv4 prefix.
+        if ipv6_vpc_prefix_id.is_some() {
+            return Some(InstanceInterfaceResolvedVpcPrefixes {
+                ipv4_vpc_prefix_id: Some(primary_vpc_prefix_id),
+                ipv6_vpc_prefix_id,
+            });
+        }
+
+        let primary_is_ipv6 = if let Some(requested_address) = self.requested_ip_addr {
+            // Explicit address intent is validated against the primary prefix
+            // and is therefore authoritative for its family.
+            requested_address.is_ipv6()
+        } else {
+            // Canonical dual-stack records returned above. Infer IPv6 only from
+            // consistently IPv6 persisted state so a sidecar-less mixed legacy
+            // record retains its primary prefix's IPv4 classification.
+            let mut family_evidence = self
+                .ip_addrs
+                .values()
+                .map(|address| address.is_ipv6())
+                .chain(
+                    self.interface_prefixes
+                        .values()
+                        .map(|prefix| prefix.is_ipv6()),
+                )
+                .chain(
+                    self.network_segment_gateways
+                        .values()
+                        .map(|gateway| gateway.is_ipv6()),
+                );
+
+            matches!(family_evidence.next(), Some(true))
+                && family_evidence.all(std::convert::identity)
+        };
+
+        // Canonical dual-stack records returned above, so this fallback
+        // projects only the remaining primary prefix's family.
+        Some(if primary_is_ipv6 {
+            InstanceInterfaceResolvedVpcPrefixes {
+                ipv4_vpc_prefix_id: None,
+                ipv6_vpc_prefix_id: Some(primary_vpc_prefix_id),
+            }
+        } else {
+            // Existing family-agnostic records predate IPv6 allocation and
+            // therefore use IPv4 when no persisted family evidence exists.
+            InstanceInterfaceResolvedVpcPrefixes {
+                ipv4_vpc_prefix_id: Some(primary_vpc_prefix_id),
+                ipv6_vpc_prefix_id: None,
+            }
+        })
+    }
+
+    /// Returns the generated segment associated with resolved explicit or
+    /// automatic VPC-prefix intent.
+    pub fn generated_network_segment_id(&self) -> Option<NetworkSegmentId> {
+        self.resolved_vpc_prefixes()?;
+        self.network_segment_id
+    }
+
     /// Returns true if this instance interface is equivalent to the host's in-band interface,
     /// meaning it belong to a network segment of type [`NetworkSegmentType::HostInband`]. This is
     /// in contrast to DPU-based interfaces where the instance sees an overlay network.
@@ -736,9 +1046,53 @@ where
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    /// Verifies durable service interfaces accept only canonical point-to-point
+    /// prefixes, because malformed stored links cannot be projected safely by
+    /// later allocation and networking stages.
+    #[test]
+    fn service_vpc_interface_validates_canonical_link_prefixes() {
+        let service_interface = |link_prefix: &str| InstanceServiceInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: NetworkSegmentId::new(),
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: link_prefix.parse().expect("valid test prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        };
+
+        // A canonical IPv4 /31 is valid durable link state.
+        let ipv4 = service_interface("192.0.2.0/31");
+        ipv4.validate().expect("canonical IPv4 service prefix");
+
+        // A canonical IPv6 /127 is the corresponding valid IPv6 shape.
+        let ipv6 = service_interface("2001:db8::/127");
+        ipv6.validate().expect("canonical IPv6 service prefix");
+
+        // Both family forms must survive the JSONB representation unchanged.
+        for service_interface in [&ipv4, &ipv6] {
+            let decoded: InstanceServiceInterfaceConfig = serde_json::from_value(
+                serde_json::to_value(service_interface).expect("serialize service interface"),
+            )
+            .expect("deserialize service interface");
+            assert_eq!(&decoded, service_interface);
+        }
+
+        // A wider prefix or non-base address would make the stored link
+        // ambiguous and must fail before use.
+        assert!(service_interface("192.0.2.0/30").validate().is_err());
+        assert!(service_interface("192.0.2.1/31").validate().is_err());
+    }
 
     #[test]
     fn iterate_function_ids() {
@@ -809,13 +1163,15 @@ mod tests {
             network_segment_gateways,
             host_inband_mac_address: None,
             network_details: None,
+            vpc_selection: None,
             device_locator: None,
             internal_uuid,
+            vpc_id: None,
         };
         let serialized = serde_json::to_string(&interface).unwrap();
         assert_eq!(
             serialized,
-            r#"{"function_id":{"type":"physical"},"network_details":null,"network_segment_id":"91609f10-c91d-470d-a260-6293ea0c1200","ip_addrs":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2"},"requested_ip_addr":"192.168.1.2","ipv6":null,"routing_profile":null,"interface_prefixes":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2/32"},"network_segment_gateways":{},"host_inband_mac_address":null,"device_locator":null,"internal_uuid":"37c3dc65-9aef-4439-b7ca-d532a0a41d7f"}"#
+            r#"{"function_id":{"type":"physical"},"network_details":null,"network_segment_id":"91609f10-c91d-470d-a260-6293ea0c1200","ip_addrs":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2"},"requested_ip_addr":"192.168.1.2","ipv6":null,"routing_profile":null,"interface_prefixes":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2/32"},"network_segment_gateways":{},"host_inband_mac_address":null,"device_locator":null,"internal_uuid":"37c3dc65-9aef-4439-b7ca-d532a0a41d7f","vpc_id":null}"#
         );
 
         assert_eq!(
@@ -847,16 +1203,507 @@ mod tests {
                     network_segment_gateways: HashMap::default(),
                     host_inband_mac_address: None,
                     network_details: None,
+                    vpc_selection: None,
                     device_locator: None,
                     internal_uuid: uuid::Uuid::new_v4(),
+                    vpc_id: None,
                 }
             })
             .collect();
 
         InstanceNetworkConfig {
             interfaces,
-            auto: false,
+            auto_config: None,
+            service_interfaces: vec![],
         }
+    }
+
+    #[test]
+    fn operator_managed_networking_requires_nonempty_host_inband_interfaces() {
+        let empty = InstanceNetworkConfig::default();
+        let dpu_networked = create_valid_network_config();
+
+        let mut host_inband = create_valid_network_config();
+        for interface in &mut host_inband.interfaces {
+            interface.host_inband_mac_address = Some(MacAddress::new([1, 2, 3, 4, 5, 6]));
+        }
+
+        let mut mixed = host_inband.clone();
+        mixed.interfaces[0].host_inband_mac_address = None;
+
+        value_scenarios!(
+            run = |config: InstanceNetworkConfig| config.uses_operator_managed_networking();
+            "operator-managed" {
+                host_inband => true,
+            }
+            "not operator-managed" {
+                empty => false,
+                dpu_networked => false,
+                mixed => false,
+            }
+        );
+    }
+
+    /// Builds one resolved automatic interface while retaining the usual
+    /// service-generated representation for its selected prefixes.
+    fn resolved_vpc_interface(
+        selection: InstanceInterfaceVpcSelection,
+        primary_vpc_prefix_id: VpcPrefixId,
+        ipv6_vpc_prefix_id: Option<VpcPrefixId>,
+    ) -> InstanceInterfaceConfig {
+        let mut interface = create_valid_network_config().interfaces.swap_remove(0);
+        interface.network_details = Some(NetworkDetails::VpcPrefixId(primary_vpc_prefix_id));
+        interface.vpc_selection = Some(selection);
+        interface.ipv6_interface_config =
+            ipv6_vpc_prefix_id.map(|vpc_prefix_id| Ipv6InterfaceConfig {
+                vpc_prefix_id,
+                requested_ip_addr: None,
+            });
+        interface.vpc_id = Some(selection.vpc_id);
+        interface
+    }
+
+    /// Resolved prefixes are projected by family rather than by the storage
+    /// position used for rolling compatibility.
+    #[test]
+    fn resolved_vpc_prefixes_follow_family_mode() {
+        let vpc_id = VpcId::new();
+        let ipv4_vpc_prefix_id = VpcPrefixId::new();
+        let ipv6_vpc_prefix_id = VpcPrefixId::new();
+
+        value_scenarios!(
+            run = |(family_mode, primary_vpc_prefix_id, secondary_vpc_prefix_id)| {
+                resolved_vpc_interface(
+                    InstanceInterfaceVpcSelection {
+                        vpc_id,
+                        family_mode,
+                    },
+                    primary_vpc_prefix_id,
+                    secondary_vpc_prefix_id,
+                )
+                .resolved_vpc_prefixes()
+            };
+            "IPv4 only" {
+                (
+                    InstanceInterfaceIpFamilyMode::Ipv4Only,
+                    ipv4_vpc_prefix_id,
+                    None,
+                ) => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(ipv4_vpc_prefix_id),
+                    ipv6_vpc_prefix_id: None,
+                }),
+            }
+            "IPv6 only" {
+                (
+                    InstanceInterfaceIpFamilyMode::Ipv6Only,
+                    ipv6_vpc_prefix_id,
+                    None,
+                ) => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: None,
+                    ipv6_vpc_prefix_id: Some(ipv6_vpc_prefix_id),
+                }),
+            }
+            "dual stack" {
+                (
+                    InstanceInterfaceIpFamilyMode::DualStack,
+                    ipv4_vpc_prefix_id,
+                    Some(ipv6_vpc_prefix_id),
+                ) => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(ipv4_vpc_prefix_id),
+                    ipv6_vpc_prefix_id: Some(ipv6_vpc_prefix_id),
+                }),
+            }
+        );
+    }
+
+    /// Legacy explicit-prefix storage uses requested or persisted family
+    /// evidence and treats an IPv6 sidecar as explicit dual stack. Absent or
+    /// mixed evidence defaults to IPv4 so a sidecar lost during an older
+    /// rolling deployment cannot relabel the primary IPv4 prefix as IPv6.
+    #[test]
+    fn resolved_vpc_prefixes_support_explicit_prefix_storage() {
+        // Share one VPC and distinct family IDs so each scenario isolates
+        // which family slot receives the stored primary prefix.
+        let vpc_id = VpcId::new();
+        let ipv4_vpc_prefix_id = VpcPrefixId::new();
+        let ipv6_vpc_prefix_id = VpcPrefixId::new();
+
+        // Clear selection metadata without adding family evidence to model a
+        // legacy explicit record, whose primary prefix defaults to IPv4.
+        let mut ipv4 = resolved_vpc_interface(
+            InstanceInterfaceVpcSelection {
+                vpc_id,
+                family_mode: InstanceInterfaceIpFamilyMode::Ipv4Only,
+            },
+            ipv4_vpc_prefix_id,
+            None,
+        );
+        ipv4.vpc_selection = None;
+
+        // A requested IPv6 address belongs to the primary explicit prefix and
+        // therefore provides authoritative IPv6 family evidence.
+        let mut ipv6 = resolved_vpc_interface(
+            InstanceInterfaceVpcSelection {
+                vpc_id,
+                family_mode: InstanceInterfaceIpFamilyMode::Ipv6Only,
+            },
+            ipv6_vpc_prefix_id,
+            None,
+        );
+        ipv6.vpc_selection = None;
+        ipv6.requested_ip_addr = Some("2001:db8::10".parse().unwrap());
+
+        // Remove requested intent to verify that persisted allocation state
+        // can independently identify an IPv6-only primary.
+        let mut allocated_ipv6 = ipv6.clone();
+        allocated_ipv6.requested_ip_addr = None;
+        allocated_ipv6
+            .ip_addrs
+            .insert(NetworkPrefixId::new(), "2001:db8::10".parse().unwrap());
+
+        // An IPv6 sidecar models canonical explicit dual stack, where IPv4 is
+        // primary and both family-specific parent IDs must remain visible.
+        let mut dual_stack = resolved_vpc_interface(
+            InstanceInterfaceVpcSelection {
+                vpc_id,
+                family_mode: InstanceInterfaceIpFamilyMode::DualStack,
+            },
+            ipv4_vpc_prefix_id,
+            Some(ipv6_vpc_prefix_id),
+        );
+        dual_stack.vpc_selection = None;
+
+        // Removing the sidecar models an older rolling rewrite that retained
+        // both address families; the surviving primary ID must remain IPv4.
+        let mut mixed_without_sidecar = dual_stack.clone();
+        mixed_without_sidecar.ipv6_interface_config = None;
+        mixed_without_sidecar.ip_addrs = HashMap::from([
+            (NetworkPrefixId::new(), "192.0.2.10".parse().unwrap()),
+            (NetworkPrefixId::new(), "2001:db8::10".parse().unwrap()),
+        ]);
+
+        value_scenarios!(
+            run = |interface| interface.resolved_vpc_prefixes();
+            "IPv4 only" {
+                ipv4 => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(ipv4_vpc_prefix_id),
+                    ipv6_vpc_prefix_id: None,
+                }),
+            }
+            "IPv6 only from requested address" {
+                ipv6 => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: None,
+                    ipv6_vpc_prefix_id: Some(ipv6_vpc_prefix_id),
+                }),
+            }
+            "IPv6 only from allocated address" {
+                allocated_ipv6 => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: None,
+                    ipv6_vpc_prefix_id: Some(ipv6_vpc_prefix_id),
+                }),
+            }
+            "dual stack" {
+                dual_stack => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(ipv4_vpc_prefix_id),
+                    ipv6_vpc_prefix_id: Some(ipv6_vpc_prefix_id),
+                }),
+            }
+            "mixed legacy evidence without sidecar" {
+                mixed_without_sidecar => Some(InstanceInterfaceResolvedVpcPrefixes {
+                    ipv4_vpc_prefix_id: Some(ipv4_vpc_prefix_id),
+                    ipv6_vpc_prefix_id: None,
+                }),
+            }
+        );
+    }
+
+    /// Automatic selection metadata round-trips additively while the explicit
+    /// resolution remains readable if an older representation ignores it.
+    #[test]
+    fn serialize_resolved_vpc_selection_additively() {
+        let selection = InstanceInterfaceVpcSelection {
+            vpc_id: VpcId::new(),
+            family_mode: InstanceInterfaceIpFamilyMode::DualStack,
+        };
+        let interface =
+            resolved_vpc_interface(selection, VpcPrefixId::new(), Some(VpcPrefixId::new()));
+
+        let mut serialized = serde_json::to_value(&interface).unwrap();
+        assert!(serialized.get("vpc_selection").is_some());
+        assert_eq!(
+            serde_json::from_value::<InstanceInterfaceConfig>(serialized.clone()).unwrap(),
+            interface
+        );
+
+        // Dropping the additive field models a rolling peer that understands
+        // only the retained explicit-prefix storage representation.
+        serialized.as_object_mut().unwrap().remove("vpc_selection");
+        let legacy_view = serde_json::from_value::<InstanceInterfaceConfig>(serialized).unwrap();
+        assert_eq!(legacy_view.vpc_selection, None);
+        assert_eq!(legacy_view.network_details, interface.network_details);
+        assert_eq!(
+            legacy_view.ipv6_interface_config,
+            interface.ipv6_interface_config
+        );
+    }
+
+    /// Update comparison ignores generated automatic resolution, but still
+    /// detects every caller-controlled selection change.
+    #[test]
+    fn network_update_detection_compares_vpc_selection_intent() {
+        let selection = InstanceInterfaceVpcSelection {
+            vpc_id: VpcId::new(),
+            family_mode: InstanceInterfaceIpFamilyMode::Ipv4Only,
+        };
+        let mut current = create_valid_network_config();
+        current.interfaces.truncate(1);
+        current.interfaces[0] = resolved_vpc_interface(selection, VpcPrefixId::new(), None);
+
+        // A repeated caller request carries only the unchanged VPC and family
+        // intent; absent generated resolution must not make it an update.
+        let mut unresolved = current.clone();
+        unresolved.interfaces[0].network_details = None;
+        unresolved.interfaces[0].network_segment_id = None;
+
+        // Prefix and segment IDs are service-generated resolution, so changing
+        // only those fields must not make identical caller intent an update.
+        let mut alternate_resolution = current.clone();
+        alternate_resolution.interfaces[0].network_details =
+            Some(NetworkDetails::VpcPrefixId(VpcPrefixId::new()));
+        alternate_resolution.interfaces[0].network_segment_id = Some(offset_segment_id(42));
+
+        let mut changed_family = unresolved.clone();
+        changed_family.interfaces[0].vpc_selection = Some(InstanceInterfaceVpcSelection {
+            family_mode: InstanceInterfaceIpFamilyMode::DualStack,
+            ..selection
+        });
+
+        let mut changed_vpc = unresolved.clone();
+        changed_vpc.interfaces[0].vpc_selection = Some(InstanceInterfaceVpcSelection {
+            vpc_id: VpcId::new(),
+            ..selection
+        });
+
+        value_scenarios!(
+            run = |requested| current.is_network_config_update_requested(&requested);
+            "unresolved repetition" {
+                unresolved => false,
+            }
+            "same intent with alternate generated resolution" {
+                alternate_resolution => false,
+            }
+            "changed family mode" {
+                changed_family => true,
+            }
+            "changed VPC" {
+                changed_vpc => true,
+            }
+        );
+    }
+
+    /// An unresolved repetition inherits the active automatic resolution and
+    /// is returned as a common resource for cleanup filtering.
+    #[test]
+    fn copy_existing_resources_resolves_matching_vpc_selection() {
+        let selection = InstanceInterfaceVpcSelection {
+            vpc_id: VpcId::new(),
+            family_mode: InstanceInterfaceIpFamilyMode::Ipv4Only,
+        };
+        let mut current = create_valid_network_config();
+        current.interfaces.truncate(1);
+        current.interfaces[0] = resolved_vpc_interface(selection, VpcPrefixId::new(), None);
+        let network_prefix_id = NetworkPrefixId::new();
+        current.interfaces[0]
+            .ip_addrs
+            .insert(network_prefix_id, "192.0.2.10".parse().unwrap());
+        current.interfaces[0]
+            .interface_prefixes
+            .insert(network_prefix_id, "192.0.2.10/32".parse().unwrap());
+        current.interfaces[0]
+            .network_segment_gateways
+            .insert(network_prefix_id, "192.0.2.1/24".parse().unwrap());
+
+        let expected_resolution = current.interfaces[0].resolved_vpc_prefixes();
+        let expected_segment_id = current.interfaces[0].network_segment_id;
+        let expected_ip_addrs = current.interfaces[0].ip_addrs.clone();
+        let mut requested = current.clone();
+        requested.interfaces[0].network_details = None;
+        requested.interfaces[0].network_segment_id = None;
+        requested.interfaces[0].vpc_id = None;
+        requested.interfaces[0].ip_addrs.clear();
+        requested.interfaces[0].interface_prefixes.clear();
+        requested.interfaces[0].network_segment_gateways.clear();
+
+        let common = requested.copy_existing_resources(&current);
+
+        assert_eq!(common.len(), 1);
+        assert_eq!(
+            requested.interfaces[0].resolved_vpc_prefixes(),
+            expected_resolution
+        );
+        assert_eq!(
+            requested.interfaces[0].network_segment_id,
+            expected_segment_id
+        );
+        assert_eq!(requested.interfaces[0].ip_addrs, expected_ip_addrs);
+    }
+
+    /// Switching active explicit prefixes to matching automatic intent reuses
+    /// their generated resources without retaining old explicit IP requests.
+    #[test]
+    fn copy_existing_resources_reuses_explicit_prefix_for_vpc_selection() {
+        // Build the current explicit dual-stack config with generated allocation state.
+        let vpc_id = VpcId::new();
+        let ipv4_vpc_prefix_id = VpcPrefixId::new();
+        let ipv6_vpc_prefix_id = VpcPrefixId::new();
+        let selection = InstanceInterfaceVpcSelection {
+            vpc_id,
+            family_mode: InstanceInterfaceIpFamilyMode::DualStack,
+        };
+        let mut current = create_valid_network_config();
+        current.interfaces.truncate(1);
+        current.interfaces[0].network_details =
+            Some(NetworkDetails::VpcPrefixId(ipv4_vpc_prefix_id));
+        current.interfaces[0].vpc_id = Some(vpc_id);
+        current.interfaces[0].requested_ip_addr = Some("192.0.2.10".parse().unwrap());
+        current.interfaces[0].ipv6_interface_config = Some(Ipv6InterfaceConfig {
+            vpc_prefix_id: ipv6_vpc_prefix_id,
+            requested_ip_addr: Some("2001:db8::10".parse().unwrap()),
+        });
+        let ipv4_network_prefix_id = NetworkPrefixId::new();
+        let ipv6_network_prefix_id = NetworkPrefixId::new();
+        current.interfaces[0]
+            .ip_addrs
+            .insert(ipv4_network_prefix_id, "192.0.2.10".parse().unwrap());
+        current.interfaces[0]
+            .ip_addrs
+            .insert(ipv6_network_prefix_id, "2001:db8::10".parse().unwrap());
+        current.interfaces[0]
+            .interface_prefixes
+            .insert(ipv4_network_prefix_id, "192.0.2.10/32".parse().unwrap());
+        current.interfaces[0]
+            .interface_prefixes
+            .insert(ipv6_network_prefix_id, "2001:db8::10/128".parse().unwrap());
+        current.interfaces[0]
+            .network_segment_gateways
+            .insert(ipv4_network_prefix_id, "192.0.2.1/24".parse().unwrap());
+        current.interfaces[0]
+            .network_segment_gateways
+            .insert(ipv6_network_prefix_id, "2001:db8::1/64".parse().unwrap());
+        let expected_segment_id = current.interfaces[0].network_segment_id;
+        let expected_ip_addrs = current.interfaces[0].ip_addrs.clone();
+
+        // Request matching automatic intent with generated fields unset.
+        let mut requested = create_valid_network_config();
+        requested.interfaces.truncate(1);
+        requested.interfaces[0].vpc_selection = Some(selection);
+        requested.interfaces[0].network_segment_id = None;
+
+        // Reconcile the update and verify resources are reused without explicit IP intent.
+        assert!(current.is_network_config_update_requested(&requested));
+        let common = requested.copy_existing_resources(&current);
+
+        assert_eq!(common.len(), 1);
+        assert_eq!(
+            requested.interfaces[0].resolved_vpc_prefixes(),
+            Some(InstanceInterfaceResolvedVpcPrefixes {
+                ipv4_vpc_prefix_id: Some(ipv4_vpc_prefix_id),
+                ipv6_vpc_prefix_id: Some(ipv6_vpc_prefix_id),
+            })
+        );
+        assert_eq!(
+            requested.interfaces[0].network_segment_id,
+            expected_segment_id
+        );
+        assert_eq!(requested.interfaces[0].ip_addrs, expected_ip_addrs);
+        assert_eq!(requested.interfaces[0].requested_ip_addr, None);
+        assert_eq!(
+            requested.interfaces[0]
+                .ipv6_interface_config
+                .as_ref()
+                .and_then(|ipv6| ipv6.requested_ip_addr),
+            None
+        );
+        assert_eq!(requested.interfaces[0].vpc_selection, Some(selection));
+    }
+
+    /// Requests already resolved to a different prefix or segment must not
+    /// reuse or protect the active resources during cleanup.
+    #[test]
+    fn copy_existing_resources_preserves_alternate_resolution() {
+        let selection = InstanceInterfaceVpcSelection {
+            vpc_id: VpcId::new(),
+            family_mode: InstanceInterfaceIpFamilyMode::Ipv4Only,
+        };
+        let mut current = create_valid_network_config();
+        current.interfaces.truncate(1);
+        current.interfaces[0] = resolved_vpc_interface(selection, VpcPrefixId::new(), None);
+
+        let mut alternate_prefix = create_valid_network_config();
+        alternate_prefix.interfaces.truncate(1);
+        alternate_prefix.interfaces[0] =
+            resolved_vpc_interface(selection, VpcPrefixId::new(), None);
+
+        let mut alternate_segment = current.clone();
+        alternate_segment.interfaces[0].network_segment_id = Some(offset_segment_id(42));
+
+        value_scenarios!(
+            run = |mut requested| {
+                let expected_resolution = requested.interfaces[0].resolved_vpc_prefixes();
+                let expected_segment_id = requested.interfaces[0].network_segment_id;
+                let common = requested.copy_existing_resources(&current);
+                common.is_empty()
+                    && requested.interfaces[0].resolved_vpc_prefixes() == expected_resolution
+                    && requested.interfaces[0].network_segment_id == expected_segment_id
+            };
+            "different selected prefix" {
+                alternate_prefix => true,
+            }
+            "different generated segment" {
+                alternate_segment => true,
+            }
+        );
+    }
+
+    #[test]
+    fn network_update_detection_ignores_derived_vpc_id() {
+        let mut current = create_valid_network_config();
+        let mut requested = current.clone();
+
+        current.interfaces[0].vpc_id = Some(VpcId::new());
+        requested.interfaces[0].vpc_id = None;
+        requested.interfaces[0].internal_uuid = uuid::Uuid::new_v4();
+
+        assert!(!current.is_network_config_update_requested(&requested));
+    }
+
+    #[test]
+    fn copy_existing_resources_preserves_derived_vpc_id() {
+        let vpc_id = VpcId::new();
+        let mut current = create_valid_network_config();
+        current.interfaces[0].vpc_id = Some(vpc_id);
+
+        let mut requested = create_valid_network_config();
+        requested.copy_existing_resources(&current);
+
+        assert_eq!(requested.interfaces[0].vpc_id, Some(vpc_id));
+    }
+
+    /// HostInband MACs come from Core rather than the caller, so a matching
+    /// interface must retain that physical-interface identity with its IPs.
+    #[test]
+    fn copy_existing_resources_preserves_host_inband_mac() {
+        let host_inband_mac_address = MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let mut current = create_valid_network_config();
+        current.interfaces[0].host_inband_mac_address = Some(host_inband_mac_address);
+
+        let mut requested = create_valid_network_config();
+        requested.copy_existing_resources(&current);
+
+        assert_eq!(
+            requested.interfaces[0].host_inband_mac_address,
+            Some(host_inband_mac_address)
+        );
     }
 
     // InstanceNetworkConfig::validate over a base valid config mutated per row.
@@ -894,6 +1741,24 @@ mod tests {
         duplicate_network_segment.interfaces[1].network_segment_id =
             Some(DUPLICATE_SEGMENT_ID.into());
 
+        let mut slaac_ipv6_prefix_without_address = create_valid_network_config();
+        slaac_ipv6_prefix_without_address.interfaces[0]
+            .interface_prefixes
+            .insert(NetworkPrefixId::new(), "2001:db8::/127".parse().unwrap());
+
+        let mut ipv4_prefix_without_address = create_valid_network_config();
+        ipv4_prefix_without_address.interfaces[0]
+            .interface_prefixes
+            .insert(NetworkPrefixId::new(), "192.0.2.10/32".parse().unwrap());
+
+        let mut address_without_prefix = create_valid_network_config();
+        address_without_prefix.interfaces[0]
+            .ip_addrs
+            .insert(NetworkPrefixId::new(), "192.0.2.10".parse().unwrap());
+        address_without_prefix.interfaces[0]
+            .interface_prefixes
+            .insert(NetworkPrefixId::new(), "2001:db8::/127".parse().unwrap());
+
         scenarios!(
             run = |(config, allow_instance_vf)| config.validate(allow_instance_vf).map_err(drop);
             "valid config with virtual functions allowed" {
@@ -922,6 +1787,95 @@ mod tests {
 
             "duplicate network segment" {
                 (duplicate_network_segment, true) => Fails,
+            }
+
+            "SLAAC IPv6 prefix without a concrete address" {
+                (slaac_ipv6_prefix_without_address, true) => Yields(()),
+            }
+
+            "IPv4 prefix without a concrete address" {
+                (ipv4_prefix_without_address, true) => Fails,
+            }
+
+            "address without its interface prefix" {
+                (address_without_prefix, true) => Fails,
+            }
+        );
+    }
+
+    /// A resolved `auto` config as `add_inband_interfaces_to_config` produces
+    /// it: one bare `Physical {}` interface per HostInband segment, no
+    /// `device_locator`. Interface identity is the segment.
+    fn create_resolved_auto_network_config(segment_count: u8) -> InstanceNetworkConfig {
+        InstanceNetworkConfig {
+            interfaces: (0..segment_count)
+                .map(|idx| InstanceInterfaceConfig {
+                    function_id: InterfaceFunctionId::Physical {},
+                    network_segment_id: Some(offset_segment_id(idx)),
+                    network_details: None,
+                    vpc_selection: None,
+                    ip_addrs: HashMap::default(),
+                    requested_ip_addr: None,
+                    ipv6_interface_config: None,
+                    routing_profile: None,
+                    interface_prefixes: HashMap::default(),
+                    network_segment_gateways: HashMap::default(),
+                    host_inband_mac_address: None,
+                    device_locator: None,
+                    internal_uuid: uuid::Uuid::new_v4(),
+                    vpc_id: None,
+                })
+                .collect(),
+            auto_config: Some(InstanceNetworkAutoConfig {
+                vpc_id: VpcId::new(),
+            }),
+            service_interfaces: vec![],
+        }
+    }
+
+    // InstanceNetworkConfig::validate over resolved `auto` configs (the
+    // output of `add_inband_interfaces_to_config`). A multi-NIC zero-DPU
+    // host resolves to several bare `Physical {}` interfaces -- one per
+    // HostInband segment -- and must validate; the per-device function-id
+    // bucketing would read those as duplicates of one device.
+    #[test]
+    fn validate_resolved_auto_network_config() {
+        let single_segment = create_resolved_auto_network_config(1);
+        let multi_segment = create_resolved_auto_network_config(3);
+
+        let mut duplicate_segment = create_resolved_auto_network_config(2);
+        duplicate_segment.interfaces[1].network_segment_id =
+            duplicate_segment.interfaces[0].network_segment_id;
+
+        let mut virtual_function = create_resolved_auto_network_config(2);
+        virtual_function.interfaces[1].function_id = InterfaceFunctionId::Virtual { id: 0 };
+
+        let mut located_interface = create_resolved_auto_network_config(2);
+        located_interface.interfaces[1].device_locator = Some(DeviceLocator {
+            device: "DPU".to_string(),
+            device_instance: 0,
+        });
+
+        scenarios!(
+            run = |(config, allow_instance_vf)| config.validate(allow_instance_vf).map_err(drop);
+            "single resolved host-inband interface" {
+                (single_segment, false) => Yields(()),
+            }
+
+            "one interface per HostInband segment on a multi-NIC host" {
+                (multi_segment, false) => Yields(()),
+            }
+
+            "duplicate segments are still rejected for auto configs" {
+                (duplicate_segment, false) => Fails,
+            }
+
+            "virtual functions cannot appear in an auto config" {
+                (virtual_function, true) => Fails,
+            }
+
+            "device-located interfaces cannot appear in an auto config" {
+                (located_interface, false) => Fails,
             }
         );
     }

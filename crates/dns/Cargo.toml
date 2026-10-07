@@ -21,12 +21,15 @@ description = "Carbide is bare metal provisioning system with auto-discovery and
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "carbide-dns"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
+logfmt = { path = "../logfmt" }
 async-trait = { workspace = true }
 clap = { workspace = true }
 eyre = { workspace = true }
@@ -36,7 +39,6 @@ tracing = { workspace = true }
 tracing-subscriber = { features = [
   "env-filter",
   "local-time",
-  "json",
 ], workspace = true }
 opentelemetry = { workspace = true, features = ["metrics"] }
 opentelemetry_sdk = { workspace = true }
@@ -55,6 +57,16 @@ carbide-version = { path = "../version" }
 carbide-rpc = { path = "../rpc" }
 thiserror = { workspace = true }
 lru.workspace = true
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+futures = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
+tokio-util = { workspace = true }
 
 [build-dependencies]
 carbide-version = { path = "../version" }

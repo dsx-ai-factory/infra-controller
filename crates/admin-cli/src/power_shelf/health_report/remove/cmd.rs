@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn remove(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
+pub(super) async fn remove(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
     api_client
         .0
         .remove_power_shelf_health_report(RemovePowerShelfHealthReportRequest {

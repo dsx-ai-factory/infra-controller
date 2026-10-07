@@ -16,9 +16,11 @@
  */
 
 mod debug_bundle;
+mod decommission;
 mod maintenance;
 mod power_options;
 mod quarantine;
+mod reset;
 mod reset_host_reprovisioning;
 mod set_primary_dpu;
 mod set_primary_interface;
@@ -27,8 +29,8 @@ mod start_updates;
 
 // Cross-module re-exports for firmware/start_updates.rs
 // Cross-module re-exports for debug_bundle/cmds.rs
-pub use debug_bundle::args::Args as DebugBundle;
-pub use start_updates::args::Args as StartUpdates;
+pub(crate) use debug_bundle::args::Args as DebugBundle;
+pub(crate) use start_updates::args::Args as StartUpdates;
 
 #[cfg(test)]
 mod tests;
@@ -38,7 +40,7 @@ use clap::Parser;
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Display managed host information")]
     Show(show::Args),
     #[clap(
@@ -58,10 +60,34 @@ pub enum Cmd {
     PowerOptions(power_options::Args),
     #[clap(about = "Start updates for machines with delayed updates, such as GB200")]
     StartUpdates(start_updates::Args),
-    #[clap(about = "Set the primary interface (boot device) for the managed host")]
+    #[clap(
+        about = "Set the primary interface (boot device) for the managed host",
+        long_about = "Set the primary interface for a managed host. The selected machine-interface \
+            row, Admin network identity, and persisted desired boot target update atomically. If \
+            the host has a DPU-backed Admin interface, the selected interface must be on the Admin \
+            segment. The machine-controller converges the BMC to the desired target when the host is \
+            eligible."
+    )]
     SetPrimaryInterface(set_primary_interface::Args),
-    #[clap(about = "Deprecated: use set-primary-interface. Sets the primary DPU.")]
+    #[clap(
+        about = "Deprecated: use set-primary-interface with a machine-interface ID, not a DPU machine ID",
+        long_about = "Deprecated compatibility form for managed hosts. This command accepts a \
+            DPU_MACHINE_ID, chooses the host-facing interface row owned by that DPU, and atomically \
+            updates the primary interface, Admin network identity, and persisted desired boot \
+            target. The selected interface must be on the Admin segment when the host has a \
+            DPU-backed Admin interface. The machine-controller converges the BMC to the desired target \
+            when the host is eligible. Use set-primary-interface with an INTERFACE_ID \
+            (machine-interface ID): \
+            https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md"
+    )]
     SetPrimaryDpu(set_primary_dpu::Args),
     #[clap(about = "Download debug bundle with logs for a specific host")]
     DebugBundle(debug_bundle::Args),
+    #[clap(about = "Start decommissioning a managed host")]
+    Decommission(decommission::Args),
+    #[clap(
+        subcommand,
+        about = "Reset a managed host: tear down its instance and DPF resources, then re-ingest"
+    )]
+    Reset(reset::Args),
 }

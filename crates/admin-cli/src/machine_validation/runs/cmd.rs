@@ -23,7 +23,7 @@ use super::args::ShowRunsOptions;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn handle_runs_show(
+pub(super) async fn handle_runs_show(
     args: ShowRunsOptions,
     output_format: OutputFormat,
     api_client: &ApiClient,

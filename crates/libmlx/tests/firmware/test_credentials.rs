@@ -113,7 +113,7 @@ fn test_ssh_agent_serde_roundtrip() {
     let toml = toml::to_string(&cred).unwrap();
     let deserialized: Credentials = toml::from_str(&toml).unwrap();
 
-    assert!(matches!(deserialized, Credentials::SshAgent));
+    assert!(matches!(deserialized, Credentials::SshAgent {}));
 }
 
 #[test]

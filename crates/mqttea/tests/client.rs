@@ -29,21 +29,21 @@ use rumqttc::AsyncClient;
 use tokio::sync::Mutex;
 
 #[derive(Clone, PartialEq, prost::Message, serde::Serialize, serde::Deserialize)]
-pub struct HelloWorld {
+struct HelloWorld {
     #[prost(string, tag = "1")]
-    pub message: String,
+    message: String,
     #[prost(int64, tag = "2")]
-    pub timestamp: i64,
+    timestamp: i64,
     #[prost(string, tag = "3")]
-    pub device_id: String,
+    device_id: String,
 }
 
 // Test message type for registration testing
 #[derive(Clone, Debug, PartialEq)]
 struct DogMessage {
-    pub breed: String,
-    pub age: u32,
-    pub payload: Vec<u8>,
+    breed: String,
+    age: u32,
+    payload: Vec<u8>,
 }
 
 impl RawMessageType for DogMessage {

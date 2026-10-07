@@ -21,7 +21,7 @@ use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use model::expected_machine::ExpectedMachineData;
 use model::hardware_info::TpmEkCertificate;
 use model::machine::ManagedHostState;
-use model::site_explorer::NicMode;
+use model::site_explorer::BlueFieldOperatingMode;
 use model::test_support::managed_host::REQUIRED_IB_GUIDS;
 use model::test_support::{DpuConfig, HardwareInfoTemplate, ManagedHostConfig};
 
@@ -53,7 +53,7 @@ impl FixtureDefault for DpuConfig {
             last_exploration_error: None,
             override_hosts_uefi_device_path: None,
             hardware_info_template: HardwareInfoTemplate::Default,
-            nic_mode: Some(NicMode::Dpu),
+            nic_mode: Some(BlueFieldOperatingMode::Dpu),
         }
     }
 }
@@ -74,12 +74,26 @@ impl DpuConfigExt for DpuConfig {
     }
 }
 
+/// The class recorded on the mock host's endpoint, and the class attestation
+/// profiles in tests key to. In the shape exploration derives, since that is
+/// what a real endpoint carries.
+///
+/// A GB200 rather than the `Dell` its exploration report's vendor would imply,
+/// because attestation reads the class and then talks to that same BMC, and
+/// `RedfishSim` answers as a `GB200 NVL` reporting `HGX_IRoT_GPU_*` attesters.
+/// The two mock halves have always disagreed about the platform; this follows
+/// the half attestation acts on. The fixture writes it into the report, so it
+/// is not derived from what the mock reports.
+pub const MOCK_HOST_HARDWARE_CLASS: &str = "nvidia_gb200-nvl";
+
 pub trait ManagedHostConfigExt {
-    fn with_serial(serial: String) -> Self;
-    fn with_dpus(dpus: Vec<DpuConfig>) -> Self;
-    fn with_expected_state(expected_state: ManagedHostState) -> Self;
-    fn with_hardware_info_template(hardware_info_template: HardwareInfoTemplate) -> Self;
-    fn with_expected_machine_data(expected_machine_data: ExpectedMachineData) -> Self;
+    fn zero_dpu() -> Self;
+    fn with_serial(self, serial: String) -> Self;
+    fn with_dpus(self, dpus: Vec<DpuConfig>) -> Self;
+    fn with_dpu_count(self, dpu_count: usize) -> Self;
+    fn with_expected_state(self, expected_state: ManagedHostState) -> Self;
+    fn with_hardware_info_template(self, hardware_info_template: HardwareInfoTemplate) -> Self;
+    fn with_expected_machine_data(self, expected_machine_data: ExpectedMachineData) -> Self;
     fn with_admin_dhcp_fallback(self) -> Self;
 }
 
@@ -103,49 +117,54 @@ impl FixtureDefault for ManagedHostConfig {
             hardware_info_template: HardwareInfoTemplate::Default,
             expected_machine_data: None,
             vendor: Some(bmc_vendor::BMCVendor::Dell),
+            hardware_class: Some(MOCK_HOST_HARDWARE_CLASS.to_string()),
             admin_dhcp_fallback: false,
         }
     }
 }
 
 impl ManagedHostConfigExt for ManagedHostConfig {
-    fn with_serial(serial: String) -> Self {
-        Self {
-            serial,
-            ..ManagedHostConfig::default()
-        }
+    fn zero_dpu() -> Self {
+        Self::default().with_dpu_count(0)
     }
 
-    fn with_dpus(dpus: Vec<DpuConfig>) -> Self {
-        Self {
-            dpus,
-            ..ManagedHostConfig::default()
-        }
+    fn with_serial(self, serial: String) -> Self {
+        Self { serial, ..self }
     }
 
-    fn with_expected_state(expected_state: ManagedHostState) -> Self {
+    fn with_dpu_count(self, dpu_count: usize) -> Self {
+        self.with_dpus((0..dpu_count).map(|_| DpuConfig::default()).collect())
+    }
+
+    fn with_dpus(self, dpus: Vec<DpuConfig>) -> Self {
+        Self { dpus, ..self }
+    }
+
+    fn with_expected_state(self, expected_state: ManagedHostState) -> Self {
         Self {
             expected_state,
-            ..ManagedHostConfig::default()
+            ..self
         }
     }
 
-    fn with_hardware_info_template(hardware_info_template: HardwareInfoTemplate) -> Self {
+    fn with_hardware_info_template(self, hardware_info_template: HardwareInfoTemplate) -> Self {
         Self {
             hardware_info_template,
-            ..ManagedHostConfig::default()
+            ..self
         }
     }
 
-    fn with_admin_dhcp_fallback(mut self) -> Self {
-        self.admin_dhcp_fallback = true;
-        self
-    }
-
-    fn with_expected_machine_data(expected_machine_data: ExpectedMachineData) -> Self {
+    fn with_expected_machine_data(self, expected_machine_data: ExpectedMachineData) -> Self {
         Self {
             expected_machine_data: Some(expected_machine_data),
-            ..ManagedHostConfig::default()
+            ..self
+        }
+    }
+
+    fn with_admin_dhcp_fallback(self) -> Self {
+        Self {
+            admin_dhcp_fallback: true,
+            ..self
         }
     }
 }

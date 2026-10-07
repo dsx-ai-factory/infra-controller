@@ -7,9 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -101,7 +100,7 @@ func TestManageExpectedPowerShelfInventory_DiscoverExpectedPowerShelfInventory(t
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.ExpectedPowerShelfInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.ExpectedPowerShelfInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -110,12 +109,12 @@ func TestManageExpectedPowerShelfInventory_DiscoverExpectedPowerShelfInventory(t
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.ExpectedPowerShelves))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -131,7 +130,7 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedPowerShelf
+		request *corev1.ExpectedPowerShelf
 	}
 	tests := []struct {
 		name    string
@@ -146,8 +145,8 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-powershelf-001"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-powershelf-001"},
 					BmcMacAddress:        "00:11:22:33:44:55",
 					ShelfSerialNumber:    "SHELF-123456789",
 				},
@@ -161,8 +160,8 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-powershelf-002"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-powershelf-002"},
 					BmcMacAddress:        "",
 					ShelfSerialNumber:    "SHELF-123456789",
 				},
@@ -176,8 +175,8 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-powershelf-003"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-powershelf-003"},
 					BmcMacAddress:        "00:11:22:33:44:55",
 					ShelfSerialNumber:    "",
 				},
@@ -191,7 +190,7 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
+				request: &corev1.ExpectedPowerShelf{
 					ExpectedPowerShelfId: nil,
 					BmcMacAddress:        "00:11:22:33:44:55",
 					ShelfSerialNumber:    "SHELF-123456789",
@@ -206,8 +205,8 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-powershelf-004"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-powershelf-004"},
 					BmcMacAddress:        "",
 					ShelfSerialNumber:    "",
 				},
@@ -228,7 +227,7 @@ func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageExpectedPowerShelf(tt.fields.coreGrpcAtomicClient, nil)
+			mm := NewManageExpectedPowerShelf(tt.fields.coreGrpcAtomicClient)
 			err := mm.CreateExpectedPowerShelfOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -250,7 +249,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedPowerShelf
+		request *corev1.ExpectedPowerShelf
 	}
 	tests := []struct {
 		name    string
@@ -265,8 +264,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-update-001"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-update-001"},
 					BmcMacAddress:        "00:11:22:33:44:55",
 					ShelfSerialNumber:    "SHELF-123456789",
 				},
@@ -280,7 +279,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
+				request: &corev1.ExpectedPowerShelf{
 					ExpectedPowerShelfId: nil,
 					BmcMacAddress:        "00:11:22:33:44:55",
 					ShelfSerialNumber:    "SHELF-123456789",
@@ -295,8 +294,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-update-002"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-update-002"},
 					BmcMacAddress:        "",
 					ShelfSerialNumber:    "SHELF-123456789",
 				},
@@ -310,8 +309,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-update-003"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-update-003"},
 					BmcMacAddress:        "00:11:22:33:44:55",
 					ShelfSerialNumber:    "",
 				},
@@ -325,8 +324,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelf{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-update-004"},
+				request: &corev1.ExpectedPowerShelf{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-update-004"},
 					BmcMacAddress:        "",
 					ShelfSerialNumber:    "",
 				},
@@ -347,7 +346,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelfOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageExpectedPowerShelf(tt.fields.coreGrpcAtomicClient, nil)
+			mm := NewManageExpectedPowerShelf(tt.fields.coreGrpcAtomicClient)
 			err := mm.UpdateExpectedPowerShelfOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -369,7 +368,7 @@ func TestManageExpectedPowerShelf_DeleteExpectedPowerShelfOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedPowerShelfRequest
+		request *corev1.ExpectedPowerShelfRequest
 	}
 	tests := []struct {
 		name    string
@@ -384,8 +383,8 @@ func TestManageExpectedPowerShelf_DeleteExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelfRequest{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-delete-001"},
+				request: &corev1.ExpectedPowerShelfRequest{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-delete-001"},
 					BmcMacAddress:        "00:11:22:33:44:55",
 				},
 			},
@@ -398,7 +397,7 @@ func TestManageExpectedPowerShelf_DeleteExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelfRequest{
+				request: &corev1.ExpectedPowerShelfRequest{
 					ExpectedPowerShelfId: nil,
 					BmcMacAddress:        "00:11:22:33:44:55",
 				},
@@ -412,8 +411,8 @@ func TestManageExpectedPowerShelf_DeleteExpectedPowerShelfOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedPowerShelfRequest{
-					ExpectedPowerShelfId: &cwssaws.UUID{Value: "test-delete-002"},
+				request: &corev1.ExpectedPowerShelfRequest{
+					ExpectedPowerShelfId: &corev1.UUID{Value: "test-delete-002"},
 					BmcMacAddress:        "",
 				},
 			},
@@ -433,7 +432,7 @@ func TestManageExpectedPowerShelf_DeleteExpectedPowerShelfOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageExpectedPowerShelf(tt.fields.coreGrpcAtomicClient, nil)
+			mm := NewManageExpectedPowerShelf(tt.fields.coreGrpcAtomicClient)
 			err := mm.DeleteExpectedPowerShelfOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -445,76 +444,8 @@ func TestManageExpectedPowerShelf_DeleteExpectedPowerShelfOnSite(t *testing.T) {
 }
 
 func TestManageExpectedPowerShelf_CreateExpectedPowerShelfOnFlow(t *testing.T) {
-	t.Run("nil Flow client skips gracefully", func(t *testing.T) {
-		mm := ManageExpectedPowerShelf{flowGrpcAtomicClient: nil}
-		err := mm.CreateExpectedPowerShelfOnFlow(context.Background(), &cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: uuid.NewString()}, BmcMacAddress: "00:11:22:33:44:55", ShelfSerialNumber: "SHELF001",
-		})
-		assert.NoError(t, err)
-	})
+	manager := NewManageExpectedPowerShelf(nil)
 
-	t.Run("nil Flow client connection skips gracefully", func(t *testing.T) {
-		mm := ManageExpectedPowerShelf{flowGrpcAtomicClient: cClient.NewFlowGrpcAtomicClient(&cClient.FlowGrpcClientConfig{})}
-		err := mm.CreateExpectedPowerShelfOnFlow(context.Background(), &cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: uuid.NewString()}, BmcMacAddress: "00:11:22:33:44:55", ShelfSerialNumber: "SHELF001",
-		})
-		assert.NoError(t, err)
-	})
-}
-
-func Test_expectedPowerShelfToFlowComponent(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-	int32Ptr := func(i int32) *int32 { return &i }
-
-	t.Run("maps all fields correctly", func(t *testing.T) {
-		eps := &cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: "eps-001"},
-			BmcMacAddress:        "AA:BB:CC:DD:EE:FF",
-			ShelfSerialNumber:    "SHELF-001",
-			BmcIpAddress:         "10.0.0.1",
-			RackId:               &cwssaws.RackId{Id: "rack-001"},
-			Name:                 strPtr("pdu-shelf-1"),
-			Manufacturer:         strPtr("Vertiv"),
-			Model:                strPtr("GXT5-3000"),
-			Description:          strPtr("Power distribution shelf"),
-			SlotId:               int32Ptr(10),
-			TrayIdx:              int32Ptr(0),
-			HostId:               int32Ptr(0),
-		}
-		component := expectedPowerShelfToFlowComponent(eps)
-		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_POWERSHELF, component.Type)
-		assert.Equal(t, "eps-001", component.Info.Id.Id)
-		assert.Equal(t, "SHELF-001", component.Info.SerialNumber)
-		assert.Equal(t, "pdu-shelf-1", component.Info.Name)
-		assert.Equal(t, "Vertiv", component.Info.Manufacturer)
-		assert.Equal(t, "GXT5-3000", *component.Info.Model)
-		assert.Equal(t, "Power distribution shelf", *component.Info.Description)
-		assert.Equal(t, "eps-001", component.ComponentId)
-		assert.NotNil(t, component.Position)
-		assert.Equal(t, int32(10), component.Position.SlotId)
-		if assert.Len(t, component.Bmcs, 1) {
-			assert.Equal(t, "AA:BB:CC:DD:EE:FF", component.Bmcs[0].MacAddress)
-			assert.NotNil(t, component.Bmcs[0].IpAddress)
-			assert.Equal(t, "10.0.0.1", *component.Bmcs[0].IpAddress)
-		}
-		assert.NotNil(t, component.RackId)
-		assert.Equal(t, "rack-001", component.RackId.Id)
-	})
-
-	t.Run("handles minimal fields (nil optionals)", func(t *testing.T) {
-		eps := &cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: "eps-002"}, BmcMacAddress: "11:22:33:44:55:66",
-			ShelfSerialNumber: "SHELF-002",
-		}
-		component := expectedPowerShelfToFlowComponent(eps)
-		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_POWERSHELF, component.Type)
-		assert.Empty(t, component.Info.Name)
-		assert.Empty(t, component.Info.Manufacturer)
-		assert.Nil(t, component.Info.Model)
-		assert.Nil(t, component.Position)
-		assert.Nil(t, component.RackId)
-		if assert.Len(t, component.Bmcs, 1) {
-			assert.Nil(t, component.Bmcs[0].IpAddress)
-		}
-	})
+	assert.NoError(t, manager.CreateExpectedPowerShelfOnFlow(context.Background(), nil))
+	assert.NoError(t, manager.CreateExpectedPowerShelfOnFlow(context.Background(), &corev1.ExpectedPowerShelf{}))
 }

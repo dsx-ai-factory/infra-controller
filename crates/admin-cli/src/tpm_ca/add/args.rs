@@ -25,7 +25,7 @@ Add a CA certificate from a DER/CER/PEM file:
     $ nico-admin-cli tpm-ca add --filename /path/to/tpm-ca.der
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, help = "File name containing certificate in DER format")]
-    pub filename: String,
+    pub(super) filename: String,
 }

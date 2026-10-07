@@ -131,7 +131,10 @@ async fn wait_for_boot(
 /// Stub: counts trays in the partition as a stand-in for real validation output.
 pub async fn validate_partition(job: ValidationJob) -> Result<Report, RvsError> {
     let trays_cnt = job.trays.len() as u32;
-    tracing::info!(trays_cnt, "validation: partition validated (stub)");
+    tracing::info!(
+        tray_count = trays_cnt,
+        "validation: partition validated (stub)"
+    );
     Ok(Report { trays_cnt })
 }
 
@@ -139,7 +142,7 @@ pub async fn validate_partition(job: ValidationJob) -> Result<Report, RvsError> 
 ///
 /// Stub: prints tray count to console.
 pub async fn submit_report(report: Report) -> Result<(), RvsError> {
-    tracing::info!(trays_cnt = report.trays_cnt, "validation report");
+    tracing::info!(tray_count = report.trays_cnt, "validation report");
     Ok(())
 }
 

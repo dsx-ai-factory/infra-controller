@@ -20,10 +20,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
-use nv_redfish::Resource;
 use nv_redfish::chassis::{Chassis, PowerSupply};
 use nv_redfish::computer_system::{ComputerSystem, Drive, Memory, Processor, Storage};
 use nv_redfish::core::{Bmc, ToSnakeCase};
+use nv_redfish::schema::power_subsystem::PowerSubsystem;
+use nv_redfish::schema::resource::{PowerState, Status};
 use nv_redfish::sensor::SensorLink;
 
 use crate::metrics::MetricLabel;
@@ -32,6 +33,133 @@ pub(crate) struct DerivedMetric {
     pub(crate) metric_type: &'static str,
     pub(crate) unit: &'static str,
     pub(crate) value: f64,
+    /// Metric-specific labels appended after the entity attributes.
+    pub(crate) labels: Vec<MetricLabel>,
+}
+
+/// Unit for informational gauges whose value is always `1.0` and whose
+/// content lives in the labels.
+const STATE_UNIT: &str = "state";
+
+/// Chassis power evidence collected only for power-shelf endpoints.
+pub(crate) struct ShelfPower {
+    /// The chassis `PowerSubsystem`, when linked and fetched successfully.
+    pub(crate) subsystem: Option<Arc<PowerSubsystem>>,
+}
+
+/// Appends `<prefix>_state` and `<prefix>_health` labels from a Redfish `Status`.
+fn push_status_labels(
+    labels: &mut Vec<MetricLabel>,
+    state_key: &'static str,
+    health_key: &'static str,
+    status: &Status,
+) {
+    if let Some(state) = status.state.flatten() {
+        labels.push((Cow::Borrowed(state_key), state.to_snake_case().to_string()));
+    }
+    if let Some(health) = status.health.flatten() {
+        labels.push((
+            Cow::Borrowed(health_key),
+            health.to_snake_case().to_string(),
+        ));
+    }
+}
+
+/// Builds an informational status gauge, or `None` when the status is absent.
+fn status_metric(
+    metric_type: &'static str,
+    state_key: &'static str,
+    health_key: &'static str,
+    status: Option<&Status>,
+) -> Option<DerivedMetric> {
+    let status = status?;
+    let mut labels = Vec::with_capacity(2);
+    push_status_labels(&mut labels, state_key, health_key, status);
+    Some(DerivedMetric {
+        metric_type,
+        unit: STATE_UNIT,
+        value: 1.0,
+        labels,
+    })
+}
+
+/// Builds `chassis_status` from `Chassis.Status` and `Chassis.PowerState`.
+///
+/// The two fields are independent in Redfish, so the gauge is emitted when
+/// either is present and each label is attached only when its source exists.
+fn chassis_status_metric(
+    status: Option<&Status>,
+    power_state: Option<PowerState>,
+) -> Option<DerivedMetric> {
+    if status.is_none() && power_state.is_none() {
+        return None;
+    }
+    let mut labels = Vec::with_capacity(3);
+    if let Some(status) = status {
+        push_status_labels(&mut labels, "chassis_state", "chassis_health", status);
+    }
+    if let Some(power_state) = power_state {
+        labels.push((
+            Cow::Borrowed("chassis_power_state"),
+            power_state.to_snake_case().to_string(),
+        ));
+    }
+    Some(DerivedMetric {
+        metric_type: "chassis_status",
+        unit: STATE_UNIT,
+        value: 1.0,
+        labels,
+    })
+}
+
+/// Identity of the GPU currently occupying a GPU slot.
+///
+/// A GPU's Redfish path (`HGX_GPU_SXM_1`, `GPU_SXM_1`) names a socket on the
+/// baseboard and survives a GPU swap, so it cannot serve as the device
+/// identity; the UUID here can. On NVIDIA hardware it matches the NVML GPU
+/// UUID without its `GPU-` prefix.
+///
+/// Read from the resource that reports the GPU, which carries these fields
+/// directly: the `Processor` for a GPU processor and the `Chassis` for a GPU
+/// module. Both were observed to report identical values per slot, so neither
+/// needs a link traversal to the other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GpuIdentity {
+    pub(crate) uuid: Option<String>,
+    pub(crate) serial: Option<String>,
+    pub(crate) model: Option<String>,
+    /// Serial number of the enclosing GPU chassis, which on SXM baseboards is
+    /// the GPU module's own serial rather than the host chassis serial.
+    pub(crate) chassis_serial: Option<String>,
+}
+
+impl GpuIdentity {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.uuid.is_none() && self.serial.is_none() && self.model.is_none()
+    }
+
+    pub(crate) fn attributes(&self) -> Vec<MetricLabel> {
+        let mut attrs = Vec::new();
+        if let Some(uuid) = &self.uuid {
+            attrs.push((Cow::Borrowed("gpu_uuid"), uuid.clone()));
+        }
+        if let Some(serial) = &self.serial {
+            attrs.push((Cow::Borrowed("gpu_serial"), serial.clone()));
+        }
+        if let Some(model) = &self.model {
+            attrs.push((Cow::Borrowed("gpu_model"), model.clone()));
+        }
+        if let Some(chassis_serial) = &self.chassis_serial {
+            attrs.push((Cow::Borrowed("gpu_chassis_serial"), chassis_serial.clone()));
+        }
+        attrs
+    }
+}
+
+/// Strips the trailing slash some BMCs append to an `@odata.id`, so that an
+/// event origin and the resource it names compare equal.
+pub(crate) fn normalize_odata_id(odata_id: &str) -> &str {
+    odata_id.trim_end_matches('/')
 }
 
 pub(crate) enum DiscoveredEntity<B: Bmc> {
@@ -39,6 +167,9 @@ pub(crate) enum DiscoveredEntity<B: Bmc> {
         entity: Arc<Processor<B>>,
         system: Arc<ComputerSystem<B>>,
         sensors: Vec<SensorLink<B>>,
+        /// Populated only when `attributes.gpu_identity` is enabled and the
+        /// processor reports `ProcessorType == GPU`.
+        gpu: Option<GpuIdentity>,
     },
     Memory {
         entity: Arc<Memory<B>>,
@@ -55,10 +186,28 @@ pub(crate) enum DiscoveredEntity<B: Bmc> {
         entity: Arc<PowerSupply<B>>,
         chassis: Arc<Chassis<B>>,
         sensors: Vec<SensorLink<B>>,
+        /// Capacity parsed from a vendor OEM schema, used only when the
+        /// standard `PowerCapacityWatts` is absent. LiteOn is the only source
+        /// today; see `discover_power_supplies`.
+        oem_capacity_watts: Option<f64>,
+        /// Whether this PSU is currently outputting power, parsed from a
+        /// vendor OEM schema. No standard `PowerSupply` field carries this;
+        /// Delta is the only source today, via `Oem.deltaenergysystems.Power`.
+        oem_power_output: Option<bool>,
+        /// Target fan speed in percent, parsed from a vendor OEM schema. No
+        /// standard `PowerSupply` field carries this either; Delta is the
+        /// only source today, via `Oem.deltaenergysystems.FanSpeedTarget`.
+        /// `0` means PSU-controlled.
+        oem_fan_speed_target_percent: Option<i64>,
     },
     Chassis {
         entity: Arc<Chassis<B>>,
         sensors: Vec<SensorLink<B>>,
+        /// Present only when discovery ran for a power-shelf endpoint.
+        shelf_power: Option<ShelfPower>,
+        /// Populated only when `attributes.gpu_identity` is enabled and the
+        /// chassis holds a GPU.
+        gpu: Option<GpuIdentity>,
     },
 }
 
@@ -96,12 +245,12 @@ impl<B: Bmc> DiscoveredEntity<B> {
     pub(crate) fn base_attributes(&self) -> Vec<MetricLabel> {
         match self {
             DiscoveredEntity::Processor { entity, system, .. } => vec![
-                (Cow::Borrowed("processor_id"), entity.raw().base.id.clone()),
-                (Cow::Borrowed("system_id"), system.raw().base.id.clone()),
+                (Cow::Borrowed("processor_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("system_id"), system.raw().id.clone()),
             ],
             DiscoveredEntity::Memory { entity, system, .. } => vec![
-                (Cow::Borrowed("memory_id"), entity.raw().base.id.clone()),
-                (Cow::Borrowed("system_id"), system.raw().base.id.clone()),
+                (Cow::Borrowed("memory_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("system_id"), system.raw().id.clone()),
             ],
             DiscoveredEntity::Drive {
                 entity,
@@ -109,21 +258,18 @@ impl<B: Bmc> DiscoveredEntity<B> {
                 storage,
                 ..
             } => vec![
-                (Cow::Borrowed("drive_id"), entity.raw().base.id.clone()),
-                (Cow::Borrowed("storage_id"), storage.raw().base.id.clone()),
-                (Cow::Borrowed("system_id"), system.raw().base.id.clone()),
+                (Cow::Borrowed("drive_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("storage_id"), storage.raw().id.clone()),
+                (Cow::Borrowed("system_id"), system.raw().id.clone()),
             ],
             DiscoveredEntity::PowerSupply {
                 entity, chassis, ..
             } => vec![
-                (
-                    Cow::Borrowed("powersupply_id"),
-                    entity.raw().base.id.clone(),
-                ),
-                (Cow::Borrowed("chassis_id"), chassis.raw().base.id.clone()),
+                (Cow::Borrowed("powersupply_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("chassis_id"), chassis.raw().id.clone()),
             ],
             DiscoveredEntity::Chassis { entity, .. } => {
-                vec![(Cow::Borrowed("chassis_id"), entity.raw().base.id.clone())]
+                vec![(Cow::Borrowed("chassis_id"), entity.raw().id.clone())]
             }
         }
     }
@@ -131,7 +277,7 @@ impl<B: Bmc> DiscoveredEntity<B> {
     pub(crate) fn entity_specific_attributes(&self) -> Vec<MetricLabel> {
         let mut attrs = Vec::new();
         match self {
-            DiscoveredEntity::Processor { entity, .. } => {
+            DiscoveredEntity::Processor { entity, gpu, .. } => {
                 if let Some(processor_type) = entity.raw().processor_type.flatten() {
                     attrs.push((
                         Cow::Borrowed("processor_type"),
@@ -140,6 +286,9 @@ impl<B: Bmc> DiscoveredEntity<B> {
                 }
                 if let Some(model) = entity.raw().model.clone().flatten() {
                     attrs.push((Cow::Borrowed("model"), model));
+                }
+                if let Some(gpu) = gpu {
+                    attrs.extend(gpu.attributes());
                 }
             }
             DiscoveredEntity::Memory { entity, .. } => {
@@ -163,22 +312,67 @@ impl<B: Bmc> DiscoveredEntity<B> {
                     attrs.push((Cow::Borrowed("model"), model));
                 }
             }
-            DiscoveredEntity::Chassis { entity, .. } => {
+            DiscoveredEntity::Chassis { entity, gpu, .. } => {
                 if let Some(model) = entity.raw().model.clone().flatten() {
                     attrs.push((Cow::Borrowed("model"), model));
+                }
+                if let Some(gpu) = gpu {
+                    attrs.extend(gpu.attributes());
                 }
             }
         }
         attrs
     }
 
+    /// GPU identity for this entity, when it reports a GPU.
+    pub(crate) fn gpu_identity(&self) -> Option<&GpuIdentity> {
+        match self {
+            DiscoveredEntity::Chassis { gpu, .. } | DiscoveredEntity::Processor { gpu, .. } => {
+                gpu.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Redfish path by which an SSE `origin_of_condition` names this entity.
+    ///
+    /// A GPU event's origin is either the GPU chassis
+    /// (`/redfish/v1/Chassis/HGX_GPU_SXM_1`) or the GPU processor
+    /// (`/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_SXM_1`), so both
+    /// are matchable. The comparison is on the whole path rather than its last
+    /// segment: a platform that reuses one id across the `Processors` and
+    /// `Chassis` collections would otherwise let a chassis origin resolve to a
+    /// processor, which reports no `gpu_chassis_serial`.
+    /// Redfish `Id` of the slot this entity describes.
+    ///
+    /// A driver event names its GPU in message text by this id rather than by a
+    /// path, so resolving those records needs a key the text can be compared
+    /// against. Prefer [`Self::gpu_origin_path`] wherever a path is available,
+    /// since an id is only unique within its own collection.
+    pub(crate) fn gpu_slot_id(&self) -> Option<String> {
+        match self {
+            DiscoveredEntity::Chassis { entity, .. } => Some(entity.raw().id.clone()),
+            DiscoveredEntity::Processor { entity, .. } => Some(entity.raw().id.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn gpu_origin_path(&self) -> Option<String> {
+        let odata_id = match self {
+            DiscoveredEntity::Chassis { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Processor { entity, .. } => entity.raw().odata_id.to_string(),
+            _ => return None,
+        };
+        Some(normalize_odata_id(&odata_id).to_string())
+    }
+
     pub(crate) fn key(&self) -> String {
         match self {
-            DiscoveredEntity::Processor { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Memory { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Drive { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::PowerSupply { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Chassis { entity, .. } => entity.odata_id().to_string(),
+            DiscoveredEntity::Processor { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Memory { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Drive { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::PowerSupply { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Chassis { entity, .. } => entity.raw().odata_id.to_string(),
         }
     }
 
@@ -193,21 +387,81 @@ impl<B: Bmc> DiscoveredEntity<B> {
                         metric_type: "drive_predicted_media_life_left",
                         unit: "percentage",
                         value,
+                        labels: Vec::new(),
                     }]
                 })
                 .unwrap_or_default(),
-            DiscoveredEntity::PowerSupply { entity, .. } => entity
-                .raw()
-                .power_capacity_watts
-                .flatten()
-                .map(|value| {
-                    vec![DerivedMetric {
+            DiscoveredEntity::PowerSupply {
+                entity,
+                oem_capacity_watts,
+                oem_power_output,
+                oem_fan_speed_target_percent,
+                ..
+            } => {
+                let raw = entity.raw();
+                let mut metrics = Vec::with_capacity(5);
+                if let Some(value) = raw.power_capacity_watts.flatten().or(*oem_capacity_watts) {
+                    metrics.push(DerivedMetric {
                         metric_type: "powersupply_capacity",
                         unit: "watts",
                         value,
-                    }]
-                })
-                .unwrap_or_default(),
+                        labels: Vec::new(),
+                    });
+                }
+                if let Some(power_output) = oem_power_output {
+                    metrics.push(DerivedMetric {
+                        metric_type: "powersupply_output_enabled",
+                        unit: "bool",
+                        value: if *power_output { 1.0 } else { 0.0 },
+                        labels: Vec::new(),
+                    });
+                }
+                if let Some(fan_speed_target) = oem_fan_speed_target_percent {
+                    metrics.push(DerivedMetric {
+                        metric_type: "powersupply_fan_speed_target",
+                        unit: "percentage",
+                        value: *fan_speed_target as f64,
+                        labels: Vec::new(),
+                    });
+                }
+                metrics.extend(status_metric(
+                    "powersupply_status",
+                    "powersupply_state",
+                    "powersupply_health",
+                    raw.status.as_ref(),
+                ));
+                metrics
+            }
+            DiscoveredEntity::Chassis {
+                entity,
+                shelf_power: Some(shelf_power),
+                ..
+            } => {
+                let raw = entity.raw();
+                let mut metrics = Vec::with_capacity(3);
+                if let Some(value) = raw.max_power_watts.flatten() {
+                    metrics.push(DerivedMetric {
+                        metric_type: "chassis_max_power",
+                        unit: "watts",
+                        value,
+                        labels: Vec::new(),
+                    });
+                }
+                metrics.extend(chassis_status_metric(
+                    raw.status.as_ref(),
+                    raw.power_state.flatten(),
+                ));
+                metrics.extend(status_metric(
+                    "power_subsystem_status",
+                    "power_subsystem_state",
+                    "power_subsystem_health",
+                    shelf_power
+                        .subsystem
+                        .as_ref()
+                        .and_then(|subsystem| subsystem.status.as_ref()),
+                ));
+                metrics
+            }
             _ => Vec::new(),
         }
     }
@@ -220,3 +474,447 @@ pub(crate) struct EntityInventory<B: Bmc> {
 }
 
 pub(crate) type SharedInventory<B> = Arc<ArcSwapOption<EntityInventory<B>>>;
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+    use crate::collectors::projection_test_support::{ProjectionFixture, TestBmc, TestEntity};
+
+    #[derive(Debug, PartialEq)]
+    struct ObservedDerivedMetric {
+        metric_type: &'static str,
+        unit: &'static str,
+        value: f64,
+        labels: Vec<(String, String)>,
+    }
+
+    fn label(key: &str, value: &str) -> (String, String) {
+        (key.to_string(), value.to_string())
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ObservedEntity {
+        sensor_ids: Vec<String>,
+        entity_type: &'static str,
+        physical_context: &'static str,
+        base_attributes: Vec<(String, String)>,
+        entity_specific_attributes: Vec<(String, String)>,
+        key: String,
+        derived_metrics: Vec<ObservedDerivedMetric>,
+    }
+
+    fn observe(entity: DiscoveredEntity<TestBmc>) -> ObservedEntity {
+        ObservedEntity {
+            sensor_ids: entity
+                .sensors()
+                .iter()
+                .map(|sensor| sensor.odata_id().to_string())
+                .collect(),
+            entity_type: entity.entity_type(),
+            physical_context: entity.physical_context_fallback(),
+            base_attributes: entity
+                .base_attributes()
+                .into_iter()
+                .map(|(key, value)| (key.into_owned(), value))
+                .collect(),
+            entity_specific_attributes: entity
+                .entity_specific_attributes()
+                .into_iter()
+                .map(|(key, value)| (key.into_owned(), value))
+                .collect(),
+            key: entity.key(),
+            derived_metrics: entity
+                .derived_metrics()
+                .into_iter()
+                .map(|metric| ObservedDerivedMetric {
+                    metric_type: metric.metric_type,
+                    unit: metric.unit,
+                    value: metric.value,
+                    labels: metric
+                        .labels
+                        .into_iter()
+                        .map(|(key, value)| (key.into_owned(), value))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    fn observe_chassis_status(
+        (status, power_state): (Option<&str>, Option<&str>),
+    ) -> Option<ObservedDerivedMetric> {
+        let status = status.map(|state| {
+            serde_json::from_value::<Status>(serde_json::json!({
+                "Health": "OK",
+                "State": state
+            }))
+            .expect("valid status")
+        });
+        let power_state = power_state.map(|value| {
+            serde_json::from_value::<PowerState>(serde_json::json!(value))
+                .expect("valid power state")
+        });
+        chassis_status_metric(status.as_ref(), power_state).map(|metric| ObservedDerivedMetric {
+            metric_type: metric.metric_type,
+            unit: metric.unit,
+            value: metric.value,
+            labels: metric
+                .labels
+                .into_iter()
+                .map(|(key, value)| (key.into_owned(), value))
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn chassis_status_metric_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "status and power state both present",
+                    input: (Some("Enabled"), Some("On")),
+                    expect: Some(ObservedDerivedMetric {
+                        metric_type: "chassis_status",
+                        unit: "state",
+                        value: 1.0,
+                        labels: vec![
+                            label("chassis_state", "enabled"),
+                            label("chassis_health", "ok"),
+                            label("chassis_power_state", "on"),
+                        ],
+                    }),
+                },
+                Check {
+                    scenario: "status only",
+                    input: (Some("Enabled"), None),
+                    expect: Some(ObservedDerivedMetric {
+                        metric_type: "chassis_status",
+                        unit: "state",
+                        value: 1.0,
+                        labels: vec![
+                            label("chassis_state", "enabled"),
+                            label("chassis_health", "ok"),
+                        ],
+                    }),
+                },
+                Check {
+                    scenario: "power state only still emits the gauge",
+                    input: (None, Some("Off")),
+                    expect: Some(ObservedDerivedMetric {
+                        metric_type: "chassis_status",
+                        unit: "state",
+                        value: 1.0,
+                        labels: vec![label("chassis_power_state", "off")],
+                    }),
+                },
+                Check {
+                    scenario: "neither present emits nothing",
+                    input: (None, None),
+                    expect: None,
+                },
+            ],
+            observe_chassis_status,
+        );
+    }
+
+    #[tokio::test]
+    async fn inventory_projection_cases() {
+        let fixture = ProjectionFixture::new().await;
+
+        check_values(
+            [
+                Check {
+                    scenario: "populated processor",
+                    input: fixture.entity(TestEntity::Processor).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![
+                            "/redfish/v1/Chassis/CH0/Sensors/CPU0_Voltage".to_string(),
+                        ],
+                        entity_type: "processor",
+                        physical_context: "cpu",
+                        base_attributes: vec![
+                            ("processor_id".to_string(), "CPU0".to_string()),
+                            ("system_id".to_string(), "SYS0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![
+                            ("processor_type".to_string(), "cpu".to_string()),
+                            ("model".to_string(), "Grace".to_string()),
+                        ],
+                        key: "/redfish/v1/Systems/SYS0/Processors/CPU0".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "sparse processor",
+                    input: fixture.entity(TestEntity::SparseProcessor).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "processor",
+                        physical_context: "cpu",
+                        base_attributes: vec![
+                            ("processor_id".to_string(), "CPU-sparse".to_string()),
+                            ("system_id".to_string(), "SYS0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Systems/SYS0/Processors/CPU-sparse".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "populated memory",
+                    input: fixture.entity(TestEntity::Memory).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "memory",
+                        physical_context: "memory",
+                        base_attributes: vec![
+                            ("memory_id".to_string(), "DIMM0".to_string()),
+                            ("system_id".to_string(), "SYS0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![
+                            ("device_type".to_string(), "ddr5".to_string()),
+                            ("model".to_string(), "HMCG94AGBRA".to_string()),
+                        ],
+                        key: "/redfish/v1/Systems/SYS0/Memory/DIMM0".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "sparse memory",
+                    input: fixture.entity(TestEntity::SparseMemory).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "memory",
+                        physical_context: "memory",
+                        base_attributes: vec![
+                            ("memory_id".to_string(), "DIMM-sparse".to_string()),
+                            ("system_id".to_string(), "SYS0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Systems/SYS0/Memory/DIMM-sparse".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "populated drive",
+                    input: fixture.entity(TestEntity::Drive).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "drive",
+                        physical_context: "storage_device",
+                        base_attributes: vec![
+                            ("drive_id".to_string(), "D0".to_string()),
+                            ("storage_id".to_string(), "ST0".to_string()),
+                            ("system_id".to_string(), "SYS0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![(
+                            "model".to_string(),
+                            "NVMe-1".to_string(),
+                        )],
+                        key: "/redfish/v1/Systems/SYS0/Storage/ST0/Drives/D0".to_string(),
+                        derived_metrics: vec![ObservedDerivedMetric {
+                            metric_type: "drive_predicted_media_life_left",
+                            unit: "percentage",
+                            value: 80.0,
+                            labels: vec![],
+                        }],
+                    },
+                },
+                Check {
+                    scenario: "sparse drive",
+                    input: fixture.entity(TestEntity::SparseDrive).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "drive",
+                        physical_context: "storage_device",
+                        base_attributes: vec![
+                            ("drive_id".to_string(), "D-sparse".to_string()),
+                            ("storage_id".to_string(), "ST0".to_string()),
+                            ("system_id".to_string(), "SYS0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Systems/SYS0/Storage/ST0/Drives/D-sparse".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "populated power supply",
+                    input: fixture.entity(TestEntity::PowerSupply).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "powersupply",
+                        physical_context: "power_supply",
+                        base_attributes: vec![
+                            ("powersupply_id".to_string(), "PS0".to_string()),
+                            ("chassis_id".to_string(), "CH0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![(
+                            "model".to_string(),
+                            "PSU-3KW".to_string(),
+                        )],
+                        key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS0".to_string(),
+                        derived_metrics: vec![
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_capacity",
+                                unit: "watts",
+                                value: 3000.0,
+                                labels: vec![],
+                            },
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("powersupply_state", "enabled"),
+                                    label("powersupply_health", "warning"),
+                                ],
+                            },
+                        ],
+                    },
+                },
+                Check {
+                    scenario: "sparse power supply",
+                    input: fixture.entity(TestEntity::SparsePowerSupply).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "powersupply",
+                        physical_context: "power_supply",
+                        base_attributes: vec![
+                            ("powersupply_id".to_string(), "PS-sparse".to_string()),
+                            ("chassis_id".to_string(), "CH0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS-sparse"
+                            .to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "standard capacity wins over the OEM value",
+                    input: fixture.entity(TestEntity::PowerSupplyWithOemCapacity).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "powersupply",
+                        physical_context: "power_supply",
+                        base_attributes: vec![
+                            ("powersupply_id".to_string(), "PS0".to_string()),
+                            ("chassis_id".to_string(), "CH0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![(
+                            "model".to_string(),
+                            "PSU-3KW".to_string(),
+                        )],
+                        key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS0".to_string(),
+                        derived_metrics: vec![
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_capacity",
+                                unit: "watts",
+                                value: 3000.0,
+                                labels: vec![],
+                            },
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("powersupply_state", "enabled"),
+                                    label("powersupply_health", "warning"),
+                                ],
+                            },
+                        ],
+                    },
+                },
+                Check {
+                    scenario: "OEM capacity fills in when the standard field is absent",
+                    input: fixture.entity(TestEntity::OemCapacityPowerSupply).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "powersupply",
+                        physical_context: "power_supply",
+                        base_attributes: vec![
+                            ("powersupply_id".to_string(), "PS-sparse".to_string()),
+                            ("chassis_id".to_string(), "CH0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS-sparse"
+                            .to_string(),
+                        derived_metrics: vec![ObservedDerivedMetric {
+                            metric_type: "powersupply_capacity",
+                            unit: "watts",
+                            value: 5500.0,
+                            labels: vec![],
+                        }],
+                    },
+                },
+                Check {
+                    scenario: "populated chassis",
+                    input: fixture.entity(TestEntity::Chassis).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "chassis",
+                        physical_context: "chassis",
+                        base_attributes: vec![("chassis_id".to_string(), "CH0".to_string())],
+                        entity_specific_attributes: vec![("model".to_string(), "HGX".to_string())],
+                        key: "/redfish/v1/Chassis/CH0".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "power-shelf chassis emits power evidence",
+                    input: fixture.entity(TestEntity::ShelfChassis).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "chassis",
+                        physical_context: "chassis",
+                        base_attributes: vec![("chassis_id".to_string(), "CH0".to_string())],
+                        entity_specific_attributes: vec![("model".to_string(), "HGX".to_string())],
+                        key: "/redfish/v1/Chassis/CH0".to_string(),
+                        derived_metrics: vec![
+                            ObservedDerivedMetric {
+                                metric_type: "chassis_max_power",
+                                unit: "watts",
+                                value: 33000.0,
+                                labels: vec![],
+                            },
+                            ObservedDerivedMetric {
+                                metric_type: "chassis_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("chassis_state", "standby_offline"),
+                                    label("chassis_health", "ok"),
+                                    label("chassis_power_state", "on"),
+                                ],
+                            },
+                            ObservedDerivedMetric {
+                                metric_type: "power_subsystem_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("power_subsystem_state", "enabled"),
+                                    label("power_subsystem_health", "ok"),
+                                ],
+                            },
+                        ],
+                    },
+                },
+                Check {
+                    scenario: "sparse chassis",
+                    input: fixture.entity(TestEntity::SparseChassis).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "chassis",
+                        physical_context: "chassis",
+                        base_attributes: vec![("chassis_id".to_string(), "CH-sparse".to_string())],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Chassis/CH-sparse".to_string(),
+                        derived_metrics: vec![],
+                    },
+                },
+            ],
+            observe,
+        );
+    }
+}

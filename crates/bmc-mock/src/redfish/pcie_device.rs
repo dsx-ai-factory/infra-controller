@@ -25,7 +25,7 @@ use crate::{hw, redfish};
 
 const PCIE_DEVICE_TYPE: &str = "#PCIeDevice.v1_5_0.PCIeDevice";
 
-pub fn chassis_resource(chassis_id: &str, dev_id: &str) -> redfish::Resource<'static> {
+pub(crate) fn chassis_resource(chassis_id: &str, dev_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/PCIeDevices/{dev_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -35,7 +35,7 @@ pub fn chassis_resource(chassis_id: &str, dev_id: &str) -> redfish::Resource<'st
     }
 }
 
-pub fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
+pub(super) fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/PCIeDevices");
     redfish::Collection {
         odata_id: Cow::Owned(odata_id),
@@ -45,18 +45,19 @@ pub fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
 }
 
 /// Generate resource bound to chassis.
-pub fn builder(resource: &redfish::Resource) -> PcieDeviceBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> PcieDeviceBuilder {
     PcieDeviceBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
-        mat_dpu: false,
     }
 }
 
-pub fn builder_from_nic(resource: &redfish::Resource, nic: &hw::nic::Nic) -> PcieDeviceBuilder {
-    let b = builder(resource);
-    let b = if nic.is_mat_dpu { b.mat_dpu() } else { b };
-    b.maybe_with(PcieDeviceBuilder::serial_number, &nic.serial_number)
+pub(crate) fn builder_from_nic(
+    resource: &redfish::Resource,
+    nic: &hw::nic::Nic,
+) -> PcieDeviceBuilder {
+    builder(resource)
+        .maybe_with(PcieDeviceBuilder::serial_number, &nic.serial_number)
         .maybe_with(PcieDeviceBuilder::description, &nic.description)
         .maybe_with(PcieDeviceBuilder::manufacturer, &nic.manufacturer)
         .maybe_with(PcieDeviceBuilder::model, &nic.model)
@@ -64,22 +65,20 @@ pub fn builder_from_nic(resource: &redfish::Resource, nic: &hw::nic::Nic) -> Pci
         .maybe_with(PcieDeviceBuilder::firmware_version, &nic.firmware_version)
 }
 
-pub struct PCIeDevice {
-    pub id: Cow<'static, str>,
-    pub is_mat_dpu: bool,
+pub(crate) struct PCIeDevice {
+    pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
 }
 
 impl PCIeDevice {
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
     }
 }
 
-pub struct PcieDeviceBuilder {
+pub(crate) struct PcieDeviceBuilder {
     id: Cow<'static, str>,
     value: serde_json::Value,
-    mat_dpu: bool,
 }
 
 impl Builder for PcieDeviceBuilder {
@@ -87,52 +86,52 @@ impl Builder for PcieDeviceBuilder {
         Self {
             value: self.value.patch(patch),
             id: self.id,
-            mat_dpu: self.mat_dpu,
         }
     }
 }
 
 impl PcieDeviceBuilder {
-    pub fn description(self, value: &str) -> Self {
+    pub(crate) fn description(self, value: &str) -> Self {
         self.add_str_field("Description", value)
     }
 
-    pub fn manufacturer(self, value: &str) -> Self {
+    pub(crate) fn manufacturer(self, value: &str) -> Self {
         self.add_str_field("Manufacturer", value)
     }
 
-    pub fn model(self, value: &str) -> Self {
+    pub(crate) fn model(self, value: &str) -> Self {
         self.add_str_field("Model", value)
     }
 
-    pub fn part_number(self, value: &str) -> Self {
+    pub(crate) fn part_number(self, value: &str) -> Self {
         self.add_str_field("PartNumber", value)
     }
 
-    pub fn serial_number(self, value: &str) -> Self {
+    pub(crate) fn serial_number(self, value: &str) -> Self {
         self.add_str_field("SerialNumber", value)
     }
 
-    pub fn firmware_version(self, value: &str) -> Self {
+    /// Device identity that survives a chassis-slot swap.
+    ///
+    /// On NVIDIA GPUs this matches the NVML GPU UUID without its `GPU-` prefix.
+    pub(crate) fn uuid(self, value: &str) -> Self {
+        self.add_str_field("UUID", value)
+    }
+
+    fn firmware_version(self, value: &str) -> Self {
         self.add_str_field("FirmwareVersion", value)
     }
 
-    pub fn mat_dpu(mut self) -> Self {
-        self.mat_dpu = true;
-        self
-    }
-
-    pub fn status(self, status: redfish::resource::Status) -> Self {
+    pub(crate) fn status(self, status: redfish::resource::Status) -> Self {
         self.apply_patch(json!({
             "Status": status.into_json()
         }))
     }
 
-    pub fn build(self) -> PCIeDevice {
+    pub(crate) fn build(self) -> PCIeDevice {
         PCIeDevice {
             id: self.id,
             value: self.value,
-            is_mat_dpu: self.mat_dpu,
         }
     }
 }

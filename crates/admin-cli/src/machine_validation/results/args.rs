@@ -34,7 +34,7 @@ Show one test's result within a run (with history):
     --test-name gpu_bandwidth --history
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Show results")]
     Show(ShowResultsOptions),
 }
@@ -45,17 +45,17 @@ pub enum Args {
     "test_name",
     "machine",
     ])))]
-pub struct ShowResultsOptions {
+pub(crate) struct ShowResultsOptions {
     #[clap(
         short = 'm',
         long,
         group = "group",
         help = "Show machine validation result of a machine"
     )]
-    pub machine: Option<MachineId>,
+    pub(super) machine: Option<MachineId>,
 
     #[clap(short = 'v', long, group = "group", help = "Machine validation id")]
-    pub validation_id: Option<MachineValidationId>,
+    pub(super) validation_id: Option<MachineValidationId>,
 
     #[clap(
         short = 't',
@@ -64,8 +64,8 @@ pub struct ShowResultsOptions {
         requires("validation_id"),
         help = "Name of the test case"
     )]
-    pub test_name: Option<String>,
+    pub(super) test_name: Option<String>,
 
     #[clap(long, default_value = "false", help = "Results history")]
-    pub history: bool,
+    pub(super) history: bool,
 }

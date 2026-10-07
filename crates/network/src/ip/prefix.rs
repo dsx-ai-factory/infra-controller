@@ -276,14 +276,14 @@ impl Ipv6Prefix {
 #[derive(Debug, thiserror::Error)]
 pub enum PrefixError {
     #[error(
-        "Prefix not in canonical representation (address bits after prefix must be set to zero)"
+        "prefix not in canonical representation (address bits after prefix must be set to zero)"
     )]
     NonCanonicalRepresentation,
 
-    #[error("Parse error: {0}")]
+    #[error("parse error: {0}")]
     ParseError(#[from] AddrParseError),
 
-    #[error("Prefix length error: {0}")]
+    #[error("prefix length error: {0}")]
     BadPrefixLength(#[from] PrefixLenError),
 }
 

@@ -30,18 +30,18 @@ Remove it from a single instance:
     $ nico-admin-cli network-security-group detach --instance-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'v',
         long,
         help = "Optional, VPC ID that should have the network security group removed"
     )]
-    pub vpc_id: Option<VpcId>,
+    pub(super) vpc_id: Option<VpcId>,
 
     #[clap(
         short = 'i',
         long,
         help = "Optional, Instance ID that should have the network security group removed"
     )]
-    pub instance_id: Option<InstanceId>,
+    pub(super) instance_id: Option<InstanceId>,
 }

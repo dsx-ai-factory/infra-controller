@@ -18,37 +18,64 @@ pub mod api_client;
 pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
+mod console_output;
+mod control_router;
+mod desired_firmware;
+mod device_handle;
+mod device_simulator;
+mod dhcp_retry_fsm;
+mod dhcp_retry_runtime;
 mod dhcp_wrapper;
+mod dhcp_wrapper_udp;
+mod discovery_info;
 mod dpu_machine;
+mod expected_inventory;
 mod host_machine;
+pub mod lifecycle_timings;
 mod machine_a_tron;
 mod machine_fsm;
 mod machine_state_machine;
 mod machine_utils;
 mod mock_ssh_server;
-mod subnet;
-mod tabs;
-mod tui;
-mod tui_host_logs;
-mod vpc;
+mod power_shelf_fsm;
+mod power_shelf_simulator;
+mod rack;
+mod run_jitter;
+mod scout_stream;
+mod simulator_registry;
+mod status;
+mod switch_fsm;
+mod switch_simulator;
 
 use std::time::{Duration, Instant};
 
 pub use bmc_mock_wrapper::BmcMockRegistry;
 pub use config::{
-    MachineATronArgs, MachineATronConfig, MachineATronContext, MachineConfig, PersistedDpuMachine,
-    PersistedHostMachine,
+    DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
+    MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
+    RackModelConfig, WiwynnGb200RackConfig,
 };
+pub use console_output::ConsoleOutputController;
+pub use control_router::{ControlState, append as append_control_routes};
+pub use desired_firmware::spawn_desired_firmware_refresher;
+pub use device_handle::DeviceHandle;
+pub use device_simulator::{
+    DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
+};
+pub use dhcp_wrapper::{DhcpClient, UdpDhcpService};
 pub use dpu_machine::DpuMachineHandle;
-pub use host_machine::HostMachineHandle;
-pub use machine_a_tron::{AppEvent, MachineATron};
-pub use machine_state_machine::BmcRegistrationMode;
+pub use expected_inventory::ExpectedInventorySummary;
+pub use machine_a_tron::MachineATron;
 pub use mock_ssh_server::{
     Credentials as MockSshCredentials, MockSshServerHandle, PromptBehavior,
     spawn as spawn_mock_ssh_server,
 };
-pub use tui::{Tui, UiUpdate};
-pub use tui_host_logs::TuiHostLogs;
+pub use rack::{RackMemberStatus, RackStatus, RacksStatusResponse};
+pub use simulator_registry::SimulatorRegistry;
+pub use status::{
+    DeviceKind, DeviceStatus, DeviceStatusConfig, DevicesStatusResponse, InfinibandPortStatus,
+};
+pub use ufm_mock::{Guid, InfinibandPortState};
 
 /// Add a Duration to an Instant, defaulting to a time in the far future if there is an overflow.
 /// This allows using Duration::MAX and being able to add it to Instant::now(), which overflows by

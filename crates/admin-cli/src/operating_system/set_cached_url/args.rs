@@ -46,9 +46,9 @@ Clear the cached_url for an artifact (NAME= with empty URL):
     --set kernel=
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "UUID of the operating system definition.")]
-    pub id: String,
+    pub(super) id: String,
 
     #[clap(
         long = "set",
@@ -57,5 +57,5 @@ pub struct Args {
         required = true,
         help = "Set cached_url for an artifact. Use NAME=URL to set, NAME= to clear. May be repeated."
     )]
-    pub updates: Vec<IpxeTemplateArtifactUpdateRequest>,
+    pub(super) updates: Vec<IpxeTemplateArtifactUpdateRequest>,
 }

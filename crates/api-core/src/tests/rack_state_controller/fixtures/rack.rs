@@ -20,7 +20,7 @@ use model::rack::RackState;
 use sqlx::PgConnection;
 
 /// Helper function to set rack controller state directly in database
-pub async fn set_rack_controller_state(
+pub(in crate::tests) async fn set_rack_controller_state(
     txn: &mut PgConnection,
     rack_id: &RackId,
     state: RackState,

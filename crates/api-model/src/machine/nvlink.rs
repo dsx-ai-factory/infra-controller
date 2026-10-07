@@ -73,8 +73,8 @@ pub fn nvlink_config_synced(
             .find(|gpu| gpu.device_instance == gpu_config.device_instance)
         else {
             tracing::error!(
-                "could not find matching status gpu {:?}",
-                gpu_config.device_instance
+                device_instance = gpu_config.device_instance,
+                "could not find matching status gpu",
             );
             return Err(NvLinkConfigNotSyncedReason(
                 "No matching NvLink status observation found for GPU in config".to_string(),

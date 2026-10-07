@@ -18,12 +18,20 @@
 name = "carbide-test-support"
 version = "0.0.0"
 edition.workspace = true
-description = "A tiny, zero-dependency crate for making table-driven tests."
+description = "A tiny crate of shared test helpers: table-driven tests and query counting."
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_test_support"
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

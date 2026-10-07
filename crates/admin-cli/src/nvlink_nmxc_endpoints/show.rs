@@ -23,10 +23,10 @@ Show the mapping for one chassis serial:
     $ nico-admin-cli nvlink-nmxc-endpoints show --chassis-serial 1234567890123
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     /// If set, show only this chassis serial
     #[clap(long, value_name = "SERIAL")]
-    pub chassis_serial: Option<String>,
+    chassis_serial: Option<String>,
 }
 
 impl Run for Args {

@@ -1,0 +1,98 @@
+---
+tags: ["maintenance", "database", "deployment", "dpu", "machine-identity", "multi-arch", "networking", "ntp", "rest-api", "security", "telemetry", "validation", "zero-dpu"]
+---
+
+## NVIDIA Infra Controller v2.0 <Badge intent="warning">Maintenance</Badge>
+
+NICo v2.0 expands bare-metal lifecycle management with built-in NTP, broader hardware telemetry, multi-architecture support, and stronger security and operational controls.
+
+Before upgrading an existing deployment, review the REST API database migration requirements below.
+
+<Warning title="Upgrade note: REST database consolidation">
+The NICo REST API database has moved from a standalone PostgreSQL instance to the shared Zalando-managed `nico-pg-cluster`. A new `nico_rest` database and `nico-rest.nico` user are provisioned automatically (gated on `rest.enabled: true`). Database credentials are now synced by External Secrets Operator as the `nico-rest-pg-creds` secret in the `nico-rest` namespace, replacing the former `db-creds` secret.
+
+To upgrade from v0.x, do the following:
+
+1. Back up the REST database from the old standalone PostgreSQL pod.
+1. Run `./setup.sh --skip-rest` to provision the prerequisites and External Secrets without starting the REST chart or its migration job.
+1. Quiesce all writes to the existing REST API.
+1. Restore the backup into `nico_rest` on `nico-pg-cluster`.
+1. Rerun `./setup.sh` without `--skip-rest`.
+
+   The REST chart and `nico-rest-db` migration job start only after the restore is complete.
+</Warning>
+
+### NTP service
+
+NICo now ships a built-in NTP service. The `nico-ntp` subchart deploys a 3-replica [chrony](https://chrony-project.org/) StatefulSet, each replica exposed on its own MetalLB LoadBalancer VIP so DPUs have a stable, site-local clock source. The Kea DHCP hook advertises these VIPs to DPUs as DHCP option 42 NTP servers.
+
+Enable the service by setting `nico-ntp.externalService.enabled: true`, assigning three VIPs via `nico-ntp.externalService.perPodAnnotations`, and setting `nico-dhcp.config.kea.hookParameters.ntpServer` to the same VIPs (comma-separated). Enterprise NTP servers in `siteConfig.ntp_servers` continue to be used for BMC pre-ingestion time sync and can coexist with `nico-ntp`. Upstream NTP peers default to `time1.google.com` through `time4.google.com`; override via `nico-ntp.ntp.upstreamServers` for air-gapped environments.
+
+### NVSwitch credential rotation
+
+The Vault policy for the `nico-vault-policy` role now includes full access to the `switch_nvos` credential paths, enabling automated NVSwitch NVOS credential rotation. `secret/data/switch_nvos/*` gains create, read, patch, list, update, and delete; `secret/metadata/switch_nvos/*` gains list, read, and delete; `secret/destroy/switch_nvos/*` gains update (KV v2 destroys versions via update, not delete). No operator action is required — the policy is applied automatically by `setup.sh` on install or upgrade.
+
+### Networking & DNS
+
+- End-to-end reverse DNS (PTR) support for both host and overlay instance addresses
+- IPv6 dual-stack allocation for FNN segments
+- Automatic reverse-DNS zone creation and lifecycle management
+- Forward DNS resolution for overlay instance addresses
+
+### Hardware Monitoring & Telemetry
+
+- NVOS gNMI telemetry collector for switch component, interface, and system data
+- NVLink domain health records with full API and database support
+- Transceiver-exporter sidecar for module EEPROM/DOM data visibility
+- Hardware health metrics collection from Redfish Metrics endpoint
+- Physical chassis intrusion event detection from BMC logs
+
+### DPU & Host Management
+
+- Zero-DPU support for instance allocation on hosts without DPUs
+- DPU-to-NIC mode conversion with automatic power cycling
+- Boot interface selection decoupled from DPU management
+- Last-seen forge-scout version tracking for machines
+
+### Machine Identity & Security
+
+- Site master encryption key (KEK) rotation for SPIFFE machine identity
+- Separate Vault credential location for SuperNIC Lockdown Identity Key Material
+- Alternative credentials storage backend using Postgres with envelope encryption
+- W3C Trace Context propagation across network boundaries
+
+### Component Management & Power Control
+
+- Power control operations (on/off/reset) extended to switches
+- Compute tray management integrated through RMS backend
+- Bypass-state-controller flag enabling direct power and firmware commands
+
+### Validation & Testing
+
+- Machine validation test execution tracking with run items and attempts
+- Heartbeat-based reliability for validation runs with stale-attempt reconciliation
+- RVS artifact pre-caching pipeline with concurrent downloads and SHA-256 verification
+
+### Multi-Architecture Support
+
+- Full end-to-end multi-arch (amd64 + arm64) implementation
+- Multi-arch container image builds for core control-plane
+
+### Operational Improvements
+
+- Admin CLI renamed to nico-admin-cli; several commands restructured
+- Force-delete racks endpoint for cleanup operations
+- Concurrent paged list fetching improving admin CLI performance
+- BMC proxy now streams responses instead of buffering
+- DNS negative-response caching with per-status TTLs and LRU eviction
+
+### Documentation
+
+- Day 2 Operations guides covering monitoring, firmware updates, and lifecycle cleanup
+- Machine Identity (SPIFFE) configuration documentation
+- Consolidated Configurability guide covering all four configuration layers
+- Authentication/authorization flow documentation with diagrams
+
+<br /><br />
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>

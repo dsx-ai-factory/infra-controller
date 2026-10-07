@@ -39,6 +39,7 @@
 # The value for boot is either "none", "pxe" or "default".
 
 prog=$0
+event_fifo=./chassis-control.fifo
 
 device=$1
 if [ "x$device" = "x" ]; then
@@ -94,6 +95,12 @@ do_set() {
 		;;
 
 	    reset)
+		if [ "$val" = "1" ]; then
+		    if ! printf '%s\n' chassis-reset > "$event_fifo"; then
+			echo "Could not report chassis reset"
+			exit 1
+		    fi
+		fi
 		;;
 
 	    boot)

@@ -11,7 +11,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	otrace "go.opentelemetry.io/otel/trace"
@@ -27,7 +26,7 @@ func testSSHKeyAssociationSetupSchema(t *testing.T, dbSession *db.Session) {
 	assert.Nil(t, err)
 }
 
-func TestSSHKeyAssociationSQLDAO_CreateFromParams(t *testing.T) {
+func TestSSHKeyAssociationSQLDAO_Create(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
 	defer dbSession.Close()
@@ -78,7 +77,11 @@ func TestSSHKeyAssociationSQLDAO_CreateFromParams(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			for _, ska := range tc.sks {
-				ska, err := sksd.CreateFromParams(ctx, nil, ska.SSHKeyID, ska.SSHKeyGroupID, ska.CreatedBy)
+				ska, err := sksd.Create(ctx, nil, SSHKeyAssociationCreateInput{
+					SSHKeyID:      ska.SSHKeyID,
+					SSHKeyGroupID: ska.SSHKeyGroupID,
+					CreatedBy:     ska.CreatedBy,
+				})
 				assert.Equal(t, tc.expectError, err != nil)
 				if !tc.expectError {
 					assert.NotNil(t, ska)
@@ -86,8 +89,6 @@ func TestSSHKeyAssociationSQLDAO_CreateFromParams(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -107,7 +108,11 @@ func TestSSHKeyAssociationSQLDAO_GetByID(t *testing.T) {
 	sshKey := testBuildSSHKey(t, dbSession, "test", "test", tenant.ID, "test", cutil.GetPtr("test"), nil, user.ID)
 	sshKeyGroup := testBuildSSHKeyGroup(t, dbSession, "test", cutil.GetPtr("test"), "test", tenant.ID, nil, SSHKeyGroupStatusSyncing, user.ID)
 
-	ska1, err := skasd.CreateFromParams(ctx, nil, sshKey.ID, sshKeyGroup.ID, user.ID)
+	ska1, err := skasd.Create(ctx, nil, SSHKeyAssociationCreateInput{
+		SSHKeyID:      sshKey.ID,
+		SSHKeyGroupID: sshKeyGroup.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
@@ -160,8 +165,6 @@ func TestSSHKeyAssociationSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -212,7 +215,11 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 		assert.Nil(t, err)
 		assert.NotNil(t, skg1)
 
-		ska1, err := skasd.CreateFromParams(ctx, nil, sk1.ID, skg1.ID, user.ID)
+		ska1, err := skasd.Create(ctx, nil, SSHKeyAssociationCreateInput{
+			SSHKeyID:      sk1.ID,
+			SSHKeyGroupID: skg1.ID,
+			CreatedBy:     user.ID,
+		})
 		assert.Nil(t, err)
 		assert.NotNil(t, ska1)
 	}
@@ -224,12 +231,9 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 		desc             string
 		includeRelations []string
 
-		paramSSHKeyIDs      []uuid.UUID
-		paramSSHKeyGroupIDs []uuid.UUID
+		paramFilter SSHKeyAssociationFilterInput
 
-		paramOffset  *int
-		paramLimit   *int
-		paramOrderBy *paginator.OrderBy
+		paramPage paginator.PageInput
 
 		expectCnt                      int
 		expectTotal                    int
@@ -242,8 +246,10 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 		verifyChildSpanner      bool
 	}{
 		{
-			desc:                      "getall with sshkeyid filters but no relations returns objects",
-			paramSSHKeyIDs:            []uuid.UUID{sks[0].ID, sks[1].ID},
+			desc: "getall with sshkeyid filters but no relations returns objects",
+			paramFilter: SSHKeyAssociationFilterInput{
+				SSHKeyIDs: []uuid.UUID{sks[0].ID, sks[1].ID},
+			},
 			includeRelations:          []string{},
 			expectFirstObjectSSHKeyID: sks[0].ID.String(),
 			expectError:               false,
@@ -254,11 +260,15 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 		{
 			desc:             "getall with sshkeyid filters and relations returns objects",
 			includeRelations: []string{SSHKeyRelationName, SSHKeyGroupRelationName},
-			paramOrderBy: &paginator.OrderBy{
-				Field: "updated",
-				Order: paginator.OrderAscending,
+			paramPage: paginator.PageInput{
+				OrderBy: &paginator.OrderBy{
+					Field: "updated",
+					Order: paginator.OrderAscending,
+				},
 			},
-			paramSSHKeyIDs:            []uuid.UUID{sks[0].ID},
+			paramFilter: SSHKeyAssociationFilterInput{
+				SSHKeyIDs: []uuid.UUID{sks[0].ID},
+			},
 			expectFirstObjectSSHKeyID: sks[0].ID.String(),
 			expectError:               false,
 			expectTotal:               1,
@@ -269,11 +279,15 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 		{
 			desc:             "getall with sshkeygroupid filters and relations returns objects",
 			includeRelations: []string{SSHKeyRelationName, SSHKeyGroupRelationName},
-			paramOrderBy: &paginator.OrderBy{
-				Field: "updated",
-				Order: paginator.OrderAscending,
+			paramPage: paginator.PageInput{
+				OrderBy: &paginator.OrderBy{
+					Field: "updated",
+					Order: paginator.OrderAscending,
+				},
 			},
-			paramSSHKeyGroupIDs:            []uuid.UUID{skgs[0].ID, skgs[1].ID},
+			paramFilter: SSHKeyAssociationFilterInput{
+				SSHKeyGroupIDs: []uuid.UUID{skgs[0].ID, skgs[1].ID},
+			},
 			expectFirstObjectSSHKeyGroupID: skgs[0].ID.String(),
 			expectError:                    false,
 			expectTotal:                    2,
@@ -285,12 +299,15 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 			desc:             "getall with offset, limit returns objects",
 			includeRelations: []string{},
 
-			paramOffset: cutil.GetPtr(10),
-			paramLimit:  cutil.GetPtr(10),
-			paramOrderBy: &paginator.OrderBy{
-				Field: "updated",
-				Order: paginator.OrderAscending,
+			paramPage: paginator.PageInput{
+				Offset: cutil.GetPtr(10),
+				Limit:  cutil.GetPtr(10),
+				OrderBy: &paginator.OrderBy{
+					Field: "updated",
+					Order: paginator.OrderAscending,
+				},
 			},
+			paramFilter:               SSHKeyAssociationFilterInput{},
 			expectFirstObjectSSHKeyID: sks[10].ID.String(),
 			expectError:               false,
 			expectTotal:               25,
@@ -300,14 +317,17 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 			desc:             "case when no objects are returned",
 			includeRelations: []string{},
 			expectError:      false,
-			paramSSHKeyIDs:   []uuid.UUID{uuid.New()},
-			expectTotal:      0,
-			expectCnt:        0,
+			paramFilter: SSHKeyAssociationFilterInput{
+				SSHKeyIDs: []uuid.UUID{uuid.New()},
+			},
+			paramPage:   paginator.PageInput{},
+			expectTotal: 0,
+			expectCnt:   0,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			objs, tot, err := skasd.GetAll(ctx, nil, tc.paramSSHKeyIDs, tc.paramSSHKeyGroupIDs, tc.includeRelations, tc.paramOffset, tc.paramLimit, tc.paramOrderBy)
+			objs, tot, err := skasd.GetAll(ctx, nil, tc.paramFilter, tc.paramPage, tc.includeRelations)
 			assert.Equal(t, tc.expectError, err != nil)
 			assert.Equal(t, tc.expectCnt, len(objs))
 			assert.Equal(t, tc.expectTotal, tot)
@@ -328,14 +348,12 @@ func TestSSHKeyAssociationSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestSSHKeyAssociationSQLDAO_UpdateFromParams(t *testing.T) {
+func TestSSHKeyAssociationSQLDAO_Update(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
 	defer dbSession.Close()
@@ -351,7 +369,11 @@ func TestSSHKeyAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 	sshKeyGroup := testBuildSSHKeyGroup(t, dbSession, "test", cutil.GetPtr("test"), "test", tenant.ID, nil, SSHKeyGroupStatusSyncing, user.ID)
 	sshKeyGroup2 := testBuildSSHKeyGroup(t, dbSession, "test2", cutil.GetPtr("test2"), "test2", tenant.ID, nil, SSHKeyGroupStatusSyncing, user.ID)
 
-	ska1, err := skasd.CreateFromParams(ctx, nil, sshKey.ID, sshKeyGroup.ID, user.ID)
+	ska1, err := skasd.Create(ctx, nil, SSHKeyAssociationCreateInput{
+		SSHKeyID:      sshKey.ID,
+		SSHKeyGroupID: sshKeyGroup.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
@@ -388,7 +410,11 @@ func TestSSHKeyAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := skasd.UpdateFromParams(ctx, nil, tc.id, tc.paramSSHKeyID, tc.paramSSHKeyGroupID)
+			got, err := skasd.Update(ctx, nil, SSHKeyAssociationUpdateInput{
+				SSHKeyAssociationID: tc.id,
+				SSHKeyID:            tc.paramSSHKeyID,
+				SSHKeyGroupID:       tc.paramSSHKeyGroupID,
+			})
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
 				assert.Equal(t, tc.expectedSSHKeyID.String(), got.SSHKeyID.String())
@@ -397,14 +423,12 @@ func TestSSHKeyAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestSSHKeyAssociationSQLDAO_DeleteByID(t *testing.T) {
+func TestSSHKeyAssociationSQLDAO_Delete(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
 	defer dbSession.Close()
@@ -416,7 +440,11 @@ func TestSSHKeyAssociationSQLDAO_DeleteByID(t *testing.T) {
 	sshKey := testBuildSSHKey(t, dbSession, "test", "test", tenant.ID, "test", cutil.GetPtr("test"), nil, user.ID)
 	sshKeyGroup := testBuildSSHKeyGroup(t, dbSession, "test", cutil.GetPtr("test"), "test", tenant.ID, nil, SSHKeyGroupStatusSyncing, user.ID)
 
-	ska1, err := skasd.CreateFromParams(ctx, nil, sshKey.ID, sshKeyGroup.ID, user.ID)
+	ska1, err := skasd.Create(ctx, nil, SSHKeyAssociationCreateInput{
+		SSHKeyID:      sshKey.ID,
+		SSHKeyGroupID: sshKeyGroup.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
@@ -442,7 +470,7 @@ func TestSSHKeyAssociationSQLDAO_DeleteByID(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			err := skasd.DeleteByID(ctx, nil, tc.id)
+			err := skasd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
 				tmp, err := skasd.GetByID(ctx, nil, tc.id, nil)
@@ -452,8 +480,6 @@ func TestSSHKeyAssociationSQLDAO_DeleteByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

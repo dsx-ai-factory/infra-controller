@@ -26,6 +26,8 @@ use crate::tests::common::api_fixtures::instance::{
     TestInstance, default_os_config, default_tenant_config, single_interface_network_config,
 };
 
+const RETRYABLE_CUSTOM_IPXE: &str = "set nico-retry-provisioning 1\nSomeRandomiPxe";
+
 #[crate::sqlx_test]
 async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -47,9 +49,9 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    // First boot should return custom iPXE instructions
+    // The one-time custom script is marked for retries within this iPXE session.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
-    assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+    assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
     // Second boot should return "exit"
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
@@ -110,7 +112,7 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     })
     .await;
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
-    assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+    assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
     env.run_machine_state_controller_iteration().await;
 
     // The next reboot should again lead to returning "exit"
@@ -124,33 +126,22 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     assert!(pxe.pxe_script.contains(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
+}
 
-    // A reboot should also be possible with just MachineId
-    // TODO: Remove these assertions after the `machine_id` based reboots are removed.
-    env.api
-        .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
-            instance_id: None,
-            machine_id: Some(mh.id),
-            operation: rpc::forge::instance_power_request::Operation::PowerReset as _,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: false,
-        }))
-        .await
-        .unwrap();
+#[crate::sqlx_test]
+async fn invoke_instance_power_requires_instance_id(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
 
-    // A request with mismatching Machine and InstanceId should fail
     let err = env
         .api
-        .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
-            instance_id: Some(tinstance.id),
-            machine_id: Some(mh.dpu_ids[0]),
-            operation: rpc::forge::instance_power_request::Operation::PowerReset as _,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: false,
-        }))
+        .invoke_instance_power(tonic::Request::new(
+            rpc::forge::InstancePowerRequest::default(),
+        ))
         .await
         .unwrap_err();
+
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("instance_id"));
 }
 
 #[crate::sqlx_test]
@@ -174,11 +165,12 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    // First boot should return custom iPXE instructions
+    // The allocation's one-time request is marked for retries within this iPXE session.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
-    assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+    assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
-    // Second boot should also return custom iPXE instructions
+    // Later requests use `run_provisioning_instructions_on_every_boot` without the
+    // one-time retry marker.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
 
@@ -201,7 +193,6 @@ async fn invoke_instance_power(
     env.api
         .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
             instance_id: Some(instance_id),
-            machine_id: None,
             operation: rpc::forge::instance_power_request::Operation::PowerReset as _,
             boot_with_custom_ipxe,
             apply_updates_on_reboot: false,
@@ -210,7 +201,7 @@ async fn invoke_instance_power(
         .unwrap();
 }
 
-pub async fn create_instance<'a, 'b>(
+pub(in crate::tests) async fn create_instance<'a, 'b>(
     env: &'a TestEnv,
     mh: &'b TestManagedHost,
     run_provisioning_instructions_on_every_boot: bool,
@@ -228,6 +219,7 @@ pub async fn create_instance<'a, 'b>(
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
+        power_profile: None,
     };
     mh.instance_builer(env).config(config).build().await
 }

@@ -28,7 +28,7 @@ mod svpc;
 
 /// Per-interface-type state machine handlers for DPA interfaces.
 #[async_trait]
-pub trait DpaInterfaceStateHandler: Sync {
+pub(super) trait DpaInterfaceStateHandler: Sync {
     async fn handle_provisioning(
         &self,
         monitor: &mut DpaMonitor,
@@ -84,9 +84,42 @@ pub trait DpaInterfaceStateHandler: Sync {
         idx: usize,
         metrics: &mut DpaMonitorMetrics,
     ) -> DpaManagerResult<HandlerResult>;
+
+    /// Tenant-free NIC lockdown IKM rekey: unlock observed. Only SuperNICs
+    /// participate; the default is a no-op so other interface types (Astra) that
+    /// never enter the rekey states stay inert.
+    async fn handle_rotate_key_unlocking(
+        &self,
+        _monitor: &mut DpaMonitor,
+        _mh: &ManagedHostStateSnapshot,
+        _idx: usize,
+        _metrics: &mut DpaMonitorMetrics,
+    ) -> DpaManagerResult<HandlerResult> {
+        Ok(HandlerResult {
+            new_state: None,
+            txn: None,
+        })
+    }
+
+    /// Tenant-free NIC lockdown IKM rekey: relock observed. Only SuperNICs
+    /// participate; the default is a no-op.
+    async fn handle_rotate_key_locking(
+        &self,
+        _monitor: &mut DpaMonitor,
+        _mh: &ManagedHostStateSnapshot,
+        _idx: usize,
+        _metrics: &mut DpaMonitorMetrics,
+    ) -> DpaManagerResult<HandlerResult> {
+        Ok(HandlerResult {
+            new_state: None,
+            txn: None,
+        })
+    }
 }
 
-pub fn handler_for(interface_type: DpaInterfaceType) -> &'static dyn DpaInterfaceStateHandler {
+pub(super) fn handler_for(
+    interface_type: DpaInterfaceType,
+) -> &'static dyn DpaInterfaceStateHandler {
     match interface_type {
         DpaInterfaceType::Svpc => &svpc::SvpcInterfaceHandler,
         DpaInterfaceType::Astra => &astra::AstraInterfaceHandler,

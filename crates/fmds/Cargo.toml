@@ -20,6 +20,7 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "fmds"
@@ -29,6 +30,7 @@ name = "carbide-fmds"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 
 # [local-dependencies]
 carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
@@ -38,6 +40,7 @@ carbide-tls = { path = "../tls" }
 carbide-uuid = { path = "../uuid" }
 carbide-version = { path = "../version" }
 logfmt = { path = "../logfmt" }
+metrics-endpoint = { path = "../metrics-endpoint" }
 
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
@@ -76,6 +79,8 @@ tracing-subscriber = { features = [
 ], workspace = true }
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy"] }

@@ -31,8 +31,10 @@ import (
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 var (
@@ -50,21 +52,27 @@ var (
 
 // NICoServerImpl implements interface NICoServer
 type NICoServerImpl struct {
-	cwssaws.UnimplementedForgeServer
-	v   map[string]*cwssaws.Vpc
-	ns  map[string]*cwssaws.NetworkSegment
-	ins map[string]*cwssaws.Instance
-	m   map[string]*cwssaws.Machine
-	tk  map[string]*cwssaws.TenantKeyset
-	ibp map[string]*cwssaws.IBPartition
-	em  map[string]*cwssaws.ExpectedMachine
-	eps map[string]*cwssaws.ExpectedPowerShelf
-	es  map[string]*cwssaws.ExpectedSwitch
-	er  map[string]*cwssaws.ExpectedRack
+	corev1.UnimplementedForgeServer
+	v   map[string]*corev1.Vpc
+	ns  map[string]*corev1.NetworkSegment
+	ins map[string]*corev1.Instance
+	m   map[string]*corev1.Machine
+	tk  map[string]*corev1.TenantKeyset
+	ibp map[string]*corev1.IBPartition
+	em  map[string]*corev1.ExpectedMachine
+	eps map[string]*corev1.ExpectedPowerShelf
+	es  map[string]*corev1.ExpectedSwitch
+	er  map[string]*corev1.ExpectedRack
 
 	// Per-org machine identity state.
 	identityState    map[string]*identityOrgState
-	tokenDelegations map[string]*cwssaws.TokenDelegationResponse
+	tokenDelegations map[string]*corev1.TokenDelegationResponse
+
+	// KEK-rotation simulation state. currentEncryptionKeyID is the key id the mock treats as
+	// "current"; reencryptedOrgs records the key id each org's secrets were last re-wrapped to,
+	// so re-runs are idempotent (already-on-target rows are skipped).
+	currentEncryptionKeyID string
+	reencryptedOrgs        map[string]string
 }
 
 // identityKeyMaterial is a per-org ES256 keypair plus its derived kid.
@@ -75,7 +83,7 @@ type identityKeyMaterial struct {
 }
 
 type identityOrgState struct {
-	cfg                  *cwssaws.TenantIdentityConfigResponse
+	cfg                  *corev1.TenantIdentityConfigResponse
 	slot1                *identityKeyMaterial
 	slot2                *identityKeyMaterial
 	currentSlot          int
@@ -130,20 +138,20 @@ func (f *NICoServerImpl) gcExpiredNonActiveSigningKey(orgID string) {
 	}
 }
 
-func tenantIdentitySigningKeysResponse(st *identityOrgState) []*cwssaws.TenantIdentitySigningKey {
+func tenantIdentitySigningKeysResponse(st *identityOrgState) []*corev1.TenantIdentitySigningKey {
 	if st == nil {
 		return nil
 	}
-	var entries []*cwssaws.TenantIdentitySigningKey
+	var entries []*corev1.TenantIdentitySigningKey
 	if active := st.activeKey(); active != nil {
-		entries = append(entries, &cwssaws.TenantIdentitySigningKey{
+		entries = append(entries, &corev1.TenantIdentitySigningKey{
 			Kid:           active.kid,
 			Alg:           "ES256",
 			CurrentSigner: true,
 		})
 	}
 	if inactive := st.inactiveKey(); inactive != nil {
-		entry := &cwssaws.TenantIdentitySigningKey{
+		entry := &corev1.TenantIdentitySigningKey{
 			Kid:           inactive.kid,
 			Alg:           "ES256",
 			CurrentSigner: false,
@@ -162,14 +170,14 @@ func tenantIdentitySigningKeysResponse(st *identityOrgState) []*cwssaws.TenantId
 var logger = log.With().Str("Component", "Mock NICo gRPC Server").Logger()
 
 // Version implements interface NICoServer
-func (f *NICoServerImpl) Version(ctx context.Context, req *cwssaws.VersionRequest) (*cwssaws.BuildInfo, error) {
-	return &cwssaws.BuildInfo{
+func (f *NICoServerImpl) Version(ctx context.Context, req *corev1.VersionRequest) (*corev1.BuildInfo, error) {
+	return &corev1.BuildInfo{
 		BuildVersion: "1.0.0",
 	}, nil
 }
 
 // CreateVpc implements interface NICoServer
-func (f *NICoServerImpl) CreateVpc(c context.Context, req *cwssaws.VpcCreationRequest) (*cwssaws.Vpc, error) {
+func (f *NICoServerImpl) CreateVpc(c context.Context, req *corev1.VpcCreationRequest) (*corev1.Vpc, error) {
 	if req == nil || req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -181,10 +189,12 @@ func (f *NICoServerImpl) CreateVpc(c context.Context, req *cwssaws.VpcCreationRe
 		nid = uuid.NewString()
 	}
 
-	nv := &cwssaws.Vpc{
-		Id:                   &cwssaws.VpcId{Value: nid},
-		Name:                 req.Name,
-		TenantOrganizationId: req.TenantOrganizationId,
+	nv := &corev1.Vpc{
+		Id:   &corev1.VpcId{Value: nid},
+		Name: req.Name,
+		Config: &corev1.VpcConfig{
+			TenantOrganizationId: req.TenantOrganizationId,
+		},
 	}
 	f.v[nid] = nv
 
@@ -192,7 +202,7 @@ func (f *NICoServerImpl) CreateVpc(c context.Context, req *cwssaws.VpcCreationRe
 }
 
 // UpdateVpc implements interface NICoServer
-func (f *NICoServerImpl) UpdateVpc(c context.Context, req *cwssaws.VpcUpdateRequest) (*cwssaws.VpcUpdateResult, error) {
+func (f *NICoServerImpl) UpdateVpc(c context.Context, req *corev1.VpcUpdateRequest) (*corev1.VpcUpdateResult, error) {
 	if req == nil || req.Id == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -202,14 +212,14 @@ func (f *NICoServerImpl) UpdateVpc(c context.Context, req *cwssaws.VpcUpdateRequ
 		if req.Name != "" {
 			nv.Name = req.Name
 		}
-		return &cwssaws.VpcUpdateResult{}, nil
+		return &corev1.VpcUpdateResult{}, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "VPC with ID %q not found", req.Id.Value)
 }
 
 // DeleteVpc implements interface NICoServer
-func (f *NICoServerImpl) DeleteVpc(c context.Context, req *cwssaws.VpcDeletionRequest) (*cwssaws.VpcDeletionResult, error) {
+func (f *NICoServerImpl) DeleteVpc(c context.Context, req *corev1.VpcDeletionRequest) (*corev1.VpcDeletionResult, error) {
 	if req == nil || req.Id == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -217,30 +227,30 @@ func (f *NICoServerImpl) DeleteVpc(c context.Context, req *cwssaws.VpcDeletionRe
 	_, ok := f.v[req.Id.Value]
 	if ok {
 		delete(f.v, req.Id.Value)
-		return &cwssaws.VpcDeletionResult{}, nil
+		return &corev1.VpcDeletionResult{}, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "VPC with ID %q not found", req.Id.Value)
 }
 
 // FindVpcIds implements interface NICoServer
-func (f *NICoServerImpl) FindVpcIds(ctx context.Context, req *cwssaws.VpcSearchFilter) (*cwssaws.VpcIdList, error) {
+func (f *NICoServerImpl) FindVpcIds(ctx context.Context, req *corev1.VpcSearchFilter) (*corev1.VpcIdList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.VpcIdList{}
+	response := corev1.VpcIdList{}
 	for id := range f.v {
-		response.VpcIds = append(response.VpcIds, &cwssaws.VpcId{Value: id})
+		response.VpcIds = append(response.VpcIds, &corev1.VpcId{Value: id})
 	}
 	return &response, nil
 }
 
 // FindVpcsByIds implements interface NICoServer
-func (f *NICoServerImpl) FindVpcsByIds(ctx context.Context, req *cwssaws.VpcsByIdsRequest) (*cwssaws.VpcList, error) {
+func (f *NICoServerImpl) FindVpcsByIds(ctx context.Context, req *corev1.VpcsByIdsRequest) (*corev1.VpcList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.VpcList{}
+	response := corev1.VpcList{}
 	for _, id := range req.VpcIds {
 		if obj, ok := f.v[id.GetValue()]; ok {
 			response.Vpcs = append(response.Vpcs, obj)
@@ -250,12 +260,12 @@ func (f *NICoServerImpl) FindVpcsByIds(ctx context.Context, req *cwssaws.VpcsByI
 }
 
 // FindVpcs implements interface NICoServer
-func (f *NICoServerImpl) FindVpcs(c context.Context, req *cwssaws.VpcSearchQuery) (*cwssaws.VpcList, error) {
+func (f *NICoServerImpl) FindVpcs(c context.Context, req *corev1.VpcSearchQuery) (*corev1.VpcList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
 
-	res := []*cwssaws.Vpc{}
+	res := []*corev1.Vpc{}
 
 	for _, v := range f.v {
 		res = append(res, v)
@@ -264,14 +274,14 @@ func (f *NICoServerImpl) FindVpcs(c context.Context, req *cwssaws.VpcSearchQuery
 	if req.Id != nil && req.Id.Value != "" {
 		v, ok := f.v[req.Id.Value]
 		if ok {
-			res = []*cwssaws.Vpc{v}
+			res = []*corev1.Vpc{v}
 		} else {
-			res = []*cwssaws.Vpc{}
+			res = []*corev1.Vpc{}
 		}
 	}
 
 	if req.Name != nil {
-		filtered := []*cwssaws.Vpc{}
+		filtered := []*corev1.Vpc{}
 		for _, nv := range f.v {
 			if nv.Name == *req.Name {
 				filtered = append(filtered, nv)
@@ -280,11 +290,11 @@ func (f *NICoServerImpl) FindVpcs(c context.Context, req *cwssaws.VpcSearchQuery
 		res = filtered
 	}
 
-	return &cwssaws.VpcList{Vpcs: res}, nil
+	return &corev1.VpcList{Vpcs: res}, nil
 }
 
 // CreateNetworkSegment implements interface NICoServer
-func (f *NICoServerImpl) CreateNetworkSegment(c context.Context, req *cwssaws.NetworkSegmentCreationRequest) (*cwssaws.NetworkSegment, error) {
+func (f *NICoServerImpl) CreateNetworkSegment(c context.Context, req *corev1.NetworkSegmentCreationRequest) (*corev1.NetworkSegment, error) {
 	if req == nil || req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -296,13 +306,17 @@ func (f *NICoServerImpl) CreateNetworkSegment(c context.Context, req *cwssaws.Ne
 		nid = uuid.NewString()
 	}
 
-	nns := &cwssaws.NetworkSegment{
-		Id:          &cwssaws.NetworkSegmentId{Value: nid},
-		Name:        req.Name,
-		VpcId:       req.VpcId,
-		SubdomainId: req.SubdomainId,
-		Mtu:         req.Mtu,
-		Prefixes:    req.Prefixes,
+	nns := &corev1.NetworkSegment{
+		Id:       &corev1.NetworkSegmentId{Value: nid},
+		Metadata: &corev1.Metadata{Name: req.Name},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId:                    req.VpcId,
+			SubdomainId:              req.SubdomainId,
+			Mtu:                      req.Mtu,
+			Prefixes:                 req.Prefixes,
+			SegmentType:              req.SegmentType,
+			InferSlaacEui64Addresses: req.InferSlaacEui64Addresses,
+		},
 	}
 	f.ns[nid] = nns
 
@@ -310,7 +324,7 @@ func (f *NICoServerImpl) CreateNetworkSegment(c context.Context, req *cwssaws.Ne
 }
 
 // DeleteNetworkSegment implements interface NICoServer
-func (f *NICoServerImpl) DeleteNetworkSegment(c context.Context, req *cwssaws.NetworkSegmentDeletionRequest) (*cwssaws.NetworkSegmentDeletionResult, error) {
+func (f *NICoServerImpl) DeleteNetworkSegment(c context.Context, req *corev1.NetworkSegmentDeletionRequest) (*corev1.NetworkSegmentDeletionResult, error) {
 	if req == nil || req.Id == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -319,30 +333,30 @@ func (f *NICoServerImpl) DeleteNetworkSegment(c context.Context, req *cwssaws.Ne
 
 	if ok {
 		delete(f.ns, req.Id.Value)
-		return &cwssaws.NetworkSegmentDeletionResult{}, nil
+		return &corev1.NetworkSegmentDeletionResult{}, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "NetworkSegment with ID %q not found", req.Id.Value)
 }
 
 // FindNetworkSegmentIds implements interface NICoServer
-func (f *NICoServerImpl) FindNetworkSegmentIds(ctx context.Context, req *cwssaws.NetworkSegmentSearchFilter) (*cwssaws.NetworkSegmentIdList, error) {
+func (f *NICoServerImpl) FindNetworkSegmentIds(ctx context.Context, req *corev1.NetworkSegmentSearchFilter) (*corev1.NetworkSegmentIdList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.NetworkSegmentIdList{}
+	response := corev1.NetworkSegmentIdList{}
 	for id := range f.ns {
-		response.NetworkSegmentsIds = append(response.NetworkSegmentsIds, &cwssaws.NetworkSegmentId{Value: id})
+		response.NetworkSegmentsIds = append(response.NetworkSegmentsIds, &corev1.NetworkSegmentId{Value: id})
 	}
 	return &response, nil
 }
 
 // FindNetworkSegmentsByIds implements interface NICoServer
-func (f *NICoServerImpl) FindNetworkSegmentsByIds(ctx context.Context, req *cwssaws.NetworkSegmentsByIdsRequest) (*cwssaws.NetworkSegmentList, error) {
+func (f *NICoServerImpl) FindNetworkSegmentsByIds(ctx context.Context, req *corev1.NetworkSegmentsByIdsRequest) (*corev1.NetworkSegmentList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.NetworkSegmentList{}
+	response := corev1.NetworkSegmentList{}
 	for _, id := range req.NetworkSegmentsIds {
 		if obj, ok := f.ns[id.GetValue()]; ok {
 			response.NetworkSegments = append(response.NetworkSegments, obj)
@@ -352,7 +366,7 @@ func (f *NICoServerImpl) FindNetworkSegmentsByIds(ctx context.Context, req *cwss
 }
 
 // CreateInstance implements interface NICoServer
-func (f *NICoServerImpl) AllocateInstance(ctx context.Context, req *cwssaws.InstanceAllocationRequest) (*cwssaws.Instance, error) {
+func (f *NICoServerImpl) AllocateInstance(ctx context.Context, req *corev1.InstanceAllocationRequest) (*corev1.Instance, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -364,30 +378,30 @@ func (f *NICoServerImpl) AllocateInstance(ctx context.Context, req *cwssaws.Inst
 
 	_, ok := f.ins[nid]
 	if !ok {
-		ifcsts := []*cwssaws.InstanceInterfaceStatus{}
+		ifcsts := []*corev1.InstanceInterfaceStatus{}
 		for _, ifcreq := range req.Config.Network.Interfaces {
-			ifcst := &cwssaws.InstanceInterfaceStatus{
+			ifcst := &corev1.InstanceInterfaceStatus{
 				MacAddress: getStrPtr(generateMacAddress()),
 				Addresses: []string{
 					generateIPAddress(),
 				},
 			}
-			if ifcreq.FunctionType == cwssaws.InterfaceFunctionType_VIRTUAL_FUNCTION {
+			if ifcreq.FunctionType == corev1.InterfaceFunctionType_VIRTUAL_FUNCTION {
 				vfid := uint32(generateInteger(16))
 				ifcst.VirtualFunctionId = &vfid
 			}
 			ifcsts = append(ifcsts, ifcst)
 		}
 
-		nins := cwssaws.Instance{
-			Id:        &cwssaws.InstanceId{Value: nid},
+		nins := corev1.Instance{
+			Id:        &corev1.InstanceId{Value: nid},
 			MachineId: req.MachineId,
 			Config:    req.Config,
-			Status: &cwssaws.InstanceStatus{
-				Tenant: &cwssaws.InstanceTenantStatus{
-					State: cwssaws.TenantState_PROVISIONING,
+			Status: &corev1.InstanceStatus{
+				Tenant: &corev1.InstanceTenantStatus{
+					State: corev1.TenantState_PROVISIONING,
 				},
-				Network: &cwssaws.InstanceNetworkStatus{
+				Network: &corev1.InstanceNetworkStatus{
 					Interfaces: ifcsts,
 				},
 			},
@@ -395,7 +409,7 @@ func (f *NICoServerImpl) AllocateInstance(ctx context.Context, req *cwssaws.Inst
 
 		f.ins[nid] = &nins
 
-		m := cwssaws.Machine{
+		m := corev1.Machine{
 			Id:    req.MachineId,
 			State: "Ready",
 		}
@@ -412,7 +426,7 @@ func (f *NICoServerImpl) AllocateInstance(ctx context.Context, req *cwssaws.Inst
 }
 
 // DeleteInstance implements interface NICoServer
-func (f *NICoServerImpl) ReleaseInstance(c context.Context, req *cwssaws.InstanceReleaseRequest) (*cwssaws.InstanceReleaseResult, error) {
+func (f *NICoServerImpl) ReleaseInstance(c context.Context, req *corev1.InstanceReleaseRequest) (*corev1.InstanceReleaseResult, error) {
 	if req == nil || req.Id == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -420,30 +434,30 @@ func (f *NICoServerImpl) ReleaseInstance(c context.Context, req *cwssaws.Instanc
 	_, ok := f.ins[req.Id.Value]
 	if ok {
 		delete(f.ins, req.Id.Value)
-		return &cwssaws.InstanceReleaseResult{}, nil
+		return &corev1.InstanceReleaseResult{}, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "Instance with ID %q not found", req.Id.Value)
 }
 
 // FindInstances implements interface NICoServer
-func (f *NICoServerImpl) FindInstanceIds(ctx context.Context, req *cwssaws.InstanceSearchFilter) (*cwssaws.InstanceIdList, error) {
+func (f *NICoServerImpl) FindInstanceIds(ctx context.Context, req *corev1.InstanceSearchFilter) (*corev1.InstanceIdList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.InstanceIdList{}
+	response := corev1.InstanceIdList{}
 	for id := range f.ins {
-		response.InstanceIds = append(response.InstanceIds, &cwssaws.InstanceId{Value: id})
+		response.InstanceIds = append(response.InstanceIds, &corev1.InstanceId{Value: id})
 	}
 	return &response, nil
 }
 
 // FindInstances implements interface NICoServer
-func (f *NICoServerImpl) FindInstancesByIds(ctx context.Context, req *cwssaws.InstancesByIdsRequest) (*cwssaws.InstanceList, error) {
+func (f *NICoServerImpl) FindInstancesByIds(ctx context.Context, req *corev1.InstancesByIdsRequest) (*corev1.InstanceList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.InstanceList{}
+	response := corev1.InstanceList{}
 	for _, id := range req.InstanceIds {
 		if obj, ok := f.ins[id.GetValue()]; ok {
 			response.Instances = append(response.Instances, obj)
@@ -453,41 +467,42 @@ func (f *NICoServerImpl) FindInstancesByIds(ctx context.Context, req *cwssaws.In
 }
 
 // InvokeInstancePower implements interface NICoServer
-func (f *NICoServerImpl) InvokeInstancePower(c context.Context, req *cwssaws.InstancePowerRequest) (*cwssaws.InstancePowerResult, error) {
-	if req == nil {
+func (f *NICoServerImpl) InvokeInstancePower(c context.Context, req *corev1.InstancePowerRequest) (*corev1.InstancePowerResult, error) {
+	if req == nil || req.GetInstanceId().GetValue() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
 
-	_, ok := f.m[req.MachineId.Id]
+	instanceID := req.GetInstanceId().GetValue()
+	_, ok := f.ins[instanceID]
 	if ok {
-		if req.Operation == cwssaws.InstancePowerRequest_POWER_RESET {
-			return &cwssaws.InstancePowerResult{}, nil
+		if req.Operation == corev1.InstancePowerRequest_POWER_RESET {
+			return &corev1.InstancePowerResult{}, nil
 		}
 
-		return &cwssaws.InstancePowerResult{}, status.Errorf(codes.InvalidArgument, "Invalid operation in request")
+		return &corev1.InstancePowerResult{}, status.Errorf(codes.InvalidArgument, "Invalid operation in request")
 	}
 
-	return nil, status.Errorf(codes.NotFound, "Machine with ID %q not found", req.MachineId.Id)
+	return nil, status.Errorf(codes.NotFound, "Instance with ID %q not found", instanceID)
 }
 
-func (f *NICoServerImpl) FindMachineIds(ctx context.Context, req *cwssaws.MachineSearchConfig) (*cwssaws.MachineIdList, error) {
+func (f *NICoServerImpl) FindMachineIds(ctx context.Context, req *corev1.MachineSearchConfig) (*corev1.MachineIdList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.MachineIdList{}
+	response := corev1.MachineIdList{}
 	for id := range f.m {
-		response.MachineIds = append(response.MachineIds, &cwssaws.MachineId{Id: id})
+		response.MachineIds = append(response.MachineIds, &corev1.MachineId{Id: id})
 	}
 
 	return &response, nil
 }
 
-func (f *NICoServerImpl) SetMaintenance(context.Context, *cwssaws.MaintenanceRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) SetMaintenance(context.Context, *corev1.MaintenanceRequest) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, nil
 }
 
 // CreateTenantKeyset implements interface NICoServer
-func (f *NICoServerImpl) CreateTenantKeyset(c context.Context, req *cwssaws.CreateTenantKeysetRequest) (*cwssaws.CreateTenantKeysetResponse, error) {
+func (f *NICoServerImpl) CreateTenantKeyset(c context.Context, req *corev1.CreateTenantKeysetRequest) (*corev1.CreateTenantKeysetResponse, error) {
 	if req == nil || req.KeysetIdentifier == nil || req.KeysetIdentifier.KeysetId == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -499,8 +514,8 @@ func (f *NICoServerImpl) CreateTenantKeyset(c context.Context, req *cwssaws.Crea
 		nid = uuid.NewString()
 	}
 
-	ntk := &cwssaws.TenantKeyset{
-		KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+	ntk := &corev1.TenantKeyset{
+		KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 			KeysetId: nid,
 		},
 		KeysetContent: req.KeysetContent,
@@ -509,7 +524,7 @@ func (f *NICoServerImpl) CreateTenantKeyset(c context.Context, req *cwssaws.Crea
 
 	f.tk[nid] = ntk
 
-	result := &cwssaws.CreateTenantKeysetResponse{
+	result := &corev1.CreateTenantKeysetResponse{
 		Keyset: ntk,
 	}
 
@@ -517,7 +532,7 @@ func (f *NICoServerImpl) CreateTenantKeyset(c context.Context, req *cwssaws.Crea
 }
 
 // UpdateTenantKeyset implements interface NICoServer
-func (f *NICoServerImpl) UpdateTenantKeyset(c context.Context, req *cwssaws.UpdateTenantKeysetRequest) (*cwssaws.UpdateTenantKeysetResponse, error) {
+func (f *NICoServerImpl) UpdateTenantKeyset(c context.Context, req *corev1.UpdateTenantKeysetRequest) (*corev1.UpdateTenantKeysetResponse, error) {
 	if req == nil || req.KeysetIdentifier == nil || req.KeysetIdentifier.KeysetId == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -529,14 +544,14 @@ func (f *NICoServerImpl) UpdateTenantKeyset(c context.Context, req *cwssaws.Upda
 		f.tk[eid].KeysetContent = req.KeysetContent
 		f.tk[eid].Version = req.Version
 
-		return &cwssaws.UpdateTenantKeysetResponse{}, nil
+		return &corev1.UpdateTenantKeysetResponse{}, nil
 	}
 
 	return nil, status.Errorf(codes.Internal, "TenantKeyset with ID not found")
 }
 
 // DeleteTenantKeyset implements interface NICoServer
-func (f *NICoServerImpl) DeleteTenantKeyset(c context.Context, req *cwssaws.DeleteTenantKeysetRequest) (*cwssaws.DeleteTenantKeysetResponse, error) {
+func (f *NICoServerImpl) DeleteTenantKeyset(c context.Context, req *corev1.DeleteTenantKeysetRequest) (*corev1.DeleteTenantKeysetResponse, error) {
 	if req == nil || req.KeysetIdentifier == nil || req.KeysetIdentifier.KeysetId == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -546,30 +561,30 @@ func (f *NICoServerImpl) DeleteTenantKeyset(c context.Context, req *cwssaws.Dele
 	_, ok := f.tk[eid]
 	if ok {
 		delete(f.tk, eid)
-		return &cwssaws.DeleteTenantKeysetResponse{}, nil
+		return &corev1.DeleteTenantKeysetResponse{}, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "TenantKeyset with ID %q not found", eid)
 }
 
 // FindTenantKeysetIds implements interface NICoServer
-func (f *NICoServerImpl) FindTenantKeysetIds(ctx context.Context, req *cwssaws.TenantKeysetSearchFilter) (*cwssaws.TenantKeysetIdList, error) {
+func (f *NICoServerImpl) FindTenantKeysetIds(ctx context.Context, req *corev1.TenantKeysetSearchFilter) (*corev1.TenantKeysetIdList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.TenantKeysetIdList{}
+	response := corev1.TenantKeysetIdList{}
 	for id := range f.tk {
-		response.KeysetIds = append(response.KeysetIds, &cwssaws.TenantKeysetIdentifier{KeysetId: id})
+		response.KeysetIds = append(response.KeysetIds, &corev1.TenantKeysetIdentifier{KeysetId: id})
 	}
 	return &response, nil
 }
 
 // FindTenantKeysetsByIds implements interface NICoServer
-func (f *NICoServerImpl) FindTenantKeysetsByIds(ctx context.Context, req *cwssaws.TenantKeysetsByIdsRequest) (*cwssaws.TenantKeySetList, error) {
+func (f *NICoServerImpl) FindTenantKeysetsByIds(ctx context.Context, req *corev1.TenantKeysetsByIdsRequest) (*corev1.TenantKeySetList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.TenantKeySetList{}
+	response := corev1.TenantKeySetList{}
 	for _, id := range req.KeysetIds {
 		if obj, ok := f.tk[id.KeysetId]; ok {
 			response.Keyset = append(response.Keyset, obj)
@@ -579,7 +594,7 @@ func (f *NICoServerImpl) FindTenantKeysetsByIds(ctx context.Context, req *cwssaw
 }
 
 // CreateIBPartition implements interface NICoServer
-func (f *NICoServerImpl) CreateIBPartition(c context.Context, req *cwssaws.IBPartitionCreationRequest) (*cwssaws.IBPartition, error) {
+func (f *NICoServerImpl) CreateIBPartition(c context.Context, req *corev1.IBPartitionCreationRequest) (*corev1.IBPartition, error) {
 	if req == nil || req.Config == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -591,9 +606,9 @@ func (f *NICoServerImpl) CreateIBPartition(c context.Context, req *cwssaws.IBPar
 		nid = uuid.NewString()
 	}
 
-	nibp := &cwssaws.IBPartition{
-		Id: &cwssaws.IBPartitionId{Value: nid},
-		Config: &cwssaws.IBPartitionConfig{
+	nibp := &corev1.IBPartition{
+		Id: &corev1.IBPartitionId{Value: nid},
+		Config: &corev1.IBPartitionConfig{
 			Name:                 req.Config.Name,
 			TenantOrganizationId: req.Config.TenantOrganizationId,
 		},
@@ -604,7 +619,7 @@ func (f *NICoServerImpl) CreateIBPartition(c context.Context, req *cwssaws.IBPar
 }
 
 // UpdateIBPartition implements interface NICoServer
-func (f *NICoServerImpl) UpdateIBPartition(c context.Context, req *cwssaws.IBPartitionUpdateRequest) (*cwssaws.IBPartition, error) {
+func (f *NICoServerImpl) UpdateIBPartition(c context.Context, req *corev1.IBPartitionUpdateRequest) (*corev1.IBPartition, error) {
 	if req == nil || req.Id == nil || req.Id.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -615,7 +630,7 @@ func (f *NICoServerImpl) UpdateIBPartition(c context.Context, req *cwssaws.IBPar
 	}
 	if req.Config != nil {
 		if ibp.Config == nil {
-			ibp.Config = &cwssaws.IBPartitionConfig{}
+			ibp.Config = &corev1.IBPartitionConfig{}
 		}
 		if req.Config.Name != "" {
 			ibp.Config.Name = req.Config.Name
@@ -634,7 +649,7 @@ func (f *NICoServerImpl) UpdateIBPartition(c context.Context, req *cwssaws.IBPar
 }
 
 // DeleteIBPartition implements interface NICoServer
-func (f *NICoServerImpl) DeleteIBPartition(c context.Context, req *cwssaws.IBPartitionDeletionRequest) (*cwssaws.IBPartitionDeletionResult, error) {
+func (f *NICoServerImpl) DeleteIBPartition(c context.Context, req *corev1.IBPartitionDeletionRequest) (*corev1.IBPartitionDeletionResult, error) {
 	if req == nil || req.Id == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -643,30 +658,30 @@ func (f *NICoServerImpl) DeleteIBPartition(c context.Context, req *cwssaws.IBPar
 
 	if ok {
 		delete(f.ibp, req.Id.Value)
-		return &cwssaws.IBPartitionDeletionResult{}, nil
+		return &corev1.IBPartitionDeletionResult{}, nil
 	}
 
 	return nil, status.Errorf(codes.NotFound, "IB Partition with ID %q not found", req.Id.Value)
 }
 
 // FindIBPartitionIds implements interface NICoServer
-func (f *NICoServerImpl) FindIBPartitionIds(ctx context.Context, req *cwssaws.IBPartitionSearchFilter) (*cwssaws.IBPartitionIdList, error) {
+func (f *NICoServerImpl) FindIBPartitionIds(ctx context.Context, req *corev1.IBPartitionSearchFilter) (*corev1.IBPartitionIdList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.IBPartitionIdList{}
+	response := corev1.IBPartitionIdList{}
 	for id := range f.ibp {
-		response.IbPartitionIds = append(response.IbPartitionIds, &cwssaws.IBPartitionId{Value: id})
+		response.IbPartitionIds = append(response.IbPartitionIds, &corev1.IBPartitionId{Value: id})
 	}
 	return &response, nil
 }
 
 // FindIBPartitionsByIds implements interface NICoServer
-func (f *NICoServerImpl) FindIBPartitionsByIds(ctx context.Context, req *cwssaws.IBPartitionsByIdsRequest) (*cwssaws.IBPartitionList, error) {
+func (f *NICoServerImpl) FindIBPartitionsByIds(ctx context.Context, req *corev1.IBPartitionsByIdsRequest) (*corev1.IBPartitionList, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
-	response := cwssaws.IBPartitionList{}
+	response := corev1.IBPartitionList{}
 	for _, id := range req.IbPartitionIds {
 		if obj, ok := f.ibp[id.GetValue()]; ok {
 			response.IbPartitions = append(response.IbPartitions, obj)
@@ -676,7 +691,7 @@ func (f *NICoServerImpl) FindIBPartitionsByIds(ctx context.Context, req *cwssaws
 }
 
 // AddExpectedMachine implements interface NICoServer
-func (f *NICoServerImpl) AddExpectedMachine(ctx context.Context, req *cwssaws.ExpectedMachine) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) AddExpectedMachine(ctx context.Context, req *corev1.ExpectedMachine) (*emptypb.Empty, error) {
 	if req == nil || req.Id == nil || req.Id.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for AddExpectedMachine")
 	}
@@ -691,7 +706,7 @@ func (f *NICoServerImpl) AddExpectedMachine(ctx context.Context, req *cwssaws.Ex
 }
 
 // UpdateExpectedMachine implements interface NICoServer
-func (f *NICoServerImpl) UpdateExpectedMachine(ctx context.Context, req *cwssaws.ExpectedMachine) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) UpdateExpectedMachine(ctx context.Context, req *corev1.ExpectedMachine) (*emptypb.Empty, error) {
 	if req == nil || req.Id == nil || req.Id.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for UpdateExpectedMachine")
 	}
@@ -709,7 +724,7 @@ func (f *NICoServerImpl) UpdateExpectedMachine(ctx context.Context, req *cwssaws
 }
 
 // DeleteExpectedMachine implements interface NICoServer
-func (f *NICoServerImpl) DeleteExpectedMachine(ctx context.Context, req *cwssaws.ExpectedMachineRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) DeleteExpectedMachine(ctx context.Context, req *corev1.ExpectedMachineRequest) (*emptypb.Empty, error) {
 	if req == nil || req.Id == nil || req.Id.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for DeleteExpectedMachine")
 	}
@@ -721,25 +736,25 @@ func (f *NICoServerImpl) DeleteExpectedMachine(ctx context.Context, req *cwssaws
 }
 
 // CreateExpectedMachines implements interface NICoServer
-func (f *NICoServerImpl) CreateExpectedMachines(ctx context.Context, req *cwssaws.BatchExpectedMachineOperationRequest) (*cwssaws.BatchExpectedMachineOperationResponse, error) {
+func (f *NICoServerImpl) CreateExpectedMachines(ctx context.Context, req *corev1.BatchExpectedMachineOperationRequest) (*corev1.BatchExpectedMachineOperationResponse, error) {
 	if req == nil || req.GetExpectedMachines() == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request for CreateExpectedMachines")
 	}
 	emList := req.GetExpectedMachines().GetExpectedMachines()
-	out := &cwssaws.BatchExpectedMachineOperationResponse{
-		Results: make([]*cwssaws.ExpectedMachineOperationResult, 0, len(emList)),
+	out := &corev1.BatchExpectedMachineOperationResponse{
+		Results: make([]*corev1.ExpectedMachineOperationResult, 0, len(emList)),
 	}
 	for _, em := range emList {
 		if em == nil {
 			msg := "nil expected machine entry"
-			out.Results = append(out.Results, &cwssaws.ExpectedMachineOperationResult{
+			out.Results = append(out.Results, &corev1.ExpectedMachineOperationResult{
 				Success:         false,
 				ErrorMessage:    &msg,
 				ExpectedMachine: nil,
 			})
 			continue
 		}
-		result := &cwssaws.ExpectedMachineOperationResult{
+		result := &corev1.ExpectedMachineOperationResult{
 			Id:              em.Id,
 			Success:         true,
 			ExpectedMachine: em,
@@ -768,25 +783,25 @@ func (f *NICoServerImpl) CreateExpectedMachines(ctx context.Context, req *cwssaw
 }
 
 // UpdateExpectedMachines implements interface NICoServer
-func (f *NICoServerImpl) UpdateExpectedMachines(ctx context.Context, req *cwssaws.BatchExpectedMachineOperationRequest) (*cwssaws.BatchExpectedMachineOperationResponse, error) {
+func (f *NICoServerImpl) UpdateExpectedMachines(ctx context.Context, req *corev1.BatchExpectedMachineOperationRequest) (*corev1.BatchExpectedMachineOperationResponse, error) {
 	if req == nil || req.GetExpectedMachines() == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request for UpdateExpectedMachines")
 	}
 	emList := req.GetExpectedMachines().GetExpectedMachines()
-	out := &cwssaws.BatchExpectedMachineOperationResponse{
-		Results: make([]*cwssaws.ExpectedMachineOperationResult, 0, len(emList)),
+	out := &corev1.BatchExpectedMachineOperationResponse{
+		Results: make([]*corev1.ExpectedMachineOperationResult, 0, len(emList)),
 	}
 	for _, em := range emList {
 		if em == nil {
 			msg := "nil expected machine entry"
-			out.Results = append(out.Results, &cwssaws.ExpectedMachineOperationResult{
+			out.Results = append(out.Results, &corev1.ExpectedMachineOperationResult{
 				Success:         false,
 				ErrorMessage:    &msg,
 				ExpectedMachine: nil,
 			})
 			continue
 		}
-		result := &cwssaws.ExpectedMachineOperationResult{
+		result := &corev1.ExpectedMachineOperationResult{
 			Id:              em.Id,
 			Success:         true,
 			ExpectedMachine: em,
@@ -820,7 +835,7 @@ func (f *NICoServerImpl) UpdateExpectedMachines(ctx context.Context, req *cwssaw
 }
 
 // AddExpectedPowerShelf implements interface NICoServer
-func (f *NICoServerImpl) AddExpectedPowerShelf(ctx context.Context, req *cwssaws.ExpectedPowerShelf) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) AddExpectedPowerShelf(ctx context.Context, req *corev1.ExpectedPowerShelf) (*emptypb.Empty, error) {
 	if req == nil || req.ExpectedPowerShelfId == nil || req.ExpectedPowerShelfId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for AddExpectedPowerShelf")
 	}
@@ -835,7 +850,7 @@ func (f *NICoServerImpl) AddExpectedPowerShelf(ctx context.Context, req *cwssaws
 }
 
 // UpdateExpectedPowerShelf implements interface NICoServer
-func (f *NICoServerImpl) UpdateExpectedPowerShelf(ctx context.Context, req *cwssaws.ExpectedPowerShelf) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) UpdateExpectedPowerShelf(ctx context.Context, req *corev1.ExpectedPowerShelf) (*emptypb.Empty, error) {
 	if req == nil || req.ExpectedPowerShelfId == nil || req.ExpectedPowerShelfId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for UpdateExpectedPowerShelf")
 	}
@@ -853,7 +868,7 @@ func (f *NICoServerImpl) UpdateExpectedPowerShelf(ctx context.Context, req *cwss
 }
 
 // DeleteExpectedPowerShelf implements interface NICoServer
-func (f *NICoServerImpl) DeleteExpectedPowerShelf(ctx context.Context, req *cwssaws.ExpectedPowerShelfRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) DeleteExpectedPowerShelf(ctx context.Context, req *corev1.ExpectedPowerShelfRequest) (*emptypb.Empty, error) {
 	if req == nil || req.ExpectedPowerShelfId == nil || req.ExpectedPowerShelfId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for DeleteExpectedPowerShelf")
 	}
@@ -865,7 +880,7 @@ func (f *NICoServerImpl) DeleteExpectedPowerShelf(ctx context.Context, req *cwss
 }
 
 // GetExpectedPowerShelf implements interface NICoServer
-func (f *NICoServerImpl) GetExpectedPowerShelf(ctx context.Context, req *cwssaws.ExpectedPowerShelfRequest) (*cwssaws.ExpectedPowerShelf, error) {
+func (f *NICoServerImpl) GetExpectedPowerShelf(ctx context.Context, req *corev1.ExpectedPowerShelfRequest) (*corev1.ExpectedPowerShelf, error) {
 	if req == nil || req.ExpectedPowerShelfId == nil || req.ExpectedPowerShelfId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for GetExpectedPowerShelf")
 	}
@@ -877,16 +892,16 @@ func (f *NICoServerImpl) GetExpectedPowerShelf(ctx context.Context, req *cwssaws
 }
 
 // GetAllExpectedPowerShelves implements interface NICoServer
-func (f *NICoServerImpl) GetAllExpectedPowerShelves(ctx context.Context, req *emptypb.Empty) (*cwssaws.ExpectedPowerShelfList, error) {
-	res := make([]*cwssaws.ExpectedPowerShelf, 0, len(f.eps))
+func (f *NICoServerImpl) GetAllExpectedPowerShelves(ctx context.Context, req *emptypb.Empty) (*corev1.ExpectedPowerShelfList, error) {
+	res := make([]*corev1.ExpectedPowerShelf, 0, len(f.eps))
 	for _, eps := range f.eps {
 		res = append(res, eps)
 	}
-	return &cwssaws.ExpectedPowerShelfList{ExpectedPowerShelves: res}, nil
+	return &corev1.ExpectedPowerShelfList{ExpectedPowerShelves: res}, nil
 }
 
 // AddExpectedSwitch implements interface NICoServer
-func (f *NICoServerImpl) AddExpectedSwitch(ctx context.Context, req *cwssaws.ExpectedSwitch) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) AddExpectedSwitch(ctx context.Context, req *corev1.ExpectedSwitch) (*emptypb.Empty, error) {
 	if req == nil || req.ExpectedSwitchId == nil || req.ExpectedSwitchId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for AddExpectedSwitch")
 	}
@@ -901,7 +916,7 @@ func (f *NICoServerImpl) AddExpectedSwitch(ctx context.Context, req *cwssaws.Exp
 }
 
 // UpdateExpectedSwitch implements interface NICoServer
-func (f *NICoServerImpl) UpdateExpectedSwitch(ctx context.Context, req *cwssaws.ExpectedSwitch) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) UpdateExpectedSwitch(ctx context.Context, req *corev1.ExpectedSwitch) (*emptypb.Empty, error) {
 	if req == nil || req.ExpectedSwitchId == nil || req.ExpectedSwitchId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for UpdateExpectedSwitch")
 	}
@@ -919,7 +934,7 @@ func (f *NICoServerImpl) UpdateExpectedSwitch(ctx context.Context, req *cwssaws.
 }
 
 // DeleteExpectedSwitch implements interface NICoServer
-func (f *NICoServerImpl) DeleteExpectedSwitch(ctx context.Context, req *cwssaws.ExpectedSwitchRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) DeleteExpectedSwitch(ctx context.Context, req *corev1.ExpectedSwitchRequest) (*emptypb.Empty, error) {
 	if req == nil || req.ExpectedSwitchId == nil || req.ExpectedSwitchId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for DeleteExpectedSwitch")
 	}
@@ -931,7 +946,7 @@ func (f *NICoServerImpl) DeleteExpectedSwitch(ctx context.Context, req *cwssaws.
 }
 
 // GetExpectedSwitch implements interface NICoServer
-func (f *NICoServerImpl) GetExpectedSwitch(ctx context.Context, req *cwssaws.ExpectedSwitchRequest) (*cwssaws.ExpectedSwitch, error) {
+func (f *NICoServerImpl) GetExpectedSwitch(ctx context.Context, req *corev1.ExpectedSwitchRequest) (*corev1.ExpectedSwitch, error) {
 	if req == nil || req.ExpectedSwitchId == nil || req.ExpectedSwitchId.Value == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for GetExpectedSwitch")
 	}
@@ -943,16 +958,16 @@ func (f *NICoServerImpl) GetExpectedSwitch(ctx context.Context, req *cwssaws.Exp
 }
 
 // GetAllExpectedSwitches implements interface NICoServer
-func (f *NICoServerImpl) GetAllExpectedSwitches(ctx context.Context, req *emptypb.Empty) (*cwssaws.ExpectedSwitchList, error) {
-	res := make([]*cwssaws.ExpectedSwitch, 0, len(f.es))
+func (f *NICoServerImpl) GetAllExpectedSwitches(ctx context.Context, req *emptypb.Empty) (*corev1.ExpectedSwitchList, error) {
+	res := make([]*corev1.ExpectedSwitch, 0, len(f.es))
 	for _, es := range f.es {
 		res = append(res, es)
 	}
-	return &cwssaws.ExpectedSwitchList{ExpectedSwitches: res}, nil
+	return &corev1.ExpectedSwitchList{ExpectedSwitches: res}, nil
 }
 
 // AddExpectedRack implements interface NICoServer
-func (f *NICoServerImpl) AddExpectedRack(ctx context.Context, req *cwssaws.ExpectedRack) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) AddExpectedRack(ctx context.Context, req *corev1.ExpectedRack) (*emptypb.Empty, error) {
 	if req == nil || req.RackId == nil || req.RackId.Id == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for AddExpectedRack")
 	}
@@ -964,7 +979,7 @@ func (f *NICoServerImpl) AddExpectedRack(ctx context.Context, req *cwssaws.Expec
 }
 
 // UpdateExpectedRack implements interface NICoServer
-func (f *NICoServerImpl) UpdateExpectedRack(ctx context.Context, req *cwssaws.ExpectedRack) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) UpdateExpectedRack(ctx context.Context, req *corev1.ExpectedRack) (*emptypb.Empty, error) {
 	if req == nil || req.RackId == nil || req.RackId.Id == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for UpdateExpectedRack")
 	}
@@ -979,7 +994,7 @@ func (f *NICoServerImpl) UpdateExpectedRack(ctx context.Context, req *cwssaws.Ex
 }
 
 // DeleteExpectedRack implements interface NICoServer
-func (f *NICoServerImpl) DeleteExpectedRack(ctx context.Context, req *cwssaws.ExpectedRackRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) DeleteExpectedRack(ctx context.Context, req *corev1.ExpectedRackRequest) (*emptypb.Empty, error) {
 	if req == nil || req.RackId == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for DeleteExpectedRack")
 	}
@@ -991,7 +1006,7 @@ func (f *NICoServerImpl) DeleteExpectedRack(ctx context.Context, req *cwssaws.Ex
 }
 
 // GetExpectedRack implements interface NICoServer
-func (f *NICoServerImpl) GetExpectedRack(ctx context.Context, req *cwssaws.ExpectedRackRequest) (*cwssaws.ExpectedRack, error) {
+func (f *NICoServerImpl) GetExpectedRack(ctx context.Context, req *corev1.ExpectedRackRequest) (*corev1.ExpectedRack, error) {
 	if req == nil || req.RackId == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "ID not provided for GetExpectedRack")
 	}
@@ -1003,16 +1018,16 @@ func (f *NICoServerImpl) GetExpectedRack(ctx context.Context, req *cwssaws.Expec
 }
 
 // GetAllExpectedRacks implements interface NICoServer
-func (f *NICoServerImpl) GetAllExpectedRacks(ctx context.Context, req *emptypb.Empty) (*cwssaws.ExpectedRackList, error) {
-	res := make([]*cwssaws.ExpectedRack, 0, len(f.er))
+func (f *NICoServerImpl) GetAllExpectedRacks(ctx context.Context, req *emptypb.Empty) (*corev1.ExpectedRackList, error) {
+	res := make([]*corev1.ExpectedRack, 0, len(f.er))
 	for _, er := range f.er {
 		res = append(res, er)
 	}
-	return &cwssaws.ExpectedRackList{ExpectedRacks: res}, nil
+	return &corev1.ExpectedRackList{ExpectedRacks: res}, nil
 }
 
 // ReplaceAllExpectedRacks implements interface NICoServer
-func (f *NICoServerImpl) ReplaceAllExpectedRacks(ctx context.Context, req *cwssaws.ExpectedRackList) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) ReplaceAllExpectedRacks(ctx context.Context, req *corev1.ExpectedRackList) (*emptypb.Empty, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1024,7 +1039,7 @@ func (f *NICoServerImpl) ReplaceAllExpectedRacks(ctx context.Context, req *cwssa
 			return nil, status.Errorf(codes.InvalidArgument, "Rack Profile ID not provided for ReplaceAllExpectedRacks")
 		}
 	}
-	f.er = make(map[string]*cwssaws.ExpectedRack)
+	f.er = make(map[string]*corev1.ExpectedRack)
 	for _, er := range req.ExpectedRacks {
 		f.er[er.RackId.Id] = er
 	}
@@ -1033,7 +1048,7 @@ func (f *NICoServerImpl) ReplaceAllExpectedRacks(ctx context.Context, req *cwssa
 
 // DeleteAllExpectedRacks implements interface NICoServer
 func (f *NICoServerImpl) DeleteAllExpectedRacks(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
-	f.er = make(map[string]*cwssaws.ExpectedRack)
+	f.er = make(map[string]*corev1.ExpectedRack)
 	return &emptypb.Empty{}, nil
 }
 
@@ -1043,242 +1058,244 @@ func (f *NICoServerImpl) LoadTestMachines() {
 
 	var memSize uint32 = 16384
 
-	f.m[nid] = &cwssaws.Machine{
-		Id:    &cwssaws.MachineId{Id: nid},
+	f.m[nid] = &corev1.Machine{
+		Id:    &corev1.MachineId{Id: nid},
 		State: "Ready",
-		Interfaces: []*cwssaws.MachineInterface{
-			{
-				Id:                   &cwssaws.MachineInterfaceId{Value: uuid.NewString()},
-				AttachedDpuMachineId: &cwssaws.MachineId{Id: uuid.NewString()},
-				MachineId:            &cwssaws.MachineId{Id: nid},
-				SegmentId:            &cwssaws.NetworkSegmentId{Value: uuid.NewString()},
-				Hostname:             "nico.nvidia.com",
-				PrimaryInterface:     true,
-				MacAddress:           generateMacAddress(),
-				Address:              []string{generateIPAddress()},
-			},
-		},
-		DiscoveryInfo: &cwssaws.DiscoveryInfo{
-			NetworkInterfaces: []*cwssaws.NetworkInterface{
+		Status: &corev1.MachineStatus{
+			Interfaces: []*corev1.MachineInterface{
 				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "0x14e4",
-						Device:      "0x165f",
-						Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.0/net/eno8303",
-						Description: getStrPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
-					},
-				},
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "0x14e4",
-						Device:      "0x165f",
-						Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.1/net/eno8403",
-						Description: getStrPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
-					},
-				},
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "0x14e4",
-						Device:      "0x16d7",
-						Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.0/net/eno12399np0",
-						Description: getStrPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
-					},
-				},
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "0x14e4",
-						Device:      "0x16d7",
-						Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.1/net/eno12409np1",
-						Description: getStrPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
-					},
-				},
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "0x15b3",
-						Device:      "0xa2d6",
-						Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.0/net/enp177s0f0np0",
-						NumaNode:    1,
-						Description: getStrPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
-					},
-				},
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "0x15b3",
-						Device:      "0xa2d6",
-						Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.1/net/enp177s0f1np1",
-						NumaNode:    1,
-						Description: getStrPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
-					},
+					Id:                   &corev1.MachineInterfaceId{Value: uuid.NewString()},
+					AttachedDpuMachineId: &corev1.MachineId{Id: uuid.NewString()},
+					MachineId:            &corev1.MachineId{Id: nid},
+					SegmentId:            &corev1.NetworkSegmentId{Value: uuid.NewString()},
+					Hostname:             "nico.nvidia.com",
+					PrimaryInterface:     true,
+					MacAddress:           generateMacAddress(),
+					Address:              []string{generateIPAddress()},
 				},
 			},
-			BlockDevices: []*cwssaws.BlockDevice{
-				{
-					Model:    "NO_MODEL",
-					Revision: "NO_REVISION",
-				},
-				{
-					Model:    "LOGICAL_VOLUME",
-					Revision: "3.53",
-					Serial:   "600508b1001cb4d1a278bf3ee7a72228",
-				},
-				{
-					Model:    "Dell Ent NVMe CM6 RI 1.92TB",
-					Revision: "2.1.3",
-				},
-				{
-					Model:    "SSDPF2KE016T9L",
-					Revision: "2CV1L028",
-				},
-				{
-					Model:    "DELLBOSS_VD",
-					Revision: "MV.R00-0",
-				},
-			},
-			DmiData: &cwssaws.DmiData{
-				BoardName:     "7Z23CTOLWW",
-				BoardVersion:  "06",
-				BiosVersion:   "U8E122J-1.51",
-				ProductSerial: "J1050ACR",
-				BoardSerial:   ".C1KS2CS001G.",
-				ChassisSerial: "J1050ACR",
-				BiosDate:      "03/30/2023",
-				ProductName:   "ThinkSystem SR670 V2",
-				SysVendor:     "Lenovo",
-			},
-			NvmeDevices: []*cwssaws.NvmeDevice{
-				{
-					Model:       "Dell Ent NVMe CM6 RI 1.92TB",
-					FirmwareRev: "2.1.3",
-				},
-				{
-					Model:       "Dell Ent NVMe CM6 RI 1.92TB",
-					FirmwareRev: "2.1.3",
-				},
-				{
-					Model:       "Dell Ent NVMe CM6 RI 1.92TB",
-					FirmwareRev: "2.1.3",
-				},
-			},
-			Gpus: []*cwssaws.Gpu{
-				{
-					Name:           "NVIDIA H100 PCIe",
-					Serial:         "1654422005434",
-					DriverVersion:  "530.30.02",
-					VbiosVersion:   "96.00.30.00.01",
-					InforomVersion: "1010.0200.00.02",
-					TotalMemory:    "81559 MiB",
-					Frequency:      "1755 MHz",
-					PciBusId:       "00000000:17:00.0",
-				},
-			},
-			MemoryDevices: []*cwssaws.MemoryDevice{
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  &memSize,
-					MemType: getStrPtr("DDR4"),
-				},
-				{
-					SizeMb:  nil,
-					MemType: getStrPtr("UNKNOWN"),
-				},
-			},
-			InfinibandInterfaces: []*cwssaws.InfinibandInterface{
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "Mellanox Technologies",
-						Device:      "MT28908 Family [ConnectX-6]",
-						Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.0/infiniband/rocep202s0f0",
-						NumaNode:    1,
-						Description: getStrPtr("MT28908 Family [ConnectX-6]"),
-						Slot:        getStrPtr("0000:ca:00.0"),
+			DiscoveryInfo: &corev1.DiscoveryInfo{
+				NetworkInterfaces: []*corev1.NetworkInterface{
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "0x14e4",
+							Device:      "0x165f",
+							Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.0/net/eno8303",
+							Description: getStrPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
+						},
 					},
-					Guid: "1070fd0300bd43ac",
-				},
-				{
-					PciProperties: &cwssaws.PciDeviceProperties{
-						Vendor:      "Mellanox Technologies",
-						Device:      "MT28908 Family [ConnectX-6]",
-						Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.1/infiniband/rocep202s0f1",
-						NumaNode:    1,
-						Description: getStrPtr("MT28908 Family [ConnectX-6]"),
-						Slot:        getStrPtr("0000:ca:00.1"),
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "0x14e4",
+							Device:      "0x165f",
+							Path:        "/devices/pci0000:00/0000:00:1c.5/0000:04:00.1/net/eno8403",
+							Description: getStrPtr("NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"),
+						},
 					},
-					Guid: "1070fd0300bd43ad",
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "0x14e4",
+							Device:      "0x16d7",
+							Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.0/net/eno12399np0",
+							Description: getStrPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
+						},
+					},
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "0x14e4",
+							Device:      "0x16d7",
+							Path:        "/devices/pci0000:30/0000:30:04.0/0000:31:00.1/net/eno12409np1",
+							Description: getStrPtr("BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"),
+						},
+					},
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "0x15b3",
+							Device:      "0xa2d6",
+							Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.0/net/enp177s0f0np0",
+							NumaNode:    1,
+							Description: getStrPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
+						},
+					},
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "0x15b3",
+							Device:      "0xa2d6",
+							Path:        "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.1/net/enp177s0f1np1",
+							NumaNode:    1,
+							Description: getStrPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"),
+						},
+					},
+				},
+				BlockDevices: []*corev1.BlockDevice{
+					{
+						Model:    "NO_MODEL",
+						Revision: "NO_REVISION",
+					},
+					{
+						Model:    "LOGICAL_VOLUME",
+						Revision: "3.53",
+						Serial:   "600508b1001cb4d1a278bf3ee7a72228",
+					},
+					{
+						Model:    "Dell Ent NVMe CM6 RI 1.92TB",
+						Revision: "2.1.3",
+					},
+					{
+						Model:    "SSDPF2KE016T9L",
+						Revision: "2CV1L028",
+					},
+					{
+						Model:    "DELLBOSS_VD",
+						Revision: "MV.R00-0",
+					},
+				},
+				DmiData: &corev1.DmiData{
+					BoardName:     "7Z23CTOLWW",
+					BoardVersion:  "06",
+					BiosVersion:   "U8E122J-1.51",
+					ProductSerial: "J1050ACR",
+					BoardSerial:   ".C1KS2CS001G.",
+					ChassisSerial: "J1050ACR",
+					BiosDate:      "03/30/2023",
+					ProductName:   "ThinkSystem SR670 V2",
+					SysVendor:     "Lenovo",
+				},
+				NvmeDevices: []*corev1.NvmeDevice{
+					{
+						Model:       "Dell Ent NVMe CM6 RI 1.92TB",
+						FirmwareRev: "2.1.3",
+					},
+					{
+						Model:       "Dell Ent NVMe CM6 RI 1.92TB",
+						FirmwareRev: "2.1.3",
+					},
+					{
+						Model:       "Dell Ent NVMe CM6 RI 1.92TB",
+						FirmwareRev: "2.1.3",
+					},
+				},
+				Gpus: []*corev1.Gpu{
+					{
+						Name:           "NVIDIA H100 PCIe",
+						Serial:         "1654422005434",
+						DriverVersion:  "530.30.02",
+						VbiosVersion:   "96.00.30.00.01",
+						InforomVersion: "1010.0200.00.02",
+						TotalMemory:    "81559 MiB",
+						Frequency:      "1755 MHz",
+						PciBusId:       "00000000:17:00.0",
+					},
+				},
+				MemoryDevices: []*corev1.MemoryDevice{
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  &memSize,
+						MemType: getStrPtr("DDR4"),
+					},
+					{
+						SizeMb:  nil,
+						MemType: getStrPtr("UNKNOWN"),
+					},
+				},
+				InfinibandInterfaces: []*corev1.InfinibandInterface{
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "Mellanox Technologies",
+							Device:      "MT28908 Family [ConnectX-6]",
+							Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.0/infiniband/rocep202s0f0",
+							NumaNode:    1,
+							Description: getStrPtr("MT28908 Family [ConnectX-6]"),
+							Slot:        getStrPtr("0000:ca:00.0"),
+						},
+						Guid: "1070fd0300bd43ac",
+					},
+					{
+						PciProperties: &corev1.PciDeviceProperties{
+							Vendor:      "Mellanox Technologies",
+							Device:      "MT28908 Family [ConnectX-6]",
+							Path:        "/devices/pci0000:c9/0000:c9:02.0/0000:ca:00.1/infiniband/rocep202s0f1",
+							NumaNode:    1,
+							Description: getStrPtr("MT28908 Family [ConnectX-6]"),
+							Slot:        getStrPtr("0000:ca:00.1"),
+						},
+						Guid: "1070fd0300bd43ad",
+					},
 				},
 			},
 		},
@@ -1412,7 +1429,7 @@ func normalizeAllowedAudiences(defaultAud string, allowed []string) ([]string, e
 }
 
 // SetTenantIdentityConfiguration implements interface NICoServer
-func (f *NICoServerImpl) SetTenantIdentityConfiguration(ctx context.Context, req *cwssaws.SetTenantIdentityConfigRequest) (*cwssaws.TenantIdentityConfigResponse, error) {
+func (f *NICoServerImpl) SetTenantIdentityConfiguration(ctx context.Context, req *corev1.SetTenantIdentityConfigRequest) (*corev1.TenantIdentityConfigResponse, error) {
 	if req == nil || req.GetOrganizationId() == "" || req.GetConfig() == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1478,9 +1495,9 @@ func (f *NICoServerImpl) SetTenantIdentityConfiguration(ctx context.Context, req
 		}
 	}
 
-	resp := &cwssaws.TenantIdentityConfigResponse{
+	resp := &corev1.TenantIdentityConfigResponse{
 		OrganizationId: orgID,
-		Config: &cwssaws.TenantIdentityConfig{
+		Config: &corev1.TenantIdentityConfig{
 			Enabled:          in.GetEnabled(),
 			Issuer:           in.GetIssuer(),
 			DefaultAudience:  in.GetDefaultAudience(),
@@ -1502,7 +1519,7 @@ func (f *NICoServerImpl) SetTenantIdentityConfiguration(ctx context.Context, req
 }
 
 // GetTenantIdentityConfiguration implements interface NICoServer
-func (f *NICoServerImpl) GetTenantIdentityConfiguration(ctx context.Context, req *cwssaws.GetTenantIdentityConfigRequest) (*cwssaws.TenantIdentityConfigResponse, error) {
+func (f *NICoServerImpl) GetTenantIdentityConfiguration(ctx context.Context, req *corev1.GetTenantIdentityConfigRequest) (*corev1.TenantIdentityConfigResponse, error) {
 	if req == nil || req.GetOrganizationId() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1520,17 +1537,17 @@ func (f *NICoServerImpl) GetTenantIdentityConfiguration(ctx context.Context, req
 	return resp, nil
 }
 
-func cloneTenantIdentityConfigResponse(in *cwssaws.TenantIdentityConfigResponse) *cwssaws.TenantIdentityConfigResponse {
+func cloneTenantIdentityConfigResponse(in *corev1.TenantIdentityConfigResponse) *corev1.TenantIdentityConfigResponse {
 	if in == nil {
 		return nil
 	}
-	out := &cwssaws.TenantIdentityConfigResponse{
+	out := &corev1.TenantIdentityConfigResponse{
 		OrganizationId: in.GetOrganizationId(),
 		CreatedAt:      in.GetCreatedAt(),
 		UpdatedAt:      in.GetUpdatedAt(),
 	}
 	if cfg := in.GetConfig(); cfg != nil {
-		out.Config = &cwssaws.TenantIdentityConfig{
+		out.Config = &corev1.TenantIdentityConfig{
 			Enabled:              cfg.GetEnabled(),
 			Issuer:               cfg.GetIssuer(),
 			DefaultAudience:      cfg.GetDefaultAudience(),
@@ -1545,7 +1562,7 @@ func cloneTenantIdentityConfigResponse(in *cwssaws.TenantIdentityConfigResponse)
 }
 
 // DeleteTenantIdentityConfiguration implements interface NICoServer
-func (f *NICoServerImpl) DeleteTenantIdentityConfiguration(ctx context.Context, req *cwssaws.GetTenantIdentityConfigRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) DeleteTenantIdentityConfiguration(ctx context.Context, req *corev1.GetTenantIdentityConfigRequest) (*emptypb.Empty, error) {
 	if req == nil || req.GetOrganizationId() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1559,7 +1576,7 @@ func (f *NICoServerImpl) DeleteTenantIdentityConfiguration(ctx context.Context, 
 }
 
 // SetTokenDelegation implements interface NICoServer
-func (f *NICoServerImpl) SetTokenDelegation(ctx context.Context, req *cwssaws.TokenDelegationRequest) (*cwssaws.TokenDelegationResponse, error) {
+func (f *NICoServerImpl) SetTokenDelegation(ctx context.Context, req *corev1.TokenDelegationRequest) (*corev1.TokenDelegationResponse, error) {
 	if req == nil || req.GetOrganizationId() == "" || req.GetConfig() == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1579,7 +1596,7 @@ func (f *NICoServerImpl) SetTokenDelegation(ctx context.Context, req *cwssaws.To
 	now := timestamppb.Now()
 	existing, isUpdate := f.tokenDelegations[orgID]
 
-	resp := &cwssaws.TokenDelegationResponse{
+	resp := &corev1.TokenDelegationResponse{
 		OrganizationId:       orgID,
 		TokenEndpoint:        in.GetTokenEndpoint(),
 		SubjectTokenAudience: in.GetSubjectTokenAudience(),
@@ -1592,8 +1609,8 @@ func (f *NICoServerImpl) SetTokenDelegation(ctx context.Context, req *cwssaws.To
 		if strings.TrimSpace(basic.GetClientSecret()) == "" {
 			return nil, status.Errorf(codes.InvalidArgument, "client_secret is required for client_secret_basic")
 		}
-		resp.AuthMethodConfig = &cwssaws.TokenDelegationResponse_ClientSecretBasic{
-			ClientSecretBasic: &cwssaws.ClientSecretBasicResponse{
+		resp.AuthMethodConfig = &corev1.TokenDelegationResponse_ClientSecretBasic{
+			ClientSecretBasic: &corev1.ClientSecretBasicResponse{
 				ClientId:         basic.GetClientId(),
 				ClientSecretHash: clientSecretDisplayHash(basic.GetClientSecret()),
 			},
@@ -1610,7 +1627,7 @@ func (f *NICoServerImpl) SetTokenDelegation(ctx context.Context, req *cwssaws.To
 }
 
 // GetTokenDelegation implements interface NICoServer
-func (f *NICoServerImpl) GetTokenDelegation(ctx context.Context, req *cwssaws.GetTokenDelegationRequest) (*cwssaws.TokenDelegationResponse, error) {
+func (f *NICoServerImpl) GetTokenDelegation(ctx context.Context, req *corev1.GetTokenDelegationRequest) (*corev1.TokenDelegationResponse, error) {
 	if req == nil || req.GetOrganizationId() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1623,7 +1640,7 @@ func (f *NICoServerImpl) GetTokenDelegation(ctx context.Context, req *cwssaws.Ge
 
 // DeleteTokenDelegation implements interface NICoServer. Idempotent: a
 // missing entry returns success (matches carbide-core's no-op delete).
-func (f *NICoServerImpl) DeleteTokenDelegation(ctx context.Context, req *cwssaws.GetTokenDelegationRequest) (*emptypb.Empty, error) {
+func (f *NICoServerImpl) DeleteTokenDelegation(ctx context.Context, req *corev1.GetTokenDelegationRequest) (*emptypb.Empty, error) {
 	if req == nil || req.GetOrganizationId() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1632,7 +1649,7 @@ func (f *NICoServerImpl) DeleteTokenDelegation(ctx context.Context, req *cwssaws
 }
 
 // GetJWKS implements interface NICoServer
-func (f *NICoServerImpl) GetJWKS(ctx context.Context, req *cwssaws.JwksRequest) (*cwssaws.Jwks, error) {
+func (f *NICoServerImpl) GetJWKS(ctx context.Context, req *corev1.JwksRequest) (*corev1.Jwks, error) {
 	if req == nil || req.GetOrganizationId() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1643,7 +1660,7 @@ func (f *NICoServerImpl) GetJWKS(ctx context.Context, req *cwssaws.JwksRequest) 
 		return nil, status.Errorf(codes.NotFound, "Identity configuration not found for org %q", orgID)
 	}
 	use := "sig"
-	if req.GetKind() == cwssaws.JwksKind_Spiffe {
+	if req.GetKind() == corev1.JwksKind_Spiffe {
 		use = "jwt-svid"
 	}
 	keys := []*identityKeyMaterial{}
@@ -1661,11 +1678,11 @@ func (f *NICoServerImpl) GetJWKS(ctx context.Context, req *cwssaws.JwksRequest) 
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to serialize JWKS: %v", err)
 	}
-	return &cwssaws.Jwks{Jwks: doc}, nil
+	return &corev1.Jwks{Jwks: doc}, nil
 }
 
 // GetOpenIDConfiguration implements interface NICoServer
-func (f *NICoServerImpl) GetOpenIDConfiguration(ctx context.Context, req *cwssaws.OpenIdConfigRequest) (*cwssaws.OpenIdConfiguration, error) {
+func (f *NICoServerImpl) GetOpenIDConfiguration(ctx context.Context, req *corev1.OpenIdConfigRequest) (*corev1.OpenIdConfiguration, error) {
 	if req == nil || req.GetOrganizationId() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1683,7 +1700,7 @@ func (f *NICoServerImpl) GetOpenIDConfiguration(ctx context.Context, req *cwssaw
 		return nil, status.Errorf(codes.NotFound, "No active signing key for org %q", orgID)
 	}
 	base := strings.TrimRight(iss, "/")
-	return &cwssaws.OpenIdConfiguration{
+	return &corev1.OpenIdConfiguration{
 		Issuer:                           iss,
 		JwksUri:                          base + "/.well-known/jwks.json",
 		ResponseTypesSupported:           []string{"token"},
@@ -1691,6 +1708,74 @@ func (f *NICoServerImpl) GetOpenIDConfiguration(ctx context.Context, req *cwssaw
 		IdTokenSigningAlgValuesSupported: []string{},
 		SpiffeJwksUri:                    base + "/.well-known/spiffe/jwks.json",
 	}, nil
+}
+
+// mockCurrentEncryptionKeyID is the KEK id the mock reports as current for re-wrap. Seeded orgs
+// start un-stamped, so the first apply re-wraps them and subsequent runs report them skipped.
+const mockCurrentEncryptionKeyID = "mock-kek-1"
+
+// tenantIdentityEncryptedFieldCount returns how many at-rest encrypted fields the mock would
+// re-wrap for an org: one per populated signing-key slot plus optional token-delegation
+// credentials. This mirrors the real re-wrap surface (encrypted_signing_key_1/2 and
+// encrypted_auth_method_config).
+func (f *NICoServerImpl) tenantIdentityEncryptedFieldCount(orgID string, st *identityOrgState) uint32 {
+	var n uint32
+	if st.slot1 != nil {
+		n++
+	}
+	if st.slot2 != nil {
+		n++
+	}
+	if _, ok := f.tokenDelegations[orgID]; ok {
+		n++
+	}
+	return n
+}
+
+// ReencryptTenantIdentitySecrets implements interface NICoServer. It simulates a KEK-rotation
+// re-wrap over the in-memory identity state so the endpoint can be exercised in local/dev
+// environments where Core is not deployed. Rows already stamped with the current key id are
+// reported as skipped (idempotent); dry_run reports would-change counts without mutating state.
+func (f *NICoServerImpl) ReencryptTenantIdentitySecrets(ctx context.Context, req *corev1.ReencryptTenantIdentitySecretsRequest) (*corev1.ReencryptTenantIdentitySecretsResponse, error) {
+	if req == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
+	}
+	if f.reencryptedOrgs == nil {
+		f.reencryptedOrgs = make(map[string]string)
+	}
+	current := f.currentEncryptionKeyID
+	if current == "" {
+		current = mockCurrentEncryptionKeyID
+	}
+
+	resp := &corev1.ReencryptTenantIdentitySecretsResponse{
+		CurrentEncryptionKeyId: current,
+	}
+	orgFilter := strings.TrimSpace(req.GetOrganizationId())
+	if orgFilter != "" {
+		state, ok := f.identityState[orgFilter]
+		if !ok || state == nil {
+			return nil, status.Errorf(codes.NotFound, "Identity configuration not found for org %q", orgFilter)
+		}
+	}
+	for orgID, st := range f.identityState {
+		if st == nil || (orgFilter != "" && orgID != orgFilter) {
+			continue
+		}
+		resp.RowsExamined++
+		fieldCount := f.tenantIdentityEncryptedFieldCount(orgID, st)
+		if f.reencryptedOrgs[orgID] == current {
+			resp.RowsSkippedAllOnTarget++
+			resp.FieldsSkippedOnTarget += fieldCount
+			continue
+		}
+		resp.RowsUpdated++
+		resp.FieldsReencrypted += fieldCount
+		if !req.GetDryRun() {
+			f.reencryptedOrgs[orgID] = current
+		}
+	}
+	return resp, nil
 }
 
 // resolveSigningOrg returns the seeded org when exactly one identity is configured,
@@ -1705,7 +1790,7 @@ func (f *NICoServerImpl) resolveSigningOrg(_ context.Context) string {
 }
 
 // SignMachineIdentity implements interface NICoServer
-func (f *NICoServerImpl) SignMachineIdentity(ctx context.Context, req *cwssaws.MachineIdentityRequest) (*cwssaws.MachineIdentityResponse, error) {
+func (f *NICoServerImpl) SignMachineIdentity(ctx context.Context, req *corev1.MachineIdentityRequest) (*corev1.MachineIdentityResponse, error) {
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
@@ -1768,7 +1853,7 @@ func (f *NICoServerImpl) SignMachineIdentity(ctx context.Context, req *cwssaws.M
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to sign token: %v", err)
 	}
-	return &cwssaws.MachineIdentityResponse{
+	return &corev1.MachineIdentityResponse{
 		AccessToken:     token,
 		IssuedTokenType: "urn:ietf:params:oauth:token-type:jwt",
 		TokenType:       "Bearer",
@@ -1792,9 +1877,9 @@ func (f *NICoServerImpl) LoadTestIdentity() {
 		slot1:       km,
 		currentSlot: 1,
 	}
-	st.cfg = &cwssaws.TenantIdentityConfigResponse{
+	st.cfg = &corev1.TenantIdentityConfigResponse{
 		OrganizationId: seedOrg,
-		Config: &cwssaws.TenantIdentityConfig{
+		Config: &corev1.TenantIdentityConfig{
 			Enabled:          true,
 			Issuer:           "https://carbide-rest.mock/v2/org/test-org/nico/site/mock-site",
 			DefaultAudience:  "openbao",
@@ -1815,27 +1900,33 @@ func NICoTest(secs int) {
 		panic(err)
 	}
 
-	s := grpc.NewServer()
+	var serverOpts []grpc.ServerOption
+	if cotel.TransportEnabled() {
+		serverOpts = append(serverOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	s := grpc.NewServer(serverOpts...)
 	reflection.Register(s)
 
 	nicoServer := &NICoServerImpl{
-		v:                make(map[string]*cwssaws.Vpc),
-		ns:               make(map[string]*cwssaws.NetworkSegment),
-		ins:              make(map[string]*cwssaws.Instance),
-		m:                make(map[string]*cwssaws.Machine),
-		tk:               make(map[string]*cwssaws.TenantKeyset),
-		ibp:              make(map[string]*cwssaws.IBPartition),
-		em:               make(map[string]*cwssaws.ExpectedMachine),
-		eps:              make(map[string]*cwssaws.ExpectedPowerShelf),
-		es:               make(map[string]*cwssaws.ExpectedSwitch),
-		er:               make(map[string]*cwssaws.ExpectedRack),
-		identityState:    make(map[string]*identityOrgState),
-		tokenDelegations: make(map[string]*cwssaws.TokenDelegationResponse),
+		v:                      make(map[string]*corev1.Vpc),
+		ns:                     make(map[string]*corev1.NetworkSegment),
+		ins:                    make(map[string]*corev1.Instance),
+		m:                      make(map[string]*corev1.Machine),
+		tk:                     make(map[string]*corev1.TenantKeyset),
+		ibp:                    make(map[string]*corev1.IBPartition),
+		em:                     make(map[string]*corev1.ExpectedMachine),
+		eps:                    make(map[string]*corev1.ExpectedPowerShelf),
+		es:                     make(map[string]*corev1.ExpectedSwitch),
+		er:                     make(map[string]*corev1.ExpectedRack),
+		identityState:          make(map[string]*identityOrgState),
+		tokenDelegations:       make(map[string]*corev1.TokenDelegationResponse),
+		currentEncryptionKeyID: mockCurrentEncryptionKeyID,
+		reencryptedOrgs:        make(map[string]string),
 	}
 	nicoServer.LoadTestMachines()
 	nicoServer.LoadTestIdentity()
 
-	cwssaws.RegisterForgeServer(s, nicoServer)
+	corev1.RegisterForgeServer(s, nicoServer)
 
 	if secs != 0 {
 		timer := time.AfterFunc(time.Second*time.Duration(secs), func() {

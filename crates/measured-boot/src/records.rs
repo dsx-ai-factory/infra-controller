@@ -710,3 +710,225 @@ impl ToTable for MeasurementApprovedProfileRecord {
         Ok(table.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, check_cases};
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum RecordEnum {
+        BundleState,
+        MachineState,
+        ApprovalType,
+    }
+
+    struct EnumInput {
+        enum_type: RecordEnum,
+        value: &'static str,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ParsedRecordEnum {
+        BundleState(MeasurementBundleState),
+        MachineState(MeasurementMachineState),
+        ApprovalType(MeasurementApprovedType),
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct EnumSummary {
+        parsed: ParsedRecordEnum,
+        display: String,
+    }
+
+    #[test]
+    fn enum_parse_and_display_cases() {
+        check_cases(
+            [
+                Case {
+                    scenario: "pending bundle",
+                    input: EnumInput {
+                        enum_type: RecordEnum::BundleState,
+                        value: "Pending",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::BundleState(MeasurementBundleState::Pending),
+                        display: "Pending".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "active bundle",
+                    input: EnumInput {
+                        enum_type: RecordEnum::BundleState,
+                        value: "Active",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::BundleState(MeasurementBundleState::Active),
+                        display: "Active".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "obsolete bundle",
+                    input: EnumInput {
+                        enum_type: RecordEnum::BundleState,
+                        value: "Obsolete",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::BundleState(MeasurementBundleState::Obsolete),
+                        display: "Obsolete".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "retired bundle",
+                    input: EnumInput {
+                        enum_type: RecordEnum::BundleState,
+                        value: "Retired",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::BundleState(MeasurementBundleState::Retired),
+                        display: "Retired".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "revoked bundle",
+                    input: EnumInput {
+                        enum_type: RecordEnum::BundleState,
+                        value: "Revoked",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::BundleState(MeasurementBundleState::Revoked),
+                        display: "Revoked".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "unknown bundle state",
+                    input: EnumInput {
+                        enum_type: RecordEnum::BundleState,
+                        value: "Unknown",
+                    },
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "discovered machine",
+                    input: EnumInput {
+                        enum_type: RecordEnum::MachineState,
+                        value: "Discovered",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::MachineState(MeasurementMachineState::Discovered),
+                        display: "Discovered".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "machine pending bundle",
+                    input: EnumInput {
+                        enum_type: RecordEnum::MachineState,
+                        value: "PendingBundle",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::MachineState(
+                            MeasurementMachineState::PendingBundle,
+                        ),
+                        display: "PendingBundle".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "measured machine",
+                    input: EnumInput {
+                        enum_type: RecordEnum::MachineState,
+                        value: "Measured",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::MachineState(MeasurementMachineState::Measured),
+                        display: "Measured".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "failed measurement",
+                    input: EnumInput {
+                        enum_type: RecordEnum::MachineState,
+                        value: "MeasuringFailed",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::MachineState(
+                            MeasurementMachineState::MeasuringFailed,
+                        ),
+                        display: "MeasuringFailed".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "unknown machine state",
+                    input: EnumInput {
+                        enum_type: RecordEnum::MachineState,
+                        value: "Unknown",
+                    },
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "one-shot approval",
+                    input: EnumInput {
+                        enum_type: RecordEnum::ApprovalType,
+                        value: "Oneshot",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::ApprovalType(MeasurementApprovedType::Oneshot),
+                        display: "Oneshot".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "persistent approval",
+                    input: EnumInput {
+                        enum_type: RecordEnum::ApprovalType,
+                        value: "Persist",
+                    },
+                    expect: Yields(EnumSummary {
+                        parsed: ParsedRecordEnum::ApprovalType(MeasurementApprovedType::Persist),
+                        display: "Persist".to_string(),
+                    }),
+                },
+                Case {
+                    scenario: "unknown approval type",
+                    input: EnumInput {
+                        enum_type: RecordEnum::ApprovalType,
+                        value: "Unknown",
+                    },
+                    expect: Fails,
+                },
+            ],
+            |input| {
+                match input.enum_type {
+                    RecordEnum::BundleState => {
+                        input
+                            .value
+                            .parse::<MeasurementBundleState>()
+                            .map(|value| EnumSummary {
+                                display: value.to_string(),
+                                parsed: ParsedRecordEnum::BundleState(value),
+                            })
+                    }
+                    RecordEnum::MachineState => {
+                        input
+                            .value
+                            .parse::<MeasurementMachineState>()
+                            .map(|value| EnumSummary {
+                                display: value.to_string(),
+                                parsed: ParsedRecordEnum::MachineState(value),
+                            })
+                    }
+                    RecordEnum::ApprovalType => {
+                        input
+                            .value
+                            .parse::<MeasurementApprovedType>()
+                            .map(|value| EnumSummary {
+                                display: value.to_string(),
+                                parsed: ParsedRecordEnum::ApprovalType(value),
+                            })
+                    }
+                }
+                .map_err(drop)
+            },
+        );
+    }
+}

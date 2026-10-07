@@ -23,17 +23,18 @@ edition = "2024"
 license = "Apache-2.0"
 license-file = "LICENSE"
 authors = ["NVIDIA Carbide Engineering <carbide-dev@exchange.nvidia.com>"]
+repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.44.10" }
-librms = { git = "https://github.com/NVIDIA/nv-rms-client.git", tag = "v0.0.13" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.10" }
+librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.10.1", features = ["server"] }
 ansi-to-html = "0.2.2"
 
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-rustls = { version = "0.26" }
 tokio-util = "0.7"
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 
 tonic = { version = "0.14", features = ["tls-ring"] }
 strum = "0.28.0"
@@ -50,17 +51,19 @@ sqlx = { version = "0.9" }
 sqlx-core = { version = "0.9" }
 sqlx-macros-core = { version = "0.9" }
 
-opentelemetry = { version = "0.31.0", features = ["logs"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.1", features = ["metrics"] }
-opentelemetry-prometheus = "0.31.0"
-opentelemetry-semantic-conventions = "0.31.0"
-# tracing-opentelemetry 0.29.0 seems to correspond to opentelemetry 0.28.0, confusingly enough.
-tracing-appender = "0.2.4"
-tracing-opentelemetry = "0.32.1"
+opentelemetry = { version = "0.32.0", features = ["logs"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["logs", "rt-tokio"] }
+opentelemetry-http = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", features = ["metrics"] }
+opentelemetry-prometheus = "0.32.0"
+opentelemetry-proto = { version = "0.32.0", default-features = false }
+opentelemetry-semantic-conventions = "0.32.1"
+# tracing-opentelemetry 0.33.0 seems to correspond to opentelemetry 0.32, confusingly enough.
+tracing-opentelemetry = "0.33.0"
 
 # NV-Redfish
-nv-redfish = { version = "0.10.0" }
+nv-redfish = { version = "0.18.1" }
+nv-redfish-dispatcher = { version = "0.18.1" }
 
 ########
 # MARK: - Pinned packages that we can't upgrade due to conflicts or just bugs
@@ -104,7 +107,6 @@ color-eyre = "0.6.5"
 const_format = "0.2.26"
 containerd-client = "0.9"
 criterion = "0.8"
-crossterm = "0.29.0"
 crypto-bigint = "0.7.0-rc.9"
 csv = "1.3.1"
 ctor = "1.0.1"
@@ -129,6 +131,7 @@ governor = "0.10.1"
 gtmpl = "0.7.1"
 gtmpl_derive = "0.5.0"
 gtmpl_value = "0.5.1"
+hashbrown = "0.17.1"
 heck = "0.5.0"
 hex = "0.4.3"
 hickory-proto = "0.26.1"
@@ -142,10 +145,12 @@ http-body-util = "^0.1"
 humantime = "2.1.0"
 humantime-serde = "1.1"
 indoc = "2.0.6"
+indexmap = "2"
 ipnet = "2"
 ipnetwork = "0.21.0"
 itertools = "0.14"
 jemalloc_pprof = "0.8"
+json-patch = "4.2.0"
 jsonwebtoken = "10.2.0"
 k8s-openapi = "0.27.0"
 kube = { version = "3.0.0", default-features = false }
@@ -157,7 +162,6 @@ local-ip-address = "0.6.3"
 log = "0.4.19"
 lru = "0.18.0"
 mac_address = "1.1"
-md5 = "0.8"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 mime = "0.3"
@@ -185,22 +189,25 @@ proc-macro2 = { default-features = false, version = "1.0.92" }
 prometheus = "0.14.0"
 prost = "0.14.3"
 prost-build = "0.14.3"
+prost-reflect = "0.16"
 prost-types = "0.14.3"
-pwhash = "1.0.0"
 quick-xml = "0.39"
 quote = { default-features = false, version = "1.0" }
 rand = "0.10"
 rand_core = "0.10"
-ratatui = "0.30.0"
 rcgen = "0.14.7"
 regex = "1.11.2"
 reqwest = { default-features = false, version = "0.13.3" }
+reqwest-middleware = "0.5"
+reqwest-tracing = { version = "0.7", default-features = false, features = [
+  "opentelemetry_0_31",
+] }
 resolv-conf = "0.7.0"
 ringbuf = "0.5.0"
 rsa = "0.9.9"
 rtnetlink = "0.21"
 rumqttc = { default-features = false, version = "0.25" }
-russh = "0.61.1"
+russh = "0.62.4"
 rustc-hash = "2.1.1"
 rustls-pemfile = "2.2.0"
 serde = "1.0.228"
@@ -222,7 +229,6 @@ tar = "0.4.40"
 temp-dir = "0.2.0"
 tempfile = "3.8"
 tera = "1.20"
-test-cdylib = "1.1.0"
 thiserror = "2.0.14"
 tikv-jemallocator = "0.6.1"
 time = "0.3.36"
@@ -233,12 +239,13 @@ toml_edit = "0.25.11"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-reflection = "0.14"
-tower = "0.5"
-tower-http = "0.6"
+tower = { version = "0.5", features = ["timeout"] }
+tower-http = "0.7"
 tower-layer = "0.3"
 tower-service = "0.3.2"
 tower-test = "0.4"
 tracing = "0.1.41"
+tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
 tracing-subscriber = "0.3"
 tryhard = "0.5.1"
@@ -258,6 +265,10 @@ zeroize = { version = "1", features = ["derive"] }
 zip = { version = "8.6", default-features = false }
 jsonpath-rust = "1.0.4"
 
+[profile.ci-tests]
+inherits = "dev"
+debug = "line-tables-only"
+
 [profile.release]
 debug = "line-tables-only"
 debug-assertions = true    # Add some extra assurance during development
@@ -268,3 +279,4 @@ cloned_instead_of_copied = "warn"
 redundant_clone = "warn"
 large_stack_arrays = "warn"
 unused_async = "warn"
+undocumented_unsafe_blocks = "deny"

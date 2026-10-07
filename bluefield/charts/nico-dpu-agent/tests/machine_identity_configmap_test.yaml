@@ -1,0 +1,14 @@
+suite: machine identity ConfigMap
+templates:
+  - configmap.yaml
+tests:
+  - it: renders the existing agent configuration format
+    set:
+      fmds:
+        sign_proxy_url: http://dsx-imds.dpf-operator-system.svc.cluster.local:8080
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [machine-identity]
+            sign-proxy-url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"

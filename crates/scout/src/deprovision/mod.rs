@@ -16,5 +16,4 @@
  */
 mod cmdrun;
 mod scrabbing;
-pub(crate) use scrabbing::run;
-pub use scrabbing::run_no_api;
+pub(super) use scrabbing::{run, run_no_api};

@@ -37,7 +37,7 @@ fn build_rack_table(racks: &[rpc::forge::Rack]) -> Table {
     table
 }
 
-pub async fn list_racks(api_client: &ApiClient, config: &RuntimeConfig) -> Result<()> {
+pub(super) async fn list_racks(api_client: &ApiClient, config: &RuntimeConfig) -> Result<()> {
     let response = api_client.get_all_racks(config.page_size).await?;
     let racks = response.racks;
     if racks.is_empty() {

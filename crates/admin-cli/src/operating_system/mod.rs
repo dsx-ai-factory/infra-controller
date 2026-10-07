@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-pub mod common;
+mod common;
 mod create;
 mod delete;
 mod get_artifacts;
@@ -29,7 +29,7 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(
         about = "Show operating system definitions (all, or one by ID).",
         visible_alias = "s"
@@ -37,11 +37,13 @@ pub enum Cmd {
     Show(show::Args),
     #[clap(
         about = "Create a new operating system definition.",
+        long_about = "Create a new operating system definition.\n\nSpecify exactly one OS variant: either --ipxe-script or --ipxe-template-id.\n\nFor templated iPXE requirements, artifact configuration, and synchronization rules, refer to docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "c"
     )]
     Create(create::Args),
     #[clap(
         about = "Update an existing operating system definition.",
+        long_about = "Update an existing operating system definition.\n\nFor templated iPXE requirements, artifact configuration, and synchronization rules, refer to docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "u"
     )]
     Update(update::Args),
@@ -54,6 +56,7 @@ pub enum Cmd {
     GetArtifacts(get_artifacts::Args),
     #[clap(
         about = "Set or clear cached_url on OS artifacts.",
+        long_about = "Set or clear cached_url on OS artifacts.\n\nFor cache strategies, readiness behavior, and the complete templated iPXE workflow, refer to docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "scu"
     )]
     SetCachedUrl(set_cached_url::Args),

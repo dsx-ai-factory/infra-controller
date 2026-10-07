@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Overlay for cert-manager only: nico-rest-cert-manager (deployment, service, rbac).
+# Overlay for cert-manager only: nico-rest-cert-manager (deployment, service, service account).
 # Deploys only this component; namespace, image-pull-secret, ca-signing-secret, etc. are assumed to exist.
 # Apply with: kubectl kustomize --load-restrictor LoadRestrictionsNone . | kubectl apply -f -
 apiVersion: kustomize.config.k8s.io/v1beta1

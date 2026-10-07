@@ -33,7 +33,10 @@ pub async fn handle_deleting(
     _state: &mut Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!("Deleting Switch {}", switch_id.to_string());
+    tracing::info!(
+        %switch_id,
+        "Deleting switch",
+    );
     let mut txn = ctx.services.db_pool.begin().await?;
     db_switch::final_delete(*switch_id, &mut txn).await?;
     Ok(StateHandlerOutcome::deleted().with_txn(txn))

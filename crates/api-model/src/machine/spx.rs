@@ -80,8 +80,8 @@ pub fn spx_config_synced(
             conf_att.mac_address.as_deref().unwrap_or_default() == obs_att.mac_address.to_string()
         }) else {
             tracing::error!(
-                "could not find matching status instance {:?}",
-                conf_att.device_instance
+                device_instance = conf_att.device_instance,
+                "could not find matching status instance",
             );
             return Err(SpxConfigNotSyncedReason(
                 "No matching SPX status observation found for attachment in config".to_string(),

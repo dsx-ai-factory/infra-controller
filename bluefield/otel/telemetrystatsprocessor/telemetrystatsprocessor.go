@@ -40,7 +40,7 @@ var (
 	// stats about telemetry_stats
 	telemetryStatCountsOnce         sync.Once
 	telemetryStatCountsLock         sync.Mutex
-	telemetryStatCounts             map[string]int64
+	telemetryStatCounts             map[string]count
 	telemetryStatCountsReporter     *telemetryStatsProcessor
 	telemetryStatCountsReporterLock sync.Mutex
 
@@ -48,11 +48,16 @@ var (
 	rePromInvalid = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 )
 
+type count struct {
+	value     int64
+	startTime pcommon.Timestamp
+}
+
 type telemetryStatsProcessor struct {
 	logger             *zap.Logger
 	config             *Config
-	logCounts          map[string]int64
-	metricCounts       map[string]int64
+	logCounts          map[string]count
+	metricCounts       map[string]count
 	logCountsRWLock    sync.RWMutex
 	metricCountsRWLock sync.RWMutex
 	metricStatsChannel chan telemetryStatsDatapoint
@@ -69,9 +74,10 @@ type logStatsExporter struct {
 }
 
 type telemetryStatsDatapoint struct {
-	name   string
-	value  int64
-	labels map[string]string
+	name      string
+	startTime pcommon.Timestamp
+	value     int64
+	labels    map[string]string
 }
 
 // processor constructor
@@ -80,7 +86,7 @@ func newTelemetryStatsProcessor(
 	logger *zap.Logger,
 ) (*telemetryStatsProcessor, error) {
 	telemetryStatCountsOnce.Do(func() {
-		telemetryStatCounts = make(map[string]int64)
+		telemetryStatCounts = make(map[string]count)
 	})
 
 	p := &telemetryStatsProcessor{
@@ -90,7 +96,7 @@ func newTelemetryStatsProcessor(
 	}
 
 	if len(config.LogGroupings) > 0 {
-		p.logCounts = make(map[string]int64)
+		p.logCounts = make(map[string]count)
 		exporter, err := getLogStatsExporter(p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create log stats exporter: %w", err)
@@ -99,7 +105,7 @@ func newTelemetryStatsProcessor(
 	}
 
 	if len(config.MetricGroupings) > 0 {
-		p.metricCounts = make(map[string]int64)
+		p.metricCounts = make(map[string]count)
 		p.metricStatsChannel = make(chan telemetryStatsDatapoint, 128)
 		p.stopWaiters.Add(1)
 		go p.metricStatsLoop()
@@ -130,6 +136,8 @@ func (p *telemetryStatsProcessor) processLogs(
 	ctx context.Context,
 	ld plog.Logs,
 ) (plog.Logs, error) {
+	now := pcommon.NewTimestampFromTime(time.Now())
+
 	p.logCountsRWLock.Lock()
 	defer p.logCountsRWLock.Unlock()
 
@@ -145,7 +153,12 @@ func (p *telemetryStatsProcessor) processLogs(
 				attrs := NewAttributes(resourceAttrs, scopeAttrs, logAttrs)
 				for _, grouping := range p.config.LogGroupings {
 					key := generateLogKey(grouping, attrs)
-					p.logCounts[key]++
+					count, ok := p.logCounts[key]
+					if !ok {
+						count.startTime = now
+					}
+					count.value++
+					p.logCounts[key] = count
 				}
 			}
 		}
@@ -158,6 +171,8 @@ func (p *telemetryStatsProcessor) processMetrics(
 	ctx context.Context,
 	md pmetric.Metrics,
 ) (pmetric.Metrics, error) {
+	now := pcommon.NewTimestampFromTime(time.Now())
+
 	// Step 1: Process incoming metrics from the pipeline.
 	p.metricCountsRWLock.Lock()
 	for i := 0; i < md.ResourceMetrics().Len(); i++ {
@@ -168,7 +183,7 @@ func (p *telemetryStatsProcessor) processMetrics(
 			scopeAttrs := sm.Scope().Attributes()
 			for k := 0; k < sm.Metrics().Len(); k++ {
 				metric := sm.Metrics().At(k)
-				p.processMetric(metric, resourceAttrs, scopeAttrs)
+				p.processMetric(metric, resourceAttrs, scopeAttrs, now)
 			}
 		}
 	}
@@ -203,6 +218,10 @@ func (p *telemetryStatsProcessor) processMetrics(
 	for {
 		select {
 		case dp := <-p.metricStatsChannel:
+			emitTime := pcommon.NewTimestampFromTime(time.Now())
+			if emitTime < dp.startTime {
+				emitTime = dp.startTime
+			}
 			metric := smStats.Metrics().AppendEmpty()
 			metric.SetName(dp.name)
 			metric.SetDescription("Number of datapoints counted")
@@ -213,6 +232,8 @@ func (p *telemetryStatsProcessor) processMetrics(
 				pmetric.AggregationTemporalityCumulative)
 			datapoint := sum.DataPoints().AppendEmpty()
 			datapoint.SetIntValue(dp.value)
+			datapoint.SetStartTimestamp(dp.startTime)
+			datapoint.SetTimestamp(emitTime)
 			for k, v := range dp.labels {
 				datapoint.Attributes().PutStr(k, v)
 			}
@@ -227,6 +248,7 @@ func (p *telemetryStatsProcessor) processMetric(
 	metric pmetric.Metric,
 	resourceAttrs pcommon.Map,
 	scopeAttrs pcommon.Map,
+	now pcommon.Timestamp,
 ) {
 	// In case log stats written to the configured prometheus endpoint pass
 	// through this processor again, exclude them here.
@@ -236,7 +258,7 @@ func (p *telemetryStatsProcessor) processMetric(
 
 	for i := range p.config.MetricGroupings {
 		grouping := &p.config.MetricGroupings[i]
-		p.processMetricGrouping(metric, grouping, resourceAttrs, scopeAttrs)
+		p.processMetricGrouping(metric, grouping, resourceAttrs, scopeAttrs, now)
 	}
 }
 
@@ -245,6 +267,7 @@ func (p *telemetryStatsProcessor) processMetricGrouping(
 	grouping *MetricGrouping,
 	resourceAttrs pcommon.Map,
 	scopeAttrs pcommon.Map,
+	now pcommon.Timestamp,
 ) {
 	var datapointCount int
 
@@ -277,7 +300,7 @@ func (p *telemetryStatsProcessor) processMetricGrouping(
 		}
 
 		attrs := NewAttributes(resourceAttrs, scopeAttrs, datapointAttrs)
-		p.processDatapoint(metric, grouping, attrs)
+		p.processDatapoint(metric, grouping, attrs, now)
 	}
 }
 
@@ -285,12 +308,20 @@ func (p *telemetryStatsProcessor) processDatapoint(
 	metric pmetric.Metric,
 	grouping *MetricGrouping,
 	attrs *Attributes,
+	now pcommon.Timestamp,
 ) {
 	if !includeMetricDatapoint(grouping, metric, attrs) {
 		return
 	}
 	key := generateMetricKey(grouping, metric, attrs)
-	p.metricCounts[key]++
+	count, ok := p.metricCounts[key]
+
+	if !ok {
+		count.startTime = now
+	}
+
+	count.value++
+	p.metricCounts[key] = count
 }
 
 func (p *telemetryStatsProcessor) metricStatsLoop() {
@@ -342,9 +373,10 @@ func (p *telemetryStatsProcessor) scrapeMetricStats() {
 			}
 		}
 		datapoints = append(datapoints, telemetryStatsDatapoint{
-			name:   telemetryStatName("datapoints_total"),
-			value:  count,
-			labels: labels,
+			name:      telemetryStatName("datapoints_total"),
+			value:     count.value,
+			startTime: count.startTime,
+			labels:    labels,
 		})
 	}
 	p.metricCountsRWLock.RUnlock()
@@ -393,29 +425,41 @@ func (p *telemetryStatsProcessor) updateTelemetryStatCounts(
 	datapoints []telemetryStatsDatapoint,
 	updatedTelemetryStatName string,
 ) {
+	now := pcommon.NewTimestampFromTime(time.Now())
+
 	telemetryStatCountsLock.Lock()
 	defer telemetryStatCountsLock.Unlock()
 
-	telemetryStatCounts[updatedTelemetryStatName] += int64(len(datapoints))
+	count, ok := telemetryStatCounts[updatedTelemetryStatName]
+
+	if !ok {
+		count.startTime = now
+	}
+
+	count.value += int64(len(datapoints))
+	telemetryStatCounts[updatedTelemetryStatName] = count
 }
 
 func (p *telemetryStatsProcessor) getTelemetryStatCounts() []telemetryStatsDatapoint {
 	var statDatapointsCount int
 	thisStatName := telemetryStatName("datapoints_total")
+	now := pcommon.NewTimestampFromTime(time.Now())
 
+	// ensure that the metric reporting the requested count is itself
+	// included in the count
 	telemetryStatCountsLock.Lock()
-	if _, exists := telemetryStatCounts[thisStatName]; !exists {
-		// ensure that the metric reporting the requested count is itself
-		// included in the count
-		telemetryStatCounts[thisStatName] = 0
+	statCount, ok := telemetryStatCounts[thisStatName]
+	if !ok {
+		statCount.startTime = now
 	}
 	statDatapointsCount = len(telemetryStatCounts)
-	telemetryStatCounts[thisStatName] += int64(statDatapointsCount)
+	statCount.value += int64(statDatapointsCount)
+	telemetryStatCounts[thisStatName] = statCount
 	counts := copyCounts(telemetryStatCounts)
 	telemetryStatCountsLock.Unlock()
 
 	statDatapoints := make([]telemetryStatsDatapoint, 0, statDatapointsCount)
-	for name, value := range counts {
+	for name, count := range counts {
 		labels := make(map[string]string)
 		labels["source"] = sourceStr
 		labels["metric_name"] = name
@@ -424,9 +468,10 @@ func (p *telemetryStatsProcessor) getTelemetryStatCounts() []telemetryStatsDatap
 			labels["metric_"+configuredLabel.Name] = configuredLabel.Value
 		}
 		statDatapoints = append(statDatapoints, telemetryStatsDatapoint{
-			name:   thisStatName,
-			value:  value,
-			labels: labels,
+			name:      thisStatName,
+			value:     count.value,
+			startTime: count.startTime,
+			labels:    labels,
 		})
 	}
 
@@ -569,7 +614,8 @@ func scrapeLogStats(w http.ResponseWriter, p *telemetryStatsProcessor) {
 		}
 		datapoints = append(datapoints, telemetryStatsDatapoint{
 			name:   telemetryStatName("log_records_total"),
-			value:  count,
+			value:  count.value,
+			startTime: count.startTime,
 			labels: labels,
 		})
 	}
@@ -810,18 +856,18 @@ func generateLogKey(grouping LogGrouping, attrs *Attributes) string {
 	return strings.Join(keyParts, ":")
 }
 
-func copyCounts(counts map[string]int64) map[string]int64 {
-	copiedCounts := make(map[string]int64, len(counts))
-	for key, value := range counts {
-		copiedCounts[key] = value
+func copyCounts(counts map[string]count) map[string]count {
+	copiedCounts := make(map[string]count, len(counts))
+	for key, count := range counts {
+		copiedCounts[key] = count
 	}
 	return copiedCounts
 }
 
-func totalCounts(counts map[string]int64) int64 {
+func totalCounts(counts map[string]count) int64 {
 	var total int64
-	for _, value := range counts {
-		total += value
+	for _, count := range counts {
+		total += count.value
 	}
 	return total
 }

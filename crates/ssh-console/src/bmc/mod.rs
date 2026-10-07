@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-pub mod client;
-pub mod client_pool;
-pub mod connection;
+pub(super) mod client;
+pub(super) mod client_pool;
+pub(super) mod connection;
 mod connection_impl;
-pub mod message_proxy;
+pub(super) mod message_proxy;
 mod pending_output_line;
-pub mod vendor;
+pub(super) mod vendor;

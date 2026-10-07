@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.25.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
 
 # Docker automatically provides these args during multi-platform builds
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG VERSION=dev
 
 # Set environment variables for cross-compilation
 ENV CGO_ENABLED=0
@@ -20,8 +21,8 @@ ARG skipcache=0
 
 WORKDIR /workspace
 
-# Copy go module files and VERSION first for better caching
-COPY go.mod go.sum VERSION ./
+# Copy go module files first for better caching
+COPY go.mod go.sum ./
 # Copy SDK go module files, required for maintaining separate go.mod for SDK
 COPY sdk/standard/go.mod ./sdk/standard/
 # Download dependencies
@@ -38,7 +39,7 @@ RUN go build -ldflags "-extldflags '-static'" \
     .
 
 # Runtime stage — NSM requires shell tools for firmware update scripts
-FROM alpine:3.19 AS final
+FROM alpine:3.24 AS final
 
 RUN apk add --no-cache \
     libc6-compat \

@@ -95,6 +95,15 @@ impl DpuNodeRepository for RebootAnnotationMock {
 
 #[async_trait]
 impl K8sConfigRepository for RebootAnnotationMock {
+    async fn create_configmap(
+        &self,
+        _name: &str,
+        _ns: &str,
+        _data: BTreeMap<String, String>,
+    ) -> Result<bool, DpfError> {
+        Ok(true)
+    }
+
     async fn get_configmap(
         &self,
         _: &str,
@@ -117,7 +126,7 @@ impl K8sConfigRepository for RebootAnnotationMock {
     ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
         Ok(None)
     }
-    async fn create_secret(
+    async fn apply_secret(
         &self,
         _: &str,
         _: &str,
@@ -129,6 +138,15 @@ impl K8sConfigRepository for RebootAnnotationMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for RebootAnnotationMock {
+    async fn get(
+        &self,
+        _name: &str,
+        _ns: &str,
+    ) -> Result<Option<crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig>, DpfError>
+    {
+        Ok(None)
+    }
+
     async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
         Ok(())
     }
@@ -147,6 +165,7 @@ async fn test_reboot_annotation_set_check_clear() {
         node_id: "host-001".to_string(),
         host_bmc_ip: "192.168.1.1".parse().unwrap(),
         device_ids: vec!["dpu-001".to_string()],
+        deployment_type: DpuDeploymentType::Bf3,
     };
     sdk.register_dpu_node(node_info).await.unwrap();
 

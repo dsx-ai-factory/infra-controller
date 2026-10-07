@@ -36,7 +36,7 @@ use crate::api::Api;
 use crate::measured_boot::convert_vec;
 
 /// handle_attest_candidate_machine handles the AttestCandidateMachine API endpoint.
-pub async fn handle_attest_candidate_machine(
+pub(crate) async fn handle_attest_candidate_machine(
     api: &Api,
     req: AttestCandidateMachineRequest,
 ) -> Result<AttestCandidateMachineResponse, Status> {
@@ -60,7 +60,7 @@ pub async fn handle_attest_candidate_machine(
 }
 
 /// handle_show_candidate_machine handles the ShowCandidateMachine API endpoint.
-pub async fn handle_show_candidate_machine(
+pub(crate) async fn handle_show_candidate_machine(
     api: &Api,
     req: ShowCandidateMachineRequest,
 ) -> Result<ShowCandidateMachineResponse, Status> {
@@ -91,7 +91,7 @@ pub async fn handle_show_candidate_machine(
 }
 
 /// handle_show_candidate_machines handles the ShowCandidateMachines API endpoint.
-pub async fn handle_show_candidate_machines(
+pub(crate) async fn handle_show_candidate_machines(
     api: &Api,
     _req: ShowCandidateMachinesRequest,
 ) -> Result<ShowCandidateMachinesResponse, Status> {
@@ -108,7 +108,7 @@ pub async fn handle_show_candidate_machines(
 }
 
 /// handle_list_candidate_machines handles the ListCandidateMachine API endpoint.
-pub async fn handle_list_candidate_machines(
+pub(crate) async fn handle_list_candidate_machines(
     api: &Api,
     _req: ListCandidateMachinesRequest,
 ) -> Result<ListCandidateMachinesResponse, Status> {

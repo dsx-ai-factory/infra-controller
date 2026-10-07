@@ -25,7 +25,7 @@ use crate::CarbideClientError;
 use crate::cfg::Options;
 use crate::client::create_forge_client;
 
-pub(crate) async fn completed(
+pub(super) async fn completed(
     config: &Options,
     machine_id: &MachineId,
     validation_id: &MachineValidationId,
@@ -42,7 +42,7 @@ pub(crate) async fn completed(
     Ok(())
 }
 
-pub async fn get_system_manufacturer_name() -> String {
+async fn get_system_manufacturer_name() -> String {
     let command_string = "dmidecode -s system-sku-number".to_string();
 
     match Command::new("sh")
@@ -68,7 +68,7 @@ pub async fn get_system_manufacturer_name() -> String {
     }
 }
 
-pub(crate) async fn run(
+pub(super) async fn run(
     cmd_config: &Options,
     machine_id: &MachineId,
     validation_id: MachineValidationId,
@@ -81,6 +81,7 @@ pub(crate) async fn run(
         root_ca: cmd_config.root_ca.clone(),
         client_cert: cmd_config.client_cert.clone(),
         client_key: cmd_config.client_key.clone(),
+        plugin_contract_dir: cmd_config.machine_validation_plugin_contract_dir.clone(),
     };
     machine_validation::MachineValidationManager::run(
         machine_id,

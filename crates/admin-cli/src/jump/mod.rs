@@ -15,29 +15,22 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
+mod args;
+mod cmd;
 
-#[cfg(test)]
-mod tests;
+pub(crate) use args::Cmd;
 
-pub use args::Cmd;
-
-use crate::cfg::dispatch::Dispatch;
+use crate::cfg::dispatch::dispatch_via_run;
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
 impl Run for Cmd {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmds::jump(self, ctx)
+        cmd::jump(self, ctx)
             .await
             .map_err(|e| crate::errors::CarbideCliError::GenericError(e.to_string()))
     }
 }
 
-impl Dispatch for Cmd {
-    async fn dispatch(self, mut ctx: RuntimeContext) -> CarbideCliResult<()> {
-        self.run(&mut ctx).await
-    }
-}
+dispatch_via_run!(Cmd);

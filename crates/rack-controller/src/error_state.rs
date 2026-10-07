@@ -21,7 +21,7 @@ use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_rack_controller::ready::all_components_ready;
 use carbide_uuid::rack::RackId;
-use model::rack::{Rack, RackConfig, RackState};
+use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -33,6 +33,7 @@ pub async fn handle_error(
     _state: &mut Rack,
     config: &RackConfig,
     cause: &str,
+    recovery_policy: RackErrorRecoveryPolicy,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     if let Some(scope) = &config.maintenance_requested {
@@ -48,18 +49,18 @@ pub async fn handle_error(
         };
         if scope.is_full_rack() {
             tracing::info!(
-                "Rack {} on-demand maintenance requested from Error state (full rack, activities: [{}]), transitioning to Maintenance",
-                id,
-                activities_desc,
+                rack_id = %id,
+                activity_description = %activities_desc,
+                "Rack on-demand maintenance requested from Error state (full rack, activities), transitioning to Maintenance",
             );
         } else {
             tracing::info!(
-                "Rack {} on-demand maintenance requested from Error state (partial: {} machines, {} switches, {} power shelves, activities: [{}]), transitioning to Maintenance",
-                id,
-                scope.machine_ids.len(),
-                scope.switch_ids.len(),
-                scope.power_shelf_ids.len(),
-                activities_desc,
+                rack_id = %id,
+                requested_machine_count = scope.machine_ids.len(),
+                requested_switch_count = scope.switch_ids.len(),
+                requested_power_shelf_count = scope.power_shelf_ids.len(),
+                activity_description = %activities_desc,
+                "Rack on-demand maintenance requested from Error state (partial: machines, switches, power shelves, activities), transitioning to Maintenance",
             );
         }
         let txn = ctx.services.db_pool.begin().await?;
@@ -69,16 +70,32 @@ pub async fn handle_error(
         .with_txn(txn));
     }
 
+    if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
+        tracing::error!(
+            rack_id = %id,
+            cause = %cause,
+            "Rack maintenance failed; a new maintenance request is required",
+        );
+
+        return Ok(StateHandlerOutcome::wait(format!(
+            "rack maintenance failed: {cause}"
+        )));
+    }
+
     if all_components_ready(id, ctx).await? {
         tracing::info!(
-            "Rack {} components all Ready, transitioning from Error back to Ready",
-            id
+            rack_id = %id,
+            "Rack components all Ready, transitioning from Error back to Ready",
         );
         let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
     }
 
-    tracing::error!("Rack {} is in error state: {}", id, cause);
+    tracing::error!(
+        rack_id = %id,
+        cause = %cause,
+        "Rack is in error state",
+    );
     Ok(StateHandlerOutcome::wait(format!(
         "rack in error state: {}",
         cause

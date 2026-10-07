@@ -15,12 +15,14 @@
  * limitations under the License.
  */
 
+mod decommission;
 mod delete;
 mod force_delete;
-pub mod health_report;
+mod health_history;
+mod health_report;
 mod list;
 mod maintenance;
-pub mod metadata;
+mod metadata;
 mod show;
 
 #[cfg(test)]
@@ -31,14 +33,16 @@ use clap::Parser;
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Show power shelf information")]
     Show(show::Args),
     #[clap(about = "List all power shelves")]
     List(list::Args),
+    #[clap(about = "Start decommissioning a managed power shelf")]
+    Decommission(decommission::Args),
     #[clap(about = "Delete a power shelf")]
     Delete(delete::Args),
-    #[clap(about = "Force delete a power shelf and optionally its interfaces")]
+    #[clap(about = "Force delete a power shelf and optionally its interfaces and BMC suppressions")]
     ForceDelete(force_delete::Args),
     #[clap(subcommand, about = "Manage Power Shelf Metadata")]
     Metadata(metadata::Args),
@@ -55,4 +59,6 @@ pub enum Cmd {
         visible_alias = "hr"
     )]
     HealthReport(health_report::Args),
+    #[clap(about = "Show power shelf health history")]
+    HealthHistory(health_history::Args),
 }

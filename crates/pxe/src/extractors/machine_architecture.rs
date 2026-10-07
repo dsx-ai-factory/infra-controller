@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::rpc_error::PxeRequestError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MachineArchitecture {
+pub(crate) enum MachineArchitecture {
     Arm = 0,
     X86 = 1,
 }
@@ -51,5 +51,57 @@ impl From<MachineArchitecture> for rpc::MachineArchitecture {
             MachineArchitecture::X86 => rpc::MachineArchitecture::X86,
             MachineArchitecture::Arm => rpc::MachineArchitecture::Arm,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{scenarios, value_scenarios};
+
+    use super::*;
+
+    fn parse_arch(value: &str) -> Result<&'static str, &'static str> {
+        MachineArchitecture::try_from(value)
+            .map(|arch| match arch {
+                MachineArchitecture::Arm => "arm",
+                MachineArchitecture::X86 => "x86",
+            })
+            .map_err(|error| match error {
+                PxeRequestError::MalformedBuildArch(_) => "malformed-build-arch",
+                _ => "unexpected",
+            })
+    }
+
+    #[test]
+    fn parses_machine_architecture_identifiers() {
+        scenarios!(parse_arch:
+            "named identifiers" {
+                "arm64" => Yields("arm"),
+                "x86_64" => Yields("x86"),
+            }
+
+            "numeric identifiers" {
+                "0" => Yields("arm"),
+                "1" => Yields("x86"),
+            }
+
+            "invalid identifiers" {
+                "" => FailsWith("malformed-build-arch"),
+                "amd64" => FailsWith("malformed-build-arch"),
+                "2" => FailsWith("malformed-build-arch"),
+            }
+        );
+    }
+
+    #[test]
+    fn converts_machine_architecture_to_rpc_enum() {
+        value_scenarios!(
+            run = |arch| rpc::MachineArchitecture::from(arch) as i32;
+            "rpc enum" {
+                MachineArchitecture::Arm => rpc::MachineArchitecture::Arm as i32,
+                MachineArchitecture::X86 => rpc::MachineArchitecture::X86 as i32,
+            }
+        );
     }
 }

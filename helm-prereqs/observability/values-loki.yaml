@@ -1,0 +1,63 @@
+# Loki (grafana/loki chart, single-binary) — the site-local log store, on the
+# local-path-persistent StorageClass with retention actually enforced (see the compactor note).
+# The Service MUST end up named `loki` in namespace `loki` (helm release `loki` -n loki, gateway.enabled=false)
+# so the pre-wired nico endpoints resolve: http://loki.loki.svc.cluster.local:3100/loki/api/v1/push
+loki:
+  auth_enabled: false          # org headers (nico / forge) accepted but collapse to one tenant — fine for now
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: 'filesystem'
+  compactor:
+    # working_directory + shared_store are REQUIRED for retention to actually delete on Loki 2.8.4
+    # (chart 5.15.0). Without them retention_enabled is a no-op and the 50Gi PVC grows unbounded.
+    # NOTE: on a future bump to Loki 3.x, `shared_store` becomes `delete_request_store: filesystem`.
+    working_directory: /var/loki/compactor
+    shared_store: filesystem
+    compaction_interval: 10m
+    retention_enabled: true
+    retention_delete_delay: 2h
+    retention_delete_worker_count: 150
+  limits_config:
+    retention_period: 360h     # 15 days
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+    per_stream_rate_limit: 16MB
+    per_stream_rate_limit_burst: 16MB
+    enforce_metric_name: false
+    max_cache_freshness_per_query: 10m
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    split_queries_by_interval: 15m
+    max_global_streams_per_user: 10000
+  ingester:
+    chunk_encoding: snappy
+  ingester_client:
+    grpc_client_config:
+      max_send_msg_size: 8388608
+  analytics:
+    reporting_enabled: false
+  server:
+    grpc_server_max_send_msg_size: 8388608
+    grpc_server_max_recv_msg_size: 8388608
+singleBinary:
+  replicas: 1
+  persistence:
+    size: 50Gi
+    storageClass: local-path-persistent    # helm-prereqs/operators/storageclass-local-path-persistent.yaml
+    enableStatefulSetAutoDeletePVC: false
+gateway:
+  enabled: false
+monitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: obs           # informational; the obs Prometheus selects ServiceMonitors cluster-wide
+  lokiCanary:
+    enabled: false
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+test:
+  enabled: false

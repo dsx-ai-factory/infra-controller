@@ -26,11 +26,12 @@ use carbide_utils::config::{
 };
 use chrono::Duration;
 use duration_str::{deserialize_duration, deserialize_duration_chrono};
-use model::expected_machine::DpuMode;
+use model::expected_machine::HostDpuPolicy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// SiteExplorer related configuration for hardware discovery and ingestion.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SiteExplorerConfig {
     /// Whether SiteExplorer is enabled. Dynamically toggleable at runtime via SetDynamicConfig.
     #[serde(
@@ -47,7 +48,6 @@ pub struct SiteExplorerConfig {
     #[serde(skip)]
     pub retained_boot_interface_window: Option<chrono::Duration>,
     /// The interval at which site explorer runs.
-    /// Defaults to 5 Minutes if not specified.
     #[serde(
         default = "SiteExplorerConfig::default_run_interval",
         deserialize_with = "deserialize_duration",
@@ -55,16 +55,21 @@ pub struct SiteExplorerConfig {
     )]
     pub run_interval: std::time::Duration,
     /// The maximum amount of nodes that are explored concurrently.
-    /// Default is 5.
     #[serde(default = "SiteExplorerConfig::default_concurrent_explorations")]
     pub concurrent_explorations: u64,
     /// How many routine (non-requested) endpoints should be explored in a single run.
-    /// Default is 90.
     /// This bounds only the background refresh work: previously unseen endpoints
     /// and stale endpoints whose reports we want to update. Endpoints with the
     /// `exploration_requested` flag set are always attempted, regardless of this
     /// value, because operators rely on that flag for guaranteed next-tick attempts.
-    /// Parallelism for both routine and requested explorations is still bounded by
+    /// Within the budget, three tiers share the slots: 70 percent for unexplored
+    /// endpoints (oldest interface first), 20 percent for endpoints preingestion
+    /// parked with `waiting_for_explorer_refresh` in a state that reads the next
+    /// report (oldest report first), and 10 percent for the routine refresh of
+    /// the oldest reports. Slots a tier cannot fill go to the other tiers in
+    /// that order, so no slot is left unused while any tier has candidates.
+    /// Below a budget of ten the smaller shares round to zero.
+    /// Parallelism for every kind of exploration is still bounded by
     /// `concurrent_explorations`.
     /// If the value is set too high the site exploration will take a lot of time
     /// and the exploration report will be updated less frequent. Therefore it
@@ -81,7 +86,7 @@ pub struct SiteExplorerConfig {
     )]
     pub create_machines: Arc<AtomicBool>,
 
-    /// How many ManagedHosts should be created in a single run. Default is 4.
+    /// How many ManagedHosts should be created in a single run.
     #[serde(default = "SiteExplorerConfig::default_machines_created_per_run")]
     pub machines_created_per_run: u64,
 
@@ -136,16 +141,9 @@ pub struct SiteExplorerConfig {
     )]
     pub admin_segment_type_non_dpu: Arc<AtomicBool>,
 
-    /// Whether site-controller should allocate a secondary
-    /// VTEP IP or leave that to discovery.
-    /// Current secondary VTEP use-case is additional
-    /// VTEP IPs for GENEVE VTEPS (GTEPS) used by traffic-intercept users.
-    ///  Only sites expected to support
-    /// additional VTEPS would turn this on.
-    #[serde(default)]
-    pub allocate_secondary_vtep_ip: bool,
-
-    /// Whether SiteExplorer should create Power Shelf state machine
+    /// Whether SiteExplorer should create PowerShelf objects for explored power
+    /// shelves that match an `expected_power_shelves` record. Defaults to true;
+    /// set false to disable power shelf ingestion site-wide.
     #[serde(
         default = "SiteExplorerConfig::default_create_power_shelves",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -153,20 +151,14 @@ pub struct SiteExplorerConfig {
     )]
     pub create_power_shelves: Arc<AtomicBool>,
 
-    /// Whether SiteExplorer should create Power Shelf state machine from static IP
-    #[serde(
-        default = "SiteExplorerConfig::default_explore_power_shelves_from_static_ip",
-        deserialize_with = "deserialize_arc_atomic_bool",
-        serialize_with = "serialize_arc_atomic_bool"
-    )]
-    pub explore_power_shelves_from_static_ip: Arc<AtomicBool>,
-
     /// How many Power Shelves should be created in a single run.
     /// Default is 1.
     #[serde(default = "SiteExplorerConfig::default_power_shelves_created_per_run")]
     pub power_shelves_created_per_run: u64,
 
-    /// Whether SiteExplorer should create Switch state machine
+    /// Whether SiteExplorer should create Switch objects for explored switches
+    /// that match an `expected_switches` record. Defaults to true; set false to
+    /// disable switch ingestion site-wide.
     #[serde(
         default = "SiteExplorerConfig::default_create_switches",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -179,15 +171,20 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_switches_created_per_run")]
     pub switches_created_per_run: u64,
 
-    /// Site-wide DPU operating mode. When set, applies to every host
-    /// that doesn't declare a per-host `ExpectedMachine.dpu_mode`
-    /// override (or that declares the default `DpuMode` variant,
-    /// which is indistinguishable from "unset"). Per-host `NicMode` /
-    /// `NoDpu` always wins. `None` means "site-wide setting unset"
-    /// and hosts fall back to the absolute default of
-    /// `DpuMode::DpuMode`.
-    #[serde(default)]
-    pub dpu_mode: Option<DpuMode>,
+    /// Site-wide host DPU policy. Per-host `Nic` and `Ignore` policies
+    /// override it; per-host `Manage` inherits it for backward compatibility.
+    /// `None` falls back to [`HostDpuPolicy::Manage`].
+    ///
+    /// The legacy `dpu_mode` field and values remain accepted during
+    /// deserialization.
+    #[serde(default, alias = "dpu_mode")]
+    pub dpu_policy: Option<HostDpuPolicy>,
+
+    /// Deprecated compatibility key. This setting is ignored; use `dpu_policy`.
+    #[doc(hidden)]
+    #[serde(default, rename = "force_dpu_nic_mode", skip_serializing)]
+    pub deprecated_force_dpu_nic_mode: Option<bool>,
+
     /// Controls which Redfish client implementation is used
     /// for hardware discovery (LibRedfish, NvRedfish, or
     /// CompareResult for side-by-side validation).
@@ -198,12 +195,12 @@ pub struct SiteExplorerConfig {
 impl Default for SiteExplorerConfig {
     fn default() -> Self {
         SiteExplorerConfig {
-            enabled: Arc::new(true.into()),
+            enabled: Self::default_enabled(),
             retained_boot_interface_window: None,
             run_interval: Self::default_run_interval(),
             concurrent_explorations: Self::default_concurrent_explorations(),
             explorations_per_run: Self::default_explorations_per_run(),
-            create_machines: Arc::new(true.into()),
+            create_machines: Self::default_create_machines(),
             machines_created_per_run: Self::default_machines_created_per_run(),
             override_target_ip: None,
             override_target_port: None,
@@ -211,14 +208,13 @@ impl Default for SiteExplorerConfig {
             allow_changing_bmc_proxy: None,
             reset_rate_limit: Self::default_reset_rate_limit(),
             admin_segment_type_non_dpu: Self::default_admin_segment_type_non_dpu(),
-            allocate_secondary_vtep_ip: false,
-            create_power_shelves: Arc::new(true.into()),
-            explore_power_shelves_from_static_ip: Arc::new(true.into()),
+            create_power_shelves: Self::default_create_power_shelves(),
             power_shelves_created_per_run: Self::default_power_shelves_created_per_run(),
-            create_switches: Arc::new(true.into()),
+            create_switches: Self::default_create_switches(),
             switches_created_per_run: Self::default_switches_created_per_run(),
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
-            dpu_mode: None,
+            dpu_policy: None,
+            deprecated_force_dpu_nic_mode: None,
             explore_mode: Self::default_explore_mode(),
         }
     }
@@ -226,14 +222,62 @@ impl Default for SiteExplorerConfig {
 
 impl PartialEq for SiteExplorerConfig {
     fn eq(&self, other: &SiteExplorerConfig) -> bool {
-        self.enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
-            && self.run_interval == other.run_interval
-            && self.concurrent_explorations == other.concurrent_explorations
-            && self.explorations_per_run == other.explorations_per_run
-            && self.create_machines.load(AtomicOrdering::Relaxed)
+        // Destructured without `..` so adding a field to the struct without
+        // deciding how it compares here is a compile error, not a silent gap.
+        let Self {
+            enabled,
+            retained_boot_interface_window,
+            run_interval,
+            concurrent_explorations,
+            explorations_per_run,
+            create_machines,
+            machines_created_per_run,
+            rotate_switch_nvos_credentials,
+            override_target_ip,
+            override_target_port,
+            bmc_proxy,
+            allow_changing_bmc_proxy,
+            reset_rate_limit,
+            admin_segment_type_non_dpu,
+            create_power_shelves,
+            power_shelves_created_per_run,
+            create_switches,
+            switches_created_per_run,
+            dpu_policy,
+            deprecated_force_dpu_nic_mode,
+            explore_mode,
+        } = self;
+
+        enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
+            && *retained_boot_interface_window == other.retained_boot_interface_window
+            && *run_interval == other.run_interval
+            && *concurrent_explorations == other.concurrent_explorations
+            && *explorations_per_run == other.explorations_per_run
+            && create_machines.load(AtomicOrdering::Relaxed)
                 == other.create_machines.load(AtomicOrdering::Relaxed)
-            && self.override_target_ip == other.override_target_ip
-            && self.override_target_port == other.override_target_port
+            && *machines_created_per_run == other.machines_created_per_run
+            && rotate_switch_nvos_credentials.load(AtomicOrdering::Relaxed)
+                == other
+                    .rotate_switch_nvos_credentials
+                    .load(AtomicOrdering::Relaxed)
+            && *override_target_ip == other.override_target_ip
+            && *override_target_port == other.override_target_port
+            && bmc_proxy.load_full() == other.bmc_proxy.load_full()
+            && *allow_changing_bmc_proxy == other.allow_changing_bmc_proxy
+            && *reset_rate_limit == other.reset_rate_limit
+            && admin_segment_type_non_dpu.load(AtomicOrdering::Relaxed)
+                == other
+                    .admin_segment_type_non_dpu
+                    .load(AtomicOrdering::Relaxed)
+            && create_power_shelves.load(AtomicOrdering::Relaxed)
+                == other.create_power_shelves.load(AtomicOrdering::Relaxed)
+            && *power_shelves_created_per_run == other.power_shelves_created_per_run
+            && create_switches.load(AtomicOrdering::Relaxed)
+                == other.create_switches.load(AtomicOrdering::Relaxed)
+            && *switches_created_per_run == other.switches_created_per_run
+            && *dpu_policy == other.dpu_policy
+            && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
+            && *explore_mode == other.explore_mode
     }
 }
 
@@ -250,16 +294,23 @@ impl SiteExplorerConfig {
         Arc::new(true.into())
     }
 
+    /// Redfish endpoints probed in parallel per exploration cycle. Bounds the
+    /// concurrent load placed on BMCs.
     pub const fn default_concurrent_explorations() -> u64 {
-        30
+        100
     }
 
+    /// Endpoints selected for exploration per cycle. Identification and machine
+    /// creation run only at the end of a completed cycle, so this trades sweep
+    /// breadth against how frequently creation runs.
     pub const fn default_explorations_per_run() -> u64 {
-        90
+        360
     }
 
+    /// Machines created per completed exploration cycle. Caps ingestion rate
+    /// independently of how many hosts exploration has identified.
     pub const fn default_machines_created_per_run() -> u64 {
-        4
+        100
     }
 
     pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {
@@ -275,11 +326,7 @@ impl SiteExplorerConfig {
     }
 
     pub fn default_create_power_shelves() -> Arc<AtomicBool> {
-        Arc::new(false.into())
-    }
-
-    pub fn default_explore_power_shelves_from_static_ip() -> Arc<AtomicBool> {
-        Arc::new(false.into())
+        Arc::new(true.into())
     }
 
     pub const fn default_power_shelves_created_per_run() -> u64 {
@@ -287,7 +334,7 @@ impl SiteExplorerConfig {
     }
 
     pub fn default_create_switches() -> Arc<AtomicBool> {
-        Arc::new(false.into())
+        Arc::new(true.into())
     }
 
     pub const fn default_switches_created_per_run() -> u64 {
@@ -295,7 +342,7 @@ impl SiteExplorerConfig {
     }
 
     pub const fn default_explore_mode() -> SiteExplorerExploreMode {
-        SiteExplorerExploreMode::LibRedfish
+        SiteExplorerExploreMode::NvRedfish
     }
 }
 
@@ -305,7 +352,7 @@ pub fn bmc_proxy(s: Option<HostPortPair>) -> Arc<ArcSwap<Option<HostPortPair>>> 
 
 /// Selects the Redfish client backend used by SiteExplorer
 /// for BMC discovery.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum SiteExplorerExploreMode {
     /// Use the libredfish Rust client.
     #[serde(rename = "libredfish")]

@@ -17,6 +17,6 @@
 
 use crate::health_utils;
 
-pub fn print_empty_template() {
+pub(super) fn print_empty_template() {
     health_utils::print_empty_template();
 }

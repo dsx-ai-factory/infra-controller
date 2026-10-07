@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "version": 1,
+      "name": "noop",
+      "type": "noop",
+      "condition": {},
+      "spec": {
+        "reason": "record only"
+      }
+    }
+  ]
+}

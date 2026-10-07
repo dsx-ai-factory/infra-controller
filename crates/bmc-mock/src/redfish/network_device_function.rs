@@ -23,7 +23,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn chassis_collection(
+pub(crate) fn chassis_collection(
     chassis_id: &str,
     network_adapter_id: &str,
 ) -> redfish::Collection<'static> {
@@ -39,7 +39,7 @@ pub fn chassis_collection(
     }
 }
 
-pub fn chassis_resource<'a>(
+pub(crate) fn chassis_resource<'a>(
     chassis_id: &'a str,
     network_adapter_id: &'a str,
     function_id: &'a str,
@@ -56,25 +56,25 @@ pub fn chassis_resource<'a>(
 }
 
 /// Get builder of the network device function.
-pub fn builder(resource: &redfish::Resource) -> NetworkDeviceFunctionBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> NetworkDeviceFunctionBuilder {
     NetworkDeviceFunctionBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
     }
 }
 
-pub struct NetworkDeviceFunction {
-    pub id: Cow<'static, str>,
+pub(crate) struct NetworkDeviceFunction {
+    pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
 }
 
 impl NetworkDeviceFunction {
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
     }
 }
 
-pub struct NetworkDeviceFunctionBuilder {
+pub(crate) struct NetworkDeviceFunctionBuilder {
     id: Cow<'static, str>,
     value: serde_json::Value,
 }
@@ -89,15 +89,15 @@ impl Builder for NetworkDeviceFunctionBuilder {
 }
 
 impl NetworkDeviceFunctionBuilder {
-    pub fn ethernet(self, v: serde_json::Value) -> Self {
+    pub(crate) fn ethernet(self, v: serde_json::Value) -> Self {
         self.apply_patch(json!({ "Ethernet": v }))
     }
 
-    pub fn oem(self, v: serde_json::Value) -> Self {
+    pub(crate) fn oem(self, v: serde_json::Value) -> Self {
         self.apply_patch(json!({ "Oem": v }))
     }
 
-    pub fn build(self) -> NetworkDeviceFunction {
+    pub(crate) fn build(self) -> NetworkDeviceFunction {
         NetworkDeviceFunction {
             id: self.id,
             value: self.value,

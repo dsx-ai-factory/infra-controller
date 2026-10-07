@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Admin web UI (HTML/askama) for the carbide-api server"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_api_web"
@@ -35,9 +36,11 @@ carbide-health-report = { path = "../health-report" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 carbide-rpc = { path = "../rpc", features = ["sqlx", "model"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
+carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 config-version = { path = "../config-version", features = ["sqlx"] }
+trace-propagation = { path = "../trace-propagation" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 ansi-to-html = { workspace = true }
@@ -60,12 +63,14 @@ itertools = { workspace = true }
 lazy_static = { workspace = true }
 mac_address = { workspace = true }
 oauth2 = { workspace = true, default-features = false }
+rand = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = [
   "rustls",
   "stream",
 ] }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 sqlx = { workspace = true, features = [
   "runtime-tokio",
   "tls-rustls",
@@ -84,6 +89,7 @@ tonic = { workspace = true }
 tower-http = { workspace = true, features = [
   "add-extension",
   "auth",
+  "csrf",
   "normalize-path",
 ] }
 tracing = { workspace = true }
@@ -102,9 +108,12 @@ workspace = true
 # test-only crates not needed by the library itself (e.g. the sqlx_test macro and request-body
 # helpers). `db`/`model` resolve via carbide-api-db/carbide-api-model's lib names, already normal
 # deps.
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-test-harness = { path = "../test-harness" }
+carbide-test-support = { path = "../test-support" }
 http-body-util = { workspace = true }
 sqlx = { workspace = true, features = [
   "runtime-tokio",

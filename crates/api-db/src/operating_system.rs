@@ -117,7 +117,7 @@ pub struct OperatingSystem {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
-    pub org: String,
+    pub org: Option<String>,
     #[sqlx(rename = "type")]
     #[serde(rename = "type")]
     pub type_: String,
@@ -197,7 +197,7 @@ pub struct CreateOperatingSystem {
     pub id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
-    pub org: String,
+    pub org: Option<String>,
     pub type_: String,
     pub status: String,
     pub is_active: bool,
@@ -396,5 +396,61 @@ mod tests {
         let mut txn = pool.begin().await.unwrap();
         let rows = get_many(&mut *txn, &[Uuid::nil()]).await.unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[crate::sqlx_test]
+    async fn test_create_persists_org(pool: sqlx::PgPool) {
+        struct Case {
+            name: &'static str,
+            input_org: Option<String>,
+            expected_org: Option<String>,
+        }
+
+        let cases = [
+            Case {
+                name: "no-org-os",
+                input_org: None,
+                expected_org: None,
+            },
+            Case {
+                name: "org-os",
+                input_org: Some("acme".to_string()),
+                expected_org: Some("acme".to_string()),
+            },
+        ];
+
+        for case in cases {
+            let mut txn = pool.begin().await.unwrap();
+            let input = CreateOperatingSystem {
+                id: None,
+                name: case.name.to_string(),
+                description: None,
+                org: case.input_org.clone(),
+                type_: model::operating_system_definition::OS_TYPE_IPXE.to_string(),
+                status: OS_STATUS_READY.to_string(),
+                is_active: true,
+                allow_override: false,
+                phone_home_enabled: false,
+                user_data: None,
+                ipxe_script: Some("#!ipxe\nboot".to_string()),
+                ipxe_template_id: None,
+                ipxe_parameters: None,
+                ipxe_artifacts: None,
+                ipxe_definition_hash: None,
+            };
+            let created = create(&mut txn, &input).await.unwrap();
+            assert_eq!(
+                created.org, case.expected_org,
+                "created.org for {}",
+                case.name
+            );
+
+            let fetched = get(&mut *txn, created.id).await.unwrap();
+            assert_eq!(
+                fetched.org, case.expected_org,
+                "fetched.org for {}",
+                case.name
+            );
+        }
     }
 }

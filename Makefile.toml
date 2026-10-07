@@ -17,20 +17,26 @@
 
 extend = [{ path = "Makefile-package.toml" }, { path = "Makefile-build.toml" }]
 
+[config]
+# CI installs this exact version in setup-mkosi-environment. Newer local
+# versions remain allowed, but older versions fail before running tasks.
+min_version = "0.37.24"
+
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 REPO_ROOT = { script = [
   "dirname $(cargo locate-project --message-format plain --workspace)",
 ] }
+KEA_VERSION = { script = [
+  "cat $(dirname $(cargo locate-project --message-format plain --workspace))/dev/docker/kea.version",
+], condition = { env_not_set = [
+  "KEA_VERSION",
+] } }
 CARBIDE_ENVIRONMENT = { value = "local", condition = { env_not_set = [
   "CARBIDE_ENVIRONMENT",
 ] } }
 FORGE_CA = { value = "nonprod", condition = { env_not_set = ["FORGE_CA"] } }
 FORGE_CA_PATH = { value = "${REPO_ROOT}/dev/forge_${FORGE_CA}root.pem" }
-
-# Temporary: increase Rust test thread stack to avoid stack overflows in tests.
-# TODO: remove after stack-heavy tests/code paths are refactored.
-RUST_MIN_STACK = { value = "8388608", condition = { env_not_set = ["RUST_MIN_STACK"] } }
 
 BUILD_CONTAINER_X86_URL = { value = "urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:latest", condition = { env_not_set = [
   "BUILD_CONTAINER_X86_URL",
@@ -46,7 +52,7 @@ BUILD_CONTAINER_AARCH64_URL = { value = "urm.nvidia.com/swngc-ngcc-docker-local/
 #
 # Make sure to update the RUST_NIGHTLY variable in
 # dev/docker/Dockerfile.build-container-x86_64 if you change this.
-RUST_NIGHTLY = "nightly-2026-05-27"
+RUST_NIGHTLY = "nightly-2026-06-16"
 
 [tasks.book]
 workspace = false
@@ -107,8 +113,7 @@ workspace = false
 # markdown with pandoc, so the `pandoc` binary must be installed. It writes one
 # directory per top-level command under docs/manuals/nico-admin-cli/commands
 # plus the four domain index files (Hardware/Network/Tenant/Admin). The
-# hand-authored pages (README.md, setup.md, workflows.md, rest-cli-parity.md)
-# are left alone.
+# hand-authored README.md and separate NICo Admin CLI guide are left alone.
 script = '''
 cargo run -p nico-admin-cli -- generate-cli-docs --out-dir docs/manuals/nico-admin-cli
 '''
@@ -197,13 +202,13 @@ workspace = false
 script = '''
 set -e
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
-docker build -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}/dev/docker
+docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}/dev/docker
 echo "Image carbide-build-x86_64 built. Run: cargo make cargo-docker -- build -p nico-admin-cli --release"
 '''
 
 [tasks.build-cargo-docker-image-minimal]
 category = "Build"
-description = "Build minimal Cargo Docker image (Rust 1.90 + protoc). Quick (~2-5 min). Required once before cargo-docker-minimal for workspace builds (e.g. carbide-rpc)."
+description = "Build minimal Cargo Docker image (Rust 1.97 + protoc). Quick (~2-5 min). Required once before cargo-docker-minimal for workspace builds (e.g. carbide-rpc)."
 workspace = false
 script = '''
 set -e
@@ -213,7 +218,7 @@ echo "Image carbide-build-minimal built. Run: cargo make cargo-docker-minimal --
 
 [tasks.build-pxe-build-container]
 category = "Build"
-description = "Build the PXE artifact build container image (Ubuntu 24.04 + Rust 1.90 + mkosi deps). Required once before pxe-docker-x86."
+description = "Build the PXE artifact build container image (Ubuntu 24.04 + Rust 1.97 + mkosi deps). Required once before pxe-docker-x86."
 workspace = false
 script = '''
 set -e
@@ -232,11 +237,15 @@ SCCACHE_HOST="${SCCACHE_DIR:-$HOME/.sccache}"
 mkdir -p "$SCCACHE_HOST"
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
-PKG_VERSION=$(git -C "${REPO_ROOT}" describe --tags --first-parent --always --long 2>/dev/null | sed 's/^v//')
-case "${PKG_VERSION}" in
-  [0-9]*) ;;
-  *) PKG_VERSION="0.0.0-${PKG_VERSION}" ;;
-esac
+if [ -n "$VERSION" ]; then
+  PKG_VERSION=$(echo "$VERSION" | sed 's/^v//')
+else
+  PKG_VERSION=$(git -C "${REPO_ROOT}" describe --tags --first-parent --always --long 2>/dev/null | sed 's/^v//')
+  case "${PKG_VERSION}" in
+    [0-9]*) ;;
+    *) PKG_VERSION="0.0.0-${PKG_VERSION}" ;;
+  esac
+fi
 docker run --rm \
   --privileged \
   -v "${REPO_ROOT}":/code \
@@ -247,6 +256,7 @@ docker run --rm \
   -e SCCACHE_DIR=/sccache \
   -e SA_ENABLEMENT=1 \
   -e PKG_VERSION="${PKG_VERSION}" \
+  -e VERSION="${VERSION}" \
   -e HOST_UID="${HOST_UID}" \
   -e HOST_GID="${HOST_GID}" \
   carbide-pxe-builder \
@@ -283,6 +293,16 @@ docker run --rm \
   cargo ${CARGO_ARGS}
 '''
 
+[tasks.test-dhcp-docker]
+category = "Test"
+description = "Run DHCP integration tests in the pinned Bookworm/Kea build environment."
+workspace = false
+dependencies = ["build-cargo-docker-image"]
+script = '''
+set -e
+cargo make cargo-docker -- test --locked -p carbide-dhcp --tests
+'''
+
 [tasks.fix-target-permissions]
 category = "Build"
 description = "Fix ownership of target/ (and repo root if needed) so cargo-docker-minimal can write. Run once if you see 'Permission denied' writing to /code/target. Uses sudo."
@@ -301,7 +321,7 @@ fi
 
 [tasks.cargo-docker-minimal]
 category = "Build"
-description = "Run Cargo in minimal Linux image (Rust 1.90 + protoc). Requires build-cargo-docker-image-minimal once (~2-5 min). For DB tests set DATABASE_URL (use host.docker.internal, not localhost). Runs as root and chowns /code afterward so target/ stays writable on macOS/Colima."
+description = "Run Cargo in minimal Linux image (Rust 1.97 + protoc). Requires build-cargo-docker-image-minimal once (~2-5 min). For DB tests set DATABASE_URL (use host.docker.internal, not localhost). Runs as root and chowns /code afterward so target/ stays writable on macOS/Colima."
 workspace = false
 dependencies = ["check-cargo-home-set"]
 script = '''
@@ -410,6 +430,8 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--build-arg",
+  "KEA_VERSION=${KEA_VERSION}",
   "-t",
   "${BUILD_CONTAINER_X86_URL}",
   "-f",
@@ -432,6 +454,8 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--build-arg",
+  "KEA_VERSION=${KEA_VERSION}",
   "-t",
   "${BUILD_CONTAINER_AARCH64_URL}",
   "-f",
@@ -447,6 +471,8 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--build-arg",
+  "KEA_VERSION=${KEA_VERSION}",
   "-t",
   "carbide-runtime:latest",
   ".",
@@ -576,15 +602,47 @@ description = "Tasks that run on workspace level (not crate level) in pre-commit
 category = "CI"
 # clippy-flow is a default target provided by cargo-make.
 # NOTE: If you add something here, and you also want it to be checked by CI, make sure to add it to the lint-police job in .github/workflows/ci.yaml too.
+# REST proto generation is covered by the dedicated check-rest-core-proto-sync CI job because it needs Go/buf setup.
 dependencies = [
+  "generate-rest-core-proto",
   "clippy-flow",
   "carbide-lints",
+  "lint-error-messages",
   "check-format-nightly",
+  "check-event-names",
   "check-workspace-deps",
-  "check-isolated-package-builds",
+  "check-metric-docs",
   "check-licenses",
   "check-bans",
 ]
+
+[tasks.generate-rest-core-proto]
+workspace = false
+description = "Regenerate REST protobuf snapshots and Go bindings from crates/rpc/proto."
+category = "Generate"
+script = '''
+set -eu
+make -C rest-api core-proto
+make -C rest-api/flow gen-nicoapi-pb
+'''
+
+[tasks.check-repo-clean]
+workspace = false
+description = "Fail if the repository has uncommitted generated or lockfile changes."
+category = "CI"
+script = '''
+bash "${REPO_ROOT}/scripts/check-repo-clean.sh" "cargo make check-repo-clean"
+'''
+
+[tasks.check-rest-core-proto-sync]
+workspace = false
+description = "Regenerate REST Core protobuf outputs and fail if they were not committed."
+category = "CI"
+script = '''
+set -eu
+cargo make --no-workspace generate-rest-core-proto
+cargo make --no-workspace check-repo-clean
+'''
 
 [tasks.clippy]
 workspace = false
@@ -636,10 +694,39 @@ fi
 '''
 
 [tasks.build-release]
+workspace = false
+description = "Build the production artifacts copied into the release container"
+command = "cargo"
+# Keep this package set aligned with the artifacts copied by the
+# Dockerfile.release-container-* files and checked below.
 args = [
   "build",
   "--locked",
   "--release",
+  "-p",
+  "carbide-api",
+  "-p",
+  "carbide-pxe",
+  "-p",
+  "carbide-dns",
+  "-p",
+  "nico-admin-cli",
+  "-p",
+  "carbide-dsx-exchange-consumer",
+  "-p",
+  "carbide-agent",
+  "-p",
+  "carbide-dhcp-server",
+  "-p",
+  "carbide-health",
+  "-p",
+  "carbide-log-parser",
+  "-p",
+  "carbide-ssh-console",
+  "-p",
+  "carbide-bmc-proxy",
+  "-p",
+  "carbide-dhcp",
   "@@split(CARGO_MAKE_CARGO_BUILD_TEST_FLAGS, )",
 ]
 
@@ -678,9 +765,8 @@ dependencies = [
 
 [tasks.test-release-container-services]
 workspace = false
-dependencies = [
-  "test-flow",
-]
+command = "cargo"
+args = ["test", "--profile=ci-tests"]
 
 [tasks.build-and-test-release-container-services]
 workspace = false
@@ -691,8 +777,8 @@ workspace = false
 # called by CI. If necessary separate tasks can be defined for workflows which
 # do not require everything.
 dependencies = [
-  "build-release", # Start with release builds, since some artifacts are used in integration tests
-  "test-flow",     # Then run all tests
+  "build-release",                                      # Start with release builds, since some artifacts are used in integration tests
+  "test-flow",                                          # Then run all tests
   "check-aarch64-release-container-services-page-size",
 ]
 
@@ -784,13 +870,32 @@ script = [
 workspace = false
 description = "Run custom lints defined in lints/carbide-lints"
 dependencies = ["setup-carbide-lints"]
-script = ["cargo carbide-lints --all-targets --all-features"]
+script = ["cargo carbide-lints"]
 
 [tasks.check-workspace-deps]
 workspace = false
 description = "Check Cargo.toml files for dependency versions declared in crates instead of the workspace root"
 script = [
   "cargo --quiet xtask check-workspace-deps || (RC=$?; echo 'To fix automatically, run `cargo xtask check-workspace-deps --fix`'; exit $RC)",
+]
+
+[tasks.lint-error-messages]
+workspace = false
+description = "Check that error messages follow C-GOOD-ERR (lowercase, no trailing period)"
+script = [
+  "cargo --quiet xtask lint-error-messages || (RC=$?; echo 'To fix automatically, run `cargo xtask lint-error-messages --fix`'; exit $RC)",
+]
+
+[tasks.check-event-names]
+workspace = false
+description = "Check that production instrumented Events have unique event_name identities"
+script = ["cargo --quiet xtask check-event-names"]
+
+[tasks.check-metric-docs]
+workspace = false
+description = "Fail if a #[derive(Event)] counter/histogram is missing a row in docs/observability/core_metrics.md"
+script = [
+  "cargo --quiet xtask check-metric-docs || (RC=$?; echo 'To fix automatically, run `cargo xtask check-metric-docs --fix`'; exit $RC)",
 ]
 
 [tasks.check-isolated-package-builds]
@@ -802,7 +907,7 @@ script = ["cargo xtask check-isolated-package-builds"]
 workspace = false
 description = "Check cargo-deny against licenses we're using to validate that we're not introducing new licenses inadvertently"
 category = "Licensing"
-script = ["cargo deny check license"]
+script = ["cargo deny check licenses"]
 
 [tasks.check-bans]
 workspace = false

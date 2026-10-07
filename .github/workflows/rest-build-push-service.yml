@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: 'Runner type for the build job'
+        description: 'Runner type for the build job (amd64; arm64 leg uses a fixed arm64 runner)'
         required: false
         default: 'linux-amd64-cpu4'
         type: string
@@ -56,11 +56,15 @@ on:
         required: false
         default: ""
         type: string
-      ngc_path:
-        description: 'NGC path for resource uploads'
-        required: false
-        default: '0837451325059433/carbide-dev'
+      helm_version:
+        description: 'Helm chart version pre-computed by the prepare step (e.g. 2.0.0-rc.14)'
+        required: true
         type: string
+      ngc_path:
+        description: 'NGC org/team for resource uploads (empty = skip)'
+        required: false
+        type: string
+        default: ''
     secrets:
       NVCR_USERNAME:
         description: 'NVCR username'
@@ -68,11 +72,36 @@ on:
       NVCR_TOKEN:
         description: 'NVCR token'
         required: false
+      NICO_TARGET_REGISTRY_USERNAME:
+        description: "Username for the push target registry (falls back to NVCR_USERNAME)"
+        required: false
+      NICO_TARGET_REGISTRY_TOKEN:
+        description: "Token for the push target registry (falls back to NVCR_TOKEN)"
+        required: false
+      NICO_NGC_TOKEN:
+        description: "Key for NGC helm/resource uploads (falls back to NVCR_TOKEN)"
+        required: false
 
 jobs:
+  # Build each architecture natively on its own runner. A single multi-platform
+  # build does NOT work here: the Dockerfile builder is `FROM --platform=$BUILDPLATFORM`,
+  # so BuildKit builds it once on the build host (amd64) and BOTH final stages
+  # `COPY --from=builder`, shipping the amd64 binary inside the arm64 image. Building
+  # each arch on its own runner (separate, single-platform builds) is the only way to
+  # guarantee the arm64 image contains an arm64 binary; the manifest is stitched in `merge`.
   build:
-    name: Build ${{ inputs.service_name }}
-    runs-on: ${{ inputs.runner }}
+    name: Build ${{ inputs.service_name }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: linux-amd64-cpu4
+          - arch: arm64
+            platform: linux/arm64
+            runner: linux-arm64-cpu4
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -80,11 +109,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU for multi-architecture builds
-        uses: docker/setup-qemu-action@v3
         with:
-          platforms: linux/amd64,linux/arm64
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -94,78 +120,72 @@ jobs:
           # directly — avoids unauthenticated 429 rate limits. Matches core docker-build.yml.
           buildkitd-config: /etc/buildkit/buildkitd.toml
 
-      - name: Login to NVCR
-        uses: docker/login-action@v3
-        with:
-          registry: nvcr.io
-          username: ${{ secrets.NVCR_USERNAME }}
-          password: ${{ secrets.NVCR_TOKEN }}
-
-      - name: Build amd64 image for Grype scan (load to daemon)
-        id: scan-build
-        continue-on-error: true
-        uses: docker/build-push-action@v5
-        with:
-          context: ./rest-api
-          file: ${{ inputs.dockerfile }}
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: localbuild/scan-${{ inputs.service_name }}:${{ github.run_id }}-${{ github.run_attempt }}
-          cache-from: type=gha,scope=${{ inputs.service_name }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.service_name }}
-
-      - name: Grype vulnerability scan
-        if: steps.scan-build.outcome == 'success'
-        continue-on-error: true
-        uses: NVIDIA/dsx-github-actions/.github/actions/security-container-scan@739847ddf00fda38916504ef84e1f504eac3158f
-        with:
-          image: localbuild/scan-${{ inputs.service_name }}:${{ github.run_id }}-${{ github.run_attempt }}
-          fail-on: critical
-          fail-build: 'false'
-          write-summary: 'false'
-          upload-sarif: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
-          sarif-category: grype-${{ inputs.service_name }}
-          artifact-name: grype-${{ inputs.service_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          sbom-artifact-name: sbom-${{ inputs.service_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Derive registry host
+        id: registry-host
+        env:
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          HAS_TARGET_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN != '' }}
+          HAS_TARGET_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME != '' }}
+        run: |
+          HOST="${TARGET_REGISTRY%%/*}"
+          echo "host=${HOST}" >> "$GITHUB_OUTPUT"
+          if [ "${PUSH_ENABLED}" = "true" ] && [ "${HOST}" != "nvcr.io" ] && { [ "${HAS_TARGET_TOKEN}" != "true" ] || [ "${HAS_TARGET_USERNAME}" != "true" ]; }; then
+            echo "::error::pushing to a non-NVCR target requires NICO_TARGET_REGISTRY_* secrets"
+            exit 1
+          fi
 
       - name: Determine Docker tags
         id: docker-tags
         run: |
-          TAGS=""
-          PRIMARY_TAG=""
           # semantic_version comes from `git describe --long` and already ends in `-g<short_sha>`,
           # so appending short_sha again would produce a duplicated SHA suffix.
           ARTIFACT_VERSION="${{ inputs.semantic_version }}"
-
           if [ "${{ inputs.is_main_branch }}" == "true" ]; then
             PRIMARY_TAG="${{ inputs.semantic_version }}"
-            TAGS="${TAGS},${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}"
-            TAGS="${TAGS},${{ inputs.target_registry }}/${{ inputs.service_name }}:latest"
           elif [ "${{ inputs.release_tag }}" != "" ]; then
             PRIMARY_TAG="${{ inputs.release_tag }}"
             ARTIFACT_VERSION="${{ inputs.release_tag }}"
-            TAGS="${TAGS},${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}"
           else
             PRIMARY_TAG="${{ inputs.branch_sha_tag }}"
-            TAGS="${TAGS},${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}"
           fi
-
-          TAGS="${TAGS#,}"
-          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          # Per-arch tag; the bare manifest tag is assembled by the merge job.
+          ARCH_TAG="${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}-${{ matrix.arch }}"
+          # Moving major.minor tag (e.g. v2.2-latest), mirroring core ci.yaml's
+          # major_minor_version. semantic_version is `git describe`, so this collapses
+          # dev builds and releases in the same X.Y line onto one tag.
+          MAJOR_MINOR=$(echo "${{ inputs.semantic_version }}" | cut -d. -f1,2)
           echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
+          echo "arch_tag=$ARCH_TAG" >> $GITHUB_OUTPUT
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
+          echo "major_minor_tag=$MAJOR_MINOR" >> $GITHUB_OUTPUT
 
-      - name: Build and push ${{ inputs.service_name }} (multi-arch)
+      - name: Build ${{ inputs.service_name }} (${{ matrix.arch }})
         uses: docker/build-push-action@v5
         with:
           context: ./rest-api
           file: ${{ inputs.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: ${{ inputs.push_enabled }}
-          tags: ${{ steps.docker-tags.outputs.tags }}
-          cache-from: type=gha,scope=${{ inputs.service_name }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.service_name }}
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          # The Dockerfile builder is FROM --platform=$BUILDPLATFORM and cross-compiles via
+          # GOARCH=$TARGETARCH. On a NATIVE single-platform build BuildKit does not inject the
+          # automatic TARGETARCH, so it falls back to the Dockerfile default (amd64) and the
+          # arm64 leg cross-compiles to amd64 even on an arm64 runner. Set it explicitly.
+          build-args: |
+            TARGETOS=linux
+            TARGETARCH=${{ matrix.arch }}
+            VERSION=${{ steps.docker-tags.outputs.primary_tag }}
+            CARBIDE_BUILD_HELM_VERSION=${{ inputs.helm_version }}
+          tags: ${{ steps.docker-tags.outputs.arch_tag }}
+          # No layer cache. Ten services on two architectures exporting mode=max
+          # dominated the Actions cache and held it at quota, which stopped
+          # sccache writing: the Rust builds logged a write error for every miss,
+          # discarding everything they compiled. Rebuilding Go layers costs less
+          # than that. cache-from goes too, since nothing populates the scope
+          # once main stops exporting.
+          cache-from: ''
+          cache-to: ''
           labels: |
             org.opencontainers.image.title=${{ inputs.service_name }}
             org.opencontainers.image.version=${{ inputs.semantic_version }}
@@ -174,81 +194,159 @@ jobs:
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.url=${{ github.repositoryUrl }}
 
-      - name: Extract amd64 binary from image
-        if: inputs.push_enabled == true
+      - name: Grype vulnerability scan
+        if: matrix.arch == 'amd64' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@aa4e470cc53f3886545c7d72a984eb81f1d203e2 # v1.16.2
+        with:
+          image: ${{ steps.docker-tags.outputs.arch_tag }}
+          fail-on: critical
+          fail-build: 'false'
+          write-summary: 'false'
+          upload-sarif: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sarif-category: grype-${{ inputs.service_name }}
+          artifact-name: grype-${{ inputs.service_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          sbom-artifact-name: sbom-${{ inputs.service_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Extract ${{ matrix.arch }} binary and verify architecture
+        # No push_enabled gate: the build step loads the image, so this guard also runs on PRs
+        # and catches an arch mismatch before merge — not only on main.
         run: |
+          set -euo pipefail
           mkdir -p artifacts
-          docker pull --platform linux/amd64 ${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}
-          docker create --name temp-container --platform linux/amd64 ${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}
-          docker cp temp-container:${{ inputs.binary_path }} artifacts/${{ inputs.binary_name }}-amd64
-          docker rm temp-container
-          chmod +x artifacts/${{ inputs.binary_name }}-amd64
+          cid=$(docker create "${{ steps.docker-tags.outputs.arch_tag }}")
+          docker cp "${cid}:${{ inputs.binary_path }}" "artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}"
+          docker rm "${cid}"
+          chmod +x "artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}"
+          # Guard: the binary must match this leg's target arch (amd64=x86-64, arm64=aarch64).
+          case "${{ matrix.arch }}" in
+            amd64) want='x86-64' ;;
+            arm64) want='aarch64' ;;
+            *) echo "::error::unknown arch ${{ matrix.arch }}"; exit 1 ;;
+          esac
+          got="$(file -b "artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}")"
+          echo "${got}" | grep -q "${want}" \
+            || { echo "::error::${{ matrix.arch }} ${{ inputs.binary_name }} is not ${want}: ${got}"; exit 1; }
 
-      - name: Extract arm64 binary from image
-        if: inputs.push_enabled == true
-        run: |
-          docker pull --platform linux/arm64 ${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}
-          docker create --name temp-container-arm --platform linux/arm64 ${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}
-          docker cp temp-container-arm:${{ inputs.binary_path }} artifacts/${{ inputs.binary_name }}-arm64
-          docker rm temp-container-arm
-          chmod +x artifacts/${{ inputs.binary_name }}-arm64
+      - name: Login to target registry
+        if: ${{ inputs.push_enabled == true }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry-host.outputs.host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          password: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
-      - name: Export Docker image
+      - name: Push ${{ matrix.arch }} image
         if: inputs.push_enabled == true
-        run: |
-          docker save ${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }} | gzip > artifacts/${{ inputs.service_name }}-${{ steps.docker-tags.outputs.artifact_version }}.tar.gz
+        run: docker push "${{ steps.docker-tags.outputs.arch_tag }}"
 
       - name: Upload binary artifact with semantic version
-        if: inputs.push_enabled == true
-        uses: NVIDIA/dsx-github-actions/.github/actions/resource-push-ngc@47c68bf27edde19d1acece9b7721b4a1a0044dfa
+        if: inputs.push_enabled == true && inputs.ngc_path != ''
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
         with:
-          name: ${{ inputs.service_name }}-binary-amd64
-          display-name: ${{ inputs.service_name }}-binary-amd64
-          description: ${{ inputs.service_name }} binary (amd64)
+          name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
+          display-name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
+          description: ${{ inputs.service_name }} binary (${{ matrix.arch }})
           version: ${{ steps.docker-tags.outputs.artifact_version }}
-          path: artifacts/${{ inputs.binary_name }}-amd64
+          path: artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}
           ngc-path: ${{ inputs.ngc_path }}
-          ngc-key: ${{ secrets.NVCR_TOKEN }}
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
 
       - name: Upload binary artifact with latest tag
-        if: inputs.is_main_branch == 'true' && inputs.push_enabled == true
-        uses: NVIDIA/dsx-github-actions/.github/actions/resource-push-ngc@47c68bf27edde19d1acece9b7721b4a1a0044dfa
+        if: inputs.is_main_branch == 'true' && inputs.push_enabled == true && inputs.ngc_path != ''
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
         with:
-          name: ${{ inputs.service_name }}-binary-amd64
-          display-name: ${{ inputs.service_name }}-binary-amd64
-          description: ${{ inputs.service_name }} binary (amd64)
+          name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
+          display-name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
+          description: ${{ inputs.service_name }} binary (${{ matrix.arch }})
           version: latest
-          path: artifacts/${{ inputs.binary_name }}-amd64
+          path: artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}
           ngc-path: ${{ inputs.ngc_path }}
-          ngc-key: ${{ secrets.NVCR_TOKEN }}
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
 
-      - name: Upload arm64 binary artifact with semantic version
-        if: inputs.push_enabled == true
-        uses: NVIDIA/dsx-github-actions/.github/actions/resource-push-ngc@47c68bf27edde19d1acece9b7721b4a1a0044dfa
-        with:
-          name: ${{ inputs.service_name }}-binary-arm64
-          display-name: ${{ inputs.service_name }}-binary-arm64
-          description: ${{ inputs.service_name }} binary (arm64)
-          version: ${{ steps.docker-tags.outputs.artifact_version }}
-          path: artifacts/${{ inputs.binary_name }}-arm64
-          ngc-path: ${{ inputs.ngc_path }}
-          ngc-key: ${{ secrets.NVCR_TOKEN }}
+  # Stitch the per-arch images pushed by `build` into one multi-arch manifest at the
+  # bare tag, then export/upload the image tarball. Push refs only.
+  merge:
+    name: Merge ${{ inputs.service_name }} manifest
+    needs: build
+    if: ${{ inputs.push_enabled == true }}
+    runs-on: linux-amd64-cpu4
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Upload arm64 binary artifact with latest tag
-        if: inputs.is_main_branch == 'true' && inputs.push_enabled == true
-        uses: NVIDIA/dsx-github-actions/.github/actions/resource-push-ngc@47c68bf27edde19d1acece9b7721b4a1a0044dfa
+      - name: Derive registry host
+        id: registry-host
+        env:
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          HAS_TARGET_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN != '' }}
+          HAS_TARGET_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME != '' }}
+        run: |
+          HOST="${TARGET_REGISTRY%%/*}"
+          echo "host=${HOST}" >> "$GITHUB_OUTPUT"
+          if [ "${PUSH_ENABLED}" = "true" ] && [ "${HOST}" != "nvcr.io" ] && { [ "${HAS_TARGET_TOKEN}" != "true" ] || [ "${HAS_TARGET_USERNAME}" != "true" ]; }; then
+            echo "::error::pushing to a non-NVCR target requires NICO_TARGET_REGISTRY_* secrets"
+            exit 1
+          fi
+
+      - name: Login to target registry
+        if: ${{ inputs.push_enabled == true }}
+        uses: docker/login-action@v3
         with:
-          name: ${{ inputs.service_name }}-binary-arm64
-          display-name: ${{ inputs.service_name }}-binary-arm64
-          description: ${{ inputs.service_name }} binary (arm64)
-          version: latest
-          path: artifacts/${{ inputs.binary_name }}-arm64
-          ngc-path: ${{ inputs.ngc_path }}
-          ngc-key: ${{ secrets.NVCR_TOKEN }}
+          registry: ${{ steps.registry-host.outputs.host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          password: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Determine Docker tags
+        id: docker-tags
+        run: |
+          ARTIFACT_VERSION="${{ inputs.semantic_version }}"
+          if [ "${{ inputs.is_main_branch }}" == "true" ]; then
+            PRIMARY_TAG="${{ inputs.semantic_version }}"
+          elif [ "${{ inputs.release_tag }}" != "" ]; then
+            PRIMARY_TAG="${{ inputs.release_tag }}"
+            ARTIFACT_VERSION="${{ inputs.release_tag }}"
+          else
+            PRIMARY_TAG="${{ inputs.branch_sha_tag }}"
+          fi
+          MAJOR_MINOR=$(echo "${{ inputs.semantic_version }}" | cut -d. -f1,2)
+          echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
+          echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
+          echo "major_minor_tag=$MAJOR_MINOR" >> $GITHUB_OUTPUT
+
+      - name: Create and push multi-arch manifest
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            REG="${{ inputs.target_registry }}/${{ inputs.service_name }}"
+            TAG="${{ steps.docker-tags.outputs.primary_tag }}"
+            MAJOR_MINOR="${{ steps.docker-tags.outputs.major_minor_tag }}"
+            docker buildx imagetools create -t "${REG}:${TAG}" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
+            if [ "${{ inputs.is_main_branch }}" == "true" ]; then
+              docker buildx imagetools create -t "${REG}:latest" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
+            fi
+            if [ -n "${MAJOR_MINOR}" ]; then
+              docker buildx imagetools create -t "${REG}:${MAJOR_MINOR}-latest" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
+            fi
+
+      - name: Export Docker image
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          docker pull "${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}"
+          docker save "${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}" \
+            | gzip > "artifacts/${{ inputs.service_name }}-${{ steps.docker-tags.outputs.artifact_version }}.tar.gz"
 
       - name: Upload Docker image artifact with semantic version
-        if: inputs.push_enabled == true
-        uses: NVIDIA/dsx-github-actions/.github/actions/resource-push-ngc@47c68bf27edde19d1acece9b7721b4a1a0044dfa
+        if: inputs.ngc_path != ''
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
         with:
           name: ${{ inputs.service_name }}-image
           display-name: ${{ inputs.service_name }}-image
@@ -256,11 +354,11 @@ jobs:
           version: ${{ steps.docker-tags.outputs.artifact_version }}
           path: artifacts/${{ inputs.service_name }}-${{ steps.docker-tags.outputs.artifact_version }}.tar.gz
           ngc-path: ${{ inputs.ngc_path }}
-          ngc-key: ${{ secrets.NVCR_TOKEN }}
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
 
       - name: Upload Docker image artifact with latest tag
-        if: inputs.is_main_branch == 'true' && inputs.push_enabled == true
-        uses: NVIDIA/dsx-github-actions/.github/actions/resource-push-ngc@47c68bf27edde19d1acece9b7721b4a1a0044dfa
+        if: inputs.is_main_branch == 'true' && inputs.ngc_path != ''
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
         with:
           name: ${{ inputs.service_name }}-image
           display-name: ${{ inputs.service_name }}-image
@@ -268,4 +366,4 @@ jobs:
           version: latest
           path: artifacts/${{ inputs.service_name }}-${{ steps.docker-tags.outputs.artifact_version }}.tar.gz
           ngc-path: ${{ inputs.ngc_path }}
-          ngc-key: ${{ secrets.NVCR_TOKEN }}
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}

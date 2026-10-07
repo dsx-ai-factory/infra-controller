@@ -18,18 +18,21 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use rpc::DiscoveryInfo;
 use serde_json::json;
 
 use crate::{BootOptionKind, Callbacks, hw, redfish};
 
-pub struct GenericAmi<'a> {
-    pub product_serial_number: Cow<'a, str>,
-    pub nics: Vec<(hw::nic::SlotNumber, hw::nic::Nic<'a>)>,
+pub(crate) struct GenericAmi<'a> {
+    pub(crate) product_serial_number: Cow<'a, str>,
+    pub(crate) nics: Vec<(hw::nic::SlotNumber, hw::nic::Nic<'a>)>,
 }
 
 impl GenericAmi<'_> {
-    pub fn manager_config(&self) -> redfish::manager::Config {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
+    pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "Self";
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {
@@ -43,13 +46,17 @@ impl GenericAmi<'_> {
                     .interface_enabled(true)
                     .build(),
                 ]),
+                serial_interfaces: None,
                 firmware_version: Some("47.20.02"),
                 oem: None,
             }],
         }
     }
 
-    pub fn system_config(&self, callbacks: Arc<dyn Callbacks>) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(
+        &self,
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "Self";
 
         let boot_opt_builder = |id: &str, kind| {
@@ -78,12 +85,13 @@ impl GenericAmi<'_> {
                     .display_name(&display_name)
                     .build()
             })
-            .collect();
+            .collect::<Vec<_>>();
         redfish::computer_system::Config {
             systems: vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
+                bios_version: None,
                 eth_interfaces: Some(vec![]),
                 serial_number: Some(self.product_serial_number.to_string().into()),
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,
@@ -95,17 +103,19 @@ impl GenericAmi<'_> {
                 log_services: None,
                 storage: None,
                 processors: None,
+                memory: None,
                 base_bios: Some(
                     redfish::bios::builder(&redfish::bios::resource(system_id))
                         .attributes(json!({"EndlessBoot":""}))
                         .build(),
                 ),
+                serial_console: None,
                 secure_boot_available: false,
             }],
         }
     }
 
-    pub fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
+    pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
         let chassis_id = "Self";
 
         let pcie_devices = self
@@ -132,13 +142,26 @@ impl GenericAmi<'_> {
         }
     }
 
-    pub fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
+    pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
         redfish::update_service::UpdateServiceConfig {
-            firmware_inventory: vec![],
+            firmware_inventory: [
+                // BMC version matches manager_config firmware_version.
+                ("HostBMC_0", "47.20.02"),
+                // Representative UEFI version for a generic AMI server.
+                ("HostBIOS_0", "02.04.01"),
+            ]
+            .iter()
+            .map(|(id, version)| {
+                redfish::software_inventory::builder(
+                    &redfish::software_inventory::firmware_inventory_resource(id),
+                )
+                .version(version)
+                .build()
+            })
+            .collect(),
+            host_bmc_inventory_id: Some("HostBMC_0".to_string()),
+            host_uefi_inventory_id: Some("HostBIOS_0".to_string()),
+            ..Default::default()
         }
-    }
-
-    pub fn discovery_info(&self) -> DiscoveryInfo {
-        DiscoveryInfo::default()
     }
 }

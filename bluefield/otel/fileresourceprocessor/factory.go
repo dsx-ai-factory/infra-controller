@@ -48,7 +48,7 @@ func NewFactory() processor.Factory {
 
 func createTracesProcessor(
 	ctx context.Context,
-	settings processor.CreateSettings,
+	settings processor.Settings,
 	cfg component.Config,
 	nextConsumer consumer.Traces,
 ) (processor.Traces, error) {
@@ -57,7 +57,7 @@ func createTracesProcessor(
 		return nil, err
 	}
 
-	return processorhelper.NewTracesProcessor(
+	return processorhelper.NewTraces(
 		ctx,
 		settings,
 		cfg,
@@ -83,7 +83,7 @@ func (p *fileResourceProcessor) processTraces(
 
 func createMetricsProcessor(
 	ctx context.Context,
-	settings processor.CreateSettings,
+	settings processor.Settings,
 	cfg component.Config,
 	nextConsumer consumer.Metrics,
 ) (processor.Metrics, error) {
@@ -92,7 +92,7 @@ func createMetricsProcessor(
 		return nil, err
 	}
 
-	return processorhelper.NewMetricsProcessor(
+	return processorhelper.NewMetrics(
 		ctx,
 		settings,
 		cfg,
@@ -118,7 +118,7 @@ func (p *fileResourceProcessor) processMetrics(
 
 func createLogsProcessor(
 	ctx context.Context,
-	settings processor.CreateSettings,
+	settings processor.Settings,
 	cfg component.Config,
 	nextConsumer consumer.Logs,
 ) (processor.Logs, error) {
@@ -127,7 +127,7 @@ func createLogsProcessor(
 		return nil, err
 	}
 
-	return processorhelper.NewLogsProcessor(
+	return processorhelper.NewLogs(
 		ctx,
 		settings,
 		cfg,

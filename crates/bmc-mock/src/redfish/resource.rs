@@ -22,29 +22,25 @@ use serde_json::json;
 use crate::json::JsonPatch;
 
 /// Defines minimal set of Redfish resource attributes.
-pub struct Resource<'a> {
-    pub odata_id: Cow<'a, str>,
-    pub odata_type: Cow<'a, str>,
-    pub id: Cow<'a, str>,
-    pub name: Cow<'a, str>,
+pub(crate) struct Resource<'a> {
+    pub(crate) odata_id: Cow<'a, str>,
+    pub(crate) odata_type: Cow<'a, str>,
+    pub(crate) id: Cow<'a, str>,
+    pub(crate) name: Cow<'a, str>,
 }
 
 impl<'a> Resource<'a> {
-    pub fn entity_ref(&self) -> serde_json::Value {
+    pub(crate) fn entity_ref(&self) -> serde_json::Value {
         json!({
             "@odata.id": self.odata_id
         })
     }
-    pub fn nav_property(&self, name: &str) -> serde_json::Value {
+    pub(crate) fn nav_property(&self, name: &str) -> serde_json::Value {
         json!({
             name: {
                 "@odata.id": self.odata_id
             }
         })
-    }
-    pub fn with_name(mut self, name: &'a str) -> Self {
-        self.name = Cow::Borrowed(name);
-        self
     }
 }
 
@@ -65,22 +61,26 @@ impl JsonPatch for Resource<'_> {
     }
 }
 
-pub enum Status {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Status {
     Ok,
     Warning,
     Critical,
 }
 
 impl Status {
-    pub fn into_json(self) -> serde_json::Value {
-        let health = match self {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
             Self::Ok => "OK",
             Self::Warning => "Warning",
             Self::Critical => "Critical",
-        };
+        }
+    }
+
+    pub(super) fn into_json(self) -> serde_json::Value {
         json!({
             "State": "Enabled",
-            "Health": health,
+            "Health": self.as_str(),
         })
     }
 }

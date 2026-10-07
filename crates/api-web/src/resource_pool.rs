@@ -28,8 +28,13 @@ use rpc::forge::forge_server::Forge;
 use super::Base;
 
 mod filters {
+    #![allow(
+        unreachable_pub,
+        reason = "askama::filter_fn emits public helper items inside this template-filter module"
+    )]
+
     #[askama::filter_fn]
-    pub fn resource_pool_allocated_fmt(
+    pub(super) fn resource_pool_allocated_fmt(
         pool: &super::forgerpc::ResourcePool,
         _env: &dyn askama::Values,
     ) -> askama::Result<String> {
@@ -50,11 +55,11 @@ struct ResourcePoolShow {
 }
 
 /// List resource pools
-pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let pools = match fetch_resource_pools(state).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "admin_list_resource_pools");
+            tracing::error!(error = %err, "admin_list_resource_pools");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed loading resource pools",
@@ -66,11 +71,11 @@ pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let out = match fetch_resource_pools(state).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "admin_list_resource_pools");
+            tracing::error!(error = %err, "admin_list_resource_pools");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed loading resource pools",

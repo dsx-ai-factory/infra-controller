@@ -23,7 +23,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn chassis_resource(chassis_id: &str) -> redfish::Resource<'static> {
+pub(crate) fn chassis_resource(chassis_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/Assembly");
     redfish::Resource {
         odata_id: odata_id.into(),
@@ -33,7 +33,7 @@ pub fn chassis_resource(chassis_id: &str) -> redfish::Resource<'static> {
     }
 }
 
-pub fn builder(resource: &redfish::Resource) -> AssemblyBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> AssemblyBuilder {
     AssemblyBuilder {
         odata_id: resource.odata_id.to_string(),
         assemblies: vec![],
@@ -41,14 +41,14 @@ pub fn builder(resource: &redfish::Resource) -> AssemblyBuilder {
     }
 }
 
-pub fn data_builder(member_id: Cow<'static, str>) -> AssemblyData {
+pub(crate) fn data_builder(member_id: Cow<'static, str>) -> AssemblyData {
     AssemblyData {
         member_id,
         value: json!({}),
     }
 }
 
-pub struct AssemblyBuilder {
+pub(crate) struct AssemblyBuilder {
     odata_id: String,
     assemblies: Vec<AssemblyData>,
     value: serde_json::Value,
@@ -65,12 +65,12 @@ impl Builder for AssemblyBuilder {
 }
 
 impl AssemblyBuilder {
-    pub fn add_data(mut self, data: AssemblyData) -> Self {
+    pub(crate) fn add_data(mut self, data: AssemblyData) -> Self {
         self.assemblies.push(data);
         self
     }
 
-    pub fn build(self) -> serde_json::Value {
+    pub(crate) fn build(self) -> serde_json::Value {
         json!({
             "Assemblies":
             self.assemblies.into_iter().map(|assembly| {
@@ -84,7 +84,7 @@ impl AssemblyBuilder {
     }
 }
 
-pub struct AssemblyData {
+pub(crate) struct AssemblyData {
     member_id: Cow<'static, str>,
     value: serde_json::Value,
 }
@@ -99,11 +99,11 @@ impl Builder for AssemblyData {
 }
 
 impl AssemblyData {
-    pub fn serial_number(self, v: &str) -> Self {
+    pub(crate) fn serial_number(self, v: &str) -> Self {
         self.add_str_field("SerialNumber", v)
     }
 
-    pub fn build(self) -> Self {
+    pub(crate) fn build(self) -> Self {
         self
     }
 }

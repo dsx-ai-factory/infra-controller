@@ -8,7 +8,7 @@
 <table class="detailsview">
 	<tr><th>Name</th><td>{{ tmpl.name }}</td></tr>
 	<tr><th>Description</th><td>{{ tmpl.description }}</td></tr>
-	<tr><th>Scope</th><td>{{ tmpl.scope|ipxe_template_scope_fmt }}</td></tr>
+	<tr><th>Visibility</th><td>{{ tmpl.visibility|ipxe_template_visibility_fmt }}</td></tr>
 </table>
 
 {% if !tmpl.required_params.is_empty() %}

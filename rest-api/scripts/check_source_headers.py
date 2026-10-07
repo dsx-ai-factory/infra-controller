@@ -86,9 +86,32 @@ HASH_PROPRIETARY_RE = re.compile(
 )
 
 
-def tracked_files(repo: Path) -> list[Path]:
+def source_files(repo: Path, include_untracked: list[str] | None = None) -> list[Path]:
+    """Return tracked files plus selected untracked generator outputs.
+
+    This keeps generation independent of Git index state without scanning
+    unrelated local files.
+    """
+    # git ls-files reports index entries, which outlive files the caller has already
+    # deleted; generate-sdk clears stale SDK output before regenerating.
     output = subprocess.check_output(["git", "ls-files"], cwd=repo, text=True)
-    return [Path(line) for line in output.splitlines()]
+    paths = output.splitlines()
+    if include_untracked:
+        untracked = subprocess.check_output(
+            [
+                "git",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+                *include_untracked,
+            ],
+            cwd=repo,
+            text=True,
+        )
+        paths.extend(untracked.splitlines())
+    paths = (Path(line) for line in dict.fromkeys(paths))
+    return [path for path in paths if (repo / path).is_file()]
 
 
 def is_dockerfile(path: Path) -> bool:
@@ -335,13 +358,19 @@ def ipam_header_missing(text: str) -> bool:
     return not all(marker in header for marker in (IPAM_COPYRIGHT, NVIDIA_COPYRIGHT, IPAM_LICENSE))
 
 
-def scan(repo: Path, *, fix: bool, migrate_only: bool = False) -> int:
+def scan(
+    repo: Path,
+    *,
+    fix: bool,
+    migrate_only: bool = False,
+    include_untracked: list[str] | None = None,
+) -> int:
     missing: list[Path] = []
     proprietary: list[Path] = []
     long_form: list[Path] = []
     fixed: list[Path] = []
 
-    for path in tracked_files(repo):
+    for path in source_files(repo, include_untracked):
         if not is_candidate(repo, path):
             continue
 
@@ -413,10 +442,22 @@ def main() -> int:
         action="store_true",
         help="With --fix, only shorten existing long-form Apache headers; do not add headers to files that lack one.",
     )
+    parser.add_argument(
+        "--include-untracked",
+        action="append",
+        default=[],
+        metavar="PATHSPEC",
+        help="Also check untracked, non-ignored files matching this Git pathspec.",
+    )
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
-    return scan(repo, fix=args.fix, migrate_only=args.migrate_only)
+    return scan(
+        repo,
+        fix=args.fix,
+        migrate_only=args.migrate_only,
+        include_untracked=args.include_untracked,
+    )
 
 
 if __name__ == "__main__":

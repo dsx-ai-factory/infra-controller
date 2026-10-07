@@ -18,17 +18,14 @@ import (
 	"logur.dev/logur"
 
 	tsdkClient "go.temporal.io/sdk/client"
-	tsdkConverter "go.temporal.io/sdk/converter"
 	tsdkWorker "go.temporal.io/sdk/worker"
-
-	"go.opentelemetry.io/otel"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	"go.temporal.io/sdk/interceptor"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
@@ -61,7 +58,9 @@ import (
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
 
 	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
+	sxpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
 	ibpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
+	sxpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
 
 	expectedMachineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
 	expectedMachineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
@@ -70,7 +69,9 @@ import (
 	expectedPowerShelfWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedpowershelf"
 
 	expectedRackActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedrack"
+	expectedRackGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedrackgroup"
 	expectedRackWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedrack"
+	expectedRackGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedrackgroup"
 
 	expectedSwitchActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedswitch"
 	expectedSwitchWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedswitch"
@@ -86,6 +87,9 @@ import (
 
 	osImageActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/operatingsystem"
 	osImageWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/operatingsystem"
+
+	ipxeTemplateActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/ipxetemplate"
+	ipxeTemplateWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/ipxetemplate"
 
 	skuActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sku"
 	skuWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sku"
@@ -111,26 +115,42 @@ const (
 )
 
 func main() {
-	// Initialize context
-	ctx := context.Background()
-
 	// Initialize logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.LevelFieldName = ZerologLevelFieldName
 	zerolog.MessageFieldName = ZerologMessageFieldName
 
+	if err := run(context.Background()); err != nil {
+		log.Error().Err(err).Msg("workflow worker stopped with an error")
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
 	cfg := config.NewConfig()
 	defer cfg.Close()
+
+	otelShutdown, err := cotel.Bootstrap(ctx, cfg.GetTracingEnabled(), cfg.GetTracingServiceName())
+	if err != nil {
+		return fmt.Errorf("failed to initialize tracing: %w", err)
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("failed to shut down tracing")
+		}
+	}()
 
 	dbConfig := cfg.GetDBConfig()
 
 	// Initialize DB connection
 	dbSession, err := cdb.NewSession(ctx, dbConfig.Host, dbConfig.Port, dbConfig.Name, dbConfig.User, dbConfig.Password, "")
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to initialize DB session")
-	} else {
-		defer dbSession.Close()
+		return fmt.Errorf("failed to initialize DB session: %w", err)
 	}
+	defer dbSession.Close()
 
 	// Initializer Temporal client
 	// Create the client object just once per process
@@ -181,47 +201,29 @@ func main() {
 
 	tcfg, err := cfg.GetTemporalConfig()
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to get Temporal config")
+		return fmt.Errorf("failed to get Temporal config: %w", err)
 	}
 
-	var tInterceptors []interceptor.ClientInterceptor
-
-	if cfg.GetTracingEnabled() {
-		otelInterceptor, err := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-		if err != nil {
-			log.Panic().Err(err).Msg("unable to get otelInterceptor")
-		}
-		tInterceptors = append(tInterceptors, otelInterceptor)
+	// Shared options carry the payload converter every binary agrees on and,
+	// when transport tracing is configured, the OpenTelemetry interceptor.
+	// The SDK applies a client interceptor that also implements the worker
+	// interface to every worker built from that client, so the worker must
+	// not register it again.
+	tOptions, err := ctemporal.ClientOptions(tcfg.GetHostPort(), tcfg.Namespace, tcfg.ClientTLSCfg, tLogger)
+	if err != nil {
+		return fmt.Errorf("failed to build Temporal client options: %w", err)
 	}
 
-	tc, err = tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
-		Namespace: tcfg.Namespace,
-		ConnectionOptions: tsdkClient.ConnectionOptions{
-			TLS: tcfg.ClientTLSCfg,
-		},
-		DataConverter: tsdkConverter.NewCompositeDataConverter(
-			tsdkConverter.NewNilPayloadConverter(),
-			tsdkConverter.NewByteSlicePayloadConverter(),
-			tsdkConverter.NewProtoJSONPayloadConverterWithOptions(tsdkConverter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			tsdkConverter.NewProtoPayloadConverter(),
-			tsdkConverter.NewJSONPayloadConverter(),
-		),
-		// Interceptors: tInterceptors,
-		Logger: tLogger,
-	})
+	tc, err = tsdkClient.NewLazyClient(tOptions)
 
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to create Temporal client")
-	} else {
-		defer tc.Close()
+		return fmt.Errorf("failed to create Temporal client: %w", err)
 	}
+	defer tc.Close()
 
 	w := tsdkWorker.New(tc, tcfg.Queue, tsdkWorker.Options{
 		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
-		MaxConcurrentActivityTaskPollers: 10,
+		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
 		MaxConcurrentWorkflowTaskPollers: 10,
 	})
 
@@ -273,12 +275,17 @@ func main() {
 
 		// Site workflows
 		w.RegisterWorkflow(siteWorkflow.UpdateAgentCertExpiry)
+		// V1 stays registered for the rollout window, where Cloud upgrades ahead of the Site
+		// Agents still publishing it.
+		w.RegisterWorkflow(siteWorkflow.UpdateSiteConfigInventory)
+		w.RegisterWorkflow(siteWorkflow.UpdateSiteConfigInventoryV2)
 
 		// SSHKeyGroup workflows
 		w.RegisterWorkflow(sshKeyGroupWorkflow.UpdateSSHKeyGroupInventory)
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.UpdateInfiniBandPartitionInventory)
+		w.RegisterWorkflow(sxpWorkflow.UpdateSpectrumXPartitionInventory)
 
 		// Tenant workflow
 		w.RegisterWorkflow(tenantWorkflow.UpdateTenantInventory)
@@ -291,6 +298,12 @@ func main() {
 
 		// OS Image workflow
 		w.RegisterWorkflow(osImageWorkflow.UpdateOsImageInventory)
+
+		// Operating System inventory workflow (inbound reconcile from nico-core)
+		w.RegisterWorkflow(osImageWorkflow.UpdateOperatingSystemInventory)
+
+		// iPXE Template inventory workflow
+		w.RegisterWorkflow(ipxeTemplateWorkflow.UpdateIpxeTemplateInventory)
 
 		// VPC Prefix workflow
 		w.RegisterWorkflow(vpcPrefixWorkflow.UpdateVpcPrefixInventory)
@@ -306,6 +319,7 @@ func main() {
 
 		// ExpectedRack workflow
 		w.RegisterWorkflow(expectedRackWorkflow.UpdateExpectedRackInventory)
+		w.RegisterWorkflow(expectedRackGroupWorkflow.UpdateExpectedRackGroupInventory)
 
 		// ExpectedSwitch workflow
 		w.RegisterWorkflow(expectedSwitchWorkflow.UpdateExpectedSwitchInventory)
@@ -318,6 +332,46 @@ func main() {
 
 		// NVLink Logical Partition workflow
 		w.RegisterWorkflow(nvLinkLogicalPartitionWorkflow.UpdateNVLinkLogicalPartitionInventory)
+	}
+
+	// Metric setup has to precede the activity registrations below, because the
+	// activities hold their own metric handles and the worker will not accept a
+	// registration once it is running. Only serving can wait for the goroutine
+	// further down.
+	mconfig := cfg.GetMetricsConfig()
+
+	var reg *prometheus.Registry
+	var siteHealthMetrics *cwm.SiteHealthMetrics
+
+	if mconfig.Enabled {
+		reg = prometheus.NewRegistry()
+		reg.MustRegister(collectors.NewGoCollector())
+
+		// Register core metrics
+		cm := cwm.NewCoreMetrics(reg, mconfig.Namespace)
+		// TODO: Set version here when available
+		cm.Info.With(prometheus.Labels{"version": "unknown", "namespace": tcfg.Namespace}).Set(1)
+
+		// Published by the Site health monitor cron, which runs on the Cloud queue.
+		siteHealthMetrics = cwm.NewSiteHealthMetrics(reg, mconfig.Namespace)
+
+		if tcfg.Namespace == cwfn.SiteNamespace {
+			// The inventory workflows that report these metrics only run here.
+
+			// Register common inventory metrics activity
+			inventoryMetricsManager := cwm.NewManageInventoryMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(inventoryMetricsManager)
+
+			// Register inventory operation metrics activity
+			vpcLifecycleMetricsManager := vpcActivity.NewManageVpcLifecycleMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(&vpcLifecycleMetricsManager)
+
+			subnetLifecycleMetricsManager := subnetActivity.NewManageSubnetLifecycleMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(&subnetLifecycleMetricsManager)
+
+			instanceLifecycleMetricsManager := instanceActivity.NewManageInstanceLifecycleMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(&instanceLifecycleMetricsManager)
+		}
 	}
 
 	// Register activities
@@ -334,7 +388,7 @@ func main() {
 	instanceManager := instanceActivity.NewManageInstance(dbSession, siteClientPool, tc, cfg)
 	w.RegisterActivity(&instanceManager)
 
-	siteManager := siteActivity.NewManageSite(dbSession, siteClientPool, tc, cfg)
+	siteManager := siteActivity.NewManageSite(dbSession, siteClientPool, tc, cfg, siteHealthMetrics)
 	w.RegisterActivity(&siteManager)
 
 	sshKeyGroupManager := sshKeyGroupActivity.NewManageSSHKeyGroup(dbSession, siteClientPool)
@@ -342,6 +396,9 @@ func main() {
 
 	ibpManager := ibpActivity.NewManageInfiniBandPartition(dbSession, siteClientPool)
 	w.RegisterActivity(&ibpManager)
+
+	sxpManager := sxpActivity.NewManageSpectrumXPartition(dbSession, siteClientPool)
+	w.RegisterActivity(&sxpManager)
 
 	tenantManager := tenantActivity.NewManageTenant(dbSession, siteClientPool)
 	w.RegisterActivity(&tenantManager)
@@ -354,6 +411,9 @@ func main() {
 
 	osImageManager := osImageActivity.NewManageOsImage(dbSession, siteClientPool)
 	w.RegisterActivity(&osImageManager)
+
+	ipxeTemplateManager := ipxeTemplateActivity.NewManageIpxeTemplate(dbSession, siteClientPool)
+	w.RegisterActivity(&ipxeTemplateManager)
 
 	vpcPrefixManager := vpcPrefixActivity.NewManageVpcPrefix(dbSession, siteClientPool)
 	w.RegisterActivity(&vpcPrefixManager)
@@ -372,6 +432,8 @@ func main() {
 	// ExpectedRack activities
 	expectedRackManager := expectedRackActivity.NewManageExpectedRack(dbSession, siteClientPool)
 	w.RegisterActivity(&expectedRackManager)
+	expectedRackGroupManager := expectedRackGroupActivity.NewManageExpectedRackGroup(dbSession, siteClientPool)
+	w.RegisterActivity(&expectedRackGroupManager)
 
 	// ExpectedSwitch activities
 	expectedSwitchManager := expectedSwitchActivity.NewManageExpectedSwitch(dbSession, siteClientPool)
@@ -395,66 +457,50 @@ func main() {
 		w.RegisterActivity(&userManager)
 	}
 
-	// Serve health endpoint
+	// A failing health or metrics server stops the worker so the failure
+	// leaves through run instead of a panic in a goroutine.
+	serveErrs := make(chan error, 2)
+	serve := func(name, addr string) {
+		go func() {
+			log.Info().Msgf("starting %s server", name)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				serveErrs <- fmt.Errorf("%s server on %s: %w", name, addr, err)
+			}
+		}()
+	}
+
 	hconfig := cfg.GetHealthzConfig()
 	if hconfig.Enabled {
-		go func() {
-			log.Info().Msg("starting health check API server")
-			http.HandleFunc("/healthz", cwfh.StatusHandler)
-			http.HandleFunc("/readyz", cwfh.StatusHandler)
-
-			serr := http.ListenAndServe(hconfig.GetListenAddr(), nil)
-			if serr != nil {
-				log.Panic().Err(serr).Msg("failed to start health check server")
-			}
-		}()
+		http.HandleFunc("/healthz", cwfh.StatusHandler)
+		http.HandleFunc("/readyz", cwfh.StatusHandler)
+		serve("health check API", hconfig.GetListenAddr())
 	}
 
-	mconfig := cfg.GetMetricsConfig()
 	if mconfig.Enabled {
-		// Serve Prometheus metrics
-		go func() {
-			log.Info().Msg("starting Prometheus metrics server")
-
-			reg := prometheus.NewRegistry()
-			reg.MustRegister(collectors.NewGoCollector())
-
-			// Register core metrics
-			cm := cwm.NewCoreMetrics(reg)
-			// TODO: Set version here when available
-			cm.Info.With(prometheus.Labels{"version": "unknown", "namespace": tcfg.Namespace}).Set(1)
-
-			if tcfg.Namespace == cwfn.SiteNamespace {
-				// Register common inventory metrics activity
-				inventoryMetricsManager := cwm.NewManageInventoryMetrics(reg, dbSession)
-				w.RegisterActivity(&inventoryMetricsManager)
-
-				// Register inventory operation metrics activity
-				vpcLifecycleMetricsManager := vpcActivity.NewManageVpcLifecycleMetrics(reg, dbSession)
-				w.RegisterActivity(&vpcLifecycleMetricsManager)
-
-				subnetLifecycleMetricsManager := subnetActivity.NewManageSubnetLifecycleMetrics(reg, dbSession)
-				w.RegisterActivity(&subnetLifecycleMetricsManager)
-
-				instanceLifecycleMetricsManager := instanceActivity.NewManageInstanceLifecycleMetrics(reg, dbSession)
-				w.RegisterActivity(&instanceLifecycleMetricsManager)
-			}
-
-			promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
-
-			http.Handle("/metrics", promHandler)
-			serr := http.ListenAndServe(mconfig.GetListenAddr(), nil)
-			if serr != nil {
-				log.Panic().Err(serr).Msg("failed to start Prometheus metrics server")
-			}
-		}()
+		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
+		serve("Prometheus metrics", mconfig.GetListenAddr())
 	}
+
+	interrupt := make(chan interface{}, 1)
+	go func() {
+		select {
+		case <-tsdkWorker.InterruptCh():
+		case err := <-serveErrs:
+			serveErrs <- err
+		}
+		interrupt <- struct{}{}
+	}()
 
 	// Start listening to the Task Queue
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("starting Temporal worker")
-	err = w.Run(tsdkWorker.InterruptCh())
+	err = w.Run(interrupt)
 	if err != nil {
-		log.Panic().Err(err).Str("Temporal Namespace", tcfg.Namespace).Msg("failed to start worker")
+		return fmt.Errorf("failed to run worker for Temporal namespace %s: %w", tcfg.Namespace, err)
+	}
+	select {
+	case err := <-serveErrs:
+		return err
+	default:
 	}
 
 	// Trigger cron workflow
@@ -478,4 +524,5 @@ func main() {
 	}
 
 	// NOTE: Log messages past this point do not show up in the log output
+	return nil
 }

@@ -49,8 +49,12 @@ type DpuExtensionServiceDeploymentRequest struct {
 
 // InstanceFilter encapsulates instance list filter parameters
 type InstanceFilter struct {
-	Name  *string
-	VpcID *string
+	Name      *string
+	Query     *string
+	VpcID     *string
+	IPAddress *string
+	// AllVPCs prevents the client's default VPC from narrowing the query when VpcID is nil.
+	AllVPCs bool
 }
 
 // InstanceUpdateRequest represents a simplified request to update an Instance
@@ -247,12 +251,20 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 		if instanceFilter.Name != nil {
 			gir = gir.Name(*instanceFilter.Name)
 		}
+		if instanceFilter.Query != nil {
+			gir = gir.Query(*instanceFilter.Query)
+		}
 		if instanceFilter.VpcID != nil {
 			gir = gir.VpcId(*instanceFilter.VpcID)
 		}
+		if instanceFilter.IPAddress != nil {
+			gir = gir.IpAddress(*instanceFilter.IPAddress)
+		}
 	}
-	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set).
-	if (instanceFilter == nil || instanceFilter.VpcID == nil) && im.client.apiMetadata.VpcID != "" {
+	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set),
+	// unless the caller requested a search across all VPCs.
+	useDefaultVPC := instanceFilter == nil || (instanceFilter.VpcID == nil && !instanceFilter.AllVPCs)
+	if useDefaultVPC && im.client.apiMetadata.VpcID != "" {
 		gir = gir.VpcId(im.client.apiMetadata.VpcID)
 	}
 	if paginationFilter != nil {
@@ -299,11 +311,148 @@ func (im InstanceManager) Update(ctx context.Context, id string, request Instanc
 	return apiInst, nil
 }
 
-// Delete deletes an Instance
+// Delete deletes an Instance.
+//
+// When the Instance was created with SSHKeys, Create auto-creates an SSH Key
+// Group named via GetInstanceSshKeyGroupName. Delete removes that group after
+// the Instance is deleted, unless another Instance still references it.
 func (im InstanceManager) Delete(ctx context.Context, id string) *ApiError {
 	ctx = WithLogger(ctx, im.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, im.client.Config.Token)
+	logger := LoggerFromContext(ctx)
 
-	resp, err := im.client.apiClient.InstanceAPI.DeleteInstance(ctx, im.client.apiMetadata.Organization, id).Execute()
-	return HandleResponseError(resp, err)
+	var sshKeyGroupIDsToDelete []string
+	if instance, getErr := im.Get(ctx, id); getErr == nil {
+		sshKeyGroupIDsToDelete = collectAutoCreatedSSHKeyGroupIDs(instance)
+		if len(sshKeyGroupIDsToDelete) > 0 {
+			sharedIDs, checkErr := im.sshKeyGroupIDsUsedByOtherInstances(ctx, id, sshKeyGroupIDsToDelete)
+			if checkErr != nil {
+				logger.Warn().Str("instanceId", id).Err(checkErr).
+					Msg("failed to check SSH Key Group associations; skipping SSH Key Group cleanup")
+				sshKeyGroupIDsToDelete = nil
+			} else {
+				sshKeyGroupIDsToDelete = filterOutIDs(sshKeyGroupIDsToDelete, sharedIDs)
+			}
+		}
+	} else {
+		logger.Warn().Str("instanceId", id).Err(getErr).
+			Msg("failed to get Instance; skipping SSH Key Group cleanup")
+	}
+
+	_, resp, err := im.client.apiClient.InstanceAPI.DeleteInstance(ctx, im.client.apiMetadata.Organization, id).Execute()
+	if apiErr := HandleResponseError(resp, err); apiErr != nil {
+		return apiErr
+	}
+
+	skm := NewSshKeyGroupManager(im.client)
+	for _, skgID := range sshKeyGroupIDsToDelete {
+		if delErr := skm.DeleteSshKeyGroup(ctx, skgID); delErr != nil {
+			logger.Warn().Str("instanceId", id).Str("sshKeyGroupId", skgID).Err(delErr).
+				Msg("failed to delete auto-created SSH Key Group after Instance deletion")
+		}
+	}
+	return nil
+}
+
+// collectAutoCreatedSSHKeyGroupIDs returns IDs of SSH Key Groups on the Instance
+// that match the naming convention used by CreateSshKeyGroupForInstance.
+func collectAutoCreatedSSHKeyGroupIDs(instance *standard.Instance) []string {
+	if instance == nil {
+		return nil
+	}
+	expectedName := GetInstanceSshKeyGroupName(instance.GetName())
+	var ids []string
+	seen := map[string]struct{}{}
+	for _, skg := range instance.GetSshKeyGroups() {
+		id := skg.GetId()
+		if id == "" || skg.GetName() != expectedName {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// filterOutIDs returns ids with every entry present in exclude removed.
+func filterOutIDs(ids []string, exclude map[string]struct{}) []string {
+	if len(ids) == 0 || len(exclude) == 0 {
+		return ids
+	}
+	filtered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, skip := exclude[id]; skip {
+			continue
+		}
+		filtered = append(filtered, id)
+	}
+	return filtered
+}
+
+// sshKeyGroupIDsUsedByOtherInstances returns the subset of candidateIDs that are
+// associated with at least one Instance other than excludeInstanceID on the
+// client's Site. Listing is site-scoped (not VPC-scoped) so cross-VPC sharing
+// is detected.
+func (im InstanceManager) sshKeyGroupIDsUsedByOtherInstances(ctx context.Context, excludeInstanceID string, candidateIDs []string) (map[string]struct{}, *ApiError) {
+	shared := map[string]struct{}{}
+	if len(candidateIDs) == 0 {
+		return shared, nil
+	}
+	candidates := make(map[string]struct{}, len(candidateIDs))
+	for _, id := range candidateIDs {
+		candidates[id] = struct{}{}
+	}
+
+	pageNumber := int32(1)
+	pageSize := int32(100)
+	for {
+		instances, resp, err := im.client.apiClient.InstanceAPI.GetAllInstance(ctx, im.client.apiMetadata.Organization).
+			SiteId(im.client.apiMetadata.SiteID).
+			PageNumber(pageNumber).
+			PageSize(pageSize).
+			Execute()
+		if apiErr := HandleResponseError(resp, err); apiErr != nil {
+			return nil, apiErr
+		}
+
+		for _, inst := range instances {
+			if inst.GetId() == excludeInstanceID {
+				continue
+			}
+			for _, skgID := range inst.GetSshKeyGroupIds() {
+				if _, ok := candidates[skgID]; ok {
+					shared[skgID] = struct{}{}
+				}
+			}
+			for _, skg := range inst.GetSshKeyGroups() {
+				if skgID := skg.GetId(); skgID != "" {
+					if _, ok := candidates[skgID]; ok {
+						shared[skgID] = struct{}{}
+					}
+				}
+			}
+		}
+
+		// All candidates are shared; no need to keep paging.
+		if len(shared) == len(candidates) {
+			return shared, nil
+		}
+
+		pagination, perr := standard.GetPaginationResponse(ctx, resp)
+		if perr != nil {
+			return nil, &ApiError{
+				Code:    http.StatusInternalServerError,
+				Message: "failed to extract pagination: " + perr.Error(),
+				Data:    map[string]interface{}{"parseError": perr.Error()},
+			}
+		}
+		if len(instances) == 0 || int(pageNumber)*pagination.PageSize >= pagination.Total {
+			break
+		}
+		pageNumber++
+	}
+	return shared, nil
 }

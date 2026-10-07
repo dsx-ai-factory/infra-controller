@@ -83,6 +83,7 @@ spec:
                        DPU controller.
                      - "script": Reboot the host by executing a custom script.
                      - "hostAgent": Use the host agent to reboot the host.
+                     - "none": Do not reboot a host through the DPUNode.
                   "hostAgent" is the default value.
                 properties:
                   external:
@@ -98,6 +99,11 @@ spec:
                   hostAgent:
                     description: Use the HostAgent to reboot the host.
                     type: object
+                  none:
+                    description: |-
+                      Do not reboot a host through the DPUNode. Used for hostless devices where
+                      DPF manages the DPU reboot directly through Redfish.
+                    type: object
                   script:
                     description: |-
                       Reboot the host by executing a custom script. This field defined which ConfigMap store the custom script.
@@ -112,11 +118,14 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: only one of hostAgent, external, script can be set
+                - message: only one of hostAgent, external, script, none can be set
                   rule: (((has(self.hostAgent) || has(self.gNOI)) && !has(self.external)
-                    && !has(self.script)) || (has(self.external) && !has(self.hostAgent)
-                    && !has(self.gNOI) && !has(self.script)) || (has(self.script)
-                    && !has(self.external) && !has(self.hostAgent) && !has(self.gNOI)))
+                    && !has(self.script) && !has(self.none)) || (has(self.external)
+                    && !has(self.hostAgent) && !has(self.gNOI) && !has(self.script)
+                    && !has(self.none)) || (has(self.script) && !has(self.external)
+                    && !has(self.hostAgent) && !has(self.gNOI) && !has(self.none))
+                    || (has(self.none) && !has(self.external) && !has(self.hostAgent)
+                    && !has(self.gNOI) && !has(self.script)))
             type: object
           status:
             description: DPUNodeStatus defines the observed state of DPUNode
@@ -199,6 +208,19 @@ spec:
                 description: RebootInProgress indicates if the node is in the process
                   of rebooting.
                 type: boolean
+              rebootMethod:
+                description: |-
+                  RebootMethod is the host operation required by the child DPUs in
+                  DPURebooting phase: PowerCycle or SystemLevelReset.
+                enum:
+                - Unknown
+                - NoAction
+                - PowerCycle
+                - SystemReboot
+                - SystemLevelReset
+                - FirmwareReset
+                - DPUWarmReboot
+                type: string
             type: object
         type: object
         x-kubernetes-validations:

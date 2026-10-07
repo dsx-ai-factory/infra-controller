@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,16 +36,47 @@ func TestManageInventoryMetrics_RecordLatency(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector())
 
-	inventoryMetricsManager := NewManageInventoryMetrics(reg, dbSession)
+	inventoryMetricsManager := NewManageInventoryMetrics(reg, dbSession, "nico_rest_workflow")
 
-	err := inventoryMetricsManager.RecordLatency(context.Background(), site.ID, "test-workflow", false, time.Second)
-	assert.NoError(t, err)
+	t.Run("records an observation and caches the Site name", func(t *testing.T) {
+		err := inventoryMetricsManager.RecordLatency(context.Background(), site.ID, "test-workflow", false, time.Second)
+		assert.NoError(t, err)
 
-	metrics, err := reg.Gather()
-	assert.NoError(t, err)
-	assert.Equal(t, "test-workflow", *metrics[0].Metric[0].Label[0].Value)
-	assert.Equal(t, site.Name, *metrics[0].Metric[0].Label[1].Value)
-	assert.Equal(t, InventoryStatusSuccess, *metrics[0].Metric[0].Label[2].Value)
+		util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_inventory_latency_seconds", 1, map[string]string{
+			"activity": "test-workflow",
+			"site":     site.Name,
+			"site_id":  site.ID.String(),
+			"status":   InventoryStatusSuccess,
+		}, 0)
 
-	assert.Equal(t, 1, len(inventoryMetricsManager.siteIDNameMap))
+		assert.Equal(t, 1, inventoryMetricsManager.siteNames.Len())
+	})
+
+	// The worker dispatches this activity concurrently against one registered
+	// instance, and a cold cache is what makes that racy: every caller misses,
+	// reads the Site, then writes the same map. Run under -race.
+	t.Run("resolves the Site name under concurrent callers", func(t *testing.T) {
+		const callers = 16
+
+		concurrentReg := prometheus.NewRegistry()
+		concurrentManager := NewManageInventoryMetrics(concurrentReg, dbSession, "nico_rest_workflow")
+
+		var wg sync.WaitGroup
+		for range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cerr := concurrentManager.RecordLatency(context.Background(), site.ID, "test-workflow", false, time.Second)
+				assert.NoError(t, cerr)
+			}()
+		}
+		wg.Wait()
+
+		metrics, err := concurrentReg.Gather()
+		assert.NoError(t, err)
+		assert.Len(t, metrics, 1)
+		assert.Equal(t, "nico_rest_workflow_inventory_latency_seconds", metrics[0].GetName())
+		assert.Len(t, metrics[0].Metric, 1)
+		assert.Equal(t, uint64(callers), metrics[0].Metric[0].Histogram.GetSampleCount())
+	})
 }

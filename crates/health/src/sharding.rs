@@ -69,7 +69,7 @@ mod tests {
             BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).unwrap(),
+                mac: Some(MacAddress::from_str(mac).unwrap()),
             },
             BmcCredentials::UsernamePassword {
                 username: "admin".into(),
@@ -122,19 +122,6 @@ mod tests {
                 "Key {key} should be assigned to exactly one shard"
             );
         }
-    }
-
-    #[test]
-    fn test_should_monitor_key_consistency() {
-        let manager = ShardManager {
-            shard: 0,
-            shards_count: 3,
-        };
-        let key = "AA:BB:CC:DD:EE:FF";
-        assert_eq!(
-            manager.should_monitor_key(key),
-            manager.should_monitor_key(key)
-        );
     }
 
     #[test]

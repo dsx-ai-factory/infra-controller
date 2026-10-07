@@ -19,15 +19,15 @@ use db::{AnnotatedSqlxError, DatabaseError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum DpaManagerError {
-    #[error("Database error: {0}")]
+    #[error("database error: {0}")]
     Database(#[from] DatabaseError),
     #[error(transparent)]
     Sqlx(#[from] AnnotatedSqlxError),
-    #[error("Argument is invalid: {0}")]
+    #[error("argument is invalid: {0}")]
     InvalidArgument(String),
-    #[error("Generic error: {0}")]
+    #[error("generic error: {0}")]
     Generic(#[from] eyre::ErrReport),
-    #[error("Internal error: {message}")]
+    #[error("internal error: {message}")]
     Internal { message: String },
 }
 

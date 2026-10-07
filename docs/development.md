@@ -219,4 +219,4 @@ Remember to `strip` before you scp so that scp goes faster. scp to DPU example (
 Set up a QEMU host for your docker-compose services to manage:
 
 1. [Build iPXE and bootable artifacts image](bootable_artifacts.md)
-1. [Start QEMU server](vm_pxe_client.md)
+1. [Start QEMU server](development/vm_pxe_client.md)

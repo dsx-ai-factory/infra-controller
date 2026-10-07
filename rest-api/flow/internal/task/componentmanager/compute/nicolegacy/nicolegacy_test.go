@@ -15,7 +15,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/compute/common/dpureprov"
 	cmconfig "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/config"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
@@ -23,6 +22,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestConfigDecoderDecodeYAML(t *testing.T) {
@@ -92,8 +92,8 @@ func TestInjectExpectation(t *testing.T) {
 			m := New(tc.client, 0, nil)
 
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.InjectExpectation(context.Background(), target, tc.info)
@@ -143,6 +143,18 @@ func managerYAMLNode(t *testing.T, data string) yaml.Node {
 // NICo, so the manager only logs a warning and proceeds; we exercise
 // that branch here. The replacement compute/nico implementation routes
 // through Core's UpdateComponentFirmware which does honour sub-targets.
+func TestFirmwareControlRejectsAuthenticationData(t *testing.T) {
+	m := &Manager{}
+
+	err := m.FirmwareControl(
+		context.Background(),
+		common.Target{},
+		operations.FirmwareControlTaskInfo{AccessToken: "token"},
+	)
+
+	require.ErrorContains(t, err, "not supported by the nicolegacy compute manager")
+}
+
 func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
 	tests := map[string]struct {
 		subTargets []string
@@ -156,8 +168,8 @@ func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := New(nicoapi.NewMockClient(), 0, nil)
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -195,8 +207,8 @@ func TestFirmwareControl_DpuTarget_Nicolegacy(t *testing.T) {
 
 			m := withFastDpuReprovLegacy(New(client, 0, nil), client, "machine-1")
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -239,8 +251,8 @@ func withFastDpuReprovLegacy(m *Manager, mock nicoapi.Client, hostID string) *Ma
 
 // --- Tests for firmware version helper functions ---
 
-func desiredEntry(versions map[string]string) *pb.DesiredFirmwareVersionEntry {
-	return &pb.DesiredFirmwareVersionEntry{
+func desiredEntry(versions map[string]string) *corev1.DesiredFirmwareVersionEntry {
+	return &corev1.DesiredFirmwareVersionEntry{
 		ComponentVersions: versions,
 	}
 }
@@ -351,12 +363,12 @@ func TestFirmwareVersionsMatch(t *testing.T) {
 func TestMatchesAnyDesired(t *testing.T) {
 	tests := map[string]struct {
 		actual  map[string]string
-		entries []*pb.DesiredFirmwareVersionEntry
+		entries []*corev1.DesiredFirmwareVersionEntry
 		expect  bool
 	}{
 		"matches first entry": {
 			actual: map[string]string{"bmc": "1.0", "uefi": "2.0"},
-			entries: []*pb.DesiredFirmwareVersionEntry{
+			entries: []*corev1.DesiredFirmwareVersionEntry{
 				desiredEntry(map[string]string{"bmc": "1.0"}),
 				desiredEntry(map[string]string{"bmc": "9.0"}),
 			},
@@ -364,7 +376,7 @@ func TestMatchesAnyDesired(t *testing.T) {
 		},
 		"matches second entry": {
 			actual: map[string]string{"bmc": "9.0"},
-			entries: []*pb.DesiredFirmwareVersionEntry{
+			entries: []*corev1.DesiredFirmwareVersionEntry{
 				desiredEntry(map[string]string{"bmc": "1.0"}),
 				desiredEntry(map[string]string{"bmc": "9.0"}),
 			},
@@ -372,7 +384,7 @@ func TestMatchesAnyDesired(t *testing.T) {
 		},
 		"matches none": {
 			actual: map[string]string{"bmc": "5.0"},
-			entries: []*pb.DesiredFirmwareVersionEntry{
+			entries: []*corev1.DesiredFirmwareVersionEntry{
 				desiredEntry(map[string]string{"bmc": "1.0"}),
 				desiredEntry(map[string]string{"bmc": "9.0"}),
 			},
@@ -385,7 +397,7 @@ func TestMatchesAnyDesired(t *testing.T) {
 		},
 		"entry with empty component_versions never matches": {
 			actual: map[string]string{"bmc": "1.0"},
-			entries: []*pb.DesiredFirmwareVersionEntry{
+			entries: []*corev1.DesiredFirmwareVersionEntry{
 				desiredEntry(map[string]string{}),
 			},
 			expect: false,
@@ -450,14 +462,14 @@ func TestParseTargetVersion(t *testing.T) {
 }
 
 func TestIsTargetVersionInDesired(t *testing.T) {
-	entries := []*pb.DesiredFirmwareVersionEntry{
+	entries := []*corev1.DesiredFirmwareVersionEntry{
 		desiredEntry(map[string]string{"bmc": "7.10.30.00", "uefi": "2.22.1"}),
 		desiredEntry(map[string]string{"bmc": "8.0.0.00", "uefi": "3.0.0"}),
 	}
 
 	tests := map[string]struct {
 		target  map[string]string
-		entries []*pb.DesiredFirmwareVersionEntry
+		entries []*corev1.DesiredFirmwareVersionEntry
 		expect  bool
 	}{
 		"matches first entry exactly": {
@@ -487,7 +499,7 @@ func TestIsTargetVersionInDesired(t *testing.T) {
 		},
 		"empty target with empty entry": {
 			target:  map[string]string{},
-			entries: []*pb.DesiredFirmwareVersionEntry{desiredEntry(map[string]string{})},
+			entries: []*corev1.DesiredFirmwareVersionEntry{desiredEntry(map[string]string{})},
 			expect:  true,
 		},
 	}
@@ -500,7 +512,7 @@ func TestIsTargetVersionInDesired(t *testing.T) {
 }
 
 func TestAllFirmwareUpToDate(t *testing.T) {
-	desiredEntries := []*pb.DesiredFirmwareVersionEntry{
+	desiredEntries := []*corev1.DesiredFirmwareVersionEntry{
 		desiredEntry(map[string]string{"bmc": "1.0", "uefi": "2.0"}),
 		desiredEntry(map[string]string{"bmc": "3.0", "uefi": "4.0"}),
 	}
@@ -509,7 +521,7 @@ func TestAllFirmwareUpToDate(t *testing.T) {
 		componentIDs   []string
 		actualFirmware map[string]map[string]string
 		targetFirmware map[string]string
-		desiredEntries []*pb.DesiredFirmwareVersionEntry
+		desiredEntries []*corev1.DesiredFirmwareVersionEntry
 		expect         bool
 	}{
 		"all match target firmware": {
@@ -624,8 +636,8 @@ func TestPowerControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -643,8 +655,8 @@ func TestPowerControl_AllowsReadyMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -659,8 +671,8 @@ func TestBringUpControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.BringUpControl(context.Background(), target, operations.BringUpTaskInfo{})
@@ -675,8 +687,8 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -699,8 +711,8 @@ func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -718,8 +730,8 @@ func TestBringUpControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.BringUpControl(context.Background(), target, operations.BringUpTaskInfo{

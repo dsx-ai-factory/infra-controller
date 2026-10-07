@@ -19,7 +19,7 @@ use crate::errors::CarbideCliResult;
 use crate::route_server::common::AddressArgs;
 use crate::rpc::ApiClient;
 
-pub async fn remove(args: AddressArgs, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn remove(args: AddressArgs, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client.0.remove_route_servers(args).await?;
 
     Ok(())

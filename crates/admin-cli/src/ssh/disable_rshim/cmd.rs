@@ -20,7 +20,7 @@ use forge_ssh::ssh::disable_rshim;
 use super::super::common::SshArgs;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
-pub async fn disable_rshim_cmd(args: SshArgs) -> CarbideCliResult<()> {
+pub(super) async fn disable_rshim_cmd(args: SshArgs) -> CarbideCliResult<()> {
     disable_rshim(
         args.credentials.bmc_ip_address,
         args.credentials.bmc_username,

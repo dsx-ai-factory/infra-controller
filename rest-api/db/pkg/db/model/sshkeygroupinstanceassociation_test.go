@@ -11,7 +11,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	otrace "go.opentelemetry.io/otel/trace"
@@ -58,7 +57,7 @@ func testSSHKeyGroupInstanceAssociationSetupSchema(t *testing.T, dbSession *db.S
 	assert.Nil(t, err)
 }
 
-func TestSSHKeyGroupInstanceAssociationSQLDAO_CreateFromParams(t *testing.T) {
+func TestSSHKeyGroupInstanceAssociationSQLDAO_Create(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
 	defer dbSession.Close()
@@ -137,7 +136,12 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_CreateFromParams(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			for _, skgia := range tc.skgias {
-				dbskgia, err := skgisd.CreateFromParams(ctx, nil, skgia.SSHKeyGroupID, skgia.SiteID, skgia.InstanceID, skgia.CreatedBy)
+				dbskgia, err := skgisd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
+					SSHKeyGroupID: skgia.SSHKeyGroupID,
+					SiteID:        skgia.SiteID,
+					InstanceID:    skgia.InstanceID,
+					CreatedBy:     skgia.CreatedBy,
+				})
 				assert.Equal(t, tc.expectError, err != nil)
 				if !tc.expectError {
 					assert.NotNil(t, dbskgia)
@@ -145,8 +149,6 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_CreateFromParams(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -193,7 +195,12 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_GetByID(t *testing.T) {
 	)
 
 	skaisd := NewSSHKeyGroupInstanceAssociationDAO(dbSession)
-	skgis1, err := skaisd.CreateFromParams(ctx, nil, sshKeyGroup1.ID, site.ID, i1.ID, user.ID)
+	skgis1, err := skaisd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
+		SSHKeyGroupID: sshKeyGroup1.ID,
+		SiteID:        site.ID,
+		InstanceID:    i1.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
@@ -249,8 +256,6 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -319,7 +324,12 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_GetAll(t *testing.T) {
 		assert.Nil(t, err)
 		assert.NotNil(t, i1)
 
-		skgia1, err := skgiasd.CreateFromParams(ctx, nil, skg1.ID, site.ID, i1.ID, user.ID)
+		skgia1, err := skgiasd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
+			SSHKeyGroupID: skg1.ID,
+			SiteID:        site.ID,
+			InstanceID:    i1.ID,
+			CreatedBy:     user.ID,
+		})
 		assert.Nil(t, err)
 		assert.NotNil(t, skgia1)
 		skgias = append(skgias, skgia1)
@@ -426,7 +436,21 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_GetAll(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			objs, tot, err := skgiasd.GetAll(ctx, nil, tc.paramSSHKeyGroupIDs, tc.paramSiteIDs, tc.paramInstanceIDs, tc.includeRelations, tc.paramOffset, tc.paramLimit, tc.paramOrderBy)
+			objs, tot, err := skgiasd.GetAll(
+				ctx,
+				nil,
+				SSHKeyGroupInstanceAssociationFilterInput{
+					SSHKeyGroupIDs: tc.paramSSHKeyGroupIDs,
+					SiteIDs:        tc.paramSiteIDs,
+					InstanceIDs:    tc.paramInstanceIDs,
+				},
+				paginator.PageInput{
+					Offset:  tc.paramOffset,
+					Limit:   tc.paramLimit,
+					OrderBy: tc.paramOrderBy,
+				},
+				tc.includeRelations,
+			)
 			assert.Equal(t, tc.expectError, err != nil)
 			assert.Equal(t, tc.expectCnt, len(objs))
 			assert.Equal(t, tc.expectTotal, tot)
@@ -450,14 +474,12 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestSSHKeyGroupInstanceAssociationSQLDAO_UpdateFromParams(t *testing.T) {
+func TestSSHKeyGroupInstanceAssociationSQLDAO_Update(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
 	defer dbSession.Close()
@@ -523,22 +545,28 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 		},
 	)
 
-	skgisa1, err := skgiasd.CreateFromParams(ctx, nil, sshKeyGroup1.ID, site.ID, i1.ID, user.ID)
+	skgisa1, err := skgiasd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
+		SSHKeyGroupID: sshKeyGroup1.ID,
+		SiteID:        site.ID,
+		InstanceID:    i1.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.Nil(t, err)
 
-	skgisa2, err := skgiasd.CreateFromParams(ctx, nil, sshKeyGroup2.ID, site.ID, i2.ID, user.ID)
+	skgisa2, err := skgiasd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
+		SSHKeyGroupID: sshKeyGroup2.ID,
+		SiteID:        site.ID,
+		InstanceID:    i2.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.NotNil(t, skgisa2)
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		desc string
-		id   uuid.UUID
-
-		paramSSHKeyGroupID *uuid.UUID
-		paramSiteID        *uuid.UUID
-		paramInstanceID    *uuid.UUID
+		desc  string
+		input SSHKeyGroupInstanceAssociationUpdateInput
 
 		expectedSSHKeyGroupID *uuid.UUID
 		expectedSiteID        *uuid.UUID
@@ -548,11 +576,13 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 		verifyChildSpanner bool
 	}{
 		{
-			desc:               "can update all fields",
-			id:                 skgisa1.ID,
-			paramSSHKeyGroupID: cutil.GetPtr(sshKeyGroup2.ID),
-			paramSiteID:        cutil.GetPtr(site2.ID),
-			paramInstanceID:    cutil.GetPtr(i2.ID),
+			desc: "can update all fields",
+			input: SSHKeyGroupInstanceAssociationUpdateInput{
+				SSHKeyGroupInstanceAssociationID: skgisa1.ID,
+				SSHKeyGroupID:                    cutil.GetPtr(sshKeyGroup2.ID),
+				SiteID:                           cutil.GetPtr(site2.ID),
+				InstanceID:                       cutil.GetPtr(i2.ID),
+			},
 
 			expectedSSHKeyGroupID: cutil.GetPtr(sshKeyGroup2.ID),
 			expectedSiteID:        cutil.GetPtr(site2.ID),
@@ -563,13 +593,13 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 		},
 		{
 			desc:        "error when ID not found",
-			id:          uuid.New(),
+			input:       SSHKeyGroupInstanceAssociationUpdateInput{SSHKeyGroupInstanceAssociationID: uuid.New()},
 			expectError: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := skgiasd.UpdateFromParams(ctx, nil, tc.id, tc.paramSSHKeyGroupID, tc.paramSiteID, tc.paramInstanceID)
+			got, err := skgiasd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
 				assert.Equal(t, tc.expectedSSHKeyGroupID.String(), got.SSHKeyGroupID.String())
@@ -579,14 +609,12 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_UpdateFromParams(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestSSHKeyGroupInstanceAssociationSQLDAO_DeleteByID(t *testing.T) {
+func TestSSHKeyGroupInstanceAssociationSQLDAO_Delete(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
 	defer dbSession.Close()
@@ -628,7 +656,12 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_DeleteByID(t *testing.T) {
 		},
 	)
 
-	skgias1, err := skgiasd.CreateFromParams(ctx, nil, sshKeyGroup1.ID, site.ID, i1.ID, user.ID)
+	skgias1, err := skgiasd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
+		SSHKeyGroupID: sshKeyGroup1.ID,
+		SiteID:        site.ID,
+		InstanceID:    i1.ID,
+		CreatedBy:     user.ID,
+	})
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
@@ -654,7 +687,7 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_DeleteByID(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			err := skgiasd.DeleteByID(ctx, nil, tc.id)
+			err := skgiasd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
 				tmp, err := skgiasd.GetByID(ctx, nil, tc.id, nil)
@@ -664,8 +697,6 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_DeleteByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -801,8 +832,6 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

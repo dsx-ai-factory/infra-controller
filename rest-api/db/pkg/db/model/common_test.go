@@ -9,13 +9,13 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestLabels_FromProto(t *testing.T) {
 	tests := []struct {
 		name        string
-		protoLabels []*cwssaws.Label
+		protoLabels []*corev1.Label
 		want        Labels
 	}{
 		{
@@ -25,19 +25,19 @@ func TestLabels_FromProto(t *testing.T) {
 		},
 		{
 			name:        "empty slice yields empty map",
-			protoLabels: []*cwssaws.Label{},
+			protoLabels: []*corev1.Label{},
 			want:        Labels{},
 		},
 		{
 			name: "single label with value",
-			protoLabels: []*cwssaws.Label{
+			protoLabels: []*corev1.Label{
 				{Key: "environment", Value: cutil.GetPtr("production")},
 			},
 			want: Labels{"environment": "production"},
 		},
 		{
 			name: "multiple labels",
-			protoLabels: []*cwssaws.Label{
+			protoLabels: []*corev1.Label{
 				{Key: "environment", Value: cutil.GetPtr("production")},
 				{Key: "rack", Value: cutil.GetPtr("rack-1")},
 				{Key: "datacenter", Value: cutil.GetPtr("dc1")},
@@ -50,14 +50,14 @@ func TestLabels_FromProto(t *testing.T) {
 		},
 		{
 			name: "label with nil value yields empty string",
-			protoLabels: []*cwssaws.Label{
+			protoLabels: []*corev1.Label{
 				{Key: "flag", Value: nil},
 			},
 			want: Labels{"flag": ""},
 		},
 		{
 			name: "label with empty key is skipped",
-			protoLabels: []*cwssaws.Label{
+			protoLabels: []*corev1.Label{
 				{Key: "", Value: cutil.GetPtr("value")},
 				{Key: "valid", Value: cutil.GetPtr("data")},
 			},
@@ -65,7 +65,7 @@ func TestLabels_FromProto(t *testing.T) {
 		},
 		{
 			name: "nil label entry is skipped",
-			protoLabels: []*cwssaws.Label{
+			protoLabels: []*corev1.Label{
 				nil,
 				{Key: "valid", Value: cutil.GetPtr("data")},
 			},
@@ -94,7 +94,7 @@ func TestLabels_FromProto(t *testing.T) {
 func TestLabels_FromProto_OverwritesExistingReceiver(t *testing.T) {
 	t.Run("populated input replaces existing entries", func(t *testing.T) {
 		l := Labels{"stale": "value", "kept-key": "old"}
-		l.FromProto([]*cwssaws.Label{
+		l.FromProto([]*corev1.Label{
 			{Key: "kept-key", Value: cutil.GetPtr("new")},
 			{Key: "fresh", Value: cutil.GetPtr("data")},
 		})
@@ -110,7 +110,7 @@ func TestLabels_FromProto_OverwritesExistingReceiver(t *testing.T) {
 
 // labelsAsMap collapses a proto Label slice into a Labels map so assertions
 // don't depend on slice ordering (user labels come from a map iteration).
-func labelsAsMap(protoLabels []*cwssaws.Label) Labels {
+func labelsAsMap(protoLabels []*corev1.Label) Labels {
 	var l Labels
 	l.FromProto(protoLabels)
 	return l

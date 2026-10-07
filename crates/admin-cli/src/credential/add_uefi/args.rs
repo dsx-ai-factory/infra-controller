@@ -32,12 +32,12 @@ Set the site-wide host UEFI default password:
     $ nico-admin-cli credential add-uefi --kind=host --password=mynewpassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, require_equals(true), required(true), help = "The UEFI kind")]
-    pub kind: UefiCredentialType,
+    kind: UefiCredentialType,
 
     #[clap(long, require_equals(true), help = "The UEFI password")]
-    pub password: String,
+    password: String,
 }
 
 impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
@@ -54,6 +54,7 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password,
             mac_address: None,
             vendor: None,
+            credential_name: None,
         })
     }
 }

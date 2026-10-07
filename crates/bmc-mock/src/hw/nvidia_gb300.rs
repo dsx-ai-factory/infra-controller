@@ -17,14 +17,42 @@
 
 use std::borrow::Cow;
 
-use crate::redfish;
+use crate::hw::rack::{RackElevation, RackUnit};
+use crate::{HardwareType, redfish};
 
-pub struct NvidiaGB300Gpu<'a> {
-    pub serial_number: Cow<'a, str>,
+pub(crate) fn nvl72_rack_elevation(
+    compute_tray: HardwareType,
+    power_shelf: HardwareType,
+    nvlink_switch_tray: HardwareType,
+) -> RackElevation {
+    let mut units = Vec::with_capacity(33);
+
+    units.extend((11..=18).chain(28..=37).map(|position| RackUnit {
+        position,
+        hardware_type: compute_tray,
+    }));
+    units.extend((19..=27).map(|position| RackUnit {
+        position,
+        hardware_type: nvlink_switch_tray,
+    }));
+    units.extend((7..=9).chain(39..=41).map(|position| RackUnit {
+        position,
+        hardware_type: power_shelf,
+    }));
+    units.sort_unstable_by_key(|unit| unit.position);
+
+    RackElevation { version: 1, units }
+}
+
+pub(crate) struct NvidiaGB300Gpu<'a> {
+    pub(crate) serial_number: Cow<'a, str>,
 }
 
 impl NvidiaGB300Gpu<'_> {
-    pub fn as_hgx_chassis(&self, id: Cow<'static, str>) -> redfish::chassis::SingleChassisConfig {
+    pub(super) fn as_hgx_chassis(
+        &self,
+        id: Cow<'static, str>,
+    ) -> redfish::chassis::SingleChassisConfig {
         let sensors = redfish::sensor::generate_chassis_sensors(
             &id,
             redfish::sensor::Layout {
@@ -49,12 +77,15 @@ impl NvidiaGB300Gpu<'_> {
     }
 }
 
-pub struct NvidiaGB300Cpu<'a> {
-    pub serial_number: Cow<'a, str>,
+pub(crate) struct NvidiaGB300Cpu<'a> {
+    pub(crate) serial_number: Cow<'a, str>,
 }
 
 impl NvidiaGB300Cpu<'_> {
-    pub fn as_hgx_chassis(&self, id: Cow<'static, str>) -> redfish::chassis::SingleChassisConfig {
+    pub(super) fn as_hgx_chassis(
+        &self,
+        id: Cow<'static, str>,
+    ) -> redfish::chassis::SingleChassisConfig {
         let sensors = redfish::sensor::generate_chassis_sensors(
             &id,
             redfish::sensor::Layout {
@@ -81,12 +112,15 @@ impl NvidiaGB300Cpu<'_> {
     }
 }
 
-pub struct NvidiaGB300IoBoard<'a> {
-    pub serial_number: Cow<'a, str>,
+pub(crate) struct NvidiaGB300IoBoard<'a> {
+    pub(crate) serial_number: Cow<'a, str>,
 }
 
 impl NvidiaGB300IoBoard<'_> {
-    pub fn as_chassis(&self, id: Cow<'static, str>) -> redfish::chassis::SingleChassisConfig {
+    pub(super) fn as_chassis(
+        &self,
+        id: Cow<'static, str>,
+    ) -> redfish::chassis::SingleChassisConfig {
         let sensors = redfish::sensor::generate_chassis_sensors(
             &id,
             redfish::sensor::Layout {

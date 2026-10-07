@@ -16,13 +16,21 @@
  */
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::vpc::VpcId;
+use ipnetwork::IpNetwork;
 use sqlx::FromRow;
 
 #[derive(Debug, FromRow, Clone)]
 pub struct InstanceAddress {
     pub instance_id: InstanceId,
     pub segment_id: NetworkSegmentId,
+    pub vpc_id: VpcId,
     // pub id: Uuid,          // unused
     pub address: std::net::IpAddr,
-    // pub prefix: IpNetwork, // unused
+    /// The address's network in CIDR form, e.g. `10.3.2.0/30`.
+    pub prefix: IpNetwork,
+    /// The forward-DNS name in the host-naming strategy's IP-derived form,
+    /// stored so the `dns_records_instance` view serves it without
+    /// re-deriving in SQL. Nullable in the table.
+    pub hostname: Option<String>,
 }

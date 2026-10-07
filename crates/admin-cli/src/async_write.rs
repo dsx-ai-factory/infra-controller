@@ -80,3 +80,41 @@ macro_rules! async_write_table_as_csv {
         result
     }};
 }
+
+#[cfg(test)]
+pub(crate) struct CapturedOutput {
+    writer: Box<dyn tokio::io::AsyncWrite + Unpin>,
+    collect: tokio::task::JoinHandle<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl CapturedOutput {
+    pub(crate) fn new() -> Self {
+        let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let collect = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+
+            let mut output = Vec::new();
+            reader
+                .read_to_end(&mut output)
+                .await
+                .expect("captured output should be readable");
+            output
+        });
+
+        Self {
+            writer: Box::new(writer),
+            collect,
+        }
+    }
+
+    pub(crate) fn writer(&mut self) -> &mut Box<dyn tokio::io::AsyncWrite + Unpin> {
+        &mut self.writer
+    }
+
+    pub(crate) async fn into_bytes(self) -> Vec<u8> {
+        let Self { writer, collect } = self;
+        drop(writer);
+        collect.await.expect("output collector should complete")
+    }
+}

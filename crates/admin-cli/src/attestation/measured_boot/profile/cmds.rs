@@ -33,87 +33,96 @@ use measured_boot::profile::MeasurementSystemProfile;
 use measured_boot::records::MeasurementSystemProfileRecord;
 use serde::Serialize;
 
+use crate::attestation::measured_boot::MachineIdList;
 use crate::attestation::measured_boot::profile::args::{
-    CmdProfile, Create, Delete, List, ListBundles, ListMachines, Rename, Show,
+    Create, Delete, ListAll, ListBundles, ListMachines, Rename, Show,
 };
-use crate::attestation::measured_boot::{MachineIdList, global};
-use crate::cli_output;
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-/// dispatch matches + dispatches the correct command for
-/// the `profile` subcommand (e.g. create, delete, etc).
-pub async fn dispatch(
-    cmd: CmdProfile,
-    cli: &mut global::cmds::CliData<'_, '_>,
-) -> CarbideCliResult<()> {
-    match cmd {
-        CmdProfile::Create(local_args) => {
-            cli_output(
-                create(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdProfile::Delete(local_args) => {
-            cli_output(
-                delete(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdProfile::Rename(local_args) => {
-            cli_output(
-                rename(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdProfile::Show(local_args) => {
-            if local_args.identifier.is_some() {
-                cli_output(
-                    show_by_id_or_name(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            } else {
-                cli_output(
-                    show_all(cli.grpc_conn).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-        }
-        CmdProfile::List(selector) => match selector {
-            List::Bundles(local_args) => {
-                cli_output(
-                    list_bundles_for_id_or_name(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-            List::Machines(local_args) => {
-                cli_output(
-                    list_machines_for_id_or_name(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-            List::All(_) => {
-                cli_output(
-                    list_all(cli.grpc_conn).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-        },
+impl Run for Create {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            create(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
     }
-    Ok(())
+}
+
+impl Run for Delete {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            delete(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Rename {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            rename(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Show {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if self.identifier.is_some() {
+            crate::cli_output(
+                show_by_id_or_name(&ctx.api_client, self).await?,
+                &ctx.config.format,
+                crate::Destination::Stdout(),
+            )
+        } else {
+            crate::cli_output(
+                show_all(&ctx.api_client).await?,
+                &ctx.config.format,
+                crate::Destination::Stdout(),
+            )
+        }
+    }
+}
+
+impl Run for ListAll {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list_all(&ctx.api_client).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for ListBundles {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list_bundles_for_id_or_name(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for ListMachines {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list_machines_for_id_or_name(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
 }
 
 /// create is `profile create` and used for creating
 /// a new profile.
-pub async fn create(
+async fn create(
     grpc_conn: &ApiClient,
     create: Create,
 ) -> CarbideCliResult<MeasurementSystemProfile> {
@@ -128,7 +137,7 @@ pub async fn create(
 
 /// delete is `delete <profile-id|profile-name>` and is used
 /// for deleting an existing profile by ID or name.
-pub async fn delete(
+async fn delete(
     grpc_conn: &ApiClient,
     delete: Delete,
 ) -> CarbideCliResult<MeasurementSystemProfile> {
@@ -142,7 +151,7 @@ pub async fn delete(
 }
 
 /// rename renames a measurement bundle with the provided name or ID.
-pub async fn rename(
+async fn rename(
     grpc_conn: &ApiClient,
     rename: Rename,
 ) -> CarbideCliResult<MeasurementSystemProfile> {
@@ -158,7 +167,7 @@ pub async fn rename(
 /// show_all is `show`, and is used for showing all
 /// profiles with details (when no <profile_id> is
 /// specified on the command line).
-pub async fn show_all(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementSystemProfileList> {
+async fn show_all(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementSystemProfileList> {
     Ok(MeasurementSystemProfileList(
         grpc_conn
             .0
@@ -176,7 +185,7 @@ pub async fn show_all(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementSyst
 
 /// show_by_id_or_name is `show <profile-id|profile-name>` and is used for
 /// showing a profile (and its details) by ID or name.
-pub async fn show_by_id_or_name(
+async fn show_by_id_or_name(
     grpc_conn: &ApiClient,
     show: Show,
 ) -> CarbideCliResult<MeasurementSystemProfile> {
@@ -192,9 +201,7 @@ pub async fn show_by_id_or_name(
 /// list_all is `list all` and is used for listing all
 /// high level profile info (just IDs). For actual
 /// details, use `show`.
-pub async fn list_all(
-    grpc_conn: &ApiClient,
-) -> CarbideCliResult<MeasurementSystemProfileRecordList> {
+async fn list_all(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementSystemProfileRecordList> {
     Ok(MeasurementSystemProfileRecordList(
         grpc_conn
             .0
@@ -212,7 +219,7 @@ pub async fn list_all(
 
 /// list_bundles_by_id_or_name is `list bundles <profile-id|profile-name>` and
 /// is used to list all configured bundles for a given profile ID or name.
-pub async fn list_bundles_for_id_or_name(
+async fn list_bundles_for_id_or_name(
     grpc_conn: &ApiClient,
     list_bundles: ListBundles,
 ) -> CarbideCliResult<MeasurementBundleIdList> {
@@ -230,7 +237,7 @@ pub async fn list_bundles_for_id_or_name(
 /// list_machines_for_id_or_name is `list machines <profile-id|profile-name>`
 /// and is used to list all configured machines associated with a given profile
 /// ID or name.
-pub async fn list_machines_for_id_or_name(
+async fn list_machines_for_id_or_name(
     grpc_conn: &ApiClient,
     list_machines: ListMachines,
 ) -> CarbideCliResult<MachineIdList> {
@@ -254,7 +261,7 @@ pub async fn list_machines_for_id_or_name(
 /// for a Vec<MeasurementSystemProfileRecord> so the ToTable trait can
 /// be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementSystemProfileRecordList(Vec<MeasurementSystemProfileRecord>);
+struct MeasurementSystemProfileRecordList(Vec<MeasurementSystemProfileRecord>);
 
 impl ToTable for MeasurementSystemProfileRecordList {
     fn into_table(self) -> eyre::Result<String> {
@@ -275,7 +282,7 @@ impl ToTable for MeasurementSystemProfileRecordList {
 /// for a Vec<MeasurementBundleId> so the ToTable trait can
 /// be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementBundleIdList(Vec<MeasurementBundleId>);
+struct MeasurementBundleIdList(Vec<MeasurementBundleId>);
 
 impl ToTable for MeasurementBundleIdList {
     fn into_table(self) -> eyre::Result<String> {
@@ -292,7 +299,7 @@ impl ToTable for MeasurementBundleIdList {
 /// pattern for a Vec<MeasurementSystemProfile> so the ToTable
 /// trait can be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementSystemProfileList(Vec<MeasurementSystemProfile>);
+struct MeasurementSystemProfileList(Vec<MeasurementSystemProfile>);
 
 // When `profile show` gets called (for all entries), and the output format
 // is the default table view, this gets used to print a pretty table.

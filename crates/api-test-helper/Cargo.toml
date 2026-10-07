@@ -21,18 +21,22 @@ description = "Helpers to launch carbide-api for integration testing"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "api_test_helper"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 
 # [local-dependencies]
 async-trait = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }
+bmc-vendor = { path = "../bmc-vendor" }
 carbide-api = { path = "../api", default-features = false }
+carbide-api-db = { path = "../api-db", default-features = false }
 carbide-version = { path = "../version" }
-carbide-rpc = { path = "../rpc" }
+carbide-rpc = { path = "../rpc", features = ["test-support"] }
 carbide-machine-a-tron = { path = "../machine-a-tron" }
 carbide-tls = { path = "../tls" }
 carbide-secrets = { path = "../secrets" }
@@ -69,6 +73,7 @@ tracing-subscriber = { features = [
 futures = { workspace = true }
 librms = { workspace = true }
 itertools = { workspace = true }
+ipnet = { workspace = true }
 ctor = { workspace = true }
 temp-dir = { workspace = true }
 rand = { workspace = true }

@@ -1,0 +1,141 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This is the global configuration file for nico-api that is shared
+# between all environments.
+# Each environment can overwrite certain parameters of this file via a
+# nico-api-site-config.toml file. Those are placed in the `envs/` folder
+# for the respective environment
+
+listen = "[::]:1079"
+# Required: the deployment's readinessProbe and livenessProbe target this
+# port. Removing metrics_endpoint leaves the pod permanently un-Ready.
+metrics_endpoint = "[::]:1080"
+database_url = "postgres://replaced-by-env-var"
+ssh_console_url = "https://nico-ssh-console-rs.nico-system.svc.cluster.local:1079"
+asn = 4294967000
+initial_dpu_agent_upgrade_policy = "up_only"
+max_concurrent_machine_updates = 10
+dhcp_servers = []                                                                                                     # Added in per-site-configuration
+route_servers = []                                                                                                    # Required for FNN. Not yet used
+attestation_enabled = true
+bypass_rbac = true
+
+[dpu_config]
+dpu_nic_firmware_initial_update_enabled = false
+dpu_nic_firmware_reprovision_update_enabled = true
+dpu_nic_firmware_update_versions = ["24.47.3576", "32.47.3576"]
+
+[host_health]
+hardware_health_reports = "MonitorOnly"
+
+[site_explorer]
+enabled = true
+create_machines = true
+
+[node_auth]
+# Node (Scout / DPU-agent) authentication to the API.
+# See docs/design/machine-identity/node-auth-jwt.md.
+# Bearer JWTs: off by default. When enabled, the API accepts short-lived
+# `Authorization: Bearer` tokens that nodes self-sign with their existing
+# mTLS client-certificate key (the cert rides in the token's x5c header and
+# is verified against the same root CA as the TLS listener).
+enabled = false
+# Machine mTLS client-certificate authentication: on by default. Disable only
+# after the fleet presents bearer tokens (requires enabled = true; the API
+# refuses to start with both mechanisms off). Service/admin-CLI certs are
+# unaffected.
+mtls_enabled = true
+# `aud` claim is always "nico-api".
+# Maximum accepted token lifetime in seconds (nodes mint 300 s tokens).
+#max_token_ttl_sec = 900
+# Whether DPF-deployed fmds is rendered in token mode. Unset follows `enabled`,
+# which is what you want unless you are staging a change: set it to false while
+# `enabled` is still true to move fmds back to client certificates first, then
+# turn `enabled` off once that roll has landed. true with enabled = false is
+# rejected at startup. See docs/design/machine-identity/node-auth-jwt.md.
+#fmds_use_node_tokens = false
+
+[firmware_global]
+autoupdate = true
+
+[machine_identity]
+enabled = true
+current_encryption_key_id = "kv1" # must match a key under machine_identity.encryption_keys in credentials
+algorithm = "ES256"               # must match tenant identity signing alg (ES256 only)
+
+[tls]
+identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
+identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
+root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
+admin_root_cafile_path = "/etc/nico/nico-api/site/admin_root_cert_pem"
+
+[auth]
+permissive_mode = false
+casbin_policy_file = "/etc/nico/nico-api/casbin-policy.csv"
+
+[machine_state_controller]
+failure_retry_time = "90m"
+
+[vpc_prefix_state_controller]
+vpc_prefix_drain_time = "5m"
+
+[network_security_group]
+# Controls whether NSGs may enable stateful egress and whether
+# stateful/reflexive ACL support is inserted into HBN configuration.
+# When false, Core rejects stateful NSG creation and updates from
+# stateless to stateful. Existing stateful NSGs remain editable but
+# are applied statelessly.
+# Leave disabled until every DPU in the site runs HBN 2.3 or later.
+# Earlier reflexive-ACL implementations allow one directional rule
+# to unintentionally permit traffic in both directions.
+stateful_acls_enabled = false
+
+# Maximum number of security groups rules
+# after they are expanded:
+# src port range * dst port range * src prefix list * dst prefix list
+# NOTE: There is also a hard-limit in the
+# DPU agent of 10k (as of the time of this
+# comment) to protect it misconfig in
+# site-controller.
+max_network_security_group_size = 200
+
+# Enable Machine Validation feature and enable all tests
+[machine_validation_config]
+enabled = true
+test_selection_mode = "EnableAll"
+
+# Per-site [component_manager] configures switch and power shelf backends.
+
+# Optional per-site mTLS certificate bindings:
+# - [switch_state_controller].switch_mtls_services applies to switch state
+#   controller and direct ComponentConfigureSwitchCertificate operations. Switch
+#   controller operations omit primary-only cluster apps on non-primary switches;
+#   direct RPC operations are unchanged.
+#   Rack ConfigureNmxCluster uses the effective service list for primary
+#   nmx-telemetry, but requires an explicit entry for gNMI.
+#   Switch and direct operations default to all four SwitchMtlsService values.
+# - [rack_state_controller].nmx_cluster_switch_mtls_services is accepted and
+#   ignored. Rack ConfigureNmxCluster uses a fixed nvue_api binding before RMS
+#   V2 selects the primary and binds NMX-C on that switch. NICo binds
+#   nmx-telemetry afterward when selected by the effective service list.
+# A non-empty switch_mtls_services list replaces the switch/direct default.
+# Omission or an empty list uses that default, including primary nmx-telemetry
+# but excluding rack-wide gNMI.
+# Cluster application bindings can enable cluster state on the target switch.
+# See
+# docs/architecture/state_machines/switch_configure_certificate.md for service
+# values and workflow scope.

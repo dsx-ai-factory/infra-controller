@@ -1,0 +1,91 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package health;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+
+// Reports the aggregate health of a system or subsystem
+message HealthReport {
+  // Identifies the source of the health report
+  // This could e.g. be `nico-dpu-agent`, `nico-host-validation`,
+  // or an override (e.g. `overrides.sre-team`)
+  string source = 1;
+  // The person or system (service) that triggered this health report.
+  // For manually triggered reports (e.g. via web UI), this identifies the user.
+  optional string triggered_by = 5;
+  // The time when this health status was observed.
+  //
+  // Clients submitting a health report can leave this field empty in order
+  // to store the current time as timestamp.
+  //
+  // In case the HealthReport is derived by combining the reports of various
+  // subsystems, the timestamp will relate to the oldest overall report.
+  optional google.protobuf.Timestamp observed_at = 2;
+  // List of all successful health probes
+  repeated HealthProbeSuccess successes = 3;
+  // List of all alerts that have been raised by health probes
+  repeated HealthProbeAlert alerts = 4;
+}
+
+// An alert that has been raised by a health-probe
+message HealthProbeAlert {
+  // Stable ID of the health probe that raised an alert
+  string id = 1;
+  // The component that the probe is targeting.
+  // This could be e.g.
+  // - a physical component (e.g. a Fan probe might check various chassis fans)
+  // - a logical component (a check which probes whether disk space is available
+  //   can list the volume name as target)
+  //
+  // The field is optional. It can be absent if the probe ID already fully
+  // describes what is tested.
+  //
+  // Targets are useful if the same type of probe checks the health of multiple components.
+  // If a health report lists multiple probes of the same type and with different targets,
+  // then those probe/target combinations are treated individually.
+  // E.g. the `in_alert_since` and `classifications` fields for each probe/target
+  // combination are calculated individually when reports are merged.
+  optional string target = 6;
+  // The first time the probe raised an alert
+  // If this field is empty while the HealthReport is sent to nico-core-api
+  // the behavior is as follows:
+  // - If an alert of the same `id` was reported before, the timestamp of the
+  // previous alert will be retained.
+  // - If this is a new alert, the timestamp will be set to "now".
+  optional google.protobuf.Timestamp in_alert_since = 2;
+  // A message that describes the alert
+  string message = 3;
+  // An optional message that will be relayed to tenants
+  optional string tenant_message = 4;
+  // Classifications for this alert
+  // A string is used here to maintain flexibility
+  repeated string classifications = 5;
+}
+
+// A successful health probe (reported no alerts)
+message HealthProbeSuccess {
+  // Stable ID of the health probe that succeeded
+  string id = 1;
+  // The component that the probe is targeting.
+  // This could be e.g.
+  // - a physical component (e.g. a Fan probe might check various chassis fans)
+  // - a logical component (a check which probes whether disk space is available
+  //   can list the volume name as target)
+  //
+  // The field is optional. It can be absent if the probe ID already fully
+  // describes what is tested.
+  //
+  // Targets are useful if the same type of probe checks the health of multiple components.
+  // If a health report lists multiple probes of the same type and with different targets,
+  // then those probe/target combinations are treated individually.
+  // E.g. the `in_alert_since` and `classifications` fields for each probe/target
+  // combination are calculated individually when reports are merged.
+  optional string target = 2;
+}

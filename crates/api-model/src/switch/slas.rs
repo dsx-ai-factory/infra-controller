@@ -16,13 +16,16 @@
  */
 
 /// SLA for Switch initialization in seconds
-pub const INITIALIZING: u64 = 300; // 5 minutes
+pub(super) const INITIALIZING: u64 = 300; // 5 minutes
 
 /// SLA for Switch configuring in seconds
-pub const CONFIGURING: u64 = 300; // 5 minutes
+pub(super) const CONFIGURING: u64 = 300; // 5 minutes
+
+/// SLA for Switch fetch-info in seconds
+pub(super) const FETCH_INFO: u64 = 300; // 5 minutes
 
 /// SLA for Switch validating in seconds
-pub const VALIDATING: u64 = 300; // 5 minutes
+pub(super) const VALIDATING: u64 = 300; // 5 minutes
 
 // /// SLA for Switch ready in seconds
 // pub const READY: u64 = 0; // 0 minutes
@@ -31,7 +34,45 @@ pub const VALIDATING: u64 = 300; // 5 minutes
 // pub const ERROR: u64 = 300; // 5 minutes
 
 /// SLA for Switch deleting in seconds
-pub const DELETING: u64 = 300; // 5 minutes
+pub(super) const DELETING: u64 = 300; // 5 minutes
 
 /// SLA for Switch maintenance (PowerOn / PowerOff / Reset) in seconds
-pub const MAINTENANCE: u64 = 300; // 5 minutes
+pub(super) const MAINTENANCE: u64 = 300; // 5 minutes
+
+/// SLA for Switch BMC credential rotation in seconds. Generous enough to absorb
+/// the up-to-5-minute site-explorer pause handshake (its
+/// `SITE_EXPLORER_PAUSE_BUDGET`) that precedes the change, a slow BMC, and the
+/// rotation engine's short per-device backoff without tripping the SLA on the
+/// first retry.
+pub(super) const ROTATING_BMC: u64 = 15 * 60; // 15 minutes
+
+/// SLA for Site Explorer suppression acknowledgement during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER: u64 = 300; // 5 minutes
+
+/// SLA for recording NVOS DHCP suppression during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_NVOS_DHCP: u64 = 300; // 5 minutes
+
+/// SLA for submitting the NVOS factory-reset RMS job during decommissioning
+pub(super) const DECOMMISSIONING_FACTORY_RESET_NVOS: u64 = 300; // 5 minutes
+
+/// SLA for RMS to finish resetting NVOS and recover the default login.
+pub(super) const DECOMMISSIONING_WAITING_FOR_NVOS_RESET: u64 = 15 * 60; // 15 minutes
+
+/// SLA for rebooting the switch after NVOS DHCP suppression is requested.
+pub(super) const DECOMMISSIONING_REBOOTING_SWITCH: u64 = 300; // 5 minutes
+
+/// SLA for waiting for NVOS DHCP suppression acknowledgement after reset
+pub(super) const DECOMMISSIONING_WAITING_FOR_NVOS_DHCP_ACKNOWLEDGEMENT: u64 = 15 * 60; // 15 minutes
+
+/// SLA for recording BMC DHCP suppression during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_BMC_DHCP: u64 = 300; // 5 minutes
+
+/// SLA for BMC factory reset during decommissioning
+pub(super) const DECOMMISSIONING_FACTORY_RESET_BMC: u64 = 300; // 5 minutes
+
+/// SLA for waiting for BMC DHCP suppression acknowledgement after reset
+pub(super) const DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT: u64 = 15 * 60; // 15 minutes
+
+/// SLA for deleting managed per-device BMC and NVOS credentials during
+/// decommissioning
+pub(super) const DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS: u64 = 300; // 5 minutes

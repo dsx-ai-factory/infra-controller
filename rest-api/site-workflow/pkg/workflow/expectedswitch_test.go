@@ -7,12 +7,13 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	temporalworkflow "go.temporal.io/sdk/workflow"
 )
 
 type InventoryExpectedSwitchTestSuite struct {
@@ -83,8 +84,8 @@ func (cests *CreateExpectedSwitchTestSuite) AfterTest(suiteName, testName string
 func (cests *CreateExpectedSwitchTestSuite) Test_CreateExpectedSwitch_Success() {
 	var expectedSwitchManager iActivity.ManageExpectedSwitch
 
-	request := &cwssaws.ExpectedSwitch{
-		ExpectedSwitchId:   &cwssaws.UUID{Value: "test-create-workflow-001"},
+	request := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: "test-create-workflow-001"},
 		BmcMacAddress:      "00:11:22:33:44:55",
 		SwitchSerialNumber: "SWITCH-001",
 	}
@@ -93,11 +94,41 @@ func (cests *CreateExpectedSwitchTestSuite) Test_CreateExpectedSwitch_Success() 
 	cests.env.RegisterActivity(expectedSwitchManager.CreateExpectedSwitchOnSite)
 	cests.env.OnActivity(expectedSwitchManager.CreateExpectedSwitchOnSite, mock.Anything, mock.Anything).Return(nil)
 
-	// Mock CreateExpectedSwitchOnFlow activity
-	cests.env.RegisterActivity(expectedSwitchManager.CreateExpectedSwitchOnFlow)
-	cests.env.OnActivity(expectedSwitchManager.CreateExpectedSwitchOnFlow, mock.Anything, mock.Anything).Return(nil)
+	cests.env.OnGetVersion(
+		removeCreateExpectedSwitchOnFlowChangeID,
+		temporalworkflow.DefaultVersion,
+		removeCreateExpectedSwitchOnFlowVersion,
+	).Return(removeCreateExpectedSwitchOnFlowVersion)
+	cests.env.OnActivity(expectedSwitchManager.CreateExpectedSwitchOnFlow, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// Execute CreateExpectedSwitch workflow
+	cests.env.ExecuteWorkflow(CreateExpectedSwitch, request)
+	cests.True(cests.env.IsWorkflowCompleted())
+	cests.NoError(cests.env.GetWorkflowError())
+	cests.env.AssertActivityNumberOfCalls(cests.T(), "CreateExpectedSwitchOnFlow", 0)
+}
+
+func (cests *CreateExpectedSwitchTestSuite) Test_CreateExpectedSwitch_LegacyVersion_FlowFailure() {
+	var expectedSwitchManager iActivity.ManageExpectedSwitch
+
+	request := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: "test-create-workflow-001"},
+		BmcMacAddress:      "00:11:22:33:44:55",
+		SwitchSerialNumber: "SWITCH-001",
+	}
+
+	cests.env.RegisterActivity(expectedSwitchManager.CreateExpectedSwitchOnSite)
+	cests.env.OnActivity(expectedSwitchManager.CreateExpectedSwitchOnSite, mock.Anything, mock.Anything).Return(nil)
+
+	cests.env.OnGetVersion(
+		removeCreateExpectedSwitchOnFlowChangeID,
+		temporalworkflow.DefaultVersion,
+		removeCreateExpectedSwitchOnFlowVersion,
+	).Return(temporalworkflow.DefaultVersion)
+
+	cests.env.RegisterActivity(expectedSwitchManager.CreateExpectedSwitchOnFlow)
+	cests.env.OnActivity(expectedSwitchManager.CreateExpectedSwitchOnFlow, mock.Anything, mock.Anything).Return(errors.New("Flow communication error"))
+
 	cests.env.ExecuteWorkflow(CreateExpectedSwitch, request)
 	cests.True(cests.env.IsWorkflowCompleted())
 	cests.NoError(cests.env.GetWorkflowError())
@@ -106,8 +137,8 @@ func (cests *CreateExpectedSwitchTestSuite) Test_CreateExpectedSwitch_Success() 
 func (cests *CreateExpectedSwitchTestSuite) Test_CreateExpectedSwitch_Failure() {
 	var expectedSwitchManager iActivity.ManageExpectedSwitch
 
-	request := &cwssaws.ExpectedSwitch{
-		ExpectedSwitchId:   &cwssaws.UUID{Value: "test-create-workflow-001"},
+	request := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: "test-create-workflow-001"},
 		BmcMacAddress:      "00:11:22:33:44:55",
 		SwitchSerialNumber: "SWITCH-001",
 	}
@@ -117,9 +148,6 @@ func (cests *CreateExpectedSwitchTestSuite) Test_CreateExpectedSwitch_Failure() 
 	// Mock CreateExpectedSwitchOnSite activity
 	cests.env.RegisterActivity(expectedSwitchManager.CreateExpectedSwitchOnSite)
 	cests.env.OnActivity(expectedSwitchManager.CreateExpectedSwitchOnSite, mock.Anything, mock.Anything).Return(errors.New(errMsg))
-
-	// Register CreateExpectedSwitchOnFlow activity (not called when Core fails)
-	cests.env.RegisterActivity(expectedSwitchManager.CreateExpectedSwitchOnFlow)
 
 	// execute CreateExpectedSwitch workflow
 	cests.env.ExecuteWorkflow(CreateExpectedSwitch, request)
@@ -149,8 +177,8 @@ func (uests *UpdateExpectedSwitchTestSuite) AfterTest(suiteName, testName string
 func (uests *UpdateExpectedSwitchTestSuite) Test_UpdateExpectedSwitch_Success() {
 	var expectedSwitchManager iActivity.ManageExpectedSwitch
 
-	request := &cwssaws.ExpectedSwitch{
-		ExpectedSwitchId:   &cwssaws.UUID{Value: "test-update-workflow-001"},
+	request := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: "test-update-workflow-001"},
 		BmcMacAddress:      "00:11:22:33:44:55",
 		SwitchSerialNumber: "SWITCH-001",
 	}
@@ -168,8 +196,8 @@ func (uests *UpdateExpectedSwitchTestSuite) Test_UpdateExpectedSwitch_Success() 
 func (uests *UpdateExpectedSwitchTestSuite) Test_UpdateExpectedSwitch_Failure() {
 	var expectedSwitchManager iActivity.ManageExpectedSwitch
 
-	request := &cwssaws.ExpectedSwitch{
-		ExpectedSwitchId:   &cwssaws.UUID{Value: "test-update-workflow-001"},
+	request := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: "test-update-workflow-001"},
 		BmcMacAddress:      "00:11:22:33:44:55",
 		SwitchSerialNumber: "SWITCH-001",
 	}
@@ -208,8 +236,8 @@ func (dests *DeleteExpectedSwitchTestSuite) AfterTest(suiteName, testName string
 func (dests *DeleteExpectedSwitchTestSuite) Test_DeleteExpectedSwitch_Success() {
 	var expectedSwitchManager iActivity.ManageExpectedSwitch
 
-	request := &cwssaws.ExpectedSwitchRequest{
-		ExpectedSwitchId: &cwssaws.UUID{Value: "test-delete-workflow-001"},
+	request := &corev1.ExpectedSwitchRequest{
+		ExpectedSwitchId: &corev1.UUID{Value: "test-delete-workflow-001"},
 		BmcMacAddress:    "00:11:22:33:44:55",
 	}
 
@@ -226,8 +254,8 @@ func (dests *DeleteExpectedSwitchTestSuite) Test_DeleteExpectedSwitch_Success() 
 func (dests *DeleteExpectedSwitchTestSuite) Test_DeleteExpectedSwitch_Failure() {
 	var expectedSwitchManager iActivity.ManageExpectedSwitch
 
-	request := &cwssaws.ExpectedSwitchRequest{
-		ExpectedSwitchId: &cwssaws.UUID{Value: "test-delete-workflow-001"},
+	request := &corev1.ExpectedSwitchRequest{
+		ExpectedSwitchId: &corev1.UUID{Value: "test-delete-workflow-001"},
 		BmcMacAddress:    "00:11:22:33:44:55",
 	}
 

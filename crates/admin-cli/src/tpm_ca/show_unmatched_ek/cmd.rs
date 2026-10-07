@@ -18,7 +18,7 @@
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn show_unmatched_ek(api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn show_unmatched_ek(api_client: &ApiClient) -> CarbideCliResult<()> {
     let unmatched_eks = api_client
         .0
         .tpm_show_unmatched_ek_certs()

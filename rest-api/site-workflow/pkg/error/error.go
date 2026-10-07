@@ -19,6 +19,7 @@ var (
 	ErrTypeNICoAlreadyExists      = "NICoAlreadyExists"
 	ErrTypeNICoFailedPrecondition = "NICoFailedPrecondition"
 	ErrTypeNICoInvalidArgument    = "NICoInvalidArgument"
+	ErrTypeNICoResourceExhausted  = "NICoResourceExhausted"
 
 	// Legacy Carbide error type names. Retained so a newer REST can still
 	// recognise errors emitted by an older site-workflow version that has
@@ -90,6 +91,8 @@ func WrapErr(err error) error {
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoFailedPrecondition, err)
 		case codes.InvalidArgument:
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoInvalidArgument, err)
+		case codes.ResourceExhausted:
+			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoResourceExhausted, err)
 		}
 	}
 	return err

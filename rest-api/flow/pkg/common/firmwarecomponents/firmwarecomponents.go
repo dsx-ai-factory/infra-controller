@@ -42,49 +42,49 @@ import (
 	"sort"
 	"strings"
 
-	nicopb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // === NICo (Core) per-tray enums. ==========================================
 
 var (
-	nicoNVSwitchByName = map[string]nicopb.NvSwitchComponent{
-		"bmc":  nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_BMC,
-		"cpld": nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_CPLD,
-		"bios": nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_BIOS,
-		"nvos": nicopb.NvSwitchComponent_NV_SWITCH_COMPONENT_NVOS,
+	nicoNVSwitchByName = map[string]corev1.NvSwitchComponent{
+		"bmc":  corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_BMC,
+		"cpld": corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_CPLD,
+		"bios": corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_BIOS,
+		"nvos": corev1.NvSwitchComponent_NV_SWITCH_COMPONENT_NVOS,
 	}
 	nicoNVSwitchNames = sortedKeys(nicoNVSwitchByName)
 
-	nicoPowerShelfByName = map[string]nicopb.PowerShelfComponent{
-		"pmc": nicopb.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC,
-		"psu": nicopb.PowerShelfComponent_POWER_SHELF_COMPONENT_PSU,
+	nicoPowerShelfByName = map[string]corev1.PowerShelfComponent{
+		"pmc": corev1.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC,
+		"psu": corev1.PowerShelfComponent_POWER_SHELF_COMPONENT_PSU,
 	}
 	nicoPowerShelfNames = sortedKeys(nicoPowerShelfByName)
 
-	nicoComputeTrayByName = map[string]nicopb.ComputeTrayComponent{
-		"bmc":               nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BMC,
-		"bios":              nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BIOS,
-		"cec":               nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CEC,
-		"nic":               nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_NIC,
-		"cpld_mb":           nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CPLD_MB,
-		"cpld_pdb":          nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CPLD_PDB,
-		"hgx_bmc":           nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_HGX_BMC,
-		"combined_bmc_uefi": nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_COMBINED_BMC_UEFI,
-		"gpu":               nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_GPU,
-		"cx7":               nicopb.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CX7,
+	nicoComputeTrayByName = map[string]corev1.ComputeTrayComponent{
+		"bmc":               corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BMC,
+		"bios":              corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_BIOS,
+		"cec":               corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CEC,
+		"nic":               corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_NIC,
+		"cpld_mb":           corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CPLD_MB,
+		"cpld_pdb":          corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CPLD_PDB,
+		"hgx_bmc":           corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_HGX_BMC,
+		"combined_bmc_uefi": corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_COMBINED_BMC_UEFI,
+		"gpu":               corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_GPU,
+		"cx7":               corev1.ComputeTrayComponent_COMPUTE_TRAY_COMPONENT_CX7,
 	}
 	nicoComputeTrayNames = sortedKeys(nicoComputeTrayByName)
 )
 
 // ParseNICoNVSwitch maps lowercase names to NICo NvSwitchComponent values.
 // Returns nil for an empty input (callers may interpret as "all components").
-func ParseNICoNVSwitch(names []string) ([]nicopb.NvSwitchComponent, error) {
+func ParseNICoNVSwitch(names []string) ([]corev1.NvSwitchComponent, error) {
 	return lookup(names, nicoNVSwitchByName, nicoNVSwitchNames, "nvswitch")
 }
 
 // ParseNICoPowerShelf maps lowercase names to NICo PowerShelfComponent values.
-func ParseNICoPowerShelf(names []string) ([]nicopb.PowerShelfComponent, error) {
+func ParseNICoPowerShelf(names []string) ([]corev1.PowerShelfComponent, error) {
 	return lookup(names, nicoPowerShelfByName, nicoPowerShelfNames, "powershelf")
 }
 
@@ -94,7 +94,7 @@ func ParseNICoPowerShelf(names []string) ([]nicopb.PowerShelfComponent, error) {
 // function is called — see SplitNICoComputeTraySubTargets. Passing "dpu"
 // directly here is rejected as an unknown component, since "dpu" does
 // not correspond to any ComputeTrayComponent enum value.
-func ParseNICoComputeTray(names []string) ([]nicopb.ComputeTrayComponent, error) {
+func ParseNICoComputeTray(names []string) ([]corev1.ComputeTrayComponent, error) {
 	return lookup(names, nicoComputeTrayByName, nicoComputeTrayNames, "compute")
 }
 
@@ -128,6 +128,13 @@ func SplitNICoComputeTraySubTargets(names []string) (computeTraySubs []string, h
 		computeTraySubs = append(computeTraySubs, n)
 	}
 	return computeTraySubs, hasDpu
+}
+
+// IsNICoDPUOnlySubTargets reports whether names request DPU reprovisioning
+// without any compute-tray-internal firmware update.
+func IsNICoDPUOnlySubTargets(names []string) bool {
+	computeTraySubs, hasDpu := SplitNICoComputeTraySubTargets(names)
+	return hasDpu && len(names) > 0 && len(computeTraySubs) == 0
 }
 
 // SupportedNICoNVSwitchNames returns the lowercase names accepted by

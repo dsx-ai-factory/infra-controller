@@ -1,0 +1,107 @@
+## mat-k8s-controller - Kubernetes controller for machine-a-tron services
+##
+## This controller auto-discovers machine-a-tron pods via their bmc-mock Services
+## and creates/updates/deletes Kubernetes Services for each endpoint.
+
+## Enable/disable the controller
+enabled: false
+
+## Exactly one controller must manage a namespace. The Deployment is a fixed
+## single replica with a Recreate rollout, and there is deliberately no replica
+## count value: the controller has no leader election, so a second active pod
+## duplicates reconcile work and races on the same Services.
+
+## Container image configuration.
+##
+## IMPORTANT: Production deployments must override these defaults.
+## The default repository has no registry prefix and will not resolve in real clusters.
+##
+## Example install/upgrade command:
+##   helm install nico-machine-a-tron ./helm/charts/nico-machine-a-tron \
+##     --set mat-k8s-controller.enabled=true \
+##     --set mat-k8s-controller.image.repository=<registry>/mat-k8s-controller \
+##     --set mat-k8s-controller.image.tag=<version>
+##
+## Or in values override file:
+##   mat-k8s-controller:
+##     enabled: true
+##     image:
+##       repository: nvcr.io/nvidia/infra-controller/mat-k8s-controller
+##       tag: "1.0.0"
+image:
+  repository: mat-k8s-controller
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+## Resource limits for the controller container
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+## Controller configuration
+config:
+  ## Label selector for discovering machine-a-tron Services
+  ## Default: nvidia-infra-controller/mat-service=true
+  discoverySelector: ""
+
+  ## Pod selector for created Services (routes traffic to mat pods)
+  ## Default: app.kubernetes.io/name=nico-machine-a-tron
+  targetSelector: ""
+
+  ## Reconciliation interval
+  syncInterval: "30s"
+
+  ## Skip TLS certificate verification
+  ## WARNING: Only enable for development with self-signed certificates
+  insecureSkipVerify: false
+
+  ## Log level (debug, info, warn, error)
+  logLevel: "info"
+
+  ## Include machine state annotations (api-state, power-state) on Services.
+  ## These annotations change frequently and cause K8s API update churn.
+  ## Disable (default) to reduce cluster load in large-scale deployments.
+  enableStateAnnotations: false
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+## Protocol gateway: optional second container in the controller pod, run from
+## the controller image (dev/k8s/machine-a-tron-controller/Dockerfile)
+gateway:
+  enabled: false
+
+  ## Bare IP address to bind. Set to "::" for IPv6; keep the IPv4 default
+  ## on hosts where IPv6 sockets are disabled.
+  listenIpAddress: "0.0.0.0"
+
+  ## HTTPS port of the UFM API, the RMS gRPC API and the probes; also the
+  ## Service port
+  port: 8443
+
+  ## Secret with a `token` key holding the UFM HTTP Basic credential. Empty
+  ## uses the parent chart's UFM mock Secret, nico-machine-a-tron-ufm-mock-auth;
+  ## set it when the parent uses nameOverride or ufmMock.existingAuthSecret.
+  existingAuthSecret: ""
+
+  ## Resource limits for the gateway container
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+## Override names (useful when release name differs from chart name)
+nameOverride: ""
+fullnameOverride: ""

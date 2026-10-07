@@ -109,6 +109,9 @@ mod tests {
         let user_env = env_name(&["DPU_UEFI_SITE_DEFAULT", "USERNAME"]);
         let pass_env = env_name(&["DPU_UEFI_SITE_DEFAULT", "PASSWORD"]);
 
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
         unsafe {
             std::env::set_var(&user_env, "operator");
             std::env::set_var(&pass_env, "secret");
@@ -119,6 +122,9 @@ mod tests {
             .get_credentials(&key)
             .await
             .expect("parse env credentials");
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
         unsafe {
             std::env::remove_var(&user_env);
             std::env::remove_var(&pass_env);
@@ -136,6 +142,46 @@ mod tests {
     #[tokio::test]
     // Mutates process environment variables. Keep serialized to avoid cross-test interference.
     #[serial]
+    async fn parses_ufm_credentials_from_documented_environment_names() {
+        let key = CredentialKey::UfmAuth {
+            fabric: "default".to_string(),
+        };
+        let user_env = env_name(&["UFM_AUTH_BY_FABRIC", "DEFAULT", "USERNAME"]);
+        let pass_env = env_name(&["UFM_AUTH_BY_FABRIC", "DEFAULT", "PASSWORD"]);
+
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
+        unsafe {
+            std::env::set_var(&user_env, "operator");
+            std::env::set_var(&pass_env, "token");
+        }
+        let provider =
+            EnvCredentials::new(EnvCredentialsConfig::default()).expect("create env provider");
+        let credentials = provider
+            .get_credentials(&key)
+            .await
+            .expect("parse UFM env credentials");
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
+        unsafe {
+            std::env::remove_var(&user_env);
+            std::env::remove_var(&pass_env);
+        }
+
+        assert_eq!(
+            credentials,
+            Some(Credentials::UsernamePassword {
+                username: "operator".to_string(),
+                password: "token".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    // Mutates process environment variables. Keep serialized to avoid cross-test interference.
+    #[serial]
     async fn snapshots_env_at_startup() {
         let key = CredentialKey::DpuUefi {
             credential_type: CredentialType::SiteDefault,
@@ -143,6 +189,9 @@ mod tests {
         let user_env = env_name(&["DPU_UEFI_SITE_DEFAULT", "USERNAME"]);
         let pass_env = env_name(&["DPU_UEFI_SITE_DEFAULT", "PASSWORD"]);
 
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
         unsafe {
             std::env::set_var(&user_env, "operator");
             std::env::set_var(&pass_env, "initial");
@@ -151,6 +200,9 @@ mod tests {
         let provider =
             EnvCredentials::new(EnvCredentialsConfig::default()).expect("create env provider");
 
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
         unsafe {
             std::env::set_var(&pass_env, "updated");
         }
@@ -160,6 +212,9 @@ mod tests {
             .await
             .expect("read startup snapshot");
 
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
         unsafe {
             std::env::remove_var(&user_env);
             std::env::remove_var(&pass_env);

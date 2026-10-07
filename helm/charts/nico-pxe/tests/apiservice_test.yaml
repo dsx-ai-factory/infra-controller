@@ -9,6 +9,9 @@ tests:
       - equal:
           path: data.NICO_API_HOST
           value: nico-api.nico-system.svc.cluster.local
+      - equal:
+          path: data.CARBIDE_API_INTERNAL_URL
+          value: https://nico-api.nico-system.svc.cluster.local:1079
   - it: apiServiceName overrides the API host to carbide-api
     set:
       apiServiceName: carbide-api
@@ -16,3 +19,23 @@ tests:
       - equal:
           path: data.NICO_API_HOST
           value: carbide-api.nico-system.svc.cluster.local
+      - equal:
+          path: data.CARBIDE_API_INTERNAL_URL
+          value: https://carbide-api.nico-system.svc.cluster.local:1079
+  - it: nicoApiPort overrides the internal API URL port
+    set:
+      config.nicoApiPort: "11443"
+    asserts:
+      - equal:
+          path: data.NICO_API_PORT
+          value: "11443"
+      - equal:
+          path: data.CARBIDE_API_INTERNAL_URL
+          value: https://nico-api.nico-system.svc.cluster.local:11443
+  - it: extraEnvData overrides CARBIDE_API_INTERNAL_URL
+    set:
+      config.extraEnvData.CARBIDE_API_INTERNAL_URL: https://override.example:1079
+    asserts:
+      - equal:
+          path: data.CARBIDE_API_INTERNAL_URL
+          value: https://override.example:1079

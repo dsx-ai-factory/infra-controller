@@ -23,97 +23,86 @@ use prettytable::{Cell, Row, Table};
 use rpc::admin_cli::OutputFormat;
 use rpc::protos::mlx_device as mlx_device_pb;
 
-use super::args::{RegistryCommand, RegistryListCommand, RegistryShowCommand};
+use super::args::{RegistryListCommand, RegistryShowCommand};
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
-use crate::mlx::{CliContext, wrap_text};
-
-// dispatch routes registry subcommands to their handlers.
-pub async fn dispatch(
-    command: RegistryCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    match command {
-        RegistryCommand::List(cmd) => handle_list(cmd, ctxt).await,
-        RegistryCommand::Show(cmd) => handle_show(cmd, ctxt).await,
-    }
-}
+use crate::mlx::wrap_text;
 
 // handle_list lists all registries configured in the remote scout agent.
-async fn handle_list(
-    cmd: RegistryListCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminRegistryListRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_registry_list(request).await?;
+impl Run for RegistryListCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminRegistryListRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_registry_list(request).await?;
 
-    let registry_listing = response
-        .registry_listing
-        .ok_or_else(|| CarbideCliError::GenericError("no registry listing returned".to_string()))?;
+        let registry_listing = response.registry_listing.ok_or_else(|| {
+            CarbideCliError::GenericError("no registry listing returned".to_string())
+        })?;
 
-    let mut registry_names = registry_listing.registry_names;
-    registry_names.sort();
+        let mut registry_names = registry_listing.registry_names;
+        registry_names.sort();
 
-    match ctxt.format {
-        OutputFormat::AsciiTable => {
-            let mut table = Table::new();
-            table.add_row(Row::new(vec![Cell::new("Registry Name")]));
+        match &ctx.config.format {
+            OutputFormat::AsciiTable => {
+                let mut table = Table::new();
+                table.add_row(Row::new(vec![Cell::new("Registry Name")]));
 
-            for name in &registry_names {
-                table.add_row(Row::new(vec![Cell::new(name)]));
+                for name in &registry_names {
+                    table.add_row(Row::new(vec![Cell::new(name)]));
+                }
+
+                table.printstd();
             }
+            OutputFormat::Json => {
+                let json = serde_json::to_string_pretty(&registry_names)?;
+                println!("{json}");
+            }
+            OutputFormat::Yaml => {
+                println!("registries:");
+                for name in registry_names {
+                    println!("  - {name}");
+                }
+            }
+            OutputFormat::Csv => {
+                for name in registry_names {
+                    println!("{name}");
+                }
+            }
+        }
 
-            table.printstd();
-        }
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&registry_names)?;
-            println!("{json}");
-        }
-        OutputFormat::Yaml => {
-            println!("registries:");
-            for name in registry_names {
-                println!("  - {name}");
-            }
-        }
-        OutputFormat::Csv => {
-            for name in registry_names {
-                println!("{name}");
-            }
-        }
+        Ok(())
     }
-
-    Ok(())
 }
 
 // handle_show shows a profile configured in carbide-api.
-async fn handle_show(
-    cmd: RegistryShowCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminRegistryShowRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_registry_show(request).await?;
+impl Run for RegistryShowCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminRegistryShowRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_registry_show(request).await?;
 
-    let variable_registry_pb = response.variable_registry.ok_or_else(|| {
-        CarbideCliError::GenericError("no variable_registry returned".to_string())
-    })?;
+        let variable_registry_pb = response.variable_registry.ok_or_else(|| {
+            CarbideCliError::GenericError("no variable_registry returned".to_string())
+        })?;
 
-    let variable_registry: MlxVariableRegistry = variable_registry_pb.try_into()?;
+        let variable_registry: MlxVariableRegistry = variable_registry_pb.try_into()?;
 
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&variable_registry)?);
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&variable_registry)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&variable_registry)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_registry_table(&variable_registry);
+            }
+            OutputFormat::Csv => {
+                println!("CSV not yet supported");
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&variable_registry)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_registry_table(&variable_registry);
-        }
-        OutputFormat::Csv => {
-            println!("CSV not yet supported");
-        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 // print_registry_table displays a registry in ASCII table format.

@@ -24,7 +24,7 @@
 #
 FROM ubuntu:24.04
 
-ARG RUST_VERSION=1.95.0
+ARG RUST_VERSION=1.97.1
 
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -36,6 +36,7 @@ RUN apt-get update && \
 	build-essential \
 	kea-dev \
 	kea-dhcp4-server \
+	kea-dhcp6-server \
 	libboost-dev \
 	libgrpc-dev \
 	libgrpc++-dev \

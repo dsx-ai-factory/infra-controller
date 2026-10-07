@@ -1,3 +1,51 @@
+{{- $bootstrapCa := default (dict) .Values.bootstrapCa -}}
+{{- $bootstrapCaSource := default "legacy_download" (get $bootstrapCa "source") -}}
+{{- $bootstrapCaUrl := default "" (get $bootstrapCa "url") -}}
+{{- $bootstrapCaObject := default (dict) (get $bootstrapCa "object") -}}
+{{- $bootstrapCaObjectKind := default "" (get $bootstrapCaObject "kind") -}}
+{{- $bootstrapCaObjectName := default "" (get $bootstrapCaObject "name") -}}
+{{- $bootstrapCaObjectKey := "ca.crt" -}}
+{{- if hasKey $bootstrapCaObject "key" -}}
+{{- $bootstrapCaObjectKey = get $bootstrapCaObject "key" -}}
+{{- end -}}
+{{- $certsDir := .Values.certsDir | default "/opt/forge" -}}
+{{- $supplementalNetworkConfig := default (dict) .Values.supplementalNetworkConfig -}}
+{{- $supplementalCmName := default "" (get $supplementalNetworkConfig "name") -}}
+{{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
+{{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
+{{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
+{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled -}}
+{{- $podAnnotations := .Values.serviceDaemonSet.annotations -}}
+{{- if $agentConfigEnabled -}}
+{{- $podAnnotations = omit $podAnnotations "checksum/machine-identity-config" -}}
+{{- end -}}
+{{- if not (has $bootstrapCaSource (list "legacy_download" "mounted")) -}}
+{{- fail (printf "bootstrapCa.source must be one of legacy_download or mounted; got %q" $bootstrapCaSource) -}}
+{{- end -}}
+{{- if eq $bootstrapCaSource "legacy_download" -}}
+  {{- if not (empty $bootstrapCaObject) -}}
+  {{- fail "bootstrapCa.object is only valid when bootstrapCa.source is mounted" -}}
+  {{- end -}}
+{{- else -}}
+  {{- if not (empty $bootstrapCaUrl) -}}
+  {{- fail "bootstrapCa.url is only valid when bootstrapCa.source is legacy_download" -}}
+  {{- end -}}
+  {{- if not (has $bootstrapCaObjectKind (list "Secret" "ConfigMap")) -}}
+  {{- fail "bootstrapCa.object.kind must be Secret or ConfigMap when bootstrapCa.source is mounted" -}}
+  {{- end -}}
+  {{- if empty $bootstrapCaObjectName -}}
+  {{- fail "bootstrapCa.object.name is required when bootstrapCa.source is mounted" -}}
+  {{- end -}}
+  {{- if empty $bootstrapCaObjectKey -}}
+  {{- fail "bootstrapCa.object.key must not be empty when bootstrapCa.source is mounted" -}}
+  {{- end -}}
+  {{- /* The init container installs the validated bundle at its fixed
+         /opt/forge/forge_root.pem path, so the shared nico-certs hostPath must
+         be mounted there. */ -}}
+  {{- if ne $certsDir "/opt/forge" -}}
+  {{- fail "bootstrapCa.source mounted requires certsDir=/opt/forge because the init container installs /opt/forge/forge_root.pem there" -}}
+  {{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -22,8 +70,11 @@ spec:
   template:
     metadata:
       annotations:
-        {{- with .Values.serviceDaemonSet.annotations }}
+        {{- with $podAnnotations }}
           {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if $agentConfigEnabled }}
+        checksum/machine-identity-config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
         {{- end }}
       labels:
         {{- include "nico-dpu-agent.selectorLabels" . | nindent 8 }}
@@ -51,6 +102,11 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           args:
             - init-container
+            {{- if eq $bootstrapCaSource "mounted" }}
+            - "--bootstrap-ca-source=mounted"
+            {{- else if not (empty $bootstrapCaUrl) }}
+            - {{ printf "--bootstrap-ca-url=%s" $bootstrapCaUrl | quote }}
+            {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: RUST_BACKTRACE
@@ -73,16 +129,24 @@ spec:
             - name: proc-mem-info
               mountPath: /host-mem-info
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: host-resolv-conf
               mountPath: /host-resolv.conf
               readOnly: true
+            {{- if eq $bootstrapCaSource "mounted" }}
+            - name: bootstrap-ca-source
+              mountPath: /var/run/secrets/nico-bootstrap-ca
+              readOnly: true
+            {{- end }}
       containers:
         - name: nico-dpu-agent
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           args:
+            {{- if $agentConfigEnabled }}
+            - "--config-path=/etc/forge/config.toml"
+            {{- end }}
             - run
             - "--hbn-config-mode=nvue-rest"
             - "--agent-platform-type=containerized"
@@ -92,6 +156,16 @@ spec:
             - "--dhcp-server-interface-prepend={{ .Values.dhcp_server.interface_prepend }}"
             {{ end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if not $prometheusDisabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ include "nico-dpu-agent.metricsPort" . | int }}
+              protocol: TCP
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
           {{- with toYaml .Values.serviceDaemonSet.resources }}
           resources:
             limits:
@@ -110,6 +184,8 @@ spec:
               value: "0"
             - name: RUST_LOG
               value: "info"
+            - name: AGENT_PLATFORM_TYPE
+              value: "containerized"
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -134,18 +210,100 @@ spec:
                   name: {{ .Values.hbn.nvue_credentials_secret_name }}
                   key: {{ .Values.hbn.nvue_password_key }}
           volumeMounts:
+            {{- if $agentConfigEnabled }}
+            - name: agent-config
+              mountPath: /etc/forge/config.toml
+              subPath: config.toml
+              readOnly: true
+            {{- end }}
+            {{- if $supplementalCmName }}
+            {{- /* Directory mount (no subPath) so kubelet live-updates the
+                   file on ConfigMap changes; the agent re-applies via its
+                   content-hash change detection without a pod restart. */}}
+            - name: supplemental-network-config
+              mountPath: /etc/forge/supplemental-network-config
+              readOnly: true
+            {{- end }}
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: hw-cache
               mountPath: /data
               readOnly: true
+            - name: host-grpc-socket-dir
+              mountPath: /var/run/dpf/weave/grpc
+              readOnly: true
+        - name: nico-lldp-sidecar
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - DAC_OVERRIDE
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          args:
+            - sidecar-mode
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.lldpSidecar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: hw-cache
+              mountPath: /data
+            - name: host-run
+              mountPath: /run
+              readOnly: true
+            - name: host-usr-sbin
+              mountPath: /usr/sbin
+              readOnly: true
+            - name: host-lib
+              mountPath: /lib
+              readOnly: true
+            - name: sys
+              mountPath: /host-sys
+              readOnly: true
       volumes:
+        {{- if $agentConfigEnabled }}
+        - name: agent-config
+          configMap:
+            name: {{ include "nico-dpu-agent.fullname" . }}-config
+        {{- end }}
+        {{- if $supplementalCmName }}
+        {{- /* Externally managed ConfigMap; this chart only mounts it. The
+               items projection pins the in-container filename regardless of
+               the source key, matching the agent's config.toml path.
+               optional keeps the agent pod running when the ConfigMap is
+               absent (the agent fails the network reconcile loudly instead);
+               kubelet populates the directory mount on its next sync once
+               the ConfigMap appears, no pod restart needed. */}}
+        - name: supplemental-network-config
+          configMap:
+            name: {{ $supplementalCmName | quote }}
+            optional: true
+            items:
+              - key: {{ $supplementalCmKey | quote }}
+                path: supplemental.json
+        {{- end }}
         - name: nico-certs
           hostPath:
-            path: {{ .Values.certsDir | default "/opt/nico" }}
+            path: {{ .Values.certsDir | default "/opt/forge" }}
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}
+        - name: host-run
+          hostPath:
+            path: /run
+            type: Directory
+        - name: host-usr-sbin
+          hostPath:
+            path: /usr/sbin
+            type: Directory
+        - name: host-lib
+          hostPath:
+            path: /lib
+            type: Directory
         - name: sys
           hostPath:
             path: /sys
@@ -165,6 +323,26 @@ spec:
           hostPath:
             path: /etc/resolv.conf
             type: File
+        - name: host-grpc-socket-dir
+          hostPath:
+            path: /var/run/dpf/weave/grpc
+            type: DirectoryOrCreate
+        {{- if eq $bootstrapCaSource "mounted" }}
+        - name: bootstrap-ca-source
+          {{- if eq $bootstrapCaObjectKind "Secret" }}
+          secret:
+            secretName: {{ $bootstrapCaObjectName | quote }}
+            items:
+              - key: {{ $bootstrapCaObjectKey | quote }}
+                path: ca.pem
+          {{- else }}
+          configMap:
+            name: {{ $bootstrapCaObjectName | quote }}
+            items:
+              - key: {{ $bootstrapCaObjectKey | quote }}
+                path: ca.pem
+          {{- end }}
+        {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

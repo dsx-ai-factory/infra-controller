@@ -20,7 +20,7 @@ use rpc::forge::SkuIdList;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn delete(sku_id: String, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn delete(sku_id: String, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client
         .0
         .delete_sku(SkuIdList { ids: vec![sku_id] })

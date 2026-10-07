@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateExpectedMachineTestSuite struct {
@@ -39,8 +39,8 @@ func (s *UpdateExpectedMachineTestSuite) Test_UpdateExpectedMachineInventory_Suc
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.ExpectedMachineInventory{
-		ExpectedMachines: []*cwssaws.ExpectedMachine{},
+	inv := &corev1.ExpectedMachineInventory{
+		ExpectedMachines: []*corev1.ExpectedMachine{},
 	}
 
 	s.env.RegisterActivity(expectedMachineManager.UpdateExpectedMachinesInDB)
@@ -56,8 +56,8 @@ func (s *UpdateExpectedMachineTestSuite) Test_UpdateExpectedMachineInventory_Act
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.ExpectedMachineInventory{
-		ExpectedMachines: []*cwssaws.ExpectedMachine{},
+	inv := &corev1.ExpectedMachineInventory{
+		ExpectedMachines: []*corev1.ExpectedMachine{},
 	}
 
 	s.env.RegisterActivity(expectedMachineManager.UpdateExpectedMachinesInDB)

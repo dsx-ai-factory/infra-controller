@@ -8,7 +8,6 @@ import (
 	"errors"
 	"reflect"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
@@ -17,9 +16,10 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ManageExpectedRack is an activity wrapper for managing ExpectedRack lifecycle that allows
@@ -38,7 +38,7 @@ type ManageExpectedRack struct {
 // - rack_id existing in NICo but not in DB: create record in DB
 // - rack_id existing in both NICo and DB with differences: update record in DB
 // - rack_id existing in DB but not in NICo: delete record in DB
-func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteID uuid.UUID, expectedRackInventory *cwssaws.ExpectedRackInventory) error {
+func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteID uuid.UUID, expectedRackInventory *corev1.ExpectedRackInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedRacksInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -48,14 +48,14 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 		return errors.New("UpdateExpectedRacksInDB called with nil inventory")
 	}
 
-	if expectedRackInventory.InventoryStatus == cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if expectedRackInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mer.dbSession)
-	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -124,6 +124,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 				SiteID:         siteID,
 				RackID:         reported.RackID,
 				RackProfileID:  reported.RackProfileID,
+				RackGroupID:    reported.RackGroupID,
 				Name:           reported.Name,
 				Description:    reported.Description,
 				Labels:         reported.Labels,
@@ -135,8 +136,18 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			continue
 		}
 
+		// A row written since the Site collected this inventory holds changes the snapshot
+		// cannot know about, including any made through the API, so writing the reported values
+		// over them would lose those edits.
+		if site.IsTimeWithinStaleInventoryThreshold(cur.Updated) {
+			logger.Info().Str("ExpectedRackID", cur.ID.String()).Msg("not updating ExpectedRack yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		// update if any field differs
 		if cur.RackProfileID != reported.RackProfileID ||
+			(reported.RackGroupID != nil && !reflect.DeepEqual(cur.RackGroupID, reported.RackGroupID)) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
 			!reflect.DeepEqual(cur.Labels, reported.Labels) {
@@ -149,6 +160,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			_, uerr := erDAO.Update(ctx, nil, cdbm.ExpectedRackUpdateInput{
 				ExpectedRackID: cur.ID,
 				RackProfileID:  &reported.RackProfileID,
+				RackGroupID:    reported.RackGroupID,
 				Name:           &reported.Name,
 				Description:    &reported.Description,
 				Labels:         labels,
@@ -162,13 +174,13 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 	// Delete any Expected Rack present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedRackIDs.
-	if expectedRackInventory.InventoryPage == nil || expectedRackInventory.InventoryPage.TotalPages == 0 || (expectedRackInventory.InventoryPage.CurrentPage == expectedRackInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedRackInventory.GetInventoryPage()) {
 		for _, er := range existingExpectedRacks {
 			if _, keep := reportedRackIDs[er.RackID]; keep {
 				continue
 			}
 			// Avoid destructive actions inside race-condition window
-			if util.IsTimeWithinStaleInventoryThreshold(er.Updated) {
+			if site.IsTimeWithinStaleInventoryThreshold(er.Updated) {
 				continue
 			}
 			logger.Info().Str("ExpectedRackID", er.ID.String()).Str("RackID", er.RackID).Msg("deleting ExpectedRack from DB since it was no longer reported in inventory from Site")

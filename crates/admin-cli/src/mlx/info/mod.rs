@@ -15,5 +15,8 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
+pub(super) mod args;
+mod cmds;
+
+#[cfg(test)]
+mod tests;

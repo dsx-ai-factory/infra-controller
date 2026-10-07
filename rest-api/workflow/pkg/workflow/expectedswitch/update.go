@@ -5,25 +5,24 @@ package expectedswitch
 
 import (
 	"fmt"
-	"time"
 
+	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	expectedSwitchActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedswitch"
 )
 
 // UpdateExpectedSwitchInventory is a workflow called by Site Agent to update ExpectedSwitch inventory for a Site
-func UpdateExpectedSwitchInventory(ctx workflow.Context, siteID string, expectedSwitchInventory *cwssaws.ExpectedSwitchInventory) (err error) {
+func UpdateExpectedSwitchInventory(ctx workflow.Context, siteID string, expectedSwitchInventory *corev1.ExpectedSwitchInventory) (err error) {
 	logger := log.With().Str("Workflow", "UpdateExpectedSwitchInventory").Str("Site ID", siteID).Logger()
 
-	startTime := time.Now()
+	startTime := workflow.Now(ctx)
 
 	logger.Info().Msg("starting workflow")
 
@@ -33,19 +32,7 @@ func UpdateExpectedSwitchInventory(ctx workflow.Context, siteID string, expected
 		return err
 	}
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
-	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    5 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    30 * time.Second,
-		MaximumAttempts:    2,
-	}
-	options := workflow.ActivityOptions{
-		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 30 * time.Second,
-		// Optionally provide a customized RetryPolicy.
-		RetryPolicy: retrypolicy,
-	}
+	options := cwi.ActivityOptions()
 
 	ctx = workflow.WithActivityOptions(ctx, options)
 
@@ -62,7 +49,7 @@ func UpdateExpectedSwitchInventory(ctx workflow.Context, siteID string, expected
 	// Record latency for this inventory call
 	var inventoryMetricsManager cwm.ManageInventoryMetrics
 
-	err = workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, parsedSiteID, "UpdateExpectedSwitchInventory", err != nil, time.Since(startTime)).Get(ctx, nil)
+	err = workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, parsedSiteID, "UpdateExpectedSwitchInventory", err != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to execute activity: RecordLatency")
 	}

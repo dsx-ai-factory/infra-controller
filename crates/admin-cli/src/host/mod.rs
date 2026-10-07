@@ -29,7 +29,7 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Set Host UEFI password")]
     SetUefiPassword(set_uefi_password::Args),
     #[clap(about = "Clear Host UEFI password")]

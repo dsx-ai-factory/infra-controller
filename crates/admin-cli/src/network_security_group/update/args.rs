@@ -30,48 +30,48 @@ Replace its rule set from JSON (overwrites all existing rules):
     --tenant-organization-id fds34511233a --rules '[...]'
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "Network security group ID to update")]
-    pub id: String,
+    pub(super) id: String,
 
     #[clap(
         short = 't',
         long,
         help = "Tenant organization ID of the network security group"
     )]
-    pub tenant_organization_id: String,
+    pub(super) tenant_organization_id: String,
 
     #[clap(short = 'n', long, help = "Name of the network security group")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
 
     #[clap(short = 'd', long, help = "Description of the network security group")]
-    pub description: Option<String>,
+    pub(super) description: Option<String>,
 
     #[clap(
         short = 'l',
         long,
         help = "JSON map of simple key:value pairs to be applied as labels to the network security group - will COMPLETELY overwrite any existing labels"
     )]
-    pub labels: Option<String>,
+    pub(super) labels: Option<String>,
 
     #[clap(
         short = 's',
         long,
-        help = "Optional, whether egress rules are stateful"
+        help = "Set whether egress rules are stateful. Omitted: unchanged. Changing false to true is rejected when site-level stateful ACL support is disabled"
     )]
-    pub stateful_egress: Option<bool>,
+    pub(super) stateful_egress: Option<bool>,
 
     #[clap(
         short = 'r',
         long,
         help = "Optional, JSON array containing a defined set of network security group rules - will COMPLETELY overwrite any existing rules"
     )]
-    pub rules: Option<String>,
+    pub(super) rules: Option<String>,
 
     #[clap(
         short = 'v',
         long,
         help = "Optional, version to use for comparison when performing the update, which will be rejected if the actual version of the record does not match the value of this parameter"
     )]
-    pub version: Option<String>,
+    pub(super) version: Option<String>,
 }

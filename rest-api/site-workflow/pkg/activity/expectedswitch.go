@@ -11,16 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"go.temporal.io/sdk/client"
 	tClient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 // ManageExpectedSwitchInventory is an activity wrapper for Expected Switch inventory collection and publishing
@@ -33,8 +31,8 @@ type ManageExpectedSwitchInventory struct {
 }
 
 type linkedExpectedSwitchInfo struct {
-	expectedSwitch       *cwssaws.ExpectedSwitch
-	linkedExpectedSwitch *cwssaws.LinkedExpectedSwitch
+	expectedSwitch       *corev1.ExpectedSwitch
+	linkedExpectedSwitch *corev1.LinkedExpectedSwitch
 }
 
 // DiscoverExpectedSwitchInventory is an activity to collect Expected Switch inventory and publish to Temporal queue
@@ -61,11 +59,11 @@ func (mesi *ManageExpectedSwitchInventory) DiscoverExpectedSwitchInventory(ctx c
 		logger.Warn().Err(err).Msg("Failed to retrieve ExpectedSwitches using Core gRPC API")
 
 		// Error encountered before we've published anything, report inventory collection error to Cloud
-		inventory := &cwssaws.ExpectedSwitchInventory{
+		inventory := &corev1.ExpectedSwitchInventory{
 			Timestamp: &timestamppb.Timestamp{
 				Seconds: time.Now().Unix(),
 			},
-			InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED,
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 			StatusMsg:       err.Error(),
 		}
 
@@ -83,11 +81,11 @@ func (mesi *ManageExpectedSwitchInventory) DiscoverExpectedSwitchInventory(ctx c
 		logger.Warn().Err(lerr).Msg("Failed to retrieve linked Switch IDs using Core gRPC API")
 
 		// Fatal error - report inventory collection error to Cloud
-		inventory := &cwssaws.ExpectedSwitchInventory{
+		inventory := &corev1.ExpectedSwitchInventory{
 			Timestamp: &timestamppb.Timestamp{
 				Seconds: time.Now().Unix(),
 			},
-			InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED,
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 			StatusMsg:       lerr.Error(),
 		}
 
@@ -100,7 +98,7 @@ func (mesi *ManageExpectedSwitchInventory) DiscoverExpectedSwitchInventory(ctx c
 	}
 
 	// LinkedExpectedSwitch data is missing ExpectedSwitch ID so we build an intermediate map using MAC address
-	linkedSwitchesByKey := make(map[string]*cwssaws.LinkedExpectedSwitch)
+	linkedSwitchesByKey := make(map[string]*corev1.LinkedExpectedSwitch)
 	for _, linked := range linkedList.ExpectedSwitches {
 		linkedSwitchesByKey[linked.BmcMacAddress] = linked
 	}
@@ -127,7 +125,7 @@ func (mesi *ManageExpectedSwitchInventory) DiscoverExpectedSwitchInventory(ctx c
 	logger.Info().Int("ExpectedSwitch Count", totalCount).Msg("Built ExpectedSwitch list")
 
 	if totalCount == 0 {
-		inventoryPage := getPagedExpectedSwitchInventory([]linkedExpectedSwitchInfo{}, allExpectedSwitchIDs, totalCount, 1, mesi.cloudPageSize, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, "No ExpectedSwitches reported by Site Controller")
+		inventoryPage := getPagedExpectedSwitchInventory([]linkedExpectedSwitchInfo{}, allExpectedSwitchIDs, totalCount, 1, mesi.cloudPageSize, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, "No ExpectedSwitches reported by Site Controller")
 
 		_, serr := mesi.temporalPublishClient.ExecuteWorkflow(context.Background(), workflowOptions, "UpdateExpectedSwitchInventory", mesi.siteID, inventoryPage)
 		if serr != nil {
@@ -151,7 +149,7 @@ func (mesi *ManageExpectedSwitchInventory) DiscoverExpectedSwitchInventory(ctx c
 			endIndex = totalCount
 		}
 
-		pagedWorkflowOptions := client.StartWorkflowOptions{
+		pagedWorkflowOptions := tClient.StartWorkflowOptions{
 			ID:        fmt.Sprintf("%v-%v", workflowOptions.ID, cloudPage),
 			TaskQueue: workflowOptions.TaskQueue,
 		}
@@ -165,7 +163,7 @@ func (mesi *ManageExpectedSwitchInventory) DiscoverExpectedSwitchInventory(ctx c
 			totalCount,
 			cloudPage,
 			mesi.cloudPageSize,
-			cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 			"Successfully retrieved ExpectedSwitches from Site Controller",
 		)
 
@@ -188,17 +186,17 @@ func getPagedExpectedSwitchInventory(
 	totalCount int,
 	page int,
 	pageSize int,
-	status cwssaws.InventoryStatus,
+	status corev1.InventoryStatus,
 	statusMessage string,
-) *cwssaws.ExpectedSwitchInventory {
+) *corev1.ExpectedSwitchInventory {
 	totalPages := totalCount / pageSize
 	if totalCount%pageSize > 0 {
 		totalPages++
 	}
 
 	// Build lists for this page from the sliced info list
-	pagedExpectedSwitches := make([]*cwssaws.ExpectedSwitch, 0, len(pagedInfo))
-	pagedLinkedSwitches := make([]*cwssaws.LinkedExpectedSwitch, 0, len(pagedInfo))
+	pagedExpectedSwitches := make([]*corev1.ExpectedSwitch, 0, len(pagedInfo))
+	pagedLinkedSwitches := make([]*corev1.LinkedExpectedSwitch, 0, len(pagedInfo))
 
 	for _, info := range pagedInfo {
 		pagedExpectedSwitches = append(pagedExpectedSwitches, info.expectedSwitch)
@@ -209,7 +207,7 @@ func getPagedExpectedSwitchInventory(
 	}
 
 	// Create an inventory page with the subset of ExpectedSwitches and matching LinkedSwitches
-	inventoryPage := &cwssaws.ExpectedSwitchInventory{
+	inventoryPage := &corev1.ExpectedSwitchInventory{
 		ExpectedSwitches: pagedExpectedSwitches,
 		LinkedSwitches:   pagedLinkedSwitches,
 		Timestamp: &timestamppb.Timestamp{
@@ -217,12 +215,12 @@ func getPagedExpectedSwitchInventory(
 		},
 		InventoryStatus: status,
 		StatusMsg:       statusMessage,
-		InventoryPage: &cwssaws.InventoryPage{
+		InventoryPage: &corev1.InventoryPage{
 			TotalPages:  int32(totalPages),
 			CurrentPage: int32(page),
 			PageSize:    int32(pageSize),
 			TotalItems:  int32(totalCount),
-			ItemIds:     allExpectedSwitchIDs,
+			ItemIds:     itemIDsForPage(page, totalPages, allExpectedSwitchIDs),
 		},
 	}
 
@@ -243,19 +241,17 @@ func NewManageExpectedSwitchInventory(siteID uuid.UUID, coreGrpcAtomicClient *cc
 // ManageExpectedSwitch is an activity wrapper for Expected Switch management
 type ManageExpectedSwitch struct {
 	coreGrpcAtomicClient *cclient.CoreGrpcAtomicClient
-	flowGrpcAtomicClient *cclient.FlowGrpcAtomicClient
 }
 
 // NewManageExpectedSwitch returns a new ManageExpectedSwitch client
-func NewManageExpectedSwitch(coreGrpcAtomicClient *cclient.CoreGrpcAtomicClient, flowGrpcAtomicClient *cclient.FlowGrpcAtomicClient) ManageExpectedSwitch {
+func NewManageExpectedSwitch(coreGrpcAtomicClient *cclient.CoreGrpcAtomicClient) ManageExpectedSwitch {
 	return ManageExpectedSwitch{
 		coreGrpcAtomicClient: coreGrpcAtomicClient,
-		flowGrpcAtomicClient: flowGrpcAtomicClient,
 	}
 }
 
 // CreateExpectedSwitchOnSite creates Expected Switch with NICo
-func (mes *ManageExpectedSwitch) CreateExpectedSwitchOnSite(ctx context.Context, request *cwssaws.ExpectedSwitch) error {
+func (mes *ManageExpectedSwitch) CreateExpectedSwitchOnSite(ctx context.Context, request *corev1.ExpectedSwitch) error {
 	logger := log.With().Str("Activity", "CreateExpectedSwitchOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -283,19 +279,20 @@ func (mes *ManageExpectedSwitch) CreateExpectedSwitchOnSite(ctx context.Context,
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call Core gRPC endpoint
+	start := time.Now()
 	_, err = grpcServiceClient.AddExpectedSwitch(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Expected Switch using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create Expected Switch using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // UpdateExpectedSwitchOnSite updates Expected Switch on NICo
-func (mes *ManageExpectedSwitch) UpdateExpectedSwitchOnSite(ctx context.Context, request *cwssaws.ExpectedSwitch) error {
+func (mes *ManageExpectedSwitch) UpdateExpectedSwitchOnSite(ctx context.Context, request *corev1.ExpectedSwitch) error {
 	logger := log.With().Str("Activity", "UpdateExpectedSwitchOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -322,107 +319,28 @@ func (mes *ManageExpectedSwitch) UpdateExpectedSwitchOnSite(ctx context.Context,
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateExpectedSwitch(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update Expected Switch using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update Expected Switch using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
-// CreateExpectedSwitchOnFlow creates an Expected Switch as a component in Flow via AddComponent
-func (mes *ManageExpectedSwitch) CreateExpectedSwitchOnFlow(ctx context.Context, request *cwssaws.ExpectedSwitch) error {
-	logger := log.With().Str("Activity", "CreateExpectedSwitchOnFlow").Logger()
-
-	logger.Info().Msg("Starting activity")
-
-	// Validate request
-	if request == nil {
-		return temporal.NewNonRetryableApplicationError("received empty create Expected Switch request for Flow", swe.ErrTypeInvalidRequest, errors.New("nil request"))
-	}
-
-	// If Flow client is not configured, skip gracefully
-	if mes.flowGrpcAtomicClient == nil {
-		logger.Warn().Msg("Flow client not configured, skipping Flow component creation")
-		return nil
-	}
-
-	grpcClient := mes.flowGrpcAtomicClient.GetClient()
-	if grpcClient == nil {
-		logger.Warn().Msg("Flow client not connected, skipping Flow component creation")
-		return nil
-	}
-	grpcServiceClient := grpcClient.GrpcServiceClient()
-
-	component := expectedSwitchToFlowComponent(request)
-	_, err := grpcServiceClient.AddComponent(ctx, &flowv1.AddComponentRequest{Component: component})
-	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create Expected Switch component on Flow")
-		return swe.WrapErr(err)
-	}
-
-	logger.Info().Msg("Completed activity")
+// CreateExpectedSwitchOnFlow is retained as a no-op for compatibility with
+// workflow histories recorded before direct Flow writes were removed.
+// Remove it after the matching `GetVersion` branch is retired and those
+// histories can no longer be replayed.
+func (*ManageExpectedSwitch) CreateExpectedSwitchOnFlow(context.Context, *corev1.ExpectedSwitch) error {
 	return nil
-}
-
-// expectedSwitchToFlowComponent converts a NICo ExpectedSwitch proto to an Flow Component proto
-func expectedSwitchToFlowComponent(es *cwssaws.ExpectedSwitch) *flowv1.Component {
-	component := &flowv1.Component{
-		Type: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
-		Info: &flowv1.DeviceInfo{
-			Id:           &flowv1.UUID{Id: es.GetExpectedSwitchId().GetValue()},
-			SerialNumber: es.GetSwitchSerialNumber(),
-		},
-		Bmcs: []*flowv1.BMCInfo{
-			{
-				Type:       flowv1.BMCType_BMC_TYPE_HOST,
-				MacAddress: es.GetBmcMacAddress(),
-			},
-		},
-		ComponentId: es.GetExpectedSwitchId().GetValue(),
-	}
-
-	// DeviceInfo fields
-	if name := es.GetName(); name != "" {
-		component.Info.Name = name
-	}
-	if manufacturer := es.GetManufacturer(); manufacturer != "" {
-		component.Info.Manufacturer = manufacturer
-	}
-	if es.Model != nil {
-		component.Info.Model = es.Model
-	}
-	if es.Description != nil {
-		component.Info.Description = es.Description
-	}
-
-	// Rack position
-	if es.SlotId != nil || es.TrayIdx != nil || es.HostId != nil {
-		pos := &flowv1.RackPosition{}
-		if es.SlotId != nil {
-			pos.SlotId = *es.SlotId
-		}
-		if es.TrayIdx != nil {
-			pos.TrayIdx = *es.TrayIdx
-		}
-		if es.HostId != nil {
-			pos.HostId = *es.HostId
-		}
-		component.Position = pos
-	}
-
-	if rackID := es.GetRackId().GetId(); rackID != "" {
-		component.RackId = &flowv1.UUID{Id: rackID}
-	}
-
-	return component
 }
 
 // DeleteExpectedSwitchOnSite deletes Expected Switch on NICo
-func (mes *ManageExpectedSwitch) DeleteExpectedSwitchOnSite(ctx context.Context, request *cwssaws.ExpectedSwitchRequest) error {
+func (mes *ManageExpectedSwitch) DeleteExpectedSwitchOnSite(ctx context.Context, request *corev1.ExpectedSwitchRequest) error {
 	logger := log.With().Str("Activity", "DeleteExpectedSwitchOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -447,13 +365,14 @@ func (mes *ManageExpectedSwitch) DeleteExpectedSwitchOnSite(ctx context.Context,
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteExpectedSwitch(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete Expected Switch using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete Expected Switch using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }

@@ -18,7 +18,16 @@
 # will use that url. Otherwise, carbide_static_pxe_url will be the same as carbide_pxe_url.
 
 set base-url {{ static_pxe_url }}/public/blobs/
-set cloudinit-url {{ pxe_url }}/api/v0/cloud-init/
+# One cloud-init URL per consumer, so the prefix a machine boots with is what
+# identifies it.
+set tenant-cloudinit-url {{ pxe_url }}/api/v0/cloud-init/tenant/
+set dpu-cloudinit-url {{ pxe_url }}/api/v0/cloud-init/dpu/
+set scout-cloudinit-url {{ pxe_url }}/api/v0/cloud-init/scout/
+
+# DEPRECATED: use tenant-cloudinit-url. Kept working because tenant-authored
+# ipxeScript values in the wild still reference it; to be deleted once they have
+# moved over.
+set cloudinit-url ${tenant-cloudinit-url}
 
 {{ ipxe }}
 

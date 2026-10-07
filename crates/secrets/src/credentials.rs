@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
@@ -29,6 +30,10 @@ use serde::{Deserialize, Serialize};
 use crate::SecretsError;
 
 const PASSWORD_LEN: usize = 16;
+const UPPERCHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const LOWERCHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+const NUMCHARS: &[u8] = b"0123456789";
+const SPECIALCHARS: &[u8] = b"^%$@!~_";
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Credentials {
     UsernamePassword { username: String, password: String },
@@ -57,64 +62,104 @@ impl fmt::Display for Credentials {
 }
 
 impl Credentials {
-    pub fn generate_password() -> String {
-        const UPPERCHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        const LOWERCHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-        const NUMCHARS: &[u8] = b"0123456789";
-        const EXTRACHARS: &[u8] = b"^%$@!~_";
-        const CHARSET: [&[u8]; 4] = [UPPERCHARS, LOWERCHARS, NUMCHARS, EXTRACHARS];
+    /// Construct a username/password credential.
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Credentials::UsernamePassword {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
 
-        let mut rng = rand::rng();
-
+    /// Build a `PASSWORD_LEN`-character password by drawing uniformly from
+    /// `charset` (a list of character classes) and then overwriting one
+    /// distinct random position per class, guaranteeing at least one
+    /// character from each class.
+    fn generate_password_with_charset(rng: &mut impl rand::Rng, charset: &[&[u8]]) -> String {
         let mut password: Vec<char> = (0..PASSWORD_LEN)
             .map(|_| {
-                let chid = rng.random_range(0..CHARSET.len());
-                let idx = rng.random_range(0..CHARSET[chid].len());
-                CHARSET[chid][idx] as char
+                let class = rng.random_range(0..charset.len());
+                let idx = rng.random_range(0..charset[class].len());
+                charset[class][idx] as char
             })
             .collect();
 
-        // Enforce 1 Uppercase, 1 lowercase, 1 symbol and 1 numeric value rule.
-        let mut positions_to_overlap = (0..PASSWORD_LEN).collect::<Vec<_>>();
-        positions_to_overlap.shuffle(&mut rand::rng());
-        let positions_to_overlap = positions_to_overlap.into_iter().take(CHARSET.len());
-
-        for (index, pos) in positions_to_overlap.enumerate() {
-            let char_index = rng.random_range(0..CHARSET[index].len());
-            password[pos] = CHARSET[index][char_index] as char;
+        // Enforce 1 uppercase, 1 lowercase, 1 digit and (when present) 1 symbol
+        // by overwriting a distinct random position with a character from each
+        // class.
+        let mut positions = (0..PASSWORD_LEN).collect::<Vec<_>>();
+        positions.shuffle(&mut *rng);
+        for (class, &pos) in positions.iter().take(charset.len()).enumerate() {
+            let idx = rng.random_range(0..charset[class].len());
+            password[pos] = charset[class][idx] as char;
         }
 
         password.into_iter().collect()
+    }
+
+    pub fn generate_password() -> String {
+        Self::generate_password_with_charset(
+            &mut rand::rng(),
+            &[UPPERCHARS, LOWERCHARS, NUMCHARS, SPECIALCHARS],
+        )
     }
 
     pub fn generate_password_no_special_char() -> String {
-        const UPPERCHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        const LOWERCHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-        const NUMCHARS: &[u8] = b"0123456789";
-        const CHARSET: [&[u8]; 3] = [UPPERCHARS, LOWERCHARS, NUMCHARS];
+        Self::generate_password_with_charset(&mut rand::rng(), &[UPPERCHARS, LOWERCHARS, NUMCHARS])
+    }
 
-        let mut rng = rand::rng();
-
-        let mut password: Vec<char> = (0..PASSWORD_LEN)
-            .map(|_| {
-                let chid = rng.random_range(0..CHARSET.len());
-                let idx = rng.random_range(0..CHARSET[chid].len());
-                CHARSET[chid][idx] as char
-            })
-            .collect();
-
-        // Enforce 1 Uppercase, 1 lowercase, 1 symbol and 1 numeric value rule.
-        let mut positions_to_overlap = (0..PASSWORD_LEN).collect::<Vec<_>>();
-        positions_to_overlap.shuffle(&mut rand::rng());
-        let positions_to_overlap = positions_to_overlap.into_iter().take(CHARSET.len());
-
-        for (index, pos) in positions_to_overlap.enumerate() {
-            let char_index = rng.random_range(0..CHARSET[index].len());
-            password[pos] = CHARSET[index][char_index] as char;
+    /// Validate that an operator-supplied password meets the strength floor the
+    /// generator also satisfies: at least `PASSWORD_LEN` bytes and at least one
+    /// uppercase, lowercase, digit and ASCII-punctuation character.
+    ///
+    /// This is a generic strength gate, not an exact mirror of the generator: it
+    /// accepts any `is_ascii_punctuation` symbol (the generator only emits a
+    /// curated subset), and length is measured in bytes -- fine for the ASCII
+    /// passwords these credentials use in practice. It is also not a
+    /// device-specific charset check, so a password that passes here may still be
+    /// rejected later by a particular BMC/UEFI password policy; that is enforced
+    /// at the device by the convergence engine.
+    ///
+    /// Explicit passwords passed to `RotateCredential` are checked with this
+    /// before being written to the secret store.
+    pub fn validate_password_strength(password: &str) -> Result<(), PasswordPolicyError> {
+        if password.len() < PASSWORD_LEN {
+            return Err(PasswordPolicyError::TooShort {
+                min: PASSWORD_LEN,
+                actual: password.len(),
+            });
         }
 
-        password.into_iter().collect()
+        let mut missing = Vec::new();
+        if !password.chars().any(|c| c.is_ascii_uppercase()) {
+            missing.push("uppercase");
+        }
+        if !password.chars().any(|c| c.is_ascii_lowercase()) {
+            missing.push("lowercase");
+        }
+        if !password.chars().any(|c| c.is_ascii_digit()) {
+            missing.push("digit");
+        }
+        if !password.chars().any(|c| c.is_ascii_punctuation()) {
+            missing.push("punctuation");
+        }
+        if !missing.is_empty() {
+            return Err(PasswordPolicyError::MissingCharacterClasses {
+                missing: missing.join(", "),
+            });
+        }
+
+        Ok(())
     }
+}
+
+/// Reasons an operator-supplied password fails the strength policy enforced by
+/// [`Credentials::validate_password_strength`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PasswordPolicyError {
+    #[error("password too short: {actual} characters, minimum {min}")]
+    TooShort { min: usize, actual: usize },
+    #[error("password is missing required character classes: {missing}")]
+    MissingCharacterClasses { missing: String },
 }
 
 #[async_trait]
@@ -138,6 +183,16 @@ impl<T: CredentialReader + ?Sized> CredentialReader for Arc<T> {
 
 #[async_trait]
 pub trait CredentialWriter: Send + Sync {
+    /// Reads the value persisted by this writer, bypassing any composite reader
+    /// precedence or local overrides.
+    ///
+    /// Callers use this after a security-sensitive write when publishing state
+    /// requires proof that the configured write target contains the value.
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError>;
+
     async fn set_credentials(
         &self,
         key: &CredentialKey,
@@ -155,6 +210,13 @@ pub trait CredentialWriter: Send + Sync {
 
 #[async_trait]
 impl<T: CredentialWriter + ?Sized> CredentialWriter for Arc<T> {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        (**self).get_credentials_from_writer(key).await
+    }
+
     async fn set_credentials(
         &self,
         key: &CredentialKey,
@@ -173,6 +235,120 @@ impl<T: CredentialWriter + ?Sized> CredentialWriter for Arc<T> {
 
     async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
         (**self).delete_credentials(key).await
+    }
+}
+
+/// Blocks persistent UFM credential mutations while local sources own all UFM
+/// credentials, and delegates every other writer operation.
+pub struct UfmCredentialMutationBlocker {
+    writer: Arc<dyn CredentialWriter>,
+}
+
+/// Blocks persistent mutations of version 0 of the site-wide BMC root while
+/// local sources own it, and delegates every other writer operation.
+pub struct BmcSiteWideRootV0CredentialMutationBlocker {
+    writer: Arc<dyn CredentialWriter>,
+}
+
+impl BmcSiteWideRootV0CredentialMutationBlocker {
+    /// Wraps a writer with the local-ownership policy for the unversioned root.
+    pub fn new(writer: Arc<dyn CredentialWriter>) -> Self {
+        Self { writer }
+    }
+
+    fn ensure_mutation_allowed(key: &CredentialKey) -> Result<(), SecretsError> {
+        if matches!(
+            key,
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRoot,
+            }
+        ) {
+            return Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked);
+        }
+        Ok(())
+    }
+}
+
+impl UfmCredentialMutationBlocker {
+    /// Wraps a writer with the policy that rejects UFM mutations and delegates
+    /// every other credential operation.
+    pub fn new(writer: Arc<dyn CredentialWriter>) -> Self {
+        Self { writer }
+    }
+
+    fn ensure_mutation_allowed(key: &CredentialKey) -> Result<(), SecretsError> {
+        let CredentialKey::UfmAuth { fabric } = key else {
+            return Ok(());
+        };
+        Err(SecretsError::UfmCredentialMutationBlocked {
+            fabric: fabric.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl CredentialWriter for UfmCredentialMutationBlocker {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.writer.get_credentials_from_writer(key).await
+    }
+
+    async fn set_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.set_credentials(key, credentials).await
+    }
+
+    async fn create_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.create_credentials(key, credentials).await
+    }
+
+    async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.delete_credentials(key).await
+    }
+}
+
+#[async_trait]
+impl CredentialWriter for BmcSiteWideRootV0CredentialMutationBlocker {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.writer.get_credentials_from_writer(key).await
+    }
+
+    async fn set_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.set_credentials(key, credentials).await
+    }
+
+    async fn create_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.create_credentials(key, credentials).await
+    }
+
+    async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.delete_credentials(key).await
     }
 }
 
@@ -205,6 +381,13 @@ impl<R: CredentialReader, W: CredentialWriter> CredentialReader
 impl<R: CredentialReader, W: CredentialWriter> CredentialWriter
     for CompositeCredentialManager<R, W>
 {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.writer.get_credentials_from_writer(key).await
+    }
+
     async fn set_credentials(
         &self,
         key: &CredentialKey,
@@ -234,19 +417,89 @@ impl<R: CredentialReader, W: CredentialWriter> CredentialManager
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[allow(clippy::enum_variant_names)]
 pub enum CredentialType {
-    DpuHardwareDefault,
+    DpuHardwareDefault { model: bmc_vendor::DpuModel },
     HostHardwareDefault { vendor: bmc_vendor::BMCVendor },
     SiteDefault,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum BmcCredentialType {
-    // Site Wide Root Credentials
+    /// Site-wide BMC root, version 0: the initial site-wide credential set at
+    /// ingestion / set-from-factory (`machines/bmc/site/root`). Under credential
+    /// rotation this is simply version 0 of the site-wide credential; the
+    /// *current* version is recorded in `sitewide_credential_rotation`'s
+    /// `target_version` and resolved via [`BmcCredentialType::site_wide_root`].
+    /// It is not an alias and is never overwritten by a rotation -- once the site
+    /// has rotated, this path still holds the v0 value while the live credential
+    /// is at [`SiteWideRootVersioned`].
     SiteWideRoot,
+    /// Site-wide BMC root at a specific rotation version `N >= 1`
+    /// (`machines/bmc/site/root/v{N}`), written by `RotateCredential`. Immutable
+    /// per version. The "current site-wide credential" is whichever version
+    /// `sitewide_credential_rotation.target_version` names; consumers resolve it
+    /// with [`BmcCredentialType::site_wide_root`] rather than reading a fixed
+    /// path. Version 0 lives at the unversioned [`SiteWideRoot`] path instead.
+    SiteWideRootVersioned {
+        version: u32,
+    },
     // BMC Specific Root Credentials
-    BmcRoot { bmc_mac_address: MacAddress },
+    BmcRoot {
+        bmc_mac_address: MacAddress,
+    },
     // BMC Specific Forge-Admin Credentials
-    BmcForgeAdmin { bmc_mac_address: MacAddress },
+    BmcForgeAdmin {
+        bmc_mac_address: MacAddress,
+    },
+    /// Site-wide DPU BMC `service` account password, version 0
+    /// (`machines/bmc/site/dpu_service`). Written on first ingestion of a DPU
+    /// BMC that exposes a factory `service` account (currently BF4 only; BF3
+    /// has none). Distinct from the site-wide BMC root password. Under credential
+    /// rotation this is simply version 0; the *current* version is recorded in
+    /// `sitewide_credential_rotation`'s `target_version` for the `dpu_bmc_service`
+    /// family and resolved via [`BmcCredentialType::site_wide_dpu_bmc_service`].
+    /// It is never overwritten by a rotation -- once the site has rotated, this
+    /// path still holds the v0 value while the live credential is at
+    /// [`SiteWideDpuBmcServiceVersioned`].
+    SiteWideDpuBmcService,
+    /// Site-wide DPU BMC `service` account password at a specific rotation
+    /// version `N >= 1` (`machines/bmc/site/dpu_service/v{N}`), written by
+    /// `RotateCredential`. Immutable per version. The "current" version is
+    /// whichever `sitewide_credential_rotation.target_version` names for the
+    /// `dpu_bmc_service` family; consumers resolve it with
+    /// [`BmcCredentialType::site_wide_dpu_bmc_service`]. Version 0 lives at the
+    /// unversioned [`SiteWideDpuBmcService`] path instead.
+    SiteWideDpuBmcServiceVersioned {
+        version: u32,
+    },
+}
+
+impl BmcCredentialType {
+    /// Resolve the site-wide BMC root credential key for `version`, implementing
+    /// the table-driven "current site-wide credential" contract: a caller reads
+    /// `sitewide_credential_rotation.target_version` and passes it here. Version 0
+    /// is the legacy unversioned path ([`SiteWideRoot`]); later versions are
+    /// version-addressed ([`SiteWideRootVersioned`]). This is the single place
+    /// that encodes "v0 lives at the unversioned path", so consumers never branch
+    /// on it themselves.
+    pub fn site_wide_root(version: u32) -> Self {
+        match version {
+            0 => Self::SiteWideRoot,
+            version => Self::SiteWideRootVersioned { version },
+        }
+    }
+
+    /// Resolve the site-wide DPU BMC `service` credential key for `version`,
+    /// mirroring [`site_wide_root`](Self::site_wide_root): version 0 is the
+    /// legacy unversioned path ([`SiteWideDpuBmcService`]); later versions are
+    /// version-addressed ([`SiteWideDpuBmcServiceVersioned`]). This is the single
+    /// place that encodes "v0 lives at the unversioned path" for the service
+    /// account, so consumers never branch on it themselves.
+    pub fn site_wide_dpu_bmc_service(version: u32) -> Self {
+        match version {
+            0 => Self::SiteWideDpuBmcService,
+            version => Self::SiteWideDpuBmcServiceVersioned { version },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -303,6 +556,25 @@ pub enum CredentialKey {
     NicLockdownIkm {
         credential_type: NicLockdownIkm,
     },
+    /// Site-wide host UEFI credential at rotation version `N >= 1`
+    /// (`machines/all_hosts/site_default/uefi-metadata-items/auth/v{N}`), written
+    /// by `RotateCredential`. Table-driven like BMC: the unversioned
+    /// [`CredentialKey::HostUefi`] / [`CredentialType::SiteDefault`] path is
+    /// version 0, and which version is current is defined by
+    /// `sitewide_credential_rotation.target_version`. Consumers resolve the live
+    /// key with [`CredentialKey::host_uefi_site_default`] rather than reading a
+    /// fixed path; no unversioned alias is maintained. Admin/rotation-written
+    /// only; not a loginable per-device credential.
+    HostUefiSiteVersioned {
+        version: u32,
+    },
+    /// Site-wide DPU UEFI credential at rotation version `N >= 1`
+    /// (`machines/all_dpus/site_default/uefi-metadata-items/auth/v{N}`). See
+    /// [`CredentialKey::HostUefiSiteVersioned`]; resolve via
+    /// [`CredentialKey::dpu_uefi_site_default`].
+    DpuUefiSiteVersioned {
+        version: u32,
+    },
     ExtensionService {
         service_id: String,
         version: String,
@@ -313,6 +585,13 @@ pub enum CredentialKey {
     SwitchNvosAdmin {
         bmc_mac_address: MacAddress,
     },
+
+    /// Versioned site-wide NVOS "rotate-TO" target.
+    /// Admin/rotation-written only; not a per-device login credential.
+    SwitchNvosSiteAdmin {
+        version: u32,
+    },
+
     MqttAuth {
         credential_type: MqttCredentialType,
     },
@@ -323,6 +602,19 @@ pub enum CredentialKey {
     },
     RackMaintenanceAccessToken {
         rack_id: RackId,
+    },
+
+    /// Firmware artifact access token addressed by a non-secret, operator-defined name.
+    ///
+    /// [`CredentialKey::to_key_str`] encodes the name as one path segment, preserving
+    /// its UTF-8 bytes without giving separators or traversal segments path semantics.
+    FirmwareArtifactAccessToken {
+        /// Opaque lookup name supplied through the credential API.
+        name: String,
+    },
+
+    ContainerRegistry {
+        registry: String,
     },
 }
 
@@ -366,11 +658,16 @@ pub enum CredentialPrefix {
     MqttAuth,
     MachineIdentityEncryptionKey,
     RackMaintenanceAccessToken,
+
+    /// Prefix used to list all named firmware artifact access tokens.
+    FirmwareArtifactAccessToken,
+
+    ContainerRegistry,
 }
 
 impl CredentialPrefix {
-    /// as_str returns the Vault-style path prefix
-    /// for this credential category.
+    /// as_str returns the serialized credential-store key prefix for this
+    /// credential category.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::DpuSsh => "machines/",
@@ -389,6 +686,8 @@ impl CredentialPrefix {
             Self::MqttAuth => "mqtt/",
             Self::MachineIdentityEncryptionKey => "machine_identity/",
             Self::RackMaintenanceAccessToken => "racks/",
+            Self::FirmwareArtifactAccessToken => "firmware_artifacts/",
+            Self::ContainerRegistry => "container_registries/",
         }
     }
 
@@ -411,11 +710,60 @@ impl CredentialPrefix {
             Self::MqttAuth,
             Self::MachineIdentityEncryptionKey,
             Self::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken,
+            Self::ContainerRegistry,
         ]
     }
 }
 
+/// Returns the vault path segment for a `DpuModel`. `Unknown` maps to `"root"` to
+/// preserve backward compatibility with the pre-per-model vault entry.
+fn dpu_model_vault_segment(model: bmc_vendor::DpuModel) -> &'static str {
+    match model {
+        bmc_vendor::DpuModel::BlueField2 => "bf2",
+        bmc_vendor::DpuModel::BlueField3 => "bf3",
+        bmc_vendor::DpuModel::BlueField4 => "bf4",
+        bmc_vendor::DpuModel::Unknown => "root",
+    }
+}
+
 impl CredentialKey {
+    /// Resolve the site-wide host UEFI credential key for `version`, the
+    /// table-driven "current site-wide host UEFI credential" lookup: a caller
+    /// reads `sitewide_credential_rotation.target_version` (host_uefi) and passes
+    /// it here. Version 0 is the legacy unversioned site-default path
+    /// ([`CredentialType::SiteDefault`]); later versions are version-addressed
+    /// ([`Self::HostUefiSiteVersioned`]).
+    pub fn host_uefi_site_default(version: u32) -> Self {
+        match version {
+            0 => Self::HostUefi {
+                credential_type: CredentialType::SiteDefault,
+            },
+            version => Self::HostUefiSiteVersioned { version },
+        }
+    }
+
+    /// Resolve the site-wide DPU UEFI credential key for `version`. See
+    /// [`Self::host_uefi_site_default`]; version 0 is the legacy unversioned
+    /// site-default path and later versions are version-addressed
+    /// ([`Self::DpuUefiSiteVersioned`]).
+    pub fn dpu_uefi_site_default(version: u32) -> Self {
+        match version {
+            0 => Self::DpuUefi {
+                credential_type: CredentialType::SiteDefault,
+            },
+            version => Self::DpuUefiSiteVersioned { version },
+        }
+    }
+
+    /// Returns the logical site-wide NVOS admin credential key for `version`.
+    ///
+    /// Callers should pass this key to [`CredentialManager`] rather than
+    /// depending on a concrete storage path or backend.
+    pub fn switch_nvos_site_admin(version: u32) -> Self {
+        Self::SwitchNvosSiteAdmin { version }
+    }
+
     /// prefix returns the CredentialPrefix category
     /// this key belongs to.
     pub fn prefix(&self) -> CredentialPrefix {
@@ -430,14 +778,21 @@ impl CredentialKey {
             Self::HostUefi { .. } => CredentialPrefix::HostUefi,
             Self::BmcCredentials { .. } => CredentialPrefix::BmcCredentials,
             Self::NicLockdownIkm { .. } => CredentialPrefix::NicLockdownIkm,
+            Self::HostUefiSiteVersioned { .. } => CredentialPrefix::HostUefi,
+            Self::DpuUefiSiteVersioned { .. } => CredentialPrefix::DpuUefi,
             Self::ExtensionService { .. } => CredentialPrefix::ExtensionService,
             Self::NmxM { .. } => CredentialPrefix::NmxM,
             Self::SwitchNvosAdmin { .. } => CredentialPrefix::SwitchNvosAdmin,
+            Self::SwitchNvosSiteAdmin { .. } => CredentialPrefix::SwitchNvosAdmin,
             Self::MqttAuth { .. } => CredentialPrefix::MqttAuth,
             Self::MachineIdentityEncryptionKey { .. } => {
                 CredentialPrefix::MachineIdentityEncryptionKey
             }
             Self::RackMaintenanceAccessToken { .. } => CredentialPrefix::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken { .. } => {
+                CredentialPrefix::FirmwareArtifactAccessToken
+            }
+            Self::ContainerRegistry { .. } => CredentialPrefix::ContainerRegistry,
         }
     }
 
@@ -450,8 +805,11 @@ impl CredentialKey {
                 Cow::from(format!("machines/{machine_id}/dpu-hbn"))
             }
             CredentialKey::DpuRedfish { credential_type } => match credential_type {
-                CredentialType::DpuHardwareDefault => {
-                    Cow::from("machines/all_dpus/factory_default/bmc-metadata-items/root")
+                CredentialType::DpuHardwareDefault { model } => {
+                    let segment = dpu_model_vault_segment(*model);
+                    Cow::from(format!(
+                        "machines/all_dpus/factory_default/bmc-metadata-items/{segment}"
+                    ))
                 }
                 CredentialType::SiteDefault => {
                     Cow::from("machines/all_dpus/site_default/bmc-metadata-items/root")
@@ -469,7 +827,7 @@ impl CredentialKey {
                 CredentialType::SiteDefault => {
                     Cow::from("machines/all_hosts/site_default/bmc-metadata-items/root")
                 }
-                CredentialType::DpuHardwareDefault => {
+                CredentialType::DpuHardwareDefault { .. } => {
                     unreachable!(
                         "HostRedfish / DpuHardwareDefault is an invalid credential combination"
                     );
@@ -477,7 +835,7 @@ impl CredentialKey {
             },
             CredentialKey::UfmAuth { fabric } => Cow::from(format!("ufm/{fabric}/auth")),
             CredentialKey::DpuUefi { credential_type } => match credential_type {
-                CredentialType::DpuHardwareDefault => {
+                CredentialType::DpuHardwareDefault { .. } => {
                     Cow::from("machines/all_dpus/factory_default/uefi-metadata-items/auth")
                 }
                 CredentialType::SiteDefault => {
@@ -497,18 +855,33 @@ impl CredentialKey {
             },
             CredentialKey::BmcCredentials { credential_type } => match credential_type {
                 BmcCredentialType::SiteWideRoot => Cow::from("machines/bmc/site/root"),
+                BmcCredentialType::SiteWideRootVersioned { version } => {
+                    Cow::from(format!("machines/bmc/site/root/v{version}"))
+                }
                 BmcCredentialType::BmcRoot { bmc_mac_address } => {
                     Cow::from(format!("machines/bmc/{bmc_mac_address}/root"))
                 }
                 BmcCredentialType::BmcForgeAdmin { bmc_mac_address } => Cow::from(format!(
                     "machines/bmc/{bmc_mac_address}/forge-admin-account"
                 )),
+                BmcCredentialType::SiteWideDpuBmcService => {
+                    Cow::from("machines/bmc/site/dpu_service")
+                }
+                BmcCredentialType::SiteWideDpuBmcServiceVersioned { version } => {
+                    Cow::from(format!("machines/bmc/site/dpu_service/v{version}"))
+                }
             },
             CredentialKey::NicLockdownIkm { credential_type } => match credential_type {
                 NicLockdownIkm::SiteWide { version } => {
                     Cow::from(format!("machines/nic_lockdown_ikm/site/root/v{version}"))
                 }
             },
+            CredentialKey::HostUefiSiteVersioned { version } => Cow::from(format!(
+                "machines/all_hosts/site_default/uefi-metadata-items/auth/v{version}"
+            )),
+            CredentialKey::DpuUefiSiteVersioned { version } => Cow::from(format!(
+                "machines/all_dpus/site_default/uefi-metadata-items/auth/v{version}"
+            )),
             CredentialKey::ExtensionService {
                 service_id,
                 version,
@@ -518,6 +891,9 @@ impl CredentialKey {
             CredentialKey::NmxM { nmxm_id } => Cow::from(format!("nmxm/{nmxm_id}/auth")),
             CredentialKey::SwitchNvosAdmin { bmc_mac_address } => {
                 Cow::from(format!("switch_nvos/{bmc_mac_address}/admin"))
+            }
+            CredentialKey::SwitchNvosSiteAdmin { version } => {
+                Cow::from(format!("switch_nvos/site/admin/v{version}"))
             }
             CredentialKey::MqttAuth { credential_type } => match credential_type {
                 MqttCredentialType::Dpa => Cow::from("mqtt/dpa/auth"),
@@ -537,12 +913,23 @@ impl CredentialKey {
             CredentialKey::RackMaintenanceAccessToken { rack_id } => {
                 Cow::from(format!("racks/{rack_id}/maintenance/access-token"))
             }
+            CredentialKey::FirmwareArtifactAccessToken { name } => {
+                let encoded_name =
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name.as_bytes());
+
+                Cow::from(format!("firmware_artifacts/{encoded_name}/access-token"))
+            }
+            CredentialKey::ContainerRegistry { registry } => {
+                Cow::from(format!("container_registries/{registry}/auth"))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
     use crate::test_support::credentials::TestCredentialManager;
 
@@ -573,6 +960,92 @@ mod tests {
         assert!(password.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
+    #[test]
+    fn firmware_artifact_credential_name_is_encoded_in_store_path() {
+        assert_eq!(
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "../repo/name".to_string(),
+            }
+            .to_key_str(),
+            "firmware_artifacts/Li4vcmVwby9uYW1l/access-token"
+        );
+    }
+
+    #[test]
+    fn generated_password_satisfies_strength_policy() {
+        // Every randomly generated password must pass the same policy we
+        // enforce on operator-supplied passwords. Repeated so the
+        // class-overwrite logic is exercised across many random layouts.
+        for _ in 0..256 {
+            let password = Credentials::generate_password();
+            Credentials::validate_password_strength(&password)
+                .expect("generated password should satisfy the strength policy");
+        }
+    }
+
+    #[test]
+    fn validate_password_strength_table() {
+        check_values(
+            [
+                Check {
+                    scenario: "valid: all four classes, long enough",
+                    input: "Abcdefghijk1234!",
+                    expect: true,
+                },
+                Check {
+                    scenario: "too short",
+                    input: "Ab1!",
+                    expect: false,
+                },
+                Check {
+                    scenario: "missing uppercase",
+                    input: "abcdefghijk1234!",
+                    expect: false,
+                },
+                Check {
+                    scenario: "missing lowercase",
+                    input: "ABCDEFGHIJK1234!",
+                    expect: false,
+                },
+                Check {
+                    scenario: "missing digit",
+                    input: "Abcdefghijklmn!@",
+                    expect: false,
+                },
+                Check {
+                    scenario: "missing punctuation",
+                    input: "Abcdefghijk12345",
+                    expect: false,
+                },
+            ],
+            |pw: &str| Credentials::validate_password_strength(pw).is_ok(),
+        );
+    }
+
+    #[test]
+    fn validate_password_strength_reports_specific_failures() {
+        assert_eq!(
+            Credentials::validate_password_strength("Ab1!"),
+            Err(PasswordPolicyError::TooShort {
+                min: PASSWORD_LEN,
+                actual: 4,
+            })
+        );
+        assert!(matches!(
+            Credentials::validate_password_strength("abcdefghijk1234!"),
+            Err(PasswordPolicyError::MissingCharacterClasses { .. })
+        ));
+    }
+
+    #[test]
+    fn dpu_bmc_service_site_wide_path() {
+        let key = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideDpuBmcService,
+        };
+        assert_eq!(key.to_key_str(), "machines/bmc/site/dpu_service");
+        assert_eq!(key.prefix(), CredentialPrefix::BmcCredentials);
+    }
+
     // Pins the exact Vault path for the versioned lockdown IKM, including
     // how the version is rendered (v{N}), since other components and the
     // seed migration depend on this layout.
@@ -591,6 +1064,45 @@ mod tests {
             key_v12.to_key_str(),
             "machines/nic_lockdown_ikm/site/root/v12"
         );
+    }
+
+    // Pins the exact versioned site-wide "rotate-TO" target paths per credential
+    // family. The rotation handler writes these and the controllers read them, so
+    // the `v{N}` layout (and the unversioned BMC alias staying put) must not drift.
+    #[test]
+    fn site_wide_rotation_target_paths_are_versioned() {
+        let bmc = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 3 },
+        };
+        assert_eq!(bmc.to_key_str(), "machines/bmc/site/root/v3");
+        assert_eq!(bmc.prefix(), CredentialPrefix::BmcCredentials);
+
+        // The unversioned alias is unchanged and still distinct.
+        let bmc_alias = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        assert_eq!(bmc_alias.to_key_str(), "machines/bmc/site/root");
+
+        // Host/DPU UEFI rotation targets are versioned in place on the existing
+        // site_default path; the unversioned alias (= v0) is unchanged.
+        let host_uefi = CredentialKey::HostUefiSiteVersioned { version: 0 };
+        assert_eq!(
+            host_uefi.to_key_str(),
+            "machines/all_hosts/site_default/uefi-metadata-items/auth/v0"
+        );
+        assert_eq!(host_uefi.prefix(), CredentialPrefix::HostUefi);
+
+        let dpu_uefi = CredentialKey::DpuUefiSiteVersioned { version: 7 };
+        assert_eq!(
+            dpu_uefi.to_key_str(),
+            "machines/all_dpus/site_default/uefi-metadata-items/auth/v7"
+        );
+        assert_eq!(dpu_uefi.prefix(), CredentialPrefix::DpuUefi);
+
+        let nvos = CredentialKey::switch_nvos_site_admin(2);
+
+        assert_eq!(nvos.to_key_str(), "switch_nvos/site/admin/v2");
+        assert_eq!(nvos.prefix(), CredentialPrefix::SwitchNvosAdmin);
     }
 
     #[tokio::test]
@@ -636,6 +1148,108 @@ mod tests {
                 password: "read-pass".to_string(),
             })
         );
+
+        let writer_readback = composite
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("writer readback");
+
+        assert_eq!(writer_readback, Some(write_cred));
+    }
+
+    #[tokio::test]
+    async fn ufm_mutation_blocker_rejects_every_writer_mutation() {
+        let backend: Arc<dyn CredentialWriter> = Arc::new(TestCredentialManager::default());
+        let key = CredentialKey::UfmAuth {
+            fabric: "test-fabric".to_string(),
+        };
+        let credentials = Credentials::UsernamePassword {
+            username: "ufm-user".to_string(),
+            password: "ufm-password".to_string(),
+        };
+        let blocker = UfmCredentialMutationBlocker::new(backend);
+
+        let results = [
+            blocker.set_credentials(&key, &credentials).await,
+            blocker.create_credentials(&key, &credentials).await,
+            blocker.delete_credentials(&key).await,
+        ];
+
+        for result in results {
+            assert!(matches!(
+                result,
+                Err(SecretsError::UfmCredentialMutationBlocked { .. })
+            ));
+        }
+        assert_eq!(
+            blocker
+                .get_credentials_from_writer(&key)
+                .await
+                .expect("read writer after blocked mutations"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn ufm_mutation_blocker_delegates_non_ufm_mutations() {
+        let backend = Arc::new(TestCredentialManager::default());
+        let blocker = UfmCredentialMutationBlocker::new(backend.clone());
+        let key = CredentialKey::DpuUefi {
+            credential_type: CredentialType::SiteDefault,
+        };
+        let credentials = Credentials::UsernamePassword {
+            username: "dpu-user".to_string(),
+            password: "dpu-password".to_string(),
+        };
+
+        blocker
+            .set_credentials(&key, &credentials)
+            .await
+            .expect("write non-UFM credential");
+
+        assert_eq!(
+            backend
+                .get_credentials_from_writer(&key)
+                .await
+                .expect("read delegated credential"),
+            Some(credentials)
+        );
+    }
+
+    #[tokio::test]
+    async fn bmc_site_wide_root_v0_mutation_blocker_is_exact() {
+        let backend = Arc::new(TestCredentialManager::default());
+        let blocker = BmcSiteWideRootV0CredentialMutationBlocker::new(backend.clone());
+        let credentials = Credentials::new("root", "password");
+        let v0 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let v1 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 1 },
+        };
+
+        for result in [
+            blocker.set_credentials(&v0, &credentials).await,
+            blocker.create_credentials(&v0, &credentials).await,
+            blocker.delete_credentials(&v0).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked)
+            ));
+        }
+
+        blocker
+            .set_credentials(&v1, &credentials)
+            .await
+            .expect("versioned BMC root mutation must reach the backend");
+        assert_eq!(
+            backend
+                .get_credentials_from_writer(&v1)
+                .await
+                .expect("read versioned BMC root from backend"),
+            Some(credentials)
+        );
     }
 
     #[tokio::test]
@@ -666,145 +1280,337 @@ mod tests {
         let rack_id = RackId::new("rack-01");
         let mac: MacAddress = MacAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
-        let cases: Vec<(CredentialKey, &str)> = vec![
-            (CredentialKey::DpuHbn { machine_id }, "machines/"),
-            (
-                CredentialKey::DpuRedfish {
-                    credential_type: CredentialType::DpuHardwareDefault,
-                },
-                "machines/all_dpus/",
-            ),
-            (
-                CredentialKey::DpuRedfish {
-                    credential_type: CredentialType::SiteDefault,
-                },
-                "machines/all_dpus/",
-            ),
-            (
-                CredentialKey::HostRedfish {
-                    credential_type: CredentialType::HostHardwareDefault {
-                        vendor: bmc_vendor::BMCVendor::Nvidia,
-                    },
-                },
-                "machines/all_hosts/",
-            ),
-            (
-                CredentialKey::HostRedfish {
-                    credential_type: CredentialType::SiteDefault,
-                },
-                "machines/all_hosts/",
-            ),
-            (
-                CredentialKey::UfmAuth {
-                    fabric: "test-fabric".to_string(),
-                },
-                "ufm/",
-            ),
-            (
-                CredentialKey::DpuUefi {
-                    credential_type: CredentialType::DpuHardwareDefault,
-                },
-                "machines/all_dpus/",
-            ),
-            (
-                CredentialKey::DpuUefi {
-                    credential_type: CredentialType::SiteDefault,
-                },
-                "machines/all_dpus/",
-            ),
-            (
-                CredentialKey::HostUefi {
-                    credential_type: CredentialType::SiteDefault,
-                },
-                "machines/all_hosts/",
-            ),
-            (
-                CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::SiteWideRoot,
-                },
-                "machines/bmc/",
-            ),
-            (
-                CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::BmcRoot {
-                        bmc_mac_address: mac,
-                    },
-                },
-                "machines/bmc/",
-            ),
-            (
-                CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::BmcForgeAdmin {
-                        bmc_mac_address: mac,
-                    },
-                },
-                "machines/bmc/",
-            ),
-            (
-                CredentialKey::NicLockdownIkm {
-                    credential_type: NicLockdownIkm::SiteWide { version: 0 },
-                },
-                "machines/nic_lockdown_ikm/",
-            ),
-            (
-                CredentialKey::ExtensionService {
-                    service_id: "svc1".to_string(),
-                    version: "v1".to_string(),
-                },
-                "machines/extension-services/",
-            ),
-            (
-                CredentialKey::NmxM {
-                    nmxm_id: "nmxm1".to_string(),
-                },
-                "nmxm/",
-            ),
-            (
-                CredentialKey::SwitchNvosAdmin {
-                    bmc_mac_address: mac,
-                },
-                "switch_nvos/",
-            ),
-            (
-                CredentialKey::MqttAuth {
-                    credential_type: MqttCredentialType::Dpa,
-                },
-                "mqtt/",
-            ),
-            (
-                CredentialKey::MqttAuth {
-                    credential_type: MqttCredentialType::DsxExchangeEventBus,
-                },
-                "mqtt/",
-            ),
-            (
-                CredentialKey::MqttAuth {
-                    credential_type: MqttCredentialType::DsxExchangeConsumer,
-                },
-                "mqtt/",
-            ),
-            (
-                CredentialKey::RackMaintenanceAccessToken { rack_id },
-                "racks/",
-            ),
-        ];
-
-        for (key, expected_prefix) in &cases {
-            let path = key.to_key_str();
-            assert!(!path.is_empty(), "{key:?} produced an empty path");
-            assert!(
-                !path.starts_with('/'),
-                "{key:?} path {path:?} should not start with /"
-            );
-            assert!(
-                !path.ends_with('/'),
-                "{key:?} path {path:?} should not end with /"
-            );
-            assert!(
-                path.starts_with(expected_prefix),
-                "{key:?} path {path:?} should start with {expected_prefix:?}"
-            );
+        // Each row is a key and the path prefix its `to_key_str()` must carry. A
+        // path is well-formed when it is non-empty, has no leading or trailing
+        // slash, and starts with that prefix.
+        struct Row {
+            key: CredentialKey,
+            expected_prefix: &'static str,
         }
+
+        // The four invariants of a well-formed key path, checked as named fields
+        // rather than folded into one bool so a failing row names the invariant
+        // it broke. A well-formed path holds all four.
+        #[derive(Debug, PartialEq)]
+        struct PathChecks {
+            non_empty: bool,
+            no_leading_slash: bool,
+            no_trailing_slash: bool,
+            has_expected_prefix: bool,
+        }
+
+        impl PathChecks {
+            const fn all_hold() -> Self {
+                Self {
+                    non_empty: true,
+                    no_leading_slash: true,
+                    no_trailing_slash: true,
+                    has_expected_prefix: true,
+                }
+            }
+        }
+
+        check_values(
+            [
+                Check {
+                    scenario: "dpu hbn",
+                    input: Row {
+                        key: CredentialKey::DpuHbn { machine_id },
+                        expected_prefix: "machines/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu redfish hardware default (unknown/root)",
+                    input: Row {
+                        key: CredentialKey::DpuRedfish {
+                            credential_type: CredentialType::DpuHardwareDefault {
+                                model: bmc_vendor::DpuModel::Unknown,
+                            },
+                        },
+                        expected_prefix: "machines/all_dpus/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu redfish hardware default (bf3)",
+                    input: Row {
+                        key: CredentialKey::DpuRedfish {
+                            credential_type: CredentialType::DpuHardwareDefault {
+                                model: bmc_vendor::DpuModel::BlueField3,
+                            },
+                        },
+                        expected_prefix: "machines/all_dpus/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu redfish site default",
+                    input: Row {
+                        key: CredentialKey::DpuRedfish {
+                            credential_type: CredentialType::SiteDefault,
+                        },
+                        expected_prefix: "machines/all_dpus/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "host redfish hardware default",
+                    input: Row {
+                        key: CredentialKey::HostRedfish {
+                            credential_type: CredentialType::HostHardwareDefault {
+                                vendor: bmc_vendor::BMCVendor::Nvidia,
+                            },
+                        },
+                        expected_prefix: "machines/all_hosts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "host redfish site default",
+                    input: Row {
+                        key: CredentialKey::HostRedfish {
+                            credential_type: CredentialType::SiteDefault,
+                        },
+                        expected_prefix: "machines/all_hosts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "ufm auth",
+                    input: Row {
+                        key: CredentialKey::UfmAuth {
+                            fabric: "test-fabric".to_string(),
+                        },
+                        expected_prefix: "ufm/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu uefi hardware default",
+                    input: Row {
+                        key: CredentialKey::DpuUefi {
+                            credential_type: CredentialType::DpuHardwareDefault {
+                                model: bmc_vendor::DpuModel::Unknown,
+                            },
+                        },
+                        expected_prefix: "machines/all_dpus/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu uefi site default",
+                    input: Row {
+                        key: CredentialKey::DpuUefi {
+                            credential_type: CredentialType::SiteDefault,
+                        },
+                        expected_prefix: "machines/all_dpus/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "host uefi site default",
+                    input: Row {
+                        key: CredentialKey::HostUefi {
+                            credential_type: CredentialType::SiteDefault,
+                        },
+                        expected_prefix: "machines/all_hosts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "bmc site wide root",
+                    input: Row {
+                        key: CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::SiteWideRoot,
+                        },
+                        expected_prefix: "machines/bmc/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "bmc root",
+                    input: Row {
+                        key: CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::BmcRoot {
+                                bmc_mac_address: mac,
+                            },
+                        },
+                        expected_prefix: "machines/bmc/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "bmc forge admin",
+                    input: Row {
+                        key: CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::BmcForgeAdmin {
+                                bmc_mac_address: mac,
+                            },
+                        },
+                        expected_prefix: "machines/bmc/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "bmc site wide dpu service",
+                    input: Row {
+                        key: CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::SiteWideDpuBmcService,
+                        },
+                        expected_prefix: "machines/bmc/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "nic lockdown ikm",
+                    input: Row {
+                        key: CredentialKey::NicLockdownIkm {
+                            credential_type: NicLockdownIkm::SiteWide { version: 0 },
+                        },
+                        expected_prefix: "machines/nic_lockdown_ikm/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "bmc site wide root versioned",
+                    input: Row {
+                        key: CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::SiteWideRootVersioned {
+                                version: 0,
+                            },
+                        },
+                        expected_prefix: "machines/bmc/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "host uefi site target",
+                    input: Row {
+                        key: CredentialKey::HostUefiSiteVersioned { version: 0 },
+                        expected_prefix: "machines/all_hosts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu uefi site target",
+                    input: Row {
+                        key: CredentialKey::DpuUefiSiteVersioned { version: 0 },
+                        expected_prefix: "machines/all_dpus/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "switch nvos site admin",
+                    input: Row {
+                        key: CredentialKey::SwitchNvosSiteAdmin { version: 0 },
+                        expected_prefix: "switch_nvos/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "extension service",
+                    input: Row {
+                        key: CredentialKey::ExtensionService {
+                            service_id: "svc1".to_string(),
+                            version: "v1".to_string(),
+                        },
+                        expected_prefix: "machines/extension-services/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "nmxm",
+                    input: Row {
+                        key: CredentialKey::NmxM {
+                            nmxm_id: "nmxm1".to_string(),
+                        },
+                        expected_prefix: "nmxm/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "switch nvos admin",
+                    input: Row {
+                        key: CredentialKey::SwitchNvosAdmin {
+                            bmc_mac_address: mac,
+                        },
+                        expected_prefix: "switch_nvos/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "mqtt dpa",
+                    input: Row {
+                        key: CredentialKey::MqttAuth {
+                            credential_type: MqttCredentialType::Dpa,
+                        },
+                        expected_prefix: "mqtt/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "mqtt dsx exchange event bus",
+                    input: Row {
+                        key: CredentialKey::MqttAuth {
+                            credential_type: MqttCredentialType::DsxExchangeEventBus,
+                        },
+                        expected_prefix: "mqtt/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "mqtt dsx exchange consumer",
+                    input: Row {
+                        key: CredentialKey::MqttAuth {
+                            credential_type: MqttCredentialType::DsxExchangeConsumer,
+                        },
+                        expected_prefix: "mqtt/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "firmware artifact access token",
+                    input: Row {
+                        key: CredentialKey::FirmwareArtifactAccessToken {
+                            name: "repository-a".to_string(),
+                        },
+                        expected_prefix: "firmware_artifacts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "rack maintenance access token",
+                    input: Row {
+                        key: CredentialKey::RackMaintenanceAccessToken { rack_id },
+                        expected_prefix: "racks/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "container registry",
+                    input: Row {
+                        key: CredentialKey::ContainerRegistry {
+                            registry: "nvcr.io".to_string(),
+                        },
+                        expected_prefix: "container_registries/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+            ],
+            |Row {
+                 key,
+                 expected_prefix,
+             }| {
+                let path = key.to_key_str();
+                PathChecks {
+                    non_empty: !path.is_empty(),
+                    no_leading_slash: !path.starts_with('/'),
+                    no_trailing_slash: !path.ends_with('/'),
+                    has_expected_prefix: path.starts_with(expected_prefix),
+                }
+            },
+        );
     }
 
     // Verifies that every CredentialKey's to_key_str()
@@ -840,9 +1646,14 @@ mod tests {
             CredentialKey::BmcCredentials {
                 credential_type: BmcCredentialType::SiteWideRoot,
             },
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRootVersioned { version: 0 },
+            },
             CredentialKey::NicLockdownIkm {
                 credential_type: NicLockdownIkm::SiteWide { version: 0 },
             },
+            CredentialKey::HostUefiSiteVersioned { version: 0 },
+            CredentialKey::DpuUefiSiteVersioned { version: 0 },
             CredentialKey::ExtensionService {
                 service_id: "s".to_string(),
                 version: "v".to_string(),
@@ -853,6 +1664,7 @@ mod tests {
             CredentialKey::SwitchNvosAdmin {
                 bmc_mac_address: mac,
             },
+            CredentialKey::SwitchNvosSiteAdmin { version: 0 },
             CredentialKey::MqttAuth {
                 credential_type: MqttCredentialType::Dpa,
             },
@@ -860,6 +1672,12 @@ mod tests {
                 key_id: "k".to_string(),
             },
             CredentialKey::RackMaintenanceAccessToken { rack_id },
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "repository-a".to_string(),
+            },
+            CredentialKey::ContainerRegistry {
+                registry: "nvcr.io".to_string(),
+            },
         ];
 
         for key in &keys {
@@ -879,6 +1697,7 @@ mod tests {
     #[test]
     fn prefix_all_is_complete() {
         let all = CredentialPrefix::all();
-        assert_eq!(all.len(), 16);
+
+        assert_eq!(all.len(), 18);
     }
 }

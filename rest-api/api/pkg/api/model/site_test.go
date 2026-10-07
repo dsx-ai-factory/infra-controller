@@ -45,7 +45,7 @@ func TestNewAPISite(t *testing.T) {
 		IsSerialConsoleEnabled:        true,
 		SerialConsoleIdleTimeout:      cutil.GetPtr(30),
 		SerialConsoleMaxSessionLength: cutil.GetPtr(60),
-		Config:                        &cdbm.SiteConfig{NativeNetworking: true},
+		Config:                        &cdbm.SiteConfig{NativeNetworking: true, VpcSlaac: true},
 		Status:                        cdbm.SiteStatusRegistered,
 		Created:                       time.Now(),
 		Updated:                       time.Now(),
@@ -154,7 +154,7 @@ func TestNewAPISite(t *testing.T) {
 				SerialConsoleIdleTimeout:      dbs.SerialConsoleIdleTimeout,
 				SerialConsoleMaxSessionLength: dbs.SerialConsoleMaxSessionLength,
 				IsSerialConsoleSSHKeysEnabled: cutil.GetPtr(ts.EnableSerialConsole),
-				Capabilities:                  siteConfigToAPISiteCapabilities(&cdbm.SiteConfig{NativeNetworking: true}),
+				Capabilities:                  siteConfigToAPISiteCapabilities(&cdbm.SiteConfig{NativeNetworking: true, VpcSlaac: true}),
 				IsOnline:                      true,
 				Status:                        dbs.Status,
 				StatusHistory: []APIStatusDetail{
@@ -193,6 +193,7 @@ func TestNewAPISite(t *testing.T) {
 			assert.Equal(t, *tt.want.SerialConsoleIdleTimeout, *got.SerialConsoleIdleTimeout)
 			assert.Equal(t, *tt.want.SerialConsoleMaxSessionLength, *got.SerialConsoleMaxSessionLength)
 			assert.Equal(t, *tt.want.Capabilities, *got.Capabilities)
+			assert.True(t, got.Capabilities.VpcSlaac)
 			assert.Equal(t, tt.want.IsOnline, got.IsOnline)
 			assert.Equal(t, tt.want.Status, got.Status)
 			assert.Equal(t, tt.want.Created, got.Created)
@@ -386,6 +387,66 @@ func TestAPISiteUpdateRequest_Validate(t *testing.T) {
 			isProvider: true,
 			wantErr:    false,
 		},
+		{
+			name: "validate update request success, Provider enabling DPS power management",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					DPSPowerManagement: cutil.GetPtr(true),
+				},
+			},
+			isProvider: true,
+			wantErr:    false,
+		},
+		{
+			name: "validate update request success, Provider disabling DPS power management",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					DPSPowerManagement: cutil.GetPtr(false),
+				},
+			},
+			isProvider: true,
+			wantErr:    false,
+		},
+		{
+			name: "validate update request failure, Provider disabling inventory-managed Flow",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					Flow: cutil.GetPtr(false),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
+		{
+			name: "validate update request failure, Provider enabling inventory-managed Flow",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					Flow: cutil.GetPtr(true),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
+		{
+			name: "validate update request failure, Provider disabling inventory capability",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					VpcSlaac: cutil.GetPtr(false),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
+		{
+			name: "validate update request failure, Provider enabling inventory capability",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					VpcSlaac: cutil.GetPtr(true),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -407,6 +468,110 @@ func TestAPISiteUpdateRequest_Validate(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestSiteConfigToAPISiteCapabilities(t *testing.T) {
+	tests := []struct {
+		name                   string
+		cfg                    *cdbm.SiteConfig
+		wantVpcSlaac           bool
+		wantDPSPowerManagement bool
+	}{
+		{
+			name: "missing Site config",
+		},
+		{
+			name: "disabled DPS power management",
+			cfg:  &cdbm.SiteConfig{},
+		},
+		{
+			name:                   "stored capabilities",
+			cfg:                    &cdbm.SiteConfig{VpcSlaac: true, DPSPowerManagement: true},
+			wantVpcSlaac:           true,
+			wantDPSPowerManagement: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := siteConfigToAPISiteCapabilities(tt.cfg)
+			require.NotNil(t, got)
+			assert.Equal(t, tt.wantVpcSlaac, got.VpcSlaac)
+			assert.Equal(t, tt.wantDPSPowerManagement, got.DPSPowerManagement)
+		})
+	}
+}
+
+func TestAPISiteCapabilitiesUpdateRequest_ToSiteConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *cdbm.SiteConfig
+		request  APISiteCapabilitiesUpdateRequest
+		want     *cdbm.SiteConfig
+	}{
+		{
+			name: "cannot clear inventory-managed Flow",
+			existing: &cdbm.SiteConfig{
+				NativeNetworking: true,
+				Flow:             true,
+			},
+			request: APISiteCapabilitiesUpdateRequest{
+				NativeNetworking: cutil.GetPtr(false),
+				Flow:             cutil.GetPtr(false),
+			},
+			want: &cdbm.SiteConfig{Flow: true},
+		},
+		{
+			name: "cannot clear inventory-managed VPC SLAAC",
+			existing: &cdbm.SiteConfig{
+				NativeNetworking: true,
+				VpcSlaac:         true,
+			},
+			request: APISiteCapabilitiesUpdateRequest{
+				NativeNetworking: cutil.GetPtr(false),
+				VpcSlaac:         cutil.GetPtr(false),
+			},
+			want: &cdbm.SiteConfig{VpcSlaac: true},
+		},
+		{
+			name: "cannot enable inventory-managed VPC SLAAC",
+			existing: &cdbm.SiteConfig{
+				NetworkSecurityGroup: true,
+			},
+			request: APISiteCapabilitiesUpdateRequest{
+				NetworkSecurityGroup: cutil.GetPtr(false),
+				VpcSlaac:             cutil.GetPtr(true),
+			},
+			want: &cdbm.SiteConfig{},
+		},
+		{
+			name: "cannot initialize inventory-managed VPC SLAAC",
+			request: APISiteCapabilitiesUpdateRequest{
+				VpcSlaac: cutil.GetPtr(true),
+			},
+			want: &cdbm.SiteConfig{},
+		},
+		{
+			name: "updates DPS power management",
+			existing: &cdbm.SiteConfig{
+				NativeNetworking: true,
+			},
+			request: APISiteCapabilitiesUpdateRequest{
+				DPSPowerManagement: cutil.GetPtr(true),
+			},
+			want: &cdbm.SiteConfig{
+				NativeNetworking:   true,
+				DPSPowerManagement: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.request.ToSiteConfig(tt.existing)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

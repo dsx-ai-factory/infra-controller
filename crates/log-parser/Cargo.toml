@@ -20,6 +20,7 @@ version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 # TODO: rename to carbide-log-parser
@@ -44,6 +45,10 @@ carbide-uuid = { path = "../uuid" }
 carbide-tls = { path = "../tls" }
 
 [build-dependencies]
+
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

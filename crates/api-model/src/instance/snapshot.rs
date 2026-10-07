@@ -15,17 +15,15 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgRow;
-use sqlx::{FromRow, Row};
 
 use super::config::network::{InstanceNetworkConfig, InstanceNetworkConfigUpdate};
 use crate::instance::config::InstanceConfig;
@@ -39,6 +37,61 @@ use crate::metadata::Metadata;
 use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
 use crate::tenant::TenantOrganizationId;
 
+/// Validates stored attachment identities and service-interface references.
+fn validate_extension_service_identities(
+    config: &InstanceExtensionServicesConfig,
+    network_config: &InstanceNetworkConfig,
+) -> Result<(), sqlx::Error> {
+    let mut attachment_ids = HashSet::new();
+    if config
+        .service_configs
+        .iter()
+        .filter_map(|service| service.id)
+        .any(|attachment_id| attachment_id.is_nil() || !attachment_ids.insert(attachment_id))
+    {
+        return Err(invalid_extension_service_identity(
+            "present extension-service attachment IDs must be non-nil and unique within an instance",
+        ));
+    }
+
+    let mut service_interface_ids = HashSet::new();
+    let mut service_interface_keys = HashSet::new();
+    for service_interface in &network_config.service_interfaces {
+        // Each record needs a matching attachment, a stable identity, and one
+        // entry for its attachment, interface position, and DPU.
+        if service_interface.attachment_id.is_nil()
+            || !attachment_ids.contains(&service_interface.attachment_id)
+            || service_interface.internal_uuid.is_nil()
+            || !service_interface_ids.insert(service_interface.internal_uuid)
+            || !service_interface_keys.insert((
+                service_interface.attachment_id,
+                service_interface.interface_ordinal,
+                service_interface.dpu_id,
+            ))
+        {
+            return Err(invalid_extension_service_identity(
+                "service-interface record contains a nil, duplicate, or dangling identity",
+            ));
+        }
+        service_interface
+            .validate()
+            .map_err(|error| invalid_extension_service_identity(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+/// Reports an invalid stored service identity as a decoding error for the snapshot column.
+fn invalid_extension_service_identity(message: impl Into<String>) -> sqlx::Error {
+    sqlx::Error::ColumnDecode {
+        index: "extension_services_config".to_string(),
+        source: Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )),
+    }
+}
+
 /// Represents a snapshot view of an `Instance`
 ///
 /// This snapshot is a state-in-time representation of everything that
@@ -50,7 +103,7 @@ pub struct InstanceSnapshot {
     /// Instance ID
     pub id: InstanceId,
     /// Machine ID
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
 
     /// InstanceType ID
     pub instance_type_id: Option<InstanceTypeId>,
@@ -146,6 +199,8 @@ pub struct InstanceSnapshotPgJson {
     pub operating_system_id: Option<uuid::Uuid>,
     instance_type_id: Option<InstanceTypeId>,
     network_security_group_id: Option<NetworkSecurityGroupId>,
+    #[serde(default)]
+    power_profile: Option<String>,
     extension_services_config: InstanceExtensionServicesConfig,
     extension_services_config_version: String,
     requested: DateTime<Utc>,
@@ -155,21 +210,13 @@ pub struct InstanceSnapshotPgJson {
     update_network_config_request: Option<InstanceNetworkConfigUpdate>,
 }
 
-impl<'r> FromRow<'r, PgRow> for InstanceSnapshot {
-    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let json: serde_json::value::Value = row.try_get(0)?;
-        InstanceSnapshotPgJson::deserialize(json)
-            .map_err(|err| sqlx::Error::Decode(err.into()))?
-            .try_into()
-    }
-}
-
 /// Builds an [`InstanceSnapshot`] from DB JSON and a pre-merged [`OperatingSystem`].
 /// Use this when the instance row has `operating_system_id` and the OS was loaded and merged with instance overrides.
 pub fn from_pg_json_and_os(
     value: InstanceSnapshotPgJson,
     os: OperatingSystem,
 ) -> Result<InstanceSnapshot, sqlx::Error> {
+    validate_extension_service_identities(&value.extension_services_config, &value.network_config)?;
     let metadata = Metadata {
         name: value.name,
         description: value.description,
@@ -193,11 +240,18 @@ pub fn from_pg_json_and_os(
         nvlink: value.nvlink_config,
         network_security_group_id: value.network_security_group_id,
         extension_services: value.extension_services_config,
+        power_profile: value.power_profile,
     };
 
     Ok(InstanceSnapshot {
         id: value.id,
-        machine_id: value.machine_id,
+        machine_id: value
+            .machine_id
+            .try_into()
+            .map_err(|e| sqlx::Error::ColumnDecode {
+                index: "machine_id".to_string(),
+                source: Box::new(e),
+            })?,
         instance_type_id: value.instance_type_id,
         metadata,
         config,
@@ -260,6 +314,10 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
     type Error = sqlx::Error;
 
     fn try_from(value: InstanceSnapshotPgJson) -> Result<Self, Self::Error> {
+        validate_extension_service_identities(
+            &value.extension_services_config,
+            &value.network_config,
+        )?;
         let metadata = Metadata {
             name: value.name,
             description: value.description,
@@ -308,11 +366,17 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
             network_security_group_id: value.network_security_group_id,
             extension_services: value.extension_services_config,
             spxconfig: value.spx_config,
+            power_profile: value.power_profile,
         };
 
         Ok(InstanceSnapshot {
             id: value.id,
-            machine_id: value.machine_id,
+            machine_id: value.machine_id.try_into().map_err(|e| {
+                sqlx::error::Error::ColumnDecode {
+                    index: "machine_id".to_string(),
+                    source: Box::new(e),
+                }
+            })?,
             instance_type_id: value.instance_type_id,
             metadata,
             config,
@@ -383,10 +447,33 @@ mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
     use chrono::Utc;
+    use mac_address::MacAddress;
     use uuid::Uuid;
 
     use super::*;
+    use crate::instance::config::extension_services::InstanceExtensionServiceConfig;
+    use crate::instance::config::network::InstanceServiceInterfaceConfig;
     use crate::os::{InlineIpxe, OperatingSystemVariant};
+
+    /// Builds the smallest valid service-interface record so these tests can
+    /// focus on attachment identity rather than point-to-point prefix validation.
+    fn service_interface(attachment_id: Uuid) -> InstanceServiceInterfaceConfig {
+        InstanceServiceInterfaceConfig {
+            attachment_id,
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: carbide_uuid::vpc::VpcId::new(),
+            vpc_prefix_id: carbide_uuid::vpc::VpcPrefixId::new(),
+            network_segment_id: carbide_uuid::network::NetworkSegmentId::new(),
+            network_prefix_id: carbide_uuid::network::NetworkPrefixId::new(),
+            link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: Uuid::new_v4(),
+        }
+    }
 
     fn minimal_pg_json() -> InstanceSnapshotPgJson {
         let version = ConfigVersion::initial().version_string();
@@ -423,6 +510,7 @@ mod tests {
             operating_system_id: None,
             instance_type_id: None,
             network_security_group_id: None,
+            power_profile: None,
             extension_services_config: InstanceExtensionServicesConfig::default(),
             extension_services_config_version: version,
             requested: Utc::now(),
@@ -433,10 +521,194 @@ mod tests {
         }
     }
 
+    /// Builds a minimal snapshot row with one valid attachment and service
+    /// interface so validation tests can change only the identity under test.
+    fn minimal_networked_pg_json() -> InstanceSnapshotPgJson {
+        let attachment_id = Uuid::new_v4();
+        let mut pg_json = minimal_pg_json();
+        pg_json.os_ipxe_script = "#!ipxe".to_string();
+        pg_json.extension_services_config = InstanceExtensionServicesConfig {
+            service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(attachment_id),
+                dpu_target: None,
+                service_id: carbide_uuid::extension_service::ExtensionServiceId::new(),
+                version: ConfigVersion::initial(),
+                removed: None,
+            }],
+        };
+        pg_json.network_config.service_interfaces = vec![service_interface(attachment_id)];
+        pg_json
+    }
+
+    /// Verifies snapshots written before service interfaces existed remain
+    /// readable, because an omitted field means no stored service-interface records.
+    #[test]
+    fn missing_service_interfaces_defaults_to_empty() {
+        // Remove the additive field to model JSON stored by an older binary.
+        let mut persisted = serde_json::to_value(minimal_pg_json()).expect("serialize snapshot");
+        persisted["network_config"]
+            .as_object_mut()
+            .expect("network config is an object")
+            .remove("service_interfaces")
+            .expect("current network config includes service interfaces");
+
+        // Decode through the production snapshot shape and preserve its legacy meaning.
+        let decoded = serde_json::from_value::<InstanceSnapshotPgJson>(persisted)
+            .expect("deserialize predecessor snapshot");
+        assert!(decoded.network_config.service_interfaces.is_empty());
+    }
+
+    /// Verifies an attachment written before IDs existed remains readable and
+    /// rewritable without inventing an identity during snapshot decoding.
+    #[test]
+    fn missing_extension_service_attachment_id_defaults_to_none() {
+        // Recreate JSON from before the field was added and decode it as a snapshot.
+        let mut persisted = serde_json::to_value(minimal_pg_json()).expect("serialize snapshot");
+        persisted["extension_services_config"] = serde_json::json!({
+            "service_configs": [{
+                "service_id": carbide_uuid::extension_service::ExtensionServiceId::new(),
+                "version": ConfigVersion::initial(),
+                "removed": null
+            }]
+        });
+
+        // Decoding preserves absence, and a current writer keeps the field omitted.
+        let decoded = serde_json::from_value::<InstanceSnapshotPgJson>(persisted)
+            .expect("deserialize predecessor attachment");
+        assert!(
+            decoded.extension_services_config.service_configs[0]
+                .id
+                .is_none()
+        );
+        let rewritten = serde_json::to_value(decoded.extension_services_config)
+            .expect("serialize predecessor attachment");
+        assert!(rewritten["service_configs"][0].get("id").is_none());
+    }
+
+    /// Verifies snapshot loading permits ID-less legacy attachments only without
+    /// service-interface references, preventing reconciliation from consuming nil,
+    /// duplicate, or dangling attachment identities.
+    #[test]
+    fn networked_extension_service_identity_is_validated() {
+        let attachment_id = Uuid::new_v4();
+        let service_id = carbide_uuid::extension_service::ExtensionServiceId::new();
+        let version = ConfigVersion::initial();
+
+        scenarios!(
+            run = |(ids, service_interface_attachment_id): (Vec<Option<Uuid>>, Option<Uuid>)| {
+                let config = InstanceExtensionServicesConfig {
+                    service_configs: ids.into_iter().map(|id| InstanceExtensionServiceConfig {
+                        id,
+                        dpu_target: None,
+                        service_id,
+                        version,
+                        removed: None,
+                    }).collect(),
+                };
+                let network = InstanceNetworkConfig {
+                    service_interfaces: service_interface_attachment_id
+                        .into_iter()
+                        .map(service_interface)
+                        .collect(),
+                    ..Default::default()
+                };
+                validate_extension_service_identities(&config, &network).map_err(drop)
+            };
+            "attachment references" {
+                // Multiple legacy attachments may lack IDs when no service-interface record
+                // refers to them.
+                (vec![None, None], None) => Yields(()),
+                // A service-interface record may refer to a stored non-nil attachment ID.
+                (vec![Some(attachment_id)], Some(attachment_id)) => Yields(()),
+                // Nil is valid UUID syntax but cannot identify an attachment,
+                // even when there are no service-interface records.
+                (vec![Some(Uuid::nil())], None) => Fails,
+                // Duplicate present attachment IDs make service-interface correlation ambiguous.
+                (vec![Some(attachment_id), Some(attachment_id)], Some(attachment_id)) => Fails,
+                // A service-interface record cannot refer to an ID-less legacy attachment.
+                (vec![None], Some(attachment_id)) => Fails,
+                // A service-interface attachment ID must match an attachment in this instance.
+                (vec![Some(attachment_id)], Some(Uuid::new_v4())) => Fails,
+            }
+        );
+    }
+
+    /// Verifies the public snapshot conversion rejects nil and duplicate
+    /// service-interface identities and duplicate DPU positions, because any
+    /// of them would make reconciliation target an ambiguous stored record.
+    #[test]
+    fn service_interface_identities_are_validated() {
+        // A complete record with distinct identities is the valid baseline.
+        assert!(InstanceSnapshot::try_from(minimal_networked_pg_json()).is_ok());
+
+        type SnapshotMutation = fn(&mut InstanceSnapshotPgJson);
+        let invalid_cases: [(&str, SnapshotMutation); 3] = [
+            // A nil internal ID cannot correlate the record across reconciliation.
+            ("nil internal identity", |pg_json| {
+                pg_json.network_config.service_interfaces[0].internal_uuid = Uuid::nil();
+            }),
+            // Distinct interface positions still need distinct stable identities.
+            ("duplicate internal identity", |pg_json| {
+                let mut duplicate = pg_json.network_config.service_interfaces[0].clone();
+                duplicate.interface_ordinal = 1;
+                pg_json.network_config.service_interfaces.push(duplicate);
+            }),
+            // One attachment cannot own two records for the same interface on one DPU.
+            ("duplicate attachment interface and DPU", |pg_json| {
+                let mut duplicate = pg_json.network_config.service_interfaces[0].clone();
+                duplicate.internal_uuid = Uuid::new_v4();
+                pg_json.network_config.service_interfaces.push(duplicate);
+            }),
+        ];
+
+        for (scenario, mutate) in invalid_cases {
+            let mut pg_json = minimal_networked_pg_json();
+            mutate(&mut pg_json);
+
+            assert!(InstanceSnapshot::try_from(pg_json).is_err(), "{scenario}");
+        }
+    }
+
+    /// Verifies the pre-merged-OS snapshot path rejects a service interface
+    /// whose attachment is absent, because both database loading paths must
+    /// enforce the same ownership invariant.
+    #[test]
+    fn from_pg_json_and_os_validates_service_interface_identity() {
+        let mut pg_json = minimal_networked_pg_json();
+        pg_json.extension_services_config.service_configs.clear();
+        let os = OperatingSystem {
+            user_data: None,
+            variant: OperatingSystemVariant::Ipxe(InlineIpxe {
+                ipxe_script: "#!ipxe".to_string(),
+            }),
+            run_provisioning_instructions_on_every_boot: false,
+            phone_home_enabled: false,
+        };
+
+        let error = from_pg_json_and_os(pg_json, os)
+            .expect_err("a service interface must have an owning attachment");
+        assert!(matches!(error, sqlx::Error::ColumnDecode { .. }));
+    }
+
+    /// Verifies ordinary snapshot conversion rejects a noncanonical service
+    /// link prefix, because later address derivation assumes a canonical /31 or
+    /// /127 stored network rather than an arbitrary host address.
+    #[test]
+    fn try_from_validates_service_interface_prefix() {
+        let mut pg_json = minimal_networked_pg_json();
+        pg_json.network_config.service_interfaces[0].link_prefix =
+            "192.0.2.1/31".parse().expect("valid noncanonical prefix");
+
+        let error = InstanceSnapshot::try_from(pg_json)
+            .expect_err("noncanonical service link prefix must fail snapshot loading");
+        assert!(matches!(error, sqlx::Error::ColumnDecode { .. }));
+    }
+
     #[test]
     fn test_from_pg_json_and_os_uses_provided_os() {
         let mut pg_json = minimal_pg_json();
         pg_json.operating_system_id = Some(Uuid::nil());
+        pg_json.power_profile = Some("balanced".to_string());
         let os = OperatingSystem {
             user_data: Some("user-data".to_string()),
             variant: OperatingSystemVariant::Ipxe(InlineIpxe {
@@ -449,6 +721,7 @@ mod tests {
         assert_eq!(snapshot.config.os.variant, os.variant);
         assert_eq!(snapshot.config.os.user_data, os.user_data);
         assert_eq!(snapshot.config.os.phone_home_enabled, os.phone_home_enabled);
+        assert_eq!(snapshot.config.power_profile.as_deref(), Some("balanced"));
         if let OperatingSystemVariant::Ipxe(ipxe) = &snapshot.config.os.variant {
             assert_eq!(ipxe.ipxe_script, "script-from-os");
         } else {
@@ -459,7 +732,8 @@ mod tests {
     /// `InstanceSnapshot::try_from` derives the OS variant from the legacy
     /// instance columns (priority: operating_system_id > os_image_id > inline
     /// iPXE). Each row mutates a minimal pg-json row, then projects the converted
-    /// snapshot to the fields under test: (os variant, user_data, phone_home).
+    /// snapshot to the fields under test: (os variant, user_data, phone_home,
+    /// power_profile).
     #[test]
     fn test_try_from_derives_os_from_instance_columns() {
         let image_uuid = uuid::uuid!("a1b2c3d4-e5f6-4780-a123-456789abcdef");
@@ -478,6 +752,7 @@ mod tests {
                             snapshot.config.os.variant,
                             snapshot.config.os.user_data,
                             snapshot.config.os.phone_home_enabled,
+                            snapshot.config.power_profile,
                         )
                     })
                     .map_err(drop)
@@ -489,12 +764,14 @@ mod tests {
                     pg.os_ipxe_script = "legacy-inline-script".to_string();
                     pg.os_user_data = Some("legacy-user-data".to_string());
                     pg.os_phone_home_enabled = true;
+                    pg.power_profile = Some("balanced".to_string());
                 }) as Box<dyn Fn(&mut InstanceSnapshotPgJson)> => Yields((
                     OperatingSystemVariant::Ipxe(InlineIpxe {
                         ipxe_script: "legacy-inline-script".to_string(),
                     }),
                     Some("legacy-user-data".to_string()),
                     true,
+                    Some("balanced".to_string()),
                 )),
             }
 
@@ -503,7 +780,7 @@ mod tests {
                     pg.operating_system_id = None;
                     pg.os_image_id = Some(image_uuid);
                     pg.os_ipxe_script = "ignored".to_string();
-                }) => Yields((OperatingSystemVariant::OsImage(image_uuid), None, false)),
+                }) => Yields((OperatingSystemVariant::OsImage(image_uuid), None, false, None)),
             }
 
             "operating_system_id takes priority over image and iPXE" {
@@ -515,6 +792,7 @@ mod tests {
                     OperatingSystemVariant::OperatingSystemId(os_uuid),
                     None,
                     false,
+                    None,
                 )),
             }
         );

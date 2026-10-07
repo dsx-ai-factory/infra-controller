@@ -15,26 +15,1581 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
+use std::time::Duration;
+
+use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use carbide_uuid::vpc_peering::VpcPeeringId;
+use config_version::ConfigVersion;
+use ipnetwork::IpNetwork;
+use model::instance::config::network::{
+    InstanceInterfaceRoutingProfile, InstanceNetworkConfig, InstanceNetworkConfigUpdate,
+};
+use model::metadata::Metadata as ModelMetadata;
+use model::network_prefix::NewNetworkPrefix;
+use model::network_segment::{
+    NetworkDefinition, NetworkDefinitionSegmentType, NetworkSegmentControllerState,
+    NetworkSegmentType, NewNetworkSegment,
+};
+use model::resource_pool::OwnerType;
+use model::site_prefix::{
+    NewTenantManagedSitePrefix, RetireTenantManagedSitePrefix, SitePrefixAuthority,
+    SitePrefixLifecycleState, SitePrefixRoutingScope,
+};
+use model::vpc_prefix::{NewVpcPrefix, VpcPrefixConfig};
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     PrefixMatchType, VpcDeletionRequest, VpcPrefixCreationRequest, VpcPrefixDeletionRequest,
     VpcPrefixSearchQuery,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, PgTransaction};
 use tonic::Request;
 
+use crate::cfg::file::{
+    FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, VpcIsolationBehaviorType,
+};
+use crate::network_segment::allocate::PrefixAllocator;
+use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::instance::{
     default_os_config, default_tenant_config, single_interface_network_config_with_vpc_prefix,
 };
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
     self, TEST_SITE_PREFIXES, TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
     create_test_env_with_overrides, get_vpc_fixture_id,
 };
+use crate::tests::common::postgres::wait_for_blocked_query;
+use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 const REFERENCED_VPC_PREFIX: &str = "192.0.4.0/24";
 const UNREFERENCED_VPC_PREFIX: &str = "192.1.4.0/27";
+
+/// Returns tenant config matching the shared VPC fixture so lifecycle tests
+/// exercise prefix behavior rather than fail ownership validation.
+fn fixture_tenant_config() -> rpc::TenantConfig {
+    rpc::TenantConfig {
+        tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+        ..default_tenant_config()
+    }
+}
+
+/// Seeds a tenant-managed SitePrefix at the requested lifecycle boundary.
+async fn seed_tenant_managed_site_prefix(
+    env: &TestEnv,
+    tenant_organization_id: &str,
+    prefix: &str,
+    lifecycle_state: SitePrefixLifecycleState,
+) -> SitePrefixId {
+    let site_prefix_id = SitePrefixId::new();
+    sqlx::query(
+        r#"
+            INSERT INTO site_prefixes (
+                id,
+                prefix,
+                authority,
+                tenant_organization_id,
+                routing_scope,
+                lifecycle_state,
+                name,
+                version
+            )
+            VALUES ($1, $2::cidr, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(site_prefix_id)
+    .bind(prefix)
+    .bind(SitePrefixAuthority::TenantManaged)
+    .bind(tenant_organization_id)
+    .bind(SitePrefixRoutingScope::DatacenterOnly)
+    .bind(lifecycle_state)
+    .bind(format!("tenant SitePrefix {prefix}"))
+    .bind(ConfigVersion::initial())
+    .execute(&env.pool)
+    .await
+    .expect("tenant-managed SitePrefix fixture should be persisted");
+    site_prefix_id
+}
+
+/// Test-specific function that creates an FNN VPC for an existing tenant.
+async fn create_fnn_vpc_for_tenant(
+    env: &TestEnv,
+    tenant: &str,
+    name: &str,
+    routing_profile_type: Option<&str>,
+) -> VpcId {
+    let mut request = VpcCreationRequest::builder(tenant.to_owned())
+        .metadata(Metadata {
+            name: name.to_owned(),
+            ..Default::default()
+        })
+        .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32);
+    if let Some(routing_profile_type) = routing_profile_type {
+        request = request.routing_profile_type(routing_profile_type.to_string());
+    }
+
+    env.api
+        .create_vpc(request.tonic_request())
+        .await
+        .expect("FNN VPC fixture should be created")
+        .into_inner()
+        .id
+        .expect("created FNN VPC should include an ID")
+}
+
+/// Builds an exact-parent VPC-prefix request for admission and locking tests.
+fn site_prefix_child_request(
+    id: VpcPrefixId,
+    vpc_id: VpcId,
+    site_prefix_id: Option<SitePrefixId>,
+    prefix: &str,
+) -> VpcPrefixCreationRequest {
+    VpcPrefixCreationRequest {
+        id: Some(id),
+        prefix: String::new(),
+        vpc_id: Some(vpc_id),
+        config: Some(rpc::forge::VpcPrefixConfig {
+            prefix: prefix.to_owned(),
+        }),
+        metadata: Some(Metadata {
+            name: format!("VPC prefix {prefix}"),
+            ..Default::default()
+        }),
+        site_prefix_id,
+    }
+}
+
+/// Test-specific function that configures overlap checks with the requested
+/// site gate.
+fn tenant_prefix_overlap_overrides(site_gate_enabled: bool) -> TestEnvOverrides {
+    let mut config = crate::test_support::default_config::get();
+    config.tenant_prefix_overlap_enabled = site_gate_enabled;
+    config.vpc_isolation_behavior = VpcIsolationBehaviorType::MutualIsolation;
+    config.site_fabric_prefixes = vec!["10.0.0.0/8".parse().unwrap()];
+
+    let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(Some(FnnConfig {
+        admin_vpc: None,
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::from([(
+            "OVERLAP".to_string(),
+            FnnRoutingProfileConfig {
+                tenant_prefix_overlap_eligible: true,
+                internal: Some(true),
+                ..Default::default()
+            },
+        )]),
+        use_vpc_vrf_loopback: false,
+    }));
+    overrides.create_network_segments = Some(false);
+    overrides.site_prefixes = Some(vec!["10.0.0.0/8".parse().unwrap()]);
+    overrides
+}
+
+/// Test-specific function that creates a tenant allowed to request the overlap profile.
+async fn create_overlap_tenant(env: &TestEnv, organization_id: &str) -> Result<(), tonic::Status> {
+    env.api
+        .create_tenant(Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: organization_id.to_string(),
+            routing_profile_type: Some("OVERLAP".to_string()),
+            metadata: Some(Metadata {
+                name: organization_id.to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+    Ok(())
+}
+
+/// Test-specific function that persists a VpcPrefix while the returned transaction holds the lock.
+async fn hold_vpc_prefix_create<'a>(
+    env: &'a TestEnv,
+    id: VpcPrefixId,
+    vpc_id: VpcId,
+    site_prefix_id: SitePrefixId,
+    prefix: &str,
+) -> Result<(PgTransaction<'a>, i32), Box<dyn std::error::Error>> {
+    let mut txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *txn)
+        .await?;
+    let vpc = db::vpc::find_by_with_lock(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
+        db::vpc::VpcRowLock::Mutation,
+    )
+    .await?
+    .pop()
+    .expect("VPC should exist");
+    db::vpc_prefix::persist(
+        NewVpcPrefix {
+            id,
+            site_prefix_id: Some(site_prefix_id),
+            vpc_id,
+            overlap_vpc_id: None,
+            config: VpcPrefixConfig {
+                prefix: prefix.parse()?,
+            },
+            metadata: ModelMetadata {
+                name: format!("held VPC prefix {prefix}"),
+                ..Default::default()
+            },
+        },
+        vpc.version,
+        &mut txn,
+    )
+    .await?;
+    Ok((txn, blocker_pid))
+}
+
+/// Test-specific function that persists an attached segment while the returned
+/// transaction holds the lock.
+async fn hold_attached_segment_create<'a>(
+    env: &'a TestEnv,
+    vpc_id: VpcId,
+    prefix: &str,
+) -> Result<(PgTransaction<'a>, i32), Box<dyn std::error::Error>> {
+    let mut txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *txn)
+        .await?;
+    db::network_segment::persist(
+        NewNetworkSegment {
+            id: NetworkSegmentId::new(),
+            name: format!("held segment {prefix}"),
+            subdomain_id: None,
+            vpc_id: Some(vpc_id),
+            mtu: 1500,
+            prefixes: vec![NewNetworkPrefix {
+                prefix: prefix.parse()?,
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 1,
+            }],
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Tenant,
+            can_stretch: None,
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+        },
+        &mut txn,
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    Ok((txn, blocker_pid))
+}
+
+/// Test-specific function that builds an attached segment with one direct prefix.
+fn attached_segment_request(
+    id: NetworkSegmentId,
+    vpc_id: VpcId,
+    prefix: &str,
+    gateway: &str,
+    segment_type: rpc::forge::NetworkSegmentType,
+) -> rpc::forge::NetworkSegmentCreationRequest {
+    rpc::forge::NetworkSegmentCreationRequest {
+        id: Some(id),
+        name: format!("attached segment {prefix}"),
+        subdomain_id: None,
+        vpc_id: Some(vpc_id),
+        mtu: Some(1500),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: prefix.to_string(),
+            gateway: Some(gateway.to_string()),
+            reserve_first: 1,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+        }],
+        segment_type: segment_type as i32,
+        infer_slaac_eui64_addresses: false,
+    }
+}
+
+/// Test-specific function that builds an unattached HostInband segment with one direct prefix.
+fn unattached_host_inband_segment_request(
+    id: NetworkSegmentId,
+    prefix: &str,
+    gateway: &str,
+) -> rpc::forge::NetworkSegmentCreationRequest {
+    rpc::forge::NetworkSegmentCreationRequest {
+        id: Some(id),
+        name: format!("unattached segment {prefix}"),
+        subdomain_id: None,
+        vpc_id: None,
+        mtu: Some(1500),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: prefix.to_string(),
+            gateway: Some(gateway.to_string()),
+            reserve_first: 1,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+        }],
+        segment_type: rpc::forge::NetworkSegmentType::HostInband as i32,
+        infer_slaac_eui64_addresses: false,
+    }
+}
+
+#[crate::sqlx_test]
+async fn change_vpc_routing_profile_preserves_workload_and_checks_interface_overrides(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    struct InterfaceCase {
+        scenario: &'static str,
+        network: InstanceNetworkConfig,
+        pending: Option<InstanceNetworkConfigUpdate>,
+    }
+
+    let mut config = api_fixtures::get_config();
+    config.default_tenant_routing_profile_type = "INTERNAL".to_string();
+    let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
+    overrides
+        .fnn_config
+        .as_mut()
+        .expect("FNN config")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal profile")
+        .allowed_anycast_prefixes = Some(vec![PrefixFilterPolicyEntry {
+        prefix: "198.51.100.0/24".parse()?,
+    }]);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let tenant = create_fixture_tenant(&env, "routing-profile-workload").await?;
+    let vpc_id = create_fnn_vpc_for_tenant(
+        &env,
+        &tenant.organization_id,
+        "routing-profile workload",
+        Some("INTERNAL"),
+    )
+    .await;
+    let prefix = create_vpc_prefix(&env, vpc_id, REFERENCED_VPC_PREFIX).await;
+    let prefix_id = prefix.id.expect("VPC prefix ID");
+    drive_vpc_prefix_to_ready(&env, prefix_id).await;
+    let managed_host = create_managed_host(&env).await;
+    let (instance, _) = managed_host
+        .instance_builer(&env)
+        .tenant_org(&tenant.organization_id)
+        .network(single_interface_network_config_with_vpc_prefix(prefix_id))
+        .build_and_return()
+        .await;
+    let original = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("instance");
+    let original_network = original.config.network;
+    let mut overridden_network = original_network.clone();
+    overridden_network.interfaces[0].routing_profile = Some(InstanceInterfaceRoutingProfile {
+        allowed_anycast_prefixes: vec!["198.51.100.0/24".parse()?],
+    });
+    let before = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(vpc_id),
+        }))
+        .await?
+        .into_inner();
+    let change = rpc::forge::VpcChangeRoutingProfileRequest {
+        id: Some(vpc_id),
+        if_version_match: Some(before.version.clone()),
+        routing_profile_type: "EXTERNAL".to_string(),
+        vni: None,
+    };
+    for case in [
+        InterfaceCase {
+            scenario: "current interface",
+            network: overridden_network.clone(),
+            pending: None,
+        },
+        InterfaceCase {
+            scenario: "pending old interface",
+            network: original_network.clone(),
+            pending: Some(InstanceNetworkConfigUpdate {
+                old_config: overridden_network.clone(),
+                new_config: original_network.clone(),
+            }),
+        },
+        InterfaceCase {
+            scenario: "pending new interface",
+            network: original_network.clone(),
+            pending: Some(InstanceNetworkConfigUpdate {
+                old_config: original_network.clone(),
+                new_config: overridden_network,
+            }),
+        },
+    ] {
+        let scenario = case.scenario;
+        // A persisted update retains old and new interface configurations;
+        // either can still require the current profile's anycast policy.
+        sqlx::query("UPDATE instances SET network_config = $1, update_network_config_request = $2 WHERE id = $3")
+            .bind(sqlx::types::Json(case.network))
+            .bind(case.pending.map(sqlx::types::Json))
+            .bind(instance.id)
+            .execute(&env.pool).await?;
+        let error = env
+            .api
+            .change_vpc_routing_profile(Request::new(change.clone()))
+            .await
+            .expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert!(
+            error.message().contains("interface routing override"),
+            "{scenario}: {error}"
+        );
+        assert_eq!(
+            env.api
+                .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+                    id: Some(vpc_id),
+                }))
+                .await?
+                .into_inner(),
+            before,
+            "{scenario}"
+        );
+    }
+    sqlx::query("UPDATE instances SET network_config = $1, update_network_config_request = NULL WHERE id = $2")
+        .bind(sqlx::types::Json(original_network)).bind(instance.id)
+        .execute(&env.pool).await?;
+    let instance_before = instance.rpc_instance().await;
+    let prefix_before = find_vpc_prefix(&env, prefix_id).await;
+    let result = env
+        .api
+        .change_vpc_routing_profile(Request::new(change))
+        .await?
+        .into_inner();
+    assert_eq!(result.routing_profile_type.as_deref(), Some("EXTERNAL"));
+    assert_ne!(result.active_vni, before.active_vni);
+    assert_eq!(instance.rpc_instance().await, instance_before);
+    assert_eq!(find_vpc_prefix(&env, prefix_id).await, prefix_before);
+
+    let tenant_site_prefix = seed_tenant_managed_site_prefix(
+        &env,
+        &tenant.organization_id,
+        "10.97.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            vpc_id,
+            Some(tenant_site_prefix),
+            "10.97.1.0/24",
+        )))
+        .await?;
+    let before_reverse = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(vpc_id),
+        }))
+        .await?
+        .into_inner();
+    let error = env
+        .api
+        .change_vpc_routing_profile(Request::new(rpc::forge::VpcChangeRoutingProfileRequest {
+            id: Some(vpc_id),
+            if_version_match: Some(before_reverse.version.clone()),
+            routing_profile_type: "INTERNAL".to_string(),
+            vni: None,
+        }))
+        .await
+        .expect_err("new tenant-managed prefix prevents reversal");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("tenant-managed SitePrefix attachments"),
+        "{error}"
+    );
+    assert_eq!(
+        env.api
+            .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+                id: Some(vpc_id),
+            }))
+            .await?
+            .into_inner(),
+        before_reverse
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn generated_linknets_inherit_scope_but_adopted_segments_stay_global(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "scope-inheritance";
+    create_overlap_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "scoped VPC", Some("OVERLAP")).await;
+    let root_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.123.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    // The public API creates stretched Tenant segments. They remain global
+    // after adoption; only generated linknets inherit the VPC scope.
+    let direct_id = NetworkSegmentId::new();
+    env.api
+        .create_network_segment(Request::new(attached_segment_request(
+            direct_id,
+            vpc_id,
+            "10.123.1.0/27",
+            "10.123.1.1",
+            rpc::forge::NetworkSegmentType::Tenant,
+        )))
+        .await?;
+    let parent_id = VpcPrefixId::new();
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            parent_id,
+            vpc_id,
+            Some(root_id),
+            "10.123.1.0/24",
+        )))
+        .await?;
+    let parent_scope: Option<VpcId> =
+        sqlx::query_scalar("SELECT overlap_vpc_id FROM network_vpc_prefixes WHERE id = $1")
+            .bind(parent_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(parent_scope, Some(vpc_id));
+    let adopted: (Option<VpcPrefixId>, Option<VpcId>) = sqlx::query_as(
+        "SELECT vpc_prefix_id, overlap_vpc_id FROM network_prefixes WHERE segment_id = $1",
+    )
+    .bind(direct_id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(adopted, (Some(parent_id), None));
+
+    // A scope assigned by a later UPDATE would fail this insert-time check.
+    sqlx::query(
+        "ALTER TABLE network_prefixes ADD CONSTRAINT generated_scope_on_insert
+         CHECK (prefix = '10.123.1.0/27'::cidr OR
+                (vpc_prefix_id IS NOT NULL AND overlap_vpc_id IS NOT NULL))",
+    )
+    .execute(&env.pool)
+    .await?;
+    let mut txn = env.pool.begin().await?;
+    let allocator = PrefixAllocator::new(parent_id, "10.123.1.0/24".parse()?, None, 31)?;
+    let prefix = allocator.next_free_prefix(&mut txn).await?;
+    let (generated_id, _) = allocator
+        .allocate_network_segment_for_prefix(&mut txn, vpc_id, prefix)
+        .await?;
+    let generated: (Option<VpcPrefixId>, Option<VpcId>) = sqlx::query_as(
+        "SELECT vpc_prefix_id, overlap_vpc_id FROM network_prefixes WHERE segment_id = $1",
+    )
+    .bind(generated_id)
+    .fetch_one(&mut *txn)
+    .await?;
+    assert_eq!(generated, (Some(parent_id), Some(vpc_id)));
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn configured_networks_reject_scoped_children_but_preserve_global_parents(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "configured-network-overlap";
+    let vpc_name = "configured network VPC";
+    create_overlap_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, vpc_name, Some("OVERLAP")).await;
+    let root_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.124.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let parent_id = VpcPrefixId::new();
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            parent_id,
+            vpc_id,
+            Some(root_id),
+            "10.124.1.0/24",
+        )))
+        .await?;
+    let mut txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let allocator = PrefixAllocator::new(parent_id, "10.124.1.0/24".parse()?, None, 31)?;
+    let prefix = allocator.next_free_prefix(&mut txn).await?;
+    let (child_id, _) = allocator
+        .allocate_network_segment_for_prefix(&mut txn, vpc_id, prefix)
+        .await?;
+    let child_scope: Option<VpcId> =
+        sqlx::query_scalar("SELECT overlap_vpc_id FROM network_prefixes WHERE segment_id = $1")
+            .bind(child_id)
+            .fetch_one(&mut *txn)
+            .await?;
+    assert_eq!(child_scope, Some(vpc_id));
+    txn.commit().await?;
+
+    // Outside the tenant root, omitting `site_prefix_id` retains global
+    // admission within the configured `10.0.0.0/8` fabric space.
+    let global_parent_id = VpcPrefixId::new();
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            global_parent_id,
+            vpc_id,
+            None,
+            "10.125.2.0/24",
+        )))
+        .await?;
+    let global_scope: Option<VpcId> =
+        sqlx::query_scalar("SELECT overlap_vpc_id FROM network_vpc_prefixes WHERE id = $1")
+            .bind(global_parent_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(global_scope, None);
+
+    let underlay = NetworkDefinition {
+        segment_type: NetworkDefinitionSegmentType::Underlay,
+        prefix: "10.124.1.0/24".parse()?,
+        prefix_v6: None,
+        gateway: Some("10.124.1.1".parse()?),
+        dhcpv6_link_address: None,
+        mtu: 1500,
+        reserve_first: 1,
+        allocation_strategy: Default::default(),
+        infer_slaac_eui64_addresses: false,
+        vpc_name: None,
+    };
+    for (name, definition, expected_error) in [
+        (
+            "configured-underlay-over-scoped-child",
+            underlay.clone(),
+            Some("prefix overlaps with an existing one"),
+        ),
+        (
+            "configured-admin-over-global-parent",
+            NetworkDefinition {
+                segment_type: NetworkDefinitionSegmentType::Admin,
+                prefix: "10.125.2.0/24".parse()?,
+                gateway: Some("10.125.2.1".parse()?),
+                vpc_name: Some(vpc_name.to_string()),
+                ..underlay
+            },
+            None,
+        ),
+    ] {
+        let networks = HashMap::from([(name.to_string(), definition.clone())]);
+        let result = crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await;
+        if let Some(expected_error) = expected_error {
+            let error: tonic::Status = result.expect_err(name).into();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{name}");
+            assert_eq!(error.message(), expected_error, "{name}");
+        } else {
+            result?;
+            let mut connection = env.pool.acquire().await?;
+            let segment = db::network_segment::find_by_name(&mut connection, name).await?;
+            assert_eq!(segment.config.vpc_id, Some(vpc_id), "{name}");
+        }
+        let segment_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM network_segments WHERE name = $1")
+                .bind(name)
+                .fetch_one(&env.pool)
+                .await?;
+        assert_eq!(segment_count, i64::from(expected_error.is_none()), "{name}");
+        assert_eq!(
+            db::network_segment::stored_def(&env.pool, name).await?,
+            expected_error.is_none().then_some(definition),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+/// Eligible reuse works across tenants and across isolated VPCs of one tenant.
+#[crate::sqlx_test]
+async fn eligible_exact_overlap_uses_distinct_vpc_scopes(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut overrides = tenant_prefix_overlap_overrides(true);
+    overrides
+        .config
+        .as_mut()
+        .unwrap()
+        .vpc_peering_policy_on_existing = Some(crate::cfg::file::VpcPeeringPolicy::None);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let tenant_a = "overlap-eligible-a";
+    let tenant_b = "overlap-eligible-b";
+    create_overlap_tenant(&env, tenant_a).await?;
+    create_overlap_tenant(&env, tenant_b).await?;
+    let vpc_a = create_fnn_vpc_for_tenant(&env, tenant_a, "overlap VPC A", Some("OVERLAP")).await;
+    let vpc_b = create_fnn_vpc_for_tenant(&env, tenant_b, "overlap VPC B", Some("OVERLAP")).await;
+    let same_tenant_vpc =
+        create_fnn_vpc_for_tenant(&env, tenant_a, "same tenant VPC", Some("OVERLAP")).await;
+    let root_a = seed_tenant_managed_site_prefix(
+        &env,
+        tenant_a,
+        "10.100.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let root_b = seed_tenant_managed_site_prefix(
+        &env,
+        tenant_b,
+        "10.100.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    let parent_a = VpcPrefixId::new();
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            parent_a,
+            vpc_a,
+            Some(root_a),
+            "10.100.1.0/24",
+        )))
+        .await?;
+    let mut txn = env.pool.begin().await?;
+    let allocator = PrefixAllocator::new(parent_a, "10.100.1.0/24".parse()?, None, 31)?;
+    allocator
+        .allocate_network_segment_for_prefix(&mut txn, vpc_a, "10.100.1.0/31".parse()?)
+        .await?;
+    txn.commit().await?;
+    for (scenario, vpc_id, site_prefix_id) in [
+        ("different tenants", vpc_b, root_b),
+        ("same tenant and SitePrefix", same_tenant_vpc, root_a),
+    ] {
+        let prefix_id = VpcPrefixId::new();
+        let created = env
+            .api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                prefix_id,
+                vpc_id,
+                Some(site_prefix_id),
+                "10.100.1.0/24",
+            )))
+            .await?
+            .into_inner();
+        assert_eq!(created.id, Some(prefix_id), "{scenario}");
+        assert_eq!(
+            stored_vpc_prefix_count(&env, prefix_id).await,
+            1,
+            "{scenario}"
+        );
+        let mut txn = env.pool.begin().await?;
+        let allocator = PrefixAllocator::new(prefix_id, "10.100.1.0/24".parse()?, None, 31)?;
+        let child = allocator.next_free_prefix(&mut txn).await?;
+        assert_eq!(child, "10.100.1.0/31".parse::<IpNetwork>()?, "{scenario}");
+        allocator
+            .allocate_network_segment_for_prefix(&mut txn, vpc_id, child)
+            .await?;
+        txn.commit().await?;
+    }
+
+    // Stored peerings are inactive when imports are disabled. Hold the new
+    // peering until the prefix request waits, then prove it sees and ignores it.
+    let peering_candidate =
+        create_fnn_vpc_for_tenant(&env, tenant_b, "inactive peer VPC", Some("OVERLAP")).await;
+    let mut peering_txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut peering_txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *peering_txn)
+        .await?;
+    let peering_id = VpcPeeringId::new();
+    db::vpc_peering::create(&mut peering_txn, vpc_a, peering_candidate, peering_id).await?;
+    let accepted_id = VpcPrefixId::new();
+    let create_prefix = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            accepted_id,
+            peering_candidate,
+            Some(root_b),
+            "10.100.1.0/24",
+        )));
+    let release_peering = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        peering_txn.commit().await
+    };
+    let (prefix_result, release_result) = tokio::join!(create_prefix, release_peering);
+    release_result?;
+    assert_eq!(prefix_result?.into_inner().id, Some(accepted_id));
+    assert_eq!(stored_vpc_prefix_count(&env, accepted_id).await, 1);
+    let peering_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vpc_peerings WHERE id = $1")
+        .bind(peering_id)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(peering_count, 1);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn stored_global_parent_or_child_prevents_eligible_reuse(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "stored-global-scope";
+    create_overlap_tenant(&env, tenant).await?;
+    let existing_vpc = create_fnn_vpc_for_tenant(&env, tenant, "existing", Some("OVERLAP")).await;
+    let candidate_vpc = create_fnn_vpc_for_tenant(&env, tenant, "candidate", Some("OVERLAP")).await;
+    let root = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.124.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    for (prefix, child) in [
+        ("10.124.1.0/24", None),
+        ("10.124.2.0/24", Some("10.124.2.0/30")),
+    ] {
+        let parent = VpcPrefixId::new();
+        env.api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                parent,
+                existing_vpc,
+                Some(root),
+                prefix,
+            )))
+            .await?;
+        if let Some(child) = child {
+            // Model an older writer attaching a global child to a scoped parent.
+            let mut txn = env.pool.begin().await?;
+            let segment = NewNetworkSegment::try_from(attached_segment_request(
+                NetworkSegmentId::new(),
+                existing_vpc,
+                child,
+                "10.124.2.1",
+                rpc::forge::NetworkSegmentType::Tenant,
+            ))?;
+            let mut segment = db::network_segment::persist(
+                segment,
+                &mut txn,
+                NetworkSegmentControllerState::Ready,
+            )
+            .await?;
+            db::network_prefix::set_vpc_prefix(
+                &mut segment.prefixes[0],
+                &mut txn,
+                &parent,
+                &prefix.parse()?,
+            )
+            .await?;
+            txn.commit().await?;
+        } else {
+            // Current VPC eligibility must not reclassify a retained global parent.
+            sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = NULL WHERE id = $1")
+                .bind(parent)
+                .execute(&env.pool)
+                .await?;
+        }
+        let candidate = VpcPrefixId::new();
+        let error = env
+            .api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                candidate,
+                candidate_vpc,
+                Some(root),
+                prefix,
+            )))
+            .await
+            .expect_err("stored global scope must remain exclusive");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("not eligible for reuse"));
+        assert_eq!(stored_vpc_prefix_count(&env, candidate).await, 0);
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn exact_overlap_requires_one_matching_vni_allocation_per_vpc(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    enum AllocationChange {
+        MissingCandidate,
+        MismatchedCandidate,
+        RetainedExisting,
+        DuplicateExisting,
+    }
+    struct TestCase {
+        scenario: &'static str,
+        change: AllocationChange,
+        prefix: &'static str,
+        candidate_vpc: VpcId,
+        existing_vpc: VpcId,
+    }
+
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let candidate_tenant = "overlap-allocation-candidate";
+    let existing_tenant = "overlap-allocation-existing";
+    // Eight VPCs plus duplicate and replacement allocations need ten VNIs.
+    // The shared fixture provides four; keep each case independent of releases.
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_vpc_vni,
+        &mut txn,
+        (20_005..=20_010).collect(),
+        true,
+    )
+    .await?;
+    txn.commit().await?;
+    create_overlap_tenant(&env, candidate_tenant).await?;
+    create_overlap_tenant(&env, existing_tenant).await?;
+    let candidate_root = seed_tenant_managed_site_prefix(
+        &env,
+        candidate_tenant,
+        "10.106.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let existing_root = seed_tenant_managed_site_prefix(
+        &env,
+        existing_tenant,
+        "10.106.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    // Create every VPC before releasing any allocation. Otherwise a later
+    // fixture could allocate a freed VNI still recorded in another VPC's status.
+    let mut cases = Vec::new();
+    for (scenario, change, prefix) in [
+        (
+            "existing VPC has duplicate owned allocations",
+            AllocationChange::DuplicateExisting,
+            "10.106.4.0/24",
+        ),
+        (
+            "candidate allocation differs from status",
+            AllocationChange::MismatchedCandidate,
+            "10.106.2.0/24",
+        ),
+        (
+            "existing VPC retains a second allocation",
+            AllocationChange::RetainedExisting,
+            "10.106.3.0/24",
+        ),
+        (
+            "candidate allocation is missing",
+            AllocationChange::MissingCandidate,
+            "10.106.1.0/24",
+        ),
+    ] {
+        let candidate_vpc =
+            create_fnn_vpc_for_tenant(&env, candidate_tenant, scenario, Some("OVERLAP")).await;
+        let existing_vpc =
+            create_fnn_vpc_for_tenant(&env, existing_tenant, scenario, Some("OVERLAP")).await;
+        cases.push(TestCase {
+            scenario,
+            change,
+            prefix,
+            candidate_vpc,
+            existing_vpc,
+        });
+    }
+    for TestCase {
+        scenario,
+        change,
+        prefix,
+        candidate_vpc,
+        existing_vpc,
+    } in cases
+    {
+        env.api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                VpcPrefixId::new(),
+                existing_vpc,
+                Some(existing_root),
+                prefix,
+            )))
+            .await?;
+
+        let mut txn = env.pool.begin().await?;
+        let internal_pool = &env.common_pools.ethernet.pool_vpc_vni;
+        match change {
+            AllocationChange::MissingCandidate | AllocationChange::MismatchedCandidate => {
+                let active_vni = db::resource_pool::find_owned_allocation(
+                    internal_pool,
+                    &mut txn,
+                    OwnerType::Vpc,
+                    &candidate_vpc.to_string(),
+                )
+                .await?
+                .expect("candidate VPC owns its active VNI");
+                if matches!(change, AllocationChange::MismatchedCandidate) {
+                    // Allocate before releasing so the replacement cannot be
+                    // the VNI still recorded in `status.vni`.
+                    db::resource_pool::allocate(
+                        internal_pool,
+                        &mut txn,
+                        OwnerType::Vpc,
+                        &candidate_vpc.to_string(),
+                        None,
+                    )
+                    .await?;
+                }
+                assert_eq!(
+                    db::resource_pool::release(
+                        internal_pool,
+                        &mut txn,
+                        active_vni,
+                        OwnerType::Vpc,
+                        &candidate_vpc.to_string(),
+                    )
+                    .await?,
+                    db::ConditionalWrite::Applied(()),
+                );
+            }
+            AllocationChange::RetainedExisting | AllocationChange::DuplicateExisting => {
+                let extra_pool = match change {
+                    AllocationChange::RetainedExisting => {
+                        &env.common_pools.ethernet.pool_external_vpc_vni
+                    }
+                    _ => internal_pool,
+                };
+                db::resource_pool::allocate(
+                    extra_pool,
+                    &mut txn,
+                    OwnerType::Vpc,
+                    &existing_vpc.to_string(),
+                    None,
+                )
+                .await?;
+            }
+        }
+        txn.commit().await?;
+
+        let prefix_id = VpcPrefixId::new();
+        let error = env
+            .api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                prefix_id,
+                candidate_vpc,
+                Some(candidate_root),
+                prefix,
+            )))
+            .await
+            .expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
+        assert_eq!(
+            error.message(),
+            "the requested prefix overlaps address space that is not eligible for reuse",
+            "{scenario}"
+        );
+        assert_eq!(
+            stored_vpc_prefix_count(&env, prefix_id).await,
+            0,
+            "{scenario}"
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn exact_overlap_waits_for_existing_vpc_allocation_cleanup(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "overlap-allocation-cleanup";
+    create_overlap_tenant(&env, tenant).await?;
+    let candidate_vpc =
+        create_fnn_vpc_for_tenant(&env, tenant, "candidate VPC", Some("OVERLAP")).await;
+    let existing_vpc =
+        create_fnn_vpc_for_tenant(&env, tenant, "existing VPC", Some("OVERLAP")).await;
+    let root = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.107.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            existing_vpc,
+            Some(root),
+            "10.107.1.0/24",
+        )))
+        .await?;
+
+    let mut txn = env.pool.begin().await?;
+    let retained_vni = db::resource_pool::allocate(
+        &env.common_pools.ethernet.pool_external_vpc_vni,
+        &mut txn,
+        OwnerType::Vpc,
+        &existing_vpc.to_string(),
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+    let routing_state = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(existing_vpc),
+        }))
+        .await?
+        .into_inner();
+    let active_vni = routing_state.active_vni;
+
+    // Hold the allocation row so cleanup pauses after locking its VPC.
+    // The overlapping create must wait for that VPC, not skip to its allocations.
+    let mut allocation_lock = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(allocation_lock.as_mut())
+        .await?;
+    assert_eq!(
+        db::resource_pool::find_owned_allocation(
+            &env.common_pools.ethernet.pool_vpc_vni,
+            allocation_lock.as_mut(),
+            OwnerType::Vpc,
+            &existing_vpc.to_string(),
+        )
+        .await?,
+        Some(i32::try_from(active_vni)?)
+    );
+    let cleanup =
+        env.api
+            .release_vpc_inactive_vni(Request::new(rpc::forge::VpcReleaseInactiveVniRequest {
+                id: Some(existing_vpc),
+                if_version_match: Some(routing_state.version),
+                expected_inactive_vni: Some(u32::try_from(retained_vni)?),
+            }));
+    tokio::pin!(cleanup);
+    let cleanup_pid = tokio::select! {
+        result = &mut cleanup => panic!("cleanup passed a locked allocation: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, blocker_pid, "resource_pool") => pid,
+    };
+
+    let prefix_id = VpcPrefixId::new();
+    let create = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            prefix_id,
+            candidate_vpc,
+            Some(root),
+            "10.107.1.0/24",
+        )));
+    tokio::pin!(create);
+    tokio::select! {
+        result = &mut cleanup => panic!("cleanup passed a locked allocation: {result:?}"),
+        result = &mut create => panic!("create passed the existing VPC lock: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, cleanup_pid, "vpcs") => {}
+    }
+    allocation_lock.commit().await?;
+    let (cleanup, create) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(cleanup, create)
+    })
+    .await?;
+    assert_eq!(
+        cleanup?.into_inner().released_inactive_vni,
+        u32::try_from(retained_vni)?
+    );
+    assert_eq!(create?.into_inner().id, Some(prefix_id));
+    assert_eq!(stored_vpc_prefix_count(&env, prefix_id).await, 1);
+    let after_cleanup = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(existing_vpc),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(after_cleanup.active_vni, active_vni);
+    assert_eq!(after_cleanup.retained_allocation, None);
+    Ok(())
+}
+
+/// Test-specific function that checks VpcPrefix create rereads after a concurrent commit.
+#[crate::sqlx_test]
+async fn vpc_prefix_create_rechecks_after_concurrent_vpc_prefix_commit(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant_a = "serialized-vpc-prefix-a";
+    let tenant_b = "serialized-vpc-prefix-b";
+    create_overlap_tenant(&env, tenant_a).await?;
+    create_overlap_tenant(&env, tenant_b).await?;
+    let vpc_a =
+        create_fnn_vpc_for_tenant(&env, tenant_a, "serialized VPC A", Some("OVERLAP")).await;
+    let vpc_b =
+        create_fnn_vpc_for_tenant(&env, tenant_b, "serialized VPC B", Some("OVERLAP")).await;
+    let root_a = seed_tenant_managed_site_prefix(
+        &env,
+        tenant_a,
+        "10.101.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let root_b = seed_tenant_managed_site_prefix(
+        &env,
+        tenant_b,
+        "10.101.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    let first_id = VpcPrefixId::new();
+    let (first_create, blocker_pid) =
+        hold_vpc_prefix_create(&env, first_id, vpc_a, root_a, "10.101.1.0/24").await?;
+    let second_id = VpcPrefixId::new();
+    let second_create = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            second_id,
+            vpc_b,
+            Some(root_b),
+            "10.101.1.0/25",
+        )));
+    let release_first = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        first_create.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+
+    let (second_result, release_result) = tokio::join!(second_create, release_first);
+    release_result?;
+    let error = second_result.expect_err("the nested overlap should be rejected after reread");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("not eligible for reuse"));
+    assert!(!error.message().contains("10.101.1.0/24"));
+    assert_eq!(stored_vpc_prefix_count(&env, first_id).await, 1);
+    assert_eq!(stored_vpc_prefix_count(&env, second_id).await, 0);
+    Ok(())
+}
+
+/// Test-specific function that checks VpcPrefix and NetworkSegment writes in both commit orders.
+#[crate::sqlx_test]
+async fn vpc_prefix_and_attached_segment_recheck_both_commit_orders(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(false)).await;
+    let tenant_a = "serialized-cross-table-a";
+    let tenant_b = "serialized-cross-table-b";
+    create_overlap_tenant(&env, tenant_a).await?;
+    create_overlap_tenant(&env, tenant_b).await?;
+    let vpc_a =
+        create_fnn_vpc_for_tenant(&env, tenant_a, "cross-table VPC A", Some("OVERLAP")).await;
+    let vpc_b =
+        create_fnn_vpc_for_tenant(&env, tenant_b, "cross-table VPC B", Some("OVERLAP")).await;
+    let root_a = seed_tenant_managed_site_prefix(
+        &env,
+        tenant_a,
+        "10.0.0.0/8",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let root_b = seed_tenant_managed_site_prefix(
+        &env,
+        tenant_b,
+        "10.0.0.0/8",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    // A committed VPC prefix must be visible when an attached segment resumes.
+    let (prefix_create, prefix_blocker_pid) =
+        hold_vpc_prefix_create(&env, VpcPrefixId::new(), vpc_a, root_a, "10.102.1.0/24").await?;
+    let rejected_segment_id = NetworkSegmentId::new();
+    let segment_create = env
+        .api
+        .create_network_segment(Request::new(attached_segment_request(
+            rejected_segment_id,
+            vpc_b,
+            "10.102.1.0/24",
+            "10.102.1.1",
+            rpc::forge::NetworkSegmentType::Tenant,
+        )));
+    let release_prefix = async {
+        wait_for_blocked_query(
+            &env.pool,
+            prefix_blocker_pid,
+            "tenant_prefix_overlap:checks",
+        )
+        .await;
+        prefix_create.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (segment_result, release_result) = tokio::join!(segment_create, release_prefix);
+    release_result?;
+    let error = segment_result.expect_err("the attached segment overlap should be rejected");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("not eligible for reuse"));
+    let segment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM network_segments WHERE id = $1")
+            .bind(rejected_segment_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(segment_count, 0);
+
+    // A committed attached segment must be visible when a VPC prefix resumes.
+    let (segment_create, segment_blocker_pid) =
+        hold_attached_segment_create(&env, vpc_a, "10.103.1.0/24").await?;
+    let rejected_prefix_id = VpcPrefixId::new();
+    let prefix_create = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            rejected_prefix_id,
+            vpc_b,
+            Some(root_b),
+            "10.103.1.0/24",
+        )));
+    let release_segment = async {
+        wait_for_blocked_query(
+            &env.pool,
+            segment_blocker_pid,
+            "tenant_prefix_overlap:checks",
+        )
+        .await;
+        segment_create.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (prefix_result, release_result) = tokio::join!(prefix_create, release_segment);
+    release_result?;
+    let error = prefix_result.expect_err("the VPC prefix overlap should be rejected");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("not eligible for reuse"));
+    assert_eq!(stored_vpc_prefix_count(&env, rejected_prefix_id).await, 0);
+
+    Ok(())
+}
+
+/// VPC-less networks may overlap global parents, but not retained scoped ones.
+#[crate::sqlx_test]
+async fn unattached_segment_preserves_global_compatibility_and_rechecks_stored_scope(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(false)).await;
+    let tenant = "serialized-segment-attach";
+    create_overlap_tenant(&env, tenant).await?;
+    let prefix_vpc = create_fnn_vpc_for_tenant(&env, tenant, "prefix VPC", Some("OVERLAP")).await;
+    let root = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.104.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let (attach_vpc, _) = api_fixtures::vpc::create_flat_vpc(
+        &env,
+        "HostInband attachment".to_string(),
+        Some(tenant.to_string()),
+    )
+    .await;
+    for (prefix, gateway, scoped) in [
+        ("10.104.1.0/24", "10.104.1.1", false),
+        ("10.104.3.0/24", "10.104.3.1", true),
+    ] {
+        let parent_id = VpcPrefixId::new();
+        let (mut prefix_create, blocker_pid) =
+            hold_vpc_prefix_create(&env, parent_id, prefix_vpc, root, prefix).await?;
+        if scoped {
+            // Model a retained scoped row after disabling admission. The
+            // VPC-less writer must use stored scope, not the current gate.
+            sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = vpc_id WHERE id = $1")
+                .bind(parent_id)
+                .execute(&mut *prefix_create)
+                .await?;
+        }
+        let segment_id = NetworkSegmentId::new();
+        let create =
+            env.api
+                .create_network_segment(Request::new(unattached_host_inband_segment_request(
+                    segment_id, prefix, gateway,
+                )));
+        let release_prefix = async {
+            wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+            prefix_create.commit().await
+        };
+        let (create_result, release_result) = tokio::join!(create, release_prefix);
+        release_result?;
+        if scoped {
+            let error = create_result.expect_err("retained scoped prefixes remain protected");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("not eligible for reuse"));
+            let count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM network_segments WHERE id = $1")
+                    .bind(segment_id)
+                    .fetch_one(&env.pool)
+                    .await?;
+            assert_eq!(count, 0);
+        } else {
+            assert_eq!(create_result?.into_inner().id, Some(segment_id));
+            let error = env
+                .api
+                .attach_network_segment_to_vpc(Request::new(
+                    rpc::forge::AttachNetworkSegmentToVpcRequest {
+                        network_segment_id: Some(segment_id),
+                        vpc_id: Some(attach_vpc),
+                        allow_replace: false,
+                    },
+                ))
+                .await
+                .expect_err("later attachment must still reject the global overlap");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("not eligible for reuse"));
+            let attached: Option<VpcId> =
+                sqlx::query_scalar("SELECT vpc_id FROM network_segments WHERE id = $1")
+                    .bind(segment_id)
+                    .fetch_one(&env.pool)
+                    .await?;
+            assert_eq!(attached, None);
+        }
+    }
+
+    let mut segment_txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut segment_txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *segment_txn)
+        .await?;
+    let segment = NewNetworkSegment::try_from(unattached_host_inband_segment_request(
+        NetworkSegmentId::new(),
+        "10.104.2.0/24",
+        "10.104.2.1",
+    ))?;
+    db::network_segment::persist(
+        segment,
+        &mut segment_txn,
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    let accepted_prefix = VpcPrefixId::new();
+    let create = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            accepted_prefix,
+            prefix_vpc,
+            Some(root),
+            "10.104.2.0/24",
+        )));
+    let release_segment = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        segment_txn.commit().await
+    };
+    let (create_result, release_result) = tokio::join!(create, release_segment);
+    release_result?;
+    assert_eq!(create_result?.into_inner().id, Some(accepted_prefix));
+    assert_eq!(stored_vpc_prefix_count(&env, accepted_prefix).await, 1);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn scoped_vpc_prefix_rechecks_after_unattached_segment_commit(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "scoped-prefix-unattached-segment";
+    create_overlap_tenant(&env, tenant).await?;
+    let vpc = create_fnn_vpc_for_tenant(&env, tenant, "scoped VPC", Some("OVERLAP")).await;
+    let root = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.104.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let mut segment_txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut segment_txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *segment_txn)
+        .await?;
+    let segment = NewNetworkSegment::try_from(unattached_host_inband_segment_request(
+        NetworkSegmentId::new(),
+        "10.104.1.0/24",
+        "10.104.1.1",
+    ))?;
+    db::network_segment::persist(
+        segment,
+        &mut segment_txn,
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    let prefix_id = VpcPrefixId::new();
+    let create = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            prefix_id,
+            vpc,
+            Some(root),
+            "10.104.1.0/24",
+        )));
+    let release_segment = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        segment_txn.commit().await
+    };
+    let (create_result, release_result) = tokio::join!(create, release_segment);
+    release_result?;
+    let error =
+        create_result.expect_err("the scoped parent must reject the committed global segment");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("not eligible for reuse"));
+    assert_eq!(stored_vpc_prefix_count(&env, prefix_id).await, 0);
+    Ok(())
+}
+
+/// Test-specific function that checks soft-deleted Admin prefixes still block
+/// `VpcPrefix` creation.
+#[crate::sqlx_test]
+async fn vpc_prefix_create_rejects_soft_deleted_admin_segment_prefix(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(false)).await;
+    let tenant = "soft-deleted-admin-segment";
+    create_overlap_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "soft-delete VPC", Some("OVERLAP")).await;
+    let root_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.105.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    let segment_id = NetworkSegmentId::new();
+    env.api
+        .create_network_segment(Request::new(attached_segment_request(
+            segment_id,
+            vpc_id,
+            "10.105.1.0/24",
+            "10.105.1.1",
+            rpc::forge::NetworkSegmentType::Admin,
+        )))
+        .await?;
+    env.api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: Some(segment_id),
+        }))
+        .await?;
+
+    let segment_is_deleted: bool =
+        sqlx::query_scalar("SELECT deleted IS NOT NULL FROM network_segments WHERE id = $1")
+            .bind(segment_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert!(segment_is_deleted);
+
+    let prefix_id = VpcPrefixId::new();
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            prefix_id,
+            vpc_id,
+            Some(root_id),
+            "10.105.1.0/24",
+        )))
+        .await
+        .expect_err("the soft-deleted Admin prefix should remain reserved");
+
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("not eligible for reuse"));
+    assert_eq!(stored_vpc_prefix_count(&env, prefix_id).await, 0);
+    Ok(())
+}
 
 #[derive(serde::Deserialize)]
 struct LifecycleStateJson {
@@ -49,6 +1604,7 @@ async fn create_vpc_prefix(env: &TestEnv, vpc_id: VpcId, prefix: &str) -> rpc::f
             id: None,
             prefix: String::new(),
             vpc_id: Some(vpc_id),
+            site_prefix_id: None,
             config: Some(rpc::forge::VpcPrefixConfig {
                 prefix: prefix.into(),
             }),
@@ -257,6 +1813,7 @@ async fn test_create_and_delete_vpc_prefix(pool: PgPool) -> Result<(), Box<dyn s
         id: None,
         prefix: String::new(),
         vpc_id: Some(vpc_id),
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig {
             prefix: ip_prefix.into(),
         }),
@@ -376,7 +1933,7 @@ async fn test_vpc_prefix_controller_transitions_provisioning_to_ready(
 }
 
 #[crate::sqlx_test]
-async fn test_vpc_prefix_delete_rejects_network_prefix_refs(
+async fn test_vpc_prefix_delete_soft_deletes_with_network_prefix_refs(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
@@ -390,15 +1947,13 @@ async fn test_vpc_prefix_delete_rejects_network_prefix_refs(
     assert!(network_prefix_ref_count(&env, id).await > 0);
 
     // Request deletion while durable network-prefix references still exist.
-    let err = env
-        .api
+    env.api
         .delete_vpc_prefix(Request::new(VpcPrefixDeletionRequest { id: Some(id) }))
         .await
-        .expect_err("delete should reject referenced VPC prefixes");
+        .expect("delete should soft-delete referenced VPC prefixes");
 
-    // Verify the rejected delete leaves the prefix active and visible.
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(find_vpc_prefix(&env, id).await.is_some());
+    // Verify public active-only reads hide the soft-deleted prefix.
+    assert!(find_vpc_prefix(&env, id).await.is_none());
     let active_search_ids = env
         .api
         .search_vpc_prefixes(Request::new(VpcPrefixSearchQuery {
@@ -411,11 +1966,25 @@ async fn test_vpc_prefix_delete_rejects_network_prefix_refs(
         .into_inner()
         .vpc_prefix_ids;
     assert!(
-        active_search_ids.contains(&id),
-        "default VPC-prefix search should keep rejected deletes visible"
+        !active_search_ids.contains(&id),
+        "active-only VPC-prefix search should hide soft-deleted prefixes"
+    );
+
+    // Verify the backing row remains soft-deleted while references still exist.
+    assert_eq!(stored_vpc_prefix_count(&env, id).await, 1);
+    assert!(stored_vpc_prefix_is_deleted(&env, id).await);
+    assert!(network_prefix_ref_count(&env, id).await > 0);
+
+    // Drive the controller and verify the FK-backed references keep the row alive.
+    env.run_vpc_prefix_controller_iteration().await;
+    env.run_vpc_prefix_controller_iteration().await;
+    assert_eq!(
+        stored_vpc_prefix_controller_state(&env, id)
+            .await
+            .as_deref(),
+        Some("deleting")
     );
     assert_eq!(stored_vpc_prefix_count(&env, id).await, 1);
-    assert!(!stored_vpc_prefix_is_deleted(&env, id).await);
     assert!(network_prefix_ref_count(&env, id).await > 0);
 
     Ok(())
@@ -465,9 +2034,9 @@ async fn test_deleted_provisioning_vpc_prefix_enters_deleting_on_first_controlle
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM vpc_prefix_state_history \
-             WHERE vpc_prefix_id = $1 AND state->>'state' = 'ready'",
+             WHERE object_id = $1 AND state->>'state' = 'ready'",
         )
-        .bind(id)
+        .bind(id.to_string())
         .fetch_one(&env.pool)
         .await
         .expect("Could not count ready history records"),
@@ -503,7 +2072,7 @@ async fn test_deleted_vpc_prefix_cannot_allocate_new_instance_interface(
             machine_id: Some(managed_host.host().id),
             instance_type_id: None,
             config: Some(rpc::forge::InstanceConfig {
-                tenant: Some(default_tenant_config()),
+                tenant: Some(fixture_tenant_config()),
                 os: Some(default_os_config()),
                 network: Some(single_interface_network_config_with_vpc_prefix(id)),
                 infiniband: None,
@@ -511,6 +2080,7 @@ async fn test_deleted_vpc_prefix_cannot_allocate_new_instance_interface(
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
+                power_profile: None,
             }),
             metadata: None,
             allow_unhealthy_machine: false,
@@ -552,6 +2122,7 @@ async fn test_vpc_prefix_final_delete_after_generated_segment_cleanup(
     let managed_host = create_managed_host(&env).await;
     let (instance, rpc_instance) = managed_host
         .instance_builer(&env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
         .network(single_interface_network_config_with_vpc_prefix(id))
         .build_and_return()
         .await;
@@ -560,26 +2131,24 @@ async fn test_vpc_prefix_final_delete_after_generated_segment_cleanup(
         .expect("VPC-prefix allocation should assign a generated segment");
     assert!(network_prefix_ref_count(&env, id).await > 0);
 
-    // Verify the generated segment reference blocks deletion requests.
-    let err = env
-        .api
+    // Delete while the generated segment still references this VPC prefix.
+    env.api
         .delete_vpc_prefix(Request::new(VpcPrefixDeletionRequest { id: Some(id) }))
         .await
-        .expect_err("delete should reject referenced VPC prefixes");
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        .expect("delete should soft-delete referenced VPC prefixes");
     assert_eq!(stored_vpc_prefix_count(&env, id).await, 1);
-    assert!(!stored_vpc_prefix_is_deleted(&env, id).await);
+    assert!(stored_vpc_prefix_is_deleted(&env, id).await);
+    assert!(network_prefix_ref_count(&env, id).await > 0);
+
+    // Verify the controller will not hard-delete while FK-backed references remain.
+    env.run_vpc_prefix_controller_iteration().await;
+    env.run_vpc_prefix_controller_iteration().await;
+    assert_eq!(stored_vpc_prefix_count(&env, id).await, 1);
     assert!(network_prefix_ref_count(&env, id).await > 0);
 
     // Release the instance so generated segment cleanup removes the prefix references.
     instance.delete().await;
     assert_eq!(network_prefix_ref_count(&env, id).await, 0);
-
-    // Delete the now-unreferenced prefix before running controller cleanup.
-    env.api
-        .delete_vpc_prefix(Request::new(VpcPrefixDeletionRequest { id: Some(id) }))
-        .await
-        .expect("delete should mark the unreferenced VPC prefix deleted");
 
     // Run VPC-prefix cleanup to advance through DBDelete after dependencies drain.
     env.run_vpc_prefix_controller_iteration().await;
@@ -673,14 +2242,14 @@ async fn test_vpc_prefix_rpc_status_includes_lifecycle_and_counters(
     let id = created.id.expect("created VPC prefix should include an id");
     let ready = drive_vpc_prefix_to_ready(&env, id).await;
 
-    // Verify lifecycle fields and existing utilization counters share the RPC status.
-    assert_status_with_lifecycle_and_linknet_counters(&ready, "ready", 128, 127);
+    // The adopted /24 tenant segment occupies every /31 in this /24 VPC prefix.
+    assert_status_with_lifecycle_and_linknet_counters(&ready, "ready", 128, 0);
     let status = ready
         .status
         .as_ref()
         .expect("VPC prefix status should be populated");
     assert_eq!(u64::from(status.total_31_segments), 128);
-    assert_eq!(u64::from(status.available_31_segments), 127);
+    assert_eq!(u64::from(status.available_31_segments), 0);
     let lifecycle_status = status
         .lifecycle
         .as_ref()
@@ -688,6 +2257,55 @@ async fn test_vpc_prefix_rpc_status_includes_lifecycle_and_counters(
     assert!(
         lifecycle_status.state_reason.is_some(),
         "RPC lifecycle status should expose controller reason"
+    );
+
+    Ok(())
+}
+
+/// Verifies that large IPv6 VPC prefixes report saturated linknet counters.
+///
+/// A /48 contains 2^79 /127 linknets, which does not fit in the u64 RPC/status
+/// fields. The DB layer should cap these display counters at u64::MAX and
+/// persist that value through the public API instead of overflowing or
+/// attempting to enumerate the linknets.
+#[crate::sqlx_test]
+async fn test_ipv6_vpc_prefix_linknet_counters_cap_large_prefix(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Extend the test fabric with IPv6 so the VPC-prefix validator accepts the /48.
+    let mut site_prefixes = TEST_SITE_PREFIXES.clone();
+    site_prefixes.push("2001:db8::/32".parse().unwrap());
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(site_prefixes),
+            create_network_segments: Some(false),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (_, vpc) = api_fixtures::vpc::create_flat_vpc(
+        &env,
+        "flat-large-v6".to_string(),
+        Some("2829bbe3-c169-4cd9-8b2a-19a8b1618a93".to_string()),
+    )
+    .await;
+    let vpc_id = vpc.id.expect("flat VPC should include an id");
+
+    // Create a large IPv6 prefix whose /127 linknet count exceeds u64.
+    let created = create_vpc_prefix(&env, vpc_id, "2001:db8:1000::/48").await;
+    let id = created.id.expect("created VPC prefix should include an id");
+    assert_status_with_lifecycle_and_linknet_counters(&created, "provisioning", u64::MAX, u64::MAX);
+
+    // Re-read through the public API to verify the capped counters persisted.
+    let persisted = find_vpc_prefix(&env, id)
+        .await
+        .expect("VPC prefix should be visible through the public get API");
+    assert_status_with_lifecycle_and_linknet_counters(
+        &persisted,
+        "provisioning",
+        u64::MAX,
+        u64::MAX,
     );
 
     Ok(())
@@ -706,6 +2324,7 @@ async fn test_overlapping_vpc_prefixes(pool: PgPool) -> Result<(), Box<dyn std::
         id: None,
         prefix: String::new(),
         vpc_id: Some(vpc_id),
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig {
             prefix: ip_prefix.into(),
         }),
@@ -726,6 +2345,7 @@ async fn test_overlapping_vpc_prefixes(pool: PgPool) -> Result<(), Box<dyn std::
         id: None,
         prefix: String::new(),
         vpc_id: Some(vpc_id),
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig {
             prefix: overlapping_ip_prefix.into(),
         }),
@@ -759,6 +2379,7 @@ async fn test_reject_create_with_invalid_metadata(
         id: None,
         prefix: String::new(),
         vpc_id: Some(vpc_id),
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig {
             prefix: ip_prefix.into(),
         }),
@@ -777,8 +2398,8 @@ async fn test_reject_create_with_invalid_metadata(
         .expect_err("expected create create vpc prefix to fail")
         .to_string();
     assert!(
-        error.contains("Invalid value"),
-        "Error message should contain 'Invalid value', but is {error}"
+        error.contains("invalid value"),
+        "error message should contain 'invalid value', but is {error}"
     );
 
     Ok(())
@@ -808,6 +2429,7 @@ async fn test_invalid_vpc_prefixes(pool: PgPool) -> Result<(), Box<dyn std::erro
             id: None,
             prefix: String::new(),
             vpc_id: Some(vpc_id),
+            site_prefix_id: None,
 
             config: Some(rpc::forge::VpcPrefixConfig {
                 prefix: prefix.into(),
@@ -841,6 +2463,7 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
         id: None,
         prefix: String::new(),
         vpc_id: Some(vpc_id),
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig { prefix: p1.into() }),
         metadata: Some(rpc::forge::Metadata {
             name: "VPC prefix p1".into(),
@@ -851,6 +2474,7 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
         id: None,
         prefix: String::new(),
         vpc_id: Some(vpc_id),
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig { prefix: p2.into() }),
         metadata: Some(rpc::forge::Metadata {
             name: "VPC prefix p2".into(),
@@ -879,6 +2503,7 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
             prefix_match: Some(prefix.into()),
             prefix_match_type: Some(PrefixMatchType::PrefixExact as i32),
             deleted: rpc::forge::DeletedFilter::Exclude as i32,
+            site_prefix_id: None,
         };
         let search_request = Request::new(prefix_query);
         let search_response = env.api.search_vpc_prefixes(search_request).await;
@@ -911,6 +2536,7 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
             prefix_match: Some(prefix.into()),
             prefix_match_type: Some(PrefixMatchType::PrefixContains as i32),
             deleted: rpc::forge::DeletedFilter::Exclude as i32,
+            site_prefix_id: None,
         };
         let search_request = Request::new(prefix_query);
         let search_response = env.api.search_vpc_prefixes(search_request).await;
@@ -938,6 +2564,7 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
         prefix_match: Some(prefix.into()),
         prefix_match_type: Some(PrefixMatchType::PrefixContainedBy as i32),
         deleted: rpc::forge::DeletedFilter::Exclude as i32,
+        site_prefix_id: None,
     };
     let search_request = Request::new(prefix_query);
     let search_response = env.api.search_vpc_prefixes(search_request).await;
@@ -958,13 +2585,685 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
 }
 
 #[crate::sqlx_test]
+async fn exact_site_prefix_attachment_enforces_lineage_and_round_trips(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = "site-prefix-tenant-a";
+    let other_tenant = "site-prefix-tenant-b";
+    create_fixture_tenant(&env, tenant).await?;
+    create_fixture_tenant(&env, other_tenant).await?;
+    let fnn_vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "tenant-root FNN VPC", None).await;
+
+    let ready_parent = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.40.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let vpc_prefix_id = VpcPrefixId::new();
+    let created = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            vpc_prefix_id,
+            fnn_vpc_id,
+            Some(ready_parent),
+            "10.40.1.0/24",
+        )))
+        .await?
+        .into_inner();
+    assert_eq!(created.site_prefix_id, Some(ready_parent));
+    let scope: Option<VpcId> =
+        sqlx::query_scalar("SELECT overlap_vpc_id FROM network_vpc_prefixes WHERE id = $1")
+            .bind(vpc_prefix_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(
+        scope, None,
+        "tenant ownership alone does not select isolated scope"
+    );
+
+    let persisted = find_vpc_prefix(&env, vpc_prefix_id)
+        .await
+        .expect("exact-parent VPC prefix should be readable");
+    assert_eq!(persisted.site_prefix_id, Some(ready_parent));
+    let ids = env
+        .api
+        .search_vpc_prefixes(Request::new(VpcPrefixSearchQuery {
+            site_prefix_id: Some(ready_parent),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .vpc_prefix_ids;
+    assert_eq!(ids, vec![vpc_prefix_id]);
+
+    let wrong_tenant_parent = seed_tenant_managed_site_prefix(
+        &env,
+        other_tenant,
+        "10.41.0.0/16",
+        SitePrefixLifecycleState::Deleting,
+    )
+    .await;
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            fnn_vpc_id,
+            Some(wrong_tenant_parent),
+            "10.41.1.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+    let _omitted_tenant_parent = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.47.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let omitted_tenant_child_id = VpcPrefixId::new();
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            omitted_tenant_child_id,
+            fnn_vpc_id,
+            None,
+            "10.47.1.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        stored_vpc_prefix_count(&env, omitted_tenant_child_id).await,
+        0
+    );
+
+    for (state, parent_prefix, child_prefix) in [
+        (
+            SitePrefixLifecycleState::Provisioning,
+            "10.42.0.0/16",
+            "10.42.1.0/24",
+        ),
+        (
+            SitePrefixLifecycleState::Deleting,
+            "10.43.0.0/16",
+            "10.43.1.0/24",
+        ),
+        (
+            SitePrefixLifecycleState::Error,
+            "10.44.0.0/16",
+            "10.44.1.0/24",
+        ),
+    ] {
+        let parent = seed_tenant_managed_site_prefix(&env, tenant, parent_prefix, state).await;
+        let error = env
+            .api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                VpcPrefixId::new(),
+                fnn_vpc_id,
+                Some(parent),
+                child_prefix,
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{state:?}");
+    }
+
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            fnn_vpc_id,
+            Some(ready_parent),
+            "10.46.1.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+    let non_fnn_parent = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.45.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let (non_fnn_vpc_id, _) = api_fixtures::vpc::create_vpc(
+        &env,
+        "tenant-root ETV VPC".to_string(),
+        Some(tenant.to_string()),
+        None,
+    )
+    .await;
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            non_fnn_vpc_id,
+            Some(non_fnn_parent),
+            "10.45.1.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    let single_linknet_parent = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.49.0.0/31",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let single_linknet_vpc_prefix_id = VpcPrefixId::new();
+    let single_linknet: IpNetwork = "10.49.0.0/31".parse()?;
+    let created = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            single_linknet_vpc_prefix_id,
+            fnn_vpc_id,
+            Some(single_linknet_parent),
+            "10.49.0.0/31",
+        )))
+        .await?
+        .into_inner();
+    assert_eq!(created.site_prefix_id, Some(single_linknet_parent));
+
+    let allocator = PrefixAllocator::new(single_linknet_vpc_prefix_id, single_linknet, None, 31)?;
+    let mut allocation = env.pool.begin().await?;
+    let selected = allocator.next_free_prefix(&mut allocation).await?;
+    assert_eq!(selected, single_linknet);
+    allocator
+        .allocate_network_segment_for_prefix(&mut allocation, fnn_vpc_id, selected)
+        .await?;
+    assert!(matches!(
+        allocator.next_free_prefix(&mut allocation).await,
+        Err(crate::CarbideError::ResourceExhausted(_))
+    ));
+    allocation.commit().await?;
+
+    // An old client can omit the ID for a uniquely containing operator root.
+    // That legacy operator root takes precedence even when the tenant owns an
+    // overlapping root, because tenant-managed address space is explicit.
+    let _overlapping_tenant_root = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.50.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let operator_root: IpNetwork = "10.50.0.0/16".parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[operator_root]).await?;
+    let operator_root_id: SitePrefixId =
+        sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1 AND authority = $2")
+            .bind(operator_root)
+            .bind(SitePrefixAuthority::OperatorManaged)
+            .fetch_one(&mut *txn)
+            .await?;
+    txn.commit().await?;
+    let legacy = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            fnn_vpc_id,
+            None,
+            "10.50.1.0/24",
+        )))
+        .await?
+        .into_inner();
+    assert_eq!(legacy.site_prefix_id, Some(operator_root_id));
+
+    Ok(())
+}
+
+/// Proves a rootless VpcPrefix admitted after the final operator root retires
+/// does not make the next authoritative Core startup fail lineage preflight.
+#[crate::sqlx_test]
+async fn rootless_vpc_prefix_after_operator_root_retirement_survives_startup(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retiring_root: IpNetwork = "10.90.0.0/16".parse()?;
+    let null_route: IpNetwork = "198.19.0.0/16".parse()?;
+    let vpc_prefix: IpNetwork = "198.19.1.0/24".parse()?;
+    let mut config = api_fixtures::get_config();
+    config.site_fabric_prefixes.clear();
+    config.site_fabric_null_routes = Some(vec![null_route]);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            create_network_segments: Some(false),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    let tenant = "post-retirement-rootless-prefix";
+    create_fixture_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "rootless prefix VPC", None).await;
+
+    // Reconstruct retirement of the final configured operator root before the
+    // new prefix is admitted outside its historical address space.
+    let mut retirement = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut retirement, &[retiring_root]).await?;
+    db::site_prefix::reconcile_configured(&mut retirement, &[]).await?;
+    retirement.commit().await?;
+
+    // Exercise public admission and then re-read the row through the API to
+    // prove the accepted prefix intentionally has no exact SitePrefix parent.
+    let vpc_prefix_id = VpcPrefixId::new();
+    let created = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            vpc_prefix_id,
+            vpc_id,
+            None,
+            &vpc_prefix.to_string(),
+        )))
+        .await?
+        .into_inner();
+    assert_eq!(created.site_prefix_id, None);
+    let persisted = find_vpc_prefix(&env, vpc_prefix_id)
+        .await
+        .expect("admitted rootless VpcPrefix must remain visible through the public API");
+    assert_eq!(persisted.site_prefix_id, None);
+
+    // Repeat the authoritative startup reconciliation and lineage preflight.
+    // Missing parentage is valid because the configured root boundary is off;
+    // the explicit null-route set remains an independent routing policy.
+    let mut startup = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut startup, &env.config.site_fabric_prefixes).await?;
+    let lineage = db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut startup).await?;
+    assert_eq!(
+        lineage.missing_vpc_prefix_ids,
+        vec![vpc_prefix_id],
+        "startup must classify the unrelated prefix as rootless"
+    );
+    let require_parent_for_every_vpc_prefix = !env.config.site_fabric_prefixes.is_empty();
+    assert!(
+        lineage.is_safe_for_startup(require_parent_for_every_vpc_prefix),
+        "rootless prefixes must not block startup when no operator roots are configured"
+    );
+    startup.commit().await?;
+
+    Ok(())
+}
+
+/// Proves legacy rootless admission remains scoped to the VPC's own tenant,
+/// because another tenant's SitePrefix must neither attach nor block it.
+#[crate::sqlx_test]
+async fn omitted_site_prefix_id_checks_only_the_vpc_tenant(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            create_network_segments: Some(false),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+    let tenant = "legacy-prefix-tenant-a";
+    let other_tenant = "legacy-prefix-tenant-b";
+    create_fixture_tenant(&env, tenant).await?;
+    create_fixture_tenant(&env, other_tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "legacy tenant-scoped VPC", None).await;
+
+    seed_tenant_managed_site_prefix(
+        &env,
+        other_tenant,
+        "10.80.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    // Another tenant may own the same private address space without changing
+    // this VPC's legacy feature-off behavior.
+    let legacy = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            vpc_id,
+            None,
+            "10.80.1.0/24",
+        )))
+        .await?
+        .into_inner();
+    assert_eq!(legacy.site_prefix_id, None);
+
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            VpcId::new(),
+            None,
+            "10.80.2.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::NotFound);
+
+    seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.80.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let error = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            vpc_id,
+            None,
+            "10.80.2.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn omitted_site_prefix_id_serializes_with_tenant_root_creation(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            create_network_segments: Some(false),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+    let tenant = "legacy-prefix-creation-race";
+    create_fixture_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "legacy creation race VPC", None).await;
+
+    let mut site_prefix_create = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *site_prefix_create)
+        .await?;
+    db::site_prefix::create_tenant_managed(
+        NewTenantManagedSitePrefix {
+            id: SitePrefixId::new(),
+            tenant_organization_id: tenant.parse()?,
+            prefix: "10.81.0.0/16".parse()?,
+            metadata: ModelMetadata {
+                name: "concurrent tenant root".to_string(),
+                ..Default::default()
+            },
+        },
+        env.config.max_site_prefixes_per_tenant,
+        &mut site_prefix_create,
+    )
+    .await?;
+
+    let vpc_prefix_id = VpcPrefixId::new();
+    let request = site_prefix_child_request(vpc_prefix_id, vpc_id, None, "10.81.1.0/24");
+    let api = env.api.clone();
+    let create = tokio::spawn(async move { api.create_vpc_prefix(Request::new(request)).await });
+    wait_for_blocked_query(&env.pool, blocker_pid, "site_prefixes:tenant:").await;
+
+    site_prefix_create.commit().await?;
+    let error = create.await?.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(stored_vpc_prefix_count(&env, vpc_prefix_id).await, 0);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn omitted_site_prefix_id_serializes_with_first_operator_root_reconciliation(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            create_network_segments: Some(false),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+    let tenant = "legacy-operator-creation-race";
+    create_fixture_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "legacy operator race VPC", None).await;
+
+    let operator_root: IpNetwork = "198.19.0.0/16".parse()?;
+    let mut reconciliation = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *reconciliation)
+        .await?;
+    db::site_prefix::reconcile_configured(&mut reconciliation, &[operator_root]).await?;
+    let operator_root_id: SitePrefixId =
+        sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
+            .bind(operator_root)
+            .fetch_one(&mut *reconciliation)
+            .await?;
+
+    let vpc_prefix_id = VpcPrefixId::new();
+    let request = site_prefix_child_request(vpc_prefix_id, vpc_id, None, "198.19.1.0/24");
+    let api = env.api.clone();
+    let create = tokio::spawn(async move { api.create_vpc_prefix(Request::new(request)).await });
+    wait_for_blocked_query(&env.pool, blocker_pid, "pg_advisory_xact_lock_shared").await;
+
+    reconciliation.commit().await?;
+    let created = create.await??.into_inner();
+    assert_eq!(created.site_prefix_id, Some(operator_root_id));
+    assert_eq!(stored_vpc_prefix_count(&env, vpc_prefix_id).await, 1);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn vpc_prefix_create_rechecks_parent_after_concurrent_retirement(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = "site-prefix-retirement-race";
+    create_fixture_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "retirement race VPC", None).await;
+    let site_prefix_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.60.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    let mut retirement = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *retirement)
+        .await?;
+    let current = db::site_prefix::find_by_id_for_update(&mut retirement, site_prefix_id)
+        .await?
+        .expect("SitePrefix should exist");
+    db::site_prefix::retire_tenant_managed(
+        &RetireTenantManagedSitePrefix {
+            id: site_prefix_id,
+            tenant_organization_id: tenant.parse()?,
+        },
+        &current,
+        &mut retirement,
+    )
+    .await?;
+
+    let vpc_prefix_id = VpcPrefixId::new();
+    let request =
+        site_prefix_child_request(vpc_prefix_id, vpc_id, Some(site_prefix_id), "10.60.1.0/24");
+    let api = env.api.clone();
+    let create = tokio::spawn(async move { api.create_vpc_prefix(Request::new(request)).await });
+    wait_for_blocked_query(&env.pool, blocker_pid, "site_prefixes").await;
+
+    retirement.commit().await?;
+    let error = create.await?.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(stored_vpc_prefix_count(&env, vpc_prefix_id).await, 0);
+    let lifecycle_state: SitePrefixLifecycleState =
+        sqlx::query_scalar("SELECT lifecycle_state FROM site_prefixes WHERE id = $1")
+            .bind(site_prefix_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(lifecycle_state, SitePrefixLifecycleState::Deleting);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn tenant_managed_lineage_blocks_virtualization_transition_and_race(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = "site-prefix-virtualization-guard";
+    create_fixture_tenant(&env, tenant).await?;
+
+    let existing_vpc_id =
+        create_fnn_vpc_for_tenant(&env, tenant, "existing lineage VPC", None).await;
+    let existing_parent_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.90.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let existing_vpc_prefix_id = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            existing_vpc_id,
+            Some(existing_parent_id),
+            "10.90.1.0/24",
+        )))
+        .await?
+        .into_inner()
+        .id
+        .expect("created VPC prefix should include an ID");
+
+    let error = env
+        .api
+        .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
+            id: Some(existing_vpc_id),
+            if_version_match: None,
+            network_virtualization_type: Some(rpc::forge::VpcVirtualizationType::Flat as i32),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    env.api
+        .delete_vpc_prefix(Request::new(VpcPrefixDeletionRequest {
+            id: Some(existing_vpc_prefix_id),
+        }))
+        .await?;
+    assert!(stored_vpc_prefix_is_deleted(&env, existing_vpc_prefix_id).await);
+
+    // Soft-deleted lineage still owns address space until the controller
+    // physically removes it, so it must continue to keep the VPC on FNN.
+    let error = env
+        .api
+        .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
+            id: Some(existing_vpc_id),
+            if_version_match: None,
+            network_virtualization_type: Some(rpc::forge::VpcVirtualizationType::Flat as i32),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    let racing_vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "racing lineage VPC", None).await;
+    let racing_parent_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.91.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let mut child_create = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *child_create)
+        .await?;
+    let locked_vpc = db::vpc::find_by_with_lock(
+        child_create.as_mut(),
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &racing_vpc_id),
+        db::vpc::VpcRowLock::Mutation,
+    )
+    .await?
+    .pop()
+    .expect("racing VPC should exist");
+    let racing_vpc_prefix_id = VpcPrefixId::new();
+    db::vpc_prefix::persist(
+        NewVpcPrefix {
+            id: racing_vpc_prefix_id,
+            site_prefix_id: Some(racing_parent_id),
+            vpc_id: racing_vpc_id,
+            overlap_vpc_id: None,
+            config: VpcPrefixConfig {
+                prefix: "10.91.1.0/24".parse()?,
+            },
+            metadata: ModelMetadata {
+                name: "racing tenant-managed lineage".to_string(),
+                ..Default::default()
+            },
+        },
+        locked_vpc.version,
+        &mut child_create,
+    )
+    .await?;
+
+    let api = env.api.clone();
+    let update = tokio::spawn(async move {
+        api.update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
+            id: Some(racing_vpc_id),
+            if_version_match: None,
+            network_virtualization_type: Some(rpc::forge::VpcVirtualizationType::Flat as i32),
+        }))
+        .await
+    });
+    wait_for_blocked_query(&env.pool, blocker_pid, "vpcs").await;
+    child_create.commit().await?;
+
+    let error = update.await?.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let vpc = db::vpc::find_by(
+        &env.pool,
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &racing_vpc_id),
+    )
+    .await?
+    .pop()
+    .expect("racing VPC should remain visible");
+    assert_eq!(
+        vpc.config.network_virtualization_type,
+        carbide_network::virtualization::VpcVirtualizationType::Fnn
+    );
+    assert_eq!(stored_vpc_prefix_count(&env, racing_vpc_prefix_id).await, 1);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn flat_vpc_accepts_ipv4_prefix(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Flat VPCs should accept IPv4 prefixes just like every other VPC type.
     let env = create_test_env(pool).await;
     let (_, vpc) = api_fixtures::vpc::create_flat_vpc(
         &env,
         "flat".to_string(),
-        Some("2829bbe3-c169-4cd9-8b2a-19a8b1618a93".to_string()),
+        Some(FIXTURE_TENANT_ORG_ID.to_string()),
     )
     .await;
 
@@ -972,6 +3271,7 @@ async fn flat_vpc_accepts_ipv4_prefix(pool: PgPool) -> Result<(), Box<dyn std::e
         id: None,
         prefix: String::new(),
         vpc_id: vpc.id,
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig {
             prefix: "192.0.2.0/25".to_string(),
         }),
@@ -981,10 +3281,19 @@ async fn flat_vpc_accepts_ipv4_prefix(pool: PgPool) -> Result<(), Box<dyn std::e
         }),
     });
 
-    env.api
+    let created = env
+        .api
         .create_vpc_prefix(request)
         .await
-        .expect("Flat VPC should accept IPv4 prefix");
+        .expect("Flat VPC should accept IPv4 prefix")
+        .into_inner();
+
+    // Acceptance alone doesn't say the prefix landed on the right VPC, or landed at all.
+    assert_eq!(created.vpc_id, vpc.id);
+    assert_eq!(
+        created.config.as_ref().expect("prefix config").prefix,
+        "192.0.2.0/25"
+    );
 
     Ok(())
 }
@@ -1008,7 +3317,7 @@ async fn flat_vpc_accepts_ipv6_prefix(pool: PgPool) -> Result<(), Box<dyn std::e
     let (_, vpc) = api_fixtures::vpc::create_flat_vpc(
         &env,
         "flat".to_string(),
-        Some("2829bbe3-c169-4cd9-8b2a-19a8b1618a93".to_string()),
+        Some(FIXTURE_TENANT_ORG_ID.to_string()),
     )
     .await;
 
@@ -1016,6 +3325,7 @@ async fn flat_vpc_accepts_ipv6_prefix(pool: PgPool) -> Result<(), Box<dyn std::e
         id: None,
         prefix: String::new(),
         vpc_id: vpc.id,
+        site_prefix_id: None,
         config: Some(rpc::forge::VpcPrefixConfig {
             prefix: "2001:db8::/64".to_string(),
         }),

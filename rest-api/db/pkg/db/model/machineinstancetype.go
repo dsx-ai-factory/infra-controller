@@ -9,14 +9,16 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -47,6 +49,25 @@ type MachineInstanceType struct {
 	Deleted        *time.Time    `bun:"deleted,soft_delete"`
 }
 
+// MachineInstanceTypeCreateInput input parameters for Create method
+type MachineInstanceTypeCreateInput struct {
+	MachineID      string
+	InstanceTypeID uuid.UUID
+}
+
+// MachineInstanceTypeUpdateInput input parameters for Update method
+type MachineInstanceTypeUpdateInput struct {
+	MachineInstanceTypeID uuid.UUID
+	MachineID             *string
+	InstanceTypeID        *uuid.UUID
+}
+
+// MachineInstanceTypeFilterInput input parameters for GetAll method
+type MachineInstanceTypeFilterInput struct {
+	MachineID       *string
+	InstanceTypeIDs []uuid.UUID
+}
+
 // GetIndentedJSON returns formatted json of MachineInstanceType
 func (mi *MachineInstanceType) GetIndentedJSON() ([]byte, error) {
 	return json.MarshalIndent(mi, "", "  ")
@@ -55,8 +76,8 @@ func (mi *MachineInstanceType) GetIndentedJSON() ([]byte, error) {
 // ToRemoveAssociationRequestProto builds the workflow request used to
 // dissociate this Machine from its current InstanceType. The proto only
 // carries the Machine ID; site-side reconciliation handles the rest.
-func (mit *MachineInstanceType) ToRemoveAssociationRequestProto() *cwssaws.RemoveMachineInstanceTypeAssociationRequest {
-	return &cwssaws.RemoveMachineInstanceTypeAssociationRequest{
+func (mit *MachineInstanceType) ToRemoveAssociationRequestProto() *corev1.RemoveMachineInstanceTypeAssociationRequest {
+	return &corev1.RemoveMachineInstanceTypeAssociationRequest{
 		MachineId: mit.MachineID,
 	}
 }
@@ -88,15 +109,15 @@ func (mi *MachineInstanceType) BeforeCreateTable(ctx context.Context, query *bun
 // MachineInstanceTypeDAO is an interface for interacting with the MachineInstanceType model
 type MachineInstanceTypeDAO interface {
 	//
-	CreateFromParams(ctx context.Context, tx *db.Tx, machineID string, instanceTypeID uuid.UUID) (*MachineInstanceType, error)
+	Create(ctx context.Context, tx *db.Tx, input MachineInstanceTypeCreateInput) (*MachineInstanceType, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*MachineInstanceType, error)
 	//
-	GetAll(ctx context.Context, tx *db.Tx, machineID *string, instanceTypeID []uuid.UUID, includeRelations []string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]MachineInstanceType, int, error)
+	GetAll(ctx context.Context, tx *db.Tx, filter MachineInstanceTypeFilterInput, page paginator.PageInput, includeRelations []string) ([]MachineInstanceType, int, error)
 	//
-	UpdateFromParams(ctx context.Context, tx *db.Tx, id uuid.UUID, machineID *string, instanceTypeID *uuid.UUID) (*MachineInstanceType, error)
+	Update(ctx context.Context, tx *db.Tx, input MachineInstanceTypeUpdateInput) (*MachineInstanceType, error)
 	//
-	DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error
+	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error
 	//
 	DeleteAllByInstanceTypeID(ctx context.Context, tx *db.Tx, instanceTypeID uuid.UUID, purge bool) error
 }
@@ -105,27 +126,21 @@ type MachineInstanceTypeDAO interface {
 type MachineInstanceTypeSQLDAO struct {
 	dbSession *db.Session
 	MachineInstanceTypeDAO
-	tracerSpan *stracer.TracerSpan
 }
 
-// CreateFromParams creates a new MachineInstanceType from the given parameters
+// Create creates a new MachineInstanceType from the given parameters
 // The returned MachineInstanceType will not have any related structs (InstanceTypeID) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (mitsd MachineInstanceTypeSQLDAO) CreateFromParams(
-	ctx context.Context, tx *db.Tx,
-	machineID string,
-	instanceTypeID uuid.UUID) (*MachineInstanceType, error) {
+func (mitsd MachineInstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineInstanceTypeCreateInput) (_ *MachineInstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.CreateFromParams")
-	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
-	}
+	ctx, machineInstanceTypeDAOSpan := cotel.StartSpan(ctx, "MachineInstanceTypeSQLDAO.Create")
+	defer func() { cotel.EndSpan(machineInstanceTypeDAOSpan, retErr) }()
 
 	mi := &MachineInstanceType{
 		ID:             uuid.New(),
-		MachineID:      machineID,
-		InstanceTypeID: instanceTypeID,
+		MachineID:      input.MachineID,
+		InstanceTypeID: input.InstanceTypeID,
 	}
 
 	_, err := db.GetIDB(tx, mitsd.dbSession).NewInsert().Model(mi).Exec(ctx)
@@ -143,14 +158,11 @@ func (mitsd MachineInstanceTypeSQLDAO) CreateFromParams(
 
 // GetByID returns a MachineInstanceType by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (mitsd MachineInstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*MachineInstanceType, error) {
+func (mitsd MachineInstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *MachineInstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.GetByID")
-	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
-
-		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "id", id.String())
-	}
+	ctx, machineInstanceTypeDAOSpan := cotel.StartSpan(ctx, "MachineInstanceTypeDAO.GetByID")
+	defer func() { cotel.EndSpan(machineInstanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(machineInstanceTypeDAOSpan, attribute.String("id", id.String()))
 
 	mi := &MachineInstanceType{}
 
@@ -175,29 +187,25 @@ func (mitsd MachineInstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in MachineInstanceTypeOrderByDefault in ascending order
-func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, machineID *string, instanceTypeIDs []uuid.UUID, includeRelations []string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]MachineInstanceType, int, error) {
+func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineInstanceTypeFilterInput, page paginator.PageInput, includeRelations []string) (_ []MachineInstanceType, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.GetAll")
-	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
-	}
+	ctx, machineInstanceTypeDAOSpan := cotel.StartSpan(ctx, "MachineInstanceTypeSQLDAO.GetAll")
+	defer func() { cotel.EndSpan(machineInstanceTypeDAOSpan, retErr) }()
 
 	mits := []MachineInstanceType{}
 
 	query := db.GetIDB(tx, mitsd.dbSession).NewSelect().Model(&mits)
 
-	if machineID != nil {
-		query = query.Where("mit.machine_id = ?", *machineID)
-		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "machine_id", machineID)
+	if filter.MachineID != nil {
+		query = query.Where("mit.machine_id = ?", *filter.MachineID)
 	}
 
-	if instanceTypeIDs != nil {
-		if len(instanceTypeIDs) == 1 {
-			query = query.Where("mit.instance_type_id = ?", instanceTypeIDs[0])
-			mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "instance_type_id", instanceTypeIDs[0].String())
+	if filter.InstanceTypeIDs != nil {
+		if len(filter.InstanceTypeIDs) == 1 {
+			query = query.Where("mit.instance_type_id = ?", filter.InstanceTypeIDs[0])
+			cotel.SetAttribute(machineInstanceTypeDAOSpan, attribute.String("instance_type_id", filter.InstanceTypeIDs[0].String()))
 		} else {
-			query = query.Where("mit.instance_type_id IN (?)", bun.In(instanceTypeIDs))
-			mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "instance_type_ids", instanceTypeIDs)
+			query = query.Where("mit.instance_type_id IN (?)", bun.In(filter.InstanceTypeIDs))
 		}
 	}
 
@@ -206,11 +214,11 @@ func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, ma
 	}
 
 	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
-	if orderBy == nil {
-		orderBy = paginator.NewDefaultOrderBy(MachineInstanceTypeOrderByDefault)
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(MachineInstanceTypeOrderByDefault)
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, offset, limit, orderBy, MachineInstanceTypeOrderByFields)
+	paginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, MachineInstanceTypeOrderByFields)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -223,38 +231,36 @@ func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, ma
 	return mits, paginator.Total, nil
 }
 
-// UpdateFromParams updates specified fields of an existing MachineInstanceType
+// Update updates specified fields of an existing MachineInstanceType
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (mitsd MachineInstanceTypeSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, id uuid.UUID, machineID *string, instanceTypeID *uuid.UUID) (*MachineInstanceType, error) {
+func (mitsd MachineInstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineInstanceTypeUpdateInput) (_ *MachineInstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.UpdateFromParams")
-	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
-	}
+	ctx, machineInstanceTypeDAOSpan := cotel.StartSpan(ctx, "MachineInstanceTypeSQLDAO.Update")
+	defer func() { cotel.EndSpan(machineInstanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(machineInstanceTypeDAOSpan, attribute.String("id", input.MachineInstanceTypeID.String()))
 
 	mi := &MachineInstanceType{
-		ID: id,
+		ID: input.MachineInstanceTypeID,
 	}
 
 	updatedFields := []string{}
 
-	if machineID != nil {
-		mi.MachineID = *machineID
+	if input.MachineID != nil {
+		mi.MachineID = *input.MachineID
 		updatedFields = append(updatedFields, "machine_id")
-		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "machine_id", machineID)
 	}
-	if instanceTypeID != nil {
-		mi.InstanceTypeID = *instanceTypeID
+	if input.InstanceTypeID != nil {
+		mi.InstanceTypeID = *input.InstanceTypeID
 		updatedFields = append(updatedFields, "instance_type_id")
-		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "instance_type_id", instanceTypeID.String())
+		cotel.SetAttribute(machineInstanceTypeDAOSpan, attribute.String("instance_type_id", input.InstanceTypeID.String()))
 	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, mitsd.dbSession).NewUpdate().Model(mi).Column(updatedFields...).Where("id = ?", id).Exec(ctx)
+		_, err := db.GetIDB(tx, mitsd.dbSession).NewUpdate().Model(mi).Column(updatedFields...).Where("id = ?", input.MachineInstanceTypeID).Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -268,17 +274,14 @@ func (mitsd MachineInstanceTypeSQLDAO) UpdateFromParams(ctx context.Context, tx 
 	return nv, nil
 }
 
-// DeleteByID deletes an MachineInstanceType by ID
+// Delete deletes an MachineInstanceType by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (mitsd MachineInstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error {
+func (mitsd MachineInstanceTypeSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.DeleteByID")
-	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
-
-		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "id", id.String())
-	}
+	ctx, machineInstanceTypeDAOSpan := cotel.StartSpan(ctx, "MachineInstanceTypeSQLDAO.Delete")
+	defer func() { cotel.EndSpan(machineInstanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(machineInstanceTypeDAOSpan, attribute.String("id", id.String()))
 
 	mit := &MachineInstanceType{
 		ID: id,
@@ -300,14 +303,11 @@ func (mitsd MachineInstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx
 
 // DeleteAllByInstanceTypeID deletes all MachineInstanceTypes for a given InstanceType
 // error is returned only if there is a db error
-func (mitsd MachineInstanceTypeSQLDAO) DeleteAllByInstanceTypeID(ctx context.Context, tx *db.Tx, instanceTypeID uuid.UUID, purge bool) error {
+func (mitsd MachineInstanceTypeSQLDAO) DeleteAllByInstanceTypeID(ctx context.Context, tx *db.Tx, instanceTypeID uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.DeleteAllByInstanceTypeID")
-	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
-
-		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "instance_type_id", instanceTypeID.String())
-	}
+	ctx, machineInstanceTypeDAOSpan := cotel.StartSpan(ctx, "MachineInstanceTypeDAO.DeleteAllByInstanceTypeID")
+	defer func() { cotel.EndSpan(machineInstanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(machineInstanceTypeDAOSpan, attribute.String("instance_type_id", instanceTypeID.String()))
 
 	mit := &MachineInstanceType{
 		InstanceTypeID: instanceTypeID,
@@ -330,7 +330,6 @@ func (mitsd MachineInstanceTypeSQLDAO) DeleteAllByInstanceTypeID(ctx context.Con
 // NewMachineInstanceTypeDAO creates a new NewMachineInstanceTypeDAO
 func NewMachineInstanceTypeDAO(dbSession *db.Session) MachineInstanceTypeDAO {
 	return &MachineInstanceTypeSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

@@ -17,6 +17,7 @@
 
 use ::rpc::forge as rpc;
 use carbide_dpf::dpu_node_cr_name;
+use carbide_uuid::machine::HostMachineId;
 use db::ObjectFilter;
 use db::machine::find_one;
 use db::managed_host::load_snapshot;
@@ -25,7 +26,7 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
-use crate::api::{Api, log_machine_id, log_request_data};
+use crate::api::{Api, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
 
 pub(crate) async fn modify_dpf_state(
@@ -34,12 +35,7 @@ pub(crate) async fn modify_dpf_state(
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
     let request = request.get_ref();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
-    log_machine_id(&machine_id);
-
-    if machine_id.machine_type().is_dpu() {
-        return Err(CarbideError::InvalidArgument("Only host id is expected!!".to_string()).into());
-    }
+    let machine_id: HostMachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
     let machine_snapshot = load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
@@ -49,9 +45,9 @@ pub(crate) async fn modify_dpf_state(
             id: machine_id.to_string(),
         })?;
 
-    if !request.dpf_enabled && machine_snapshot.host_snapshot.dpf.used_for_ingestion {
+    if !request.dpf_enabled && machine_snapshot.host_snapshot.config.dpf.used_for_ingestion {
         return Err(CarbideError::FailedPrecondition(format!(
-            "Cannot disable DPF for host {}: machine was ingested via DPF.",
+            "cannot disable DPF for host {}: machine was ingested via DPF",
             machine_id
         ))
         .into());
@@ -79,7 +75,7 @@ pub(crate) async fn get_dpf_state(
     for machine_id in &request.machine_ids {
         if machine_id.machine_type().is_dpu() {
             return Err(
-                CarbideError::InvalidArgument("Only host id is expected!!".to_string()).into(),
+                CarbideError::InvalidArgument("only host id is expected!!".to_string()).into(),
             );
         }
     }
@@ -108,12 +104,7 @@ pub(crate) async fn get_dpf_host_snapshot(
 ) -> Result<Response<rpc::DpfHostSnapshotResponse>, Status> {
     log_request_data(&request);
     let request = request.get_ref();
-    let machine_id = convert_and_log_machine_id(request.host_machine_id.as_ref())?;
-    log_machine_id(&machine_id);
-
-    if machine_id.machine_type().is_dpu() {
-        return Err(CarbideError::InvalidArgument("Only host id is expected".to_string()).into());
-    }
+    let machine_id: HostMachineId = convert_and_log_machine_id(request.host_machine_id.as_ref())?;
 
     let Some(ops) = api.dpf_sdk.as_ref() else {
         return Err(CarbideError::InvalidArgument(
@@ -133,7 +124,7 @@ pub(crate) async fn get_dpf_host_snapshot(
 
     let host_dpf_id = machine.dpf_id().ok_or_else(|| {
         CarbideError::InvalidArgument(format!(
-            "Host {machine_id} has no BMC MAC; cannot derive DPF node name"
+            "host {machine_id} has no BMC MAC; cannot derive DPF node name"
         ))
     })?;
     let node_name = dpu_node_cr_name(&host_dpf_id);
@@ -144,7 +135,7 @@ pub(crate) async fn get_dpf_host_snapshot(
         .map_err(CarbideError::DpfError)?;
 
     let json_payload = serde_json::to_string_pretty(&snapshot).map_err(|e| {
-        CarbideError::internal(format!("Failed to serialize DPF host snapshot: {e}"))
+        CarbideError::internal(format!("failed to serialize DPF host snapshot: {e}"))
     })?;
 
     Ok(Response::new(rpc::DpfHostSnapshotResponse { json_payload }))

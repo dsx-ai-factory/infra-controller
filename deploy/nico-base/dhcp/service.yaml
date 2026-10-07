@@ -19,6 +19,8 @@ kind: Service
 metadata:
   name: nico-dhcp
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   ports:
     - port: 67
       name: udp

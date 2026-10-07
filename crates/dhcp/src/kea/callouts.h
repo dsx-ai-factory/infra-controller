@@ -19,11 +19,14 @@
 #define CALLOUTS_H
 
 #include <asiolink/io_address.h>
+#include <dhcp/dhcp6.h>
 #include <dhcp/pkt4.h>
+#include <dhcp/pkt6.h>
 #include <dhcpsrv/lease.h>
 #include <hooks/hooks.h>
 #include <log/logger.h>
 #include <log/macros.h>
+#include <sys/socket.h>
 #include <string>
 
 #include <dhcp/option4_addrlst.h>
@@ -108,6 +111,11 @@ int lease4_select(CalloutHandle &handle);
 int lease4_renew(CalloutHandle &handle);
 int pkt4_send(CalloutHandle &handle);
 int lease4_expire(CalloutHandle &handle);
+int pkt6_receive(CalloutHandle &handle);
+int lease6_select(CalloutHandle &handle);
+int lease6_renew(CalloutHandle &handle);
+int lease6_rebind(CalloutHandle &handle);
+int pkt6_send(CalloutHandle &handle);
 int lease6_expire(CalloutHandle &handle);
 }
 

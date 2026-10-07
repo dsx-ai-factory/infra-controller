@@ -19,19 +19,13 @@ use std::fmt::{Debug, Display};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum_client_ip::Rejection;
-use carbide_uuid::UuidConversionError;
-use rpc::errors::RpcDataConversionError;
 
-pub enum PxeRequestError {
+pub(super) enum PxeRequestError {
     CarbideApiError(tonic::Status),
     MissingClientConfig,
-    MissingMachineId,
     MissingIp(Rejection),
     InvalidBuildArch,
-    MalformedMachineId(String),
     MalformedBuildArch(String),
-    RpcConversion(RpcDataConversionError),
-    UuidConversion(UuidConversionError),
 }
 
 impl IntoResponse for PxeRequestError {
@@ -59,16 +53,84 @@ impl Display for PxeRequestError {
                 Self::MissingClientConfig =>
                     "Missing client configuration from server config (should not reach this case)"
                         .to_string(),
-                Self::MissingMachineId =>
-                    "Missing Machine Identifier (UUID) specified in URI parameter uuid".to_string(),
                 Self::InvalidBuildArch =>
                     "Invalid build arch specified in URI parameter buildarch".to_string(),
-                Self::MalformedMachineId(err) => format!("Malformed Machine UUID: {err}"),
                 Self::MalformedBuildArch(err) => format!("Malformed build arch: {err}"),
                 Self::MissingIp(err) => format!("Source IP is missing. Error: {err:?}"),
-                Self::RpcConversion(err) => format!("Error converting RPC data: {err:?}"),
-                Self::UuidConversion(err) => format!("Error converting RPC UUID data: {err:?}"),
             }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ErrorCase {
+        MissingClientConfig,
+        InvalidBuildArch,
+        MalformedBuildArch,
+    }
+
+    fn error_for(case: ErrorCase) -> PxeRequestError {
+        match case {
+            ErrorCase::MissingClientConfig => PxeRequestError::MissingClientConfig,
+            ErrorCase::InvalidBuildArch => PxeRequestError::InvalidBuildArch,
+            ErrorCase::MalformedBuildArch => {
+                PxeRequestError::MalformedBuildArch("bad arch".to_string())
+            }
+        }
+    }
+
+    fn display_error(case: ErrorCase) -> String {
+        error_for(case).to_string()
+    }
+
+    fn debug_matches_display(case: ErrorCase) -> bool {
+        let error = error_for(case);
+        format!("{error:?}") == error.to_string()
+    }
+
+    fn response_status(case: ErrorCase) -> StatusCode {
+        error_for(case).into_response().status()
+    }
+
+    #[test]
+    fn formats_pxe_request_errors() {
+        value_scenarios!(display_error:
+            "missing inputs" {
+                ErrorCase::MissingClientConfig => "Missing client configuration from server config (should not reach this case)".to_string(),
+                ErrorCase::InvalidBuildArch => "Invalid build arch specified in URI parameter buildarch".to_string(),
+            }
+
+            "malformed inputs" {
+                ErrorCase::MalformedBuildArch => "Malformed build arch: bad arch".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn debug_matches_display_for_pxe_request_errors() {
+        value_scenarios!(debug_matches_display:
+            "debug" {
+                ErrorCase::MissingClientConfig => true,
+                ErrorCase::InvalidBuildArch => true,
+                ErrorCase::MalformedBuildArch => true,
+            }
+        );
+    }
+
+    #[test]
+    fn converts_pxe_request_errors_to_bad_request_responses() {
+        value_scenarios!(response_status:
+            "response status" {
+                ErrorCase::MissingClientConfig => StatusCode::BAD_REQUEST,
+                ErrorCase::InvalidBuildArch => StatusCode::BAD_REQUEST,
+                ErrorCase::MalformedBuildArch => StatusCode::BAD_REQUEST,
+            }
+        );
     }
 }

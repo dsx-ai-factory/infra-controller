@@ -17,11 +17,13 @@
 
 use std::borrow::Cow;
 
+use serde_json::json;
+
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn firmware_inventory_collection() -> redfish::Collection<'static> {
+pub(super) fn firmware_inventory_collection() -> redfish::Collection<'static> {
     let odata_id = format!(
         "{}/FirmwareInventory",
         redfish::update_service::resource().odata_id
@@ -33,7 +35,7 @@ pub fn firmware_inventory_collection() -> redfish::Collection<'static> {
     }
 }
 
-pub fn firmware_inventory_resource<'a>(id: &'a str) -> redfish::Resource<'a> {
+pub(crate) fn firmware_inventory_resource<'a>(id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("{}/{id}", firmware_inventory_collection().odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -44,25 +46,37 @@ pub fn firmware_inventory_resource<'a>(id: &'a str) -> redfish::Resource<'a> {
 }
 
 /// Generate resource bound to chassis.
-pub fn builder(resource: &redfish::Resource) -> SoftwareInventoryBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> SoftwareInventoryBuilder {
     SoftwareInventoryBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
     }
 }
 
-pub struct SoftwareInventory {
-    pub id: Cow<'static, str>,
+pub(crate) struct SoftwareInventory {
+    pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
 }
 
 impl SoftwareInventory {
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
+    }
+
+    /// Update the `Version` field in-place.  Used by
+    /// `UpdateServiceState::apply_staged_firmware` to reflect a firmware
+    /// version that became active after a power-cycle.
+    pub(crate) fn set_version(&mut self, version: &str) {
+        if let Some(object) = self.value.as_object_mut() {
+            object.insert(
+                "Version".to_string(),
+                serde_json::Value::String(version.to_string()),
+            );
+        }
     }
 }
 
-pub struct SoftwareInventoryBuilder {
+pub(crate) struct SoftwareInventoryBuilder {
     id: Cow<'static, str>,
     value: serde_json::Value,
 }
@@ -77,11 +91,42 @@ impl Builder for SoftwareInventoryBuilder {
 }
 
 impl SoftwareInventoryBuilder {
-    pub fn version(self, value: &str) -> Self {
+    pub(crate) fn name(self, value: &str) -> Self {
+        self.add_str_field("Name", value)
+    }
+
+    pub(crate) fn manufacturer(self, value: &str) -> Self {
+        self.add_str_field("Manufacturer", value)
+    }
+
+    pub(crate) fn software_id(self, value: &str) -> Self {
+        self.add_str_field("SoftwareId", value)
+    }
+
+    pub(crate) fn version(self, value: &str) -> Self {
         self.add_str_field("Version", value)
     }
 
-    pub fn build(self) -> SoftwareInventory {
+    pub(crate) fn status(self, value: redfish::resource::Status) -> Self {
+        self.apply_patch(json!({ "Status": value.into_json() }))
+    }
+
+    pub(crate) fn updateable(self, value: bool) -> Self {
+        self.apply_patch(json!({ "Updateable": value }))
+    }
+
+    pub(crate) fn related_items(self, odata_ids: &[&str]) -> Self {
+        let items = odata_ids
+            .iter()
+            .map(|odata_id| json!({ "@odata.id": odata_id }))
+            .collect::<Vec<_>>();
+        self.apply_patch(json!({
+            "RelatedItem": items,
+            "RelatedItem@odata.count": odata_ids.len(),
+        }))
+    }
+
+    pub(crate) fn build(self) -> SoftwareInventory {
         SoftwareInventory {
             id: self.id,
             value: self.value,

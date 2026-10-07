@@ -10,7 +10,7 @@ the management backend for NVIDIA Infrastructure Controller (NICo), exposed as a
 provides multi-tenant, API-driven bare-metal lifecycle management, working in
 concert with Core services for on-site hardware operations.
 
-> **Status:** Experimental/Preview. APIs, configurations, and features may
+> **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
 ### Key Responsibilities
@@ -98,7 +98,7 @@ make test-workflow
 make test-auth
 make test-common
 make test-cert-manager
-make test-site-agent        # requires mock gRPC servers
+make test-site-agent        # starts mock Core and Flow gRPC servers first
 make test-site-manager
 make test-site-workflow
 make test-ipam
@@ -112,6 +112,20 @@ make migrate                # run database migrations against test DB
 
 Tests require a PostgreSQL container (postgres:14.4-alpine) on port 30432.
 The Makefile manages this automatically via `ensure-postgres`.
+
+Use these targets rather than calling `go test` yourself, because they start what the tests
+need and skipping that setup does not fail fast:
+
+- `make test-site-agent` starts mock Core and Flow gRPC servers. Without them the
+  `site-agent/pkg/components` tests retry the connection on a `40s` backoff until the `10m`
+  test timeout, so a bare `go test ./site-agent/...` looks like a hang rather than an error.
+  That target also scopes to `site-agent/pkg/components` and sets `CGO_ENABLED=1` for `-race`,
+  so it is not the same package set or the same build.
+- `test-api`, `test-auth`, `test-db`, `test-flow`, `test-ipam`, `test-nvswitch-manager`,
+  `test-powershelf-manager`, and `test-workflow` call `ensure-postgres` first.
+- Every Postgres-backed package resets the schema, so packages running in parallel drop and
+  recreate the same tables and fail in `TestSetupSchema`. Pass `-p 1` whenever you do run
+  `go test` against more than one of them directly.
 
 ### Linting and Formatting
 
@@ -137,10 +151,14 @@ make preview-openapi
 
 # Generate Go SDK from OpenAPI spec
 make generate-sdk
-
-# Publish OpenAPI docs
-make publish-openapi
 ```
+
+`generate-sdk` uses a pinned openapi-generator, downloaded to `.tools/` and
+checksum-verified on first use, because the generated SDK is byte-for-byte
+dependent on the generator version. Do not install the generator separately to
+bypass the pin. Raising `OPENAPI_GENERATOR_VERSION` belongs in its own change
+alongside the regenerated `sdk/standard/`, since a new generator rewrites files
+no spec edit touched.
 
 ### Protobuf Code Generation
 
@@ -166,23 +184,273 @@ make kind-down              # tear down cluster
 
 ## Coding Conventions
 
+Follow the shared [Engineering Guidelines](../CONTRIBUTING.md#engineering-guidelines)
+for scope control, reuse-before-new-code, evidence-backed assumptions, and
+verification expectations.
+
 - Follow standard Go conventions; `go fmt` is enforced in CI.
 - Linting uses `golangci-lint` (v2 config in `.golangci.yml`) with most
   linters enabled, plus `revive` (config in `.revive.toml`).
 - Use `testify` (assert/require) for test assertions.
+- When a test verifies a generated CLI command path, assert that the leaf
+  command has a non-nil `Action`; path presence alone does not prove the
+  command is runnable.
+- For a tenant-owned TUI resource picker, resolve the current tenant explicitly,
+  send its ID in the list request, and require each returned row to match that
+  exact tenant ID. Test a dual-role caller whose response also contains
+  provider-owned and other-tenant resources.
+- When a site-wide TUI resource picker must ignore a narrower active scope,
+  clear that scope and invalidate filtered caches before fetching, then restore
+  the scope and invalidate filtered caches again on every return path so
+  site-wide entries cannot be reused under the restored scope. Test the scoped
+  case.
 - Tests that need a database use a PostgreSQL container (testcontainers-go
   or the Makefile-managed container).
+- Organize tests by the production function or method under test, not by individual
+  scenarios. Use one top-level test function named `Test<Receiver>_<Method>` or
+  `Test<Function>`—for example `TestIsStrInSlice` for `IsStrInSlice` and `TestGetAllSkuHandler_Handle` for `GetAllSkuHandler.Handle`. Define individual test
+  cases in a table and execute each case as a named `t.Run` subtest. Do not create
+  separate top-level test functions for each test case.
 - Tests run with `-p 1` (serial) and often with `-race`.
 - API handlers live in `api/pkg/api/handler/`, request/response models in
   `api/pkg/api/model/`, and DB models in `db/pkg/db/model/`.
-- OpenAPI schema in `openapi/spec.yaml` must be updated whenever API
-  endpoints are added or modified.
+- OpenAPI schema in `openapi/spec.yaml` must be updated whenever routes in the
+  published API surface are added or modified.
+- Give every newly introduced OpenAPI object a realistic example backed by an
+  existing contract, configuration, or test fixture. Keep example IDs, enum
+  values, nullability, and timing semantics valid under OpenAPI lint.
+- When adding a request/response field to a resource that has both single-item
+  and batch endpoints, update the full surface together: single create/update
+  DTOs, batch create/update DTOs, handlers, DAO input structs, persistence,
+  OpenAPI, SDK, and tests. Do not stop after the single handler path.
+- When adding a request field, if the field contains sensitive information
+  (passwords, auth tokens, encryption keys, etc.), add it to the list of
+  fields to be obfuscated in `rest-api/api/pkg/middleware/audit.go`, using
+  the currently listed fields as a guide for what is considered sensitive.
+- Endpoint handlers should use the following name prefix convention consistently (Instance resource used as example):
+  - GET single object: GetInstanceHandler
+  - GET multiple objects: GetAllInstanceHandler
+  - POST single object: CreateInstanceHandler
+  - POST multiple objects: BatchCreateInstanceHandler
+  - PUT object: CreateOrUpdateInstance
+  - PATCH object: UpdateInstance
+  - PATCH multiple objects: BatchUpdateInstance
+  - DELETE object: DeleteInstance
+- Corresponding API request models should have the following naming convention:
+  - POST: APIInstanceCreateRequest
+  - PATCH: APIInstanceUpdateRequest
+  - PUT: APIInstanceCreateOrUpdateRequest
+  - DELETE: APIInstanceDeleteRequest
+  - GET: Request objects are typically not used for GET requests
+- Optional string fields that support clearing through PATCH use `""` as the
+  explicit clear value. Omission or JSON `null` preserves the stored value;
+  model these as `*string` instead of adding custom presence tracking.
+- API models should have the following naming conventions:
+  - APIInstance: For full Instance details
+  - APIInstanceSummary: For summary objects nested under other API resource objects
+- When a JSON request body exists, put IDs such as `siteId` in that body
+  and validate them on the DTO; use query parameters for filters/read-only
+  selectors.
+- Successful POST/PUT responses should return the updated object, but omit
+  passwords and other credentials. Keep OpenAPI
+  descriptions focused on the REST contract rather than internal gRPC
+  implementation details.
+- When an authoritative external create returns a contract-critical value,
+  persist it in the request transaction before returning 2xx and independently
+  assert the response and database state. Do not rely on a best-effort cache or
+  later reconciliation for read-after-create behavior.
+- API-layer enum-like request constants exposed through JSON use CapitalCase
+  values, for example `SiteWideRoot` and `BMCRoot`.
+- When prose names exact API enum values, format the literals as code, for
+  example `Set`, `Clear`, and `Restart`, so they are distinct from verbs.
+- For disruptive machine operations, decide and encode the attached-Instance
+  behavior explicitly. If an operation can power-cycle or otherwise disrupt a
+  tenant workload, check `Machine.IsAssigned` (or the equivalent association)
+  and reject unless the product requirement explicitly allows Provider Admins
+  to override tenant attachment
+- Avoid declaring new types that are just an array of another type. Simply use an
+  array of the original object
+- Be prudent when declaring utility functions that pass around arbitrary set of
+  arguments. If it's used only once or breaks the flow of reading the caller code,
+  it is often better to keep the logic inline
+
+### Interactive CLI review checks
+
+- When an option consumes a separate value, test that another option token is
+  rejected instead of consumed as that value.
+- Propagate terminal restoration errors. Restore the terminal successfully
+  before starting another interactive selector. Return one non-nil error
+  unchanged. Use `errors.Join` only when the operation and restoration both
+  fail. Treat only a direct cancellation sentinel as successful so a joined
+  restoration failure propagates. Test normal PTY, cancellation, and
+  restoration-failure paths.
+- Table-test shell argument quoting with empty input, whitespace, quotes,
+  backslashes, control characters, non-ASCII text, and shell metacharacters.
+- When a mutation success message reads fields from a response object, reject
+  malformed JSON, `null`, empty objects, and missing display fields before
+  printing success. Use the returned resource values rather than echoing
+  request or discovery values that the server may default or normalize, and
+  test a response whose value differs from the pre-request value.
+
+### REST endpoints through the Core gRPC proxy
+
+When building or converting a REST endpoint that calls on-site NICo Core through
+the generic gRPC proxy, follow
+[`skills/rest-core-grpc-proxy/SKILL.md`](skills/rest-core-grpc-proxy/SKILL.md).
+
+### REST endpoints through the Flow gRPC proxy
+
+When building or converting a REST endpoint that calls on-site Flow through the
+generic gRPC proxy, follow
+[`skills/rest-flow-grpc-proxy/SKILL.md`](skills/rest-flow-grpc-proxy/SKILL.md).
+Callers supply the Temporal workflow ID and conflict policy (unlike CoreProxy).
+
+### REST endpoint implementation patterns
+
+Before adding REST API code, find the nearest existing endpoint family and copy
+its shape. The central route list in `api/pkg/api/routes.go` already covers the
+main patterns:
+
+- Plain DB-backed resources use the resource triplet
+  `api/pkg/api/handler/<resource>.go`, `api/pkg/api/model/<resource>.go`, and
+  corresponding `*_test.go` files. VPC, Instance Type, SSH Key Group, Network
+  Security Group, and Operating System are good references for ordinary
+  create/get/list/update/delete surfaces.
+- Site-scoped cloud-to-site operations pass a site client pool into the handler
+  constructor (`scp *site.ClientPool`) and resolve the site before calling
+  Temporal or Core. VPC, Subnet, Expected Machine/Rack/Switch, Flow Rack/Tray,
+  Machine Validation, and Tenant Identity endpoints are the reference families.
+- Flow-backed inventory and task APIs use Flow request/response protobufs in the
+  API model layer and keep target-shape helpers next to the model or handler
+  that owns the REST shape. Use Rack, Tray, Task, and Task Rule as references.
+  Every Flow-backed endpoint dispatches through the generic proxy, so use
+  `handler/util/common.ProxyFlowGRPC` (or `ExecuteFlowGRPC` where the caller
+  must return a plain `error`) rather than adding a bespoke Temporal workflow
+  per method. Retiring the bespoke workflows spans releases; see the skill for
+  the required order.
+- Curated REST endpoints that call NICo Core `forge.Forge` unary methods should
+  use `handler/util/common.ExecuteCoreGRPC` with a typed protobuf request. Do
+  not create a bespoke Temporal workflow for a simple unary Core call. BMC
+  Credential is the reference for auth, site lookup, secret redaction, and a
+  password-free response.
+- Public discovery endpoints belong in `NewWellKnownRoutes`, not the normal
+  authenticated `NewAPIRoutes` list. The Tenant Identity `.well-known/*`
+  endpoints are security-sensitive because they are mounted before auth
+  middleware.
+
+- Use receiver methods named `FromDBModel` and `ToDBModel` for conversions
+  between API and DB models. Prefer `FromDBModel` over new `NewX` conversion
+  constructors as existing models are updated.
+- Give every API model attribute a structured schema; do not expose schemaless
+  JSON. JSON tags use camelCase, and API constants use PascalCase. In exceptional
+  cases where industry standards differ e.g. well known JWKS endpoints - snake_case
+  can be used
+- Review the existing endpoint routes before choosing a new route or attribute
+  name. Published names are compatibility commitments and require deprecation
+  before they can be replaced. Follow these REST conventions:
+  - Use POST to create resources.
+  - Use PATCH to update resources.
+  - Use PUT only when an endpoint supports both creation and update.
+  - End PATCH, GET, and DELETE routes with the resource ID unless the resource
+    has no unique identifier
+  - Return pagination metadata in the `X-Pagination` response header for GET
+    requests that return multiple resources.
+  - Query params are encouraged only for GET requests that return multiple objects
+- API request models should use ozzo validation for simple validations instead of
+  validating data in the handler. Complex validations involving multiple
+  request attributes can be done in `Validate` receiver function. All errors returned
+  from `Validate` receiver function should have `validation.Errors` type
+
+Keep handlers thin and reuse the common surfaces already in the tree:
+
+1. Start handlers with `common.SetupHandler`, defer the span end, check the
+   request user, then validate org membership and roles with the authorization
+   helpers used by the neighboring handler.
+2. Bind request bodies into `api/pkg/api/model` DTOs and call `Validate` before
+   conversion or side effects. Keep syntactic and cross-field request rules in
+   `Validate`; keep auth, ownership, site readiness, and DB-backed checks in the
+   handler where context is available.
+3. Use `IsProviderOrTenant` from `rest-api/api/pkg/api/handler/util/common/common.go`
+   to retrieve Provider and Tenant objects. When adding list endpoints, reuse
+   `pagination.PageRequest`, `common.ValidateKnownQueryParams`, and `common.GetSearchQuery`.
+4. Put request-to-proto conversion on the API request type and entity-to-proto
+   conversion on the DB model, following the "Proto conversion methods" section
+   below. `ToProto` should trust prior validation instead of returning errors
+   for the same rules.
+5. Use `cdb.WithTx` or `cdb.WithTxResult` for write transactions, and translate
+   closure errors with `common.HandleTxError`. Return `cutil.NewAPIError` inside
+   a transaction closure and `cutil.NewAPIErrorResponse` outside it.
+6. For synchronous Temporal workflows, reuse the existing workflow ID,
+   timeout, task queue, `common.UnwrapWorkflowError`, and
+   `common.TerminateWorkflowOnTimeOut` patterns from the nearest handler instead
+   of inventing new error plumbing. When a request spans caller, workflow, and
+   activity or RPC deadlines, keep those budgets strictly increasing toward the
+   caller and test every boundary; an outer timeout alone does not bound work
+   that has already started.
+7. Return curated REST models, not DB models, Core protobufs, Flow protobufs, or
+   secret-bearing request bodies. Log identifiers, method names, kinds, and
+   site IDs; do not log raw request bodies that may contain credentials
+8. API endpoints should generally return following HTTP codes on success:
+   - GET: 200
+   - POST: 201 if a new object is created, 202 if async processing is triggered with no object to return, otherwise 200
+   - PATCH: 200
+   - PUT: 201 if a new object is created, otherwise 200
+   - DELETE: 204 if object is deleted immediately, 202 if object is deleted async
+   - For 202 or 204 responses where no object can be returned `APIMessageResponse` should be returned
+9. When API handler encounters an error:
+   - Data validation errors should return 400
+   - If an object ID is specified in URL and the corresponding object cannot be found, then 404 should be returned
+   - If an object ID is specified in query param or request JSON data and the corresponding object cannot be found, then 400 should be returned
+   - When resource cannot be created due to another existing resource, 409 should be returned
+   - When user doesn't have permission to execute an action, 403 should be returned
+   - Any unexpected error should return 500
+   - All error response should be returned in `APIError` format
+
+When registering a new route:
+
+- Add it to `NewAPIRoutes` with the existing `/org/:orgName/<apiName>` prefix
+  unless it is a system or public discovery route.
+- Keep literal/static routes such as `/batch`, `/stats`, `/validation`,
+  `/power`, and `.well-known/*` before parameterized `/:id` routes that could
+  otherwise capture them.
+- Update `api/pkg/api/routes_test.go`: increment the route family count, add an
+  `assertRouteExists` check for any new route shape, and add `assertRouteBefore`
+  when a static route could be shadowed by a parameterized route.
+- For routes published in the OpenAPI surface, update `openapi/spec.yaml` in the
+  same change. System and public discovery routes that are intentionally outside
+  that surface are exempt. Keep operation IDs, summaries, handler constructors,
+  handler godoc, and SDK-facing names aligned.
+- When an OpenAPI tag or operation ID changes, build the generated CLI command
+  tree and run the affected `nicocli ... --help` paths to catch alias collisions.
+
+Endpoint tests should follow the changed surface, not just compile it:
+
+- Model tests cover `Validate`, query validation, enum values, list-level
+  constraints, and `ToProto` / `FromProto` mappings.
+- Handler tests cover auth role, org membership, missing user, invalid IDs,
+  ownership/site checks, request validation, status codes, and the response
+  shape
+- List handler tests cover paging inputs and assert the `X-Pagination` response
+  header.
+- Site/Core/Flow handlers should assert the workflow or proxy request arguments,
+  workflow ID inputs, secret field names, timeout behavior where relevant, and
+  that secrets are absent from responses and logs.
+- Operator examples must keep credentials out of command arguments; use a
+  supported prompt, stdin, or protected secret file. For asynchronous HTTP 202
+  operations, document the real completion signal and terminal states. Do not
+  present a resource read or poll as completion unless the API contract exposes
+  that transition.
+- Route tests and OpenAPI checks are part of the endpoint change; generated SDK
+  updates belong in the same change only when the repo workflow requires them.
+- When one response model serves endpoints with different nullability
+  contracts, preserve each endpoint's schema in its constructor or use distinct
+  models. Test unavailable values at every affected response boundary.
 
 ### Prefer range-based iteration over C-style `for` loops
 
-The module is on Go 1.25, so reach for range-based iteration before the
-three-clause `for i := 0; i < n; i++` / `i--` form. Go 1.22 range-over-integer
-and Go 1.23 range-over-function iterators (`slices.Backward`, `slices.All`,
+The module is on Go 1.26.4, so reach for range-based iteration before the
+three-clause `for i := 0; i < n; i++` / `i--` form. Range-over-integer and
+range-over-function iterators (`slices.Backward`, `slices.All`,
 `slices.Values`, `maps.Keys`, `maps.Values`, …) drop the manual index
 bookkeeping that the older form makes a reader re-derive to trust.
 
@@ -221,7 +489,7 @@ A related cleanup: a backward byte scan for a delimiter is
 
 ### Proto conversion methods
 
-DB and API model types that round-trip with a workflow-schema (`cwssaws`)
+DB and API model types that round-trip with a workflow-schema (`corev1`)
 or Flow (`flowv1`) protobuf types carry conversion as receiver methods, not
 free functions. The convention layers cleanly so call sites are
 predictable and every entity has the same surface:
@@ -265,6 +533,24 @@ predictable and every entity has the same surface:
    checks, cross-field structural rules — belongs in `Validate`
    instead, so the translation step stays a focused mapper.
 
+   If a Core proto request needs values from both the URL path and the
+   JSON body, assemble those values on the API request object before
+   conversion. Use non-JSON fields, for example a `MachineID` field
+   tagged with `json:"-"`, for path-derived context. Set those fields
+   explicitly in the handler, then call `req.ToProto()` with no hidden
+   path-parameter arguments. Avoid
+   call sites like `req.ToProto(machineID)` when `req` came from the
+   body; they make readers re-discover where each proto field came from.
+   Name the file, handler, request/response DTOs, and OpenAPI schemas
+   after the REST resource and operation (`machinepower`,
+   `MachinePowerControlHandler`, `APIMachinePowerControlRequest`), not an
+   internal Core method or authorization concept. Prefer typed string enums
+   with receiver conversion methods such as `(MachinePowerAction).ToProto()`
+   over free conversion helpers. For simple response shapes, build the
+   response inline in the handler; reserve constructor helpers for real
+   construction logic. Shared handler helpers should return `*cutil.APIError`
+   when callers need to preserve client-facing status codes and messages.
+
    **What stays in the handler:** authorization (RBAC, tenant
    privileges, cross-resource ownership lookups), and validation that
    depends on context `Validate` cannot see (site config defaults
@@ -301,7 +587,8 @@ stays on the entity because there's no API request body for delete.
 `InstanceType` is the reference for everything else under this rollout
 (typed-slice validation, typed-map proto behavior, ozzo composition,
 shared conversion helpers): `(*cdbm.InstanceType).ToProto/FromProto`
-+ `(*InstanceType).AttachCapabilities` on the entity,
+
+- `(*InstanceType).AttachCapabilities` on the entity,
 `APIMachineCapabilities` + `APIMachineCapability` for the list/element
 split, `cdbm.Labels` for the typed map, and
 `common/pkg/util.IntPtrToUint32Ptr` for shared casts.
@@ -367,15 +654,15 @@ that round-trip with the proto should be typed accordingly (e.g.
 on the underlying primitive until they need it.
 
 - `db/pkg/db/model.Labels` (`type Labels map[string]string` with
-  `(Labels).ToProto() []*cwssaws.Label` and
-  `(*Labels).FromProto([]*cwssaws.Label)`) is the reference for
+  `(Labels).ToProto() []*corev1.Label` and
+  `(*Labels).FromProto([]*corev1.Label)`) is the reference for
   map-shaped values that round-trip with workflow `Metadata.Labels`.
   Entity callers reach it via `entity.Labels.FromProto(proto.Metadata.GetLabels())`
   — the proto getter is nil-safe and returns `nil` for missing
   metadata, which the method translates into a `nil` receiver.
 - `db/pkg/db/model.MachineCapabilityType` and `MachineCapabilityDeviceType`
-  (`type X string` with `(X).ToProto() cwssaws.X` and
-  `(*X).FromProto(cwssaws.X)`) are the reference for **typed-string
+  (`type X string` with `(X).ToProto() corev1.X` and
+  `(*X).FromProto(corev1.X)`) are the reference for **typed-string
   domain enums** that round-trip with proto enum values. The DB column
   stays a plain string under the named type, but the conversion to /
   from the proto enum lives as methods on the type — not as a free
@@ -522,6 +809,34 @@ of rule 3 (validation reads hoisted out of the tx). NVLink Logical
 Partition's Delete handler shows the rule 5 `timeoutResp`-gating pattern
 in its simplest form.
 
+### Bulk updates must not clobber omitted (PATCH-preserved) columns
+
+`UpdateMultiple`-style DAOs build one shared column list and apply it to every
+row in a single bulk `UPDATE`. Any column added to that shared `columnsSet` is
+written for **every** row in the batch — including rows whose input omitted the
+field, which carry the model's zero value. For a field whose API contract is
+"omitting it preserves the existing value" (PATCH semantics), folding it into
+the shared set silently clears the stored value on untouched rows in a mixed
+batch.
+
+When adding such a field to a bulk-update DAO:
+
+- Do **not** add it to the shared `columnsSet`.
+- Apply it only to rows that provided it (carry per-row presence through the SQL
+  shape), or split the batch by identical column set. For flat JSONB
+  patch-style structs, prefer the Site config pattern:
+  `column = column || ?::jsonb`; an empty object is a no-op and future fields
+  can be partial-patched without replacing the whole stored object.
+- Keep create vs. update straight: on create, an omitted optional field is
+  stored as its zero/empty value; on update, an omitted field must be left
+  untouched.
+- Add a mixed-batch test: some rows set the field, others omit it, and assert
+  the omitted rows keep their prior value.
+
+`ExpectedMachine.UpdateMultiple` (`db/pkg/db/model/expectedmachine.go`) applies
+`bmc_ip_address` this way for a scalar value and `host_lifecycle_profile` for a
+JSONB patch; their mixed-batch tests are the guards.
+
 ## Git Workflow
 
 When writing git commit messages, follow the conventions below:
@@ -539,15 +854,19 @@ When writing git commit messages, follow the conventions below:
   otherwise expect to be present.
 - Add TODO comments for features or nuances not important to implement
   right away.
+- In Go, split variable assignment and the condition into separate lines.
+  Do not use initializer clauses such as if err := operation(); err != nil
 
 ## Commit Guidelines
 
 All commits **must** meet the following signing requirement:
 
 - **DCO sign-off** — certifies the Developer Certificate of Origin:
+
   ```bash
   git commit -s -m "Your commit message"
   ```
+
   DCO compliance is enforced automatically; unsigned commits block merging.
 
 ## Pull Request Guidelines
@@ -557,6 +876,21 @@ All commits **must** meet the following signing requirement:
 - Keep PRs focused on a single change.
 - Do not land unused code unless the PR is too large to review otherwise.
 - Ensure all CI checks pass before requesting review.
+- Before requesting review for a Go change, run `make lint-go` and inspect its
+  complete analyzer output. Its `golangci-lint` command uses
+  `--issues-exit-code 0`, so a successful command does not mean the output is
+  clean. Run `go tool golangci-lint run` with the changed Go package patterns
+  as arguments, without that override, and fix every finding in those packages.
+- When CLI flags override configuration, copy the complete configured object
+  first and overlay only explicitly set flags. Test no override, one override,
+  and unset configured fields so unrelated options cannot be discarded.
+- Before using an authentication or protocol convenience API, read its current
+  documentation for protocol-specific encoding rules. Exercise delimiters,
+  percent signs, plus signs, and other reserved characters through the real
+  encode and decode boundary.
+- Before requesting review, group every changed Go function's scenarios under
+  one table-driven top-level test. Treat scenario-specific top-level tests as a
+  review failure even when the test suite passes.
 
 ## CI / CD
 
@@ -587,7 +921,7 @@ make pre-commit-update      # update hooks to latest versions
 ## Further Reading
 
 - [`README.md`](README.md) — Project overview and getting started
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — Contribution workflow and DCO process
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — Contribution workflow and DCO process
 - [`openapi/README.md`](openapi/README.md) — OpenAPI schema development
 - [`cli/README.md`](cli/README.md) — CLI client reference
 - [`deploy/README.md`](deploy/README.md) — Deployment quickstart guide

@@ -19,7 +19,7 @@ use carbide_uuid::switch::SwitchId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Set the Name or Description of the Switch")]
     Set(SwitchMetadataCommandSet),
     #[clap(about = "Show the Metadata of the Switch")]
@@ -40,9 +40,9 @@ Show a switch's metadata:
     $ nico-admin-cli switch metadata show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct SwitchMetadataCommandShow {
+pub(crate) struct SwitchMetadataCommandShow {
     #[clap(help = "The switch which should get its metadata displayed")]
-    pub switch: SwitchId,
+    pub(super) switch: SwitchId,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -54,13 +54,13 @@ Set a switch's name and description:
     --name spine-01 --description \"Rack 4 spine\"
 
 ")]
-pub struct SwitchMetadataCommandSet {
+pub(crate) struct SwitchMetadataCommandSet {
     #[clap(help = "The switch which should get updated metadata")]
-    pub switch: SwitchId,
+    pub(super) switch: SwitchId,
     #[clap(long, help = "The updated name of the Switch")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
     #[clap(long, help = "The updated description of the Switch")]
-    pub description: Option<String>,
+    pub(super) description: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -75,13 +75,13 @@ Add a key/value label:
     --key env --value prod
 
 ")]
-pub struct SwitchMetadataCommandAddLabel {
+pub(crate) struct SwitchMetadataCommandAddLabel {
     #[clap(help = "The switch which should get updated metadata")]
-    pub switch: SwitchId,
+    pub(super) switch: SwitchId,
     #[clap(long, help = "The key to add")]
-    pub key: String,
+    pub(super) key: String,
     #[clap(long, help = "The optional value to add")]
-    pub value: Option<String>,
+    pub(super) value: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -93,11 +93,11 @@ Remove one or more labels by key:
     --keys env --keys edge
 
 ")]
-pub struct SwitchMetadataCommandRemoveLabels {
+pub(crate) struct SwitchMetadataCommandRemoveLabels {
     #[clap(help = "The switch which should get updated metadata")]
-    pub switch: SwitchId,
+    pub(super) switch: SwitchId,
     #[clap(long, help = "The keys to remove")]
-    pub keys: Vec<String>,
+    pub(super) keys: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -112,9 +112,9 @@ Overwrite the switch's metadata with the expected-switch's values:
     --replace-all
 
 ")]
-pub struct SwitchMetadataCommandFromExpectedSwitch {
+pub(crate) struct SwitchMetadataCommandFromExpectedSwitch {
     #[clap(help = "The switch which should get updated metadata")]
-    pub switch: SwitchId,
+    pub(super) switch: SwitchId,
     /// Whether to fully replace the Metadata that is currently stored on the Switch.
     /// - If not set, existing Metadata on the Switch will not be touched by executing
     ///   the command:
@@ -127,5 +127,5 @@ pub struct SwitchMetadataCommandFromExpectedSwitch {
     ///   they would if the Switch would get freshly ingested.
     ///   Metadata that is currently set on the Switch will be overridden.
     #[clap(long, verbatim_doc_comment)]
-    pub replace_all: bool,
+    pub(super) replace_all: bool,
 }

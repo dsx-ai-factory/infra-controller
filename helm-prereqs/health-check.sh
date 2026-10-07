@@ -9,7 +9,8 @@
 #   KUBECONFIG=/path/to/kubeconfig ./health-check.sh
 #
 # All namespaces are auto-detected from cluster resources. Override via env:
-#   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS
+#   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS,
+#   CONTOUR_NS
 # =============================================================================
 set -uo pipefail
 
@@ -65,9 +66,19 @@ pass "kubectl: cluster reachable"
 # --------------------------------------------------------------------------
 section "Namespace Detection"
 
+# Two-label names may be `service.namespace`; longer names must include `.svc`.
+_service_namespace() {
+  local address="${1#*://}"
+  address="$(printf '%s' "${address}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${address}" =~ ^[a-z0-9-]+\.([a-z0-9-]+)(\.svc(\.[a-z0-9.-]+)?)?(:[0-9]+)?(/.*)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
 # NICo namespace: find the namespace containing vault-cluster-info
 if [[ -z "${NICO_NS:-}" ]]; then
-  NICO_NS=$(kubectl get configmap vault-cluster-info -A \
+  NICO_NS=$(kubectl get configmap -A \
+    --field-selector metadata.name=vault-cluster-info \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
   NICO_NS="${NICO_NS:-nico-system}"
 fi
@@ -77,7 +88,7 @@ fi
 if [[ -z "${VAULT_NS:-}" ]]; then
   _VAULT_SVC=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
     -o jsonpath='{.data.VAULT_SERVICE}' || true)
-  VAULT_NS=$(printf '%s' "${_VAULT_SVC}" | sed 's|https\?://||' | cut -d: -f1 | cut -d. -f2)
+  VAULT_NS=$(_service_namespace "${_VAULT_SVC}")
   VAULT_NS="${VAULT_NS:-vault}"
 fi
 VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
@@ -89,22 +100,30 @@ VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
 if [[ -z "${POSTGRES_NS:-}" ]]; then
   _DB_HOST=$(kc get configmap -n "${NICO_NS}" nico-system-nico-database-config \
     -o jsonpath='{.data.DB_HOST}' || true)
-  POSTGRES_NS=$(printf '%s' "${_DB_HOST}" | cut -d. -f2)
+  POSTGRES_NS=$(_service_namespace "${_DB_HOST}")
   POSTGRES_NS="${POSTGRES_NS:-postgres}"
 fi
 
 # cert-manager, ESO, MetalLB: discover by known deployment names
 if [[ -z "${CERT_MANAGER_NS:-}" ]]; then
-  CERT_MANAGER_NS=$(kubectl get deployment cert-manager -A \
+  CERT_MANAGER_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=cert-manager \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'cert-manager')
 fi
 if [[ -z "${ESO_NS:-}" ]]; then
-  ESO_NS=$(kubectl get deployment external-secrets -A \
+  ESO_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=external-secrets \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'external-secrets')
 fi
 if [[ -z "${METALLB_NS:-}" ]]; then
-  METALLB_NS=$(kubectl get deployment metallb-controller -A \
+  METALLB_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=metallb-controller \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'metallb-system')
+fi
+if [[ -z "${CONTOUR_NS:-}" ]]; then
+  CONTOUR_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=contour-contour \
+    -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
 fi
 
 printf "  %-26s %s\n" "NICo namespace:"     "${NICO_NS}"
@@ -114,6 +133,7 @@ printf "  %-26s %s\n" "postgres namespace:"    "${POSTGRES_NS}"
 printf "  %-26s %s\n" "cert-manager ns:"       "${CERT_MANAGER_NS}"
 printf "  %-26s %s\n" "external-secrets ns:"   "${ESO_NS}"
 printf "  %-26s %s\n" "metallb ns:"            "${METALLB_NS}"
+printf "  %-26s %s\n" "Contour/Envoy ns:"      "${CONTOUR_NS:-not installed}"
 
 # --------------------------------------------------------------------------
 # Test helpers
@@ -241,6 +261,92 @@ else
   fail "daemonset/metallb-speaker: ${_ready:-0}/${_desired} ready"
 fi
 
+section "Contour/Envoy"
+if [[ -n "${CONTOUR_NS:-}" ]]; then
+  _check_deployment "${CONTOUR_NS}" contour-contour
+  _desired=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.desiredNumberScheduled}' || printf '0')
+  _ready=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.numberReady}' || printf '0')
+  _desired="${_desired:-0}"; _ready="${_ready:-0}"
+  if [[ "${_desired}" -gt 0 && "${_ready}" -ge "${_desired}" ]]; then
+    pass "daemonset/contour-envoy: ${_ready}/${_desired} ready"
+  else
+    fail "daemonset/contour-envoy: ${_ready}/${_desired} ready"
+  fi
+  _ENVOY_ADDRESS=$(kc get service -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+  if [[ -z "${_ENVOY_ADDRESS}" ]]; then
+    _ENVOY_ADDRESS=$(kc get service -n "${CONTOUR_NS}" contour-envoy \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
+  fi
+  if [[ -n "${_ENVOY_ADDRESS}" ]]; then
+    pass "service/contour-envoy: LoadBalancer address ${_ENVOY_ADDRESS}"
+    printf "    %s point the nico-rest-api ingress host at %s%s\n" \
+      "${_DIM}" "${_ENVOY_ADDRESS}" "${_RESET}"
+  else
+    fail "service/contour-envoy: LoadBalancer address pending"
+  fi
+else
+  skip "not installed"
+fi
+
+# --------------------------------------------------------------------------
+# 1b. DPF (installed by default; --skip-dpf to opt out)
+# NOTE: 'kubectl get deployment <name> -A' is invalid (by-name lookups cannot
+# cross namespaces); use a field selector for the namespace autodetect.
+# --------------------------------------------------------------------------
+if [[ -z "${DPF_NS:-}" ]]; then
+  DPF_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=dpf-operator-controller-manager \
+    -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
+fi
+
+section "DPF"
+if [[ -n "${DPF_NS:-}" ]]; then
+  _check_deployment "${DPF_NS}" dpf-operator-controller-manager
+  _check_deployment "${DPF_NS}" kamaji
+  _check_deployment "${DPF_NS}" maintenance-operator
+  _check_deployment "${DPF_NS}" node-feature-discovery-master
+  _check_deployment "${DPF_NS}" argo-cd-argocd-repo-server
+  _check_statefulset "${DPF_NS}" argo-cd-argocd-application-controller
+  _check_secret_exists "${DPF_NS}" hbn-user-password
+  # dpf-pull-secret is optional: setup.sh only creates it when an NGC key is
+  # set, and the operator pulls the public nvidia/doca images anonymously.
+  if kc get secret -n "${DPF_NS}" dpf-pull-secret &>/dev/null; then
+    pass "secret/dpf-pull-secret: exists"
+  else
+    skip "secret/dpf-pull-secret: not set (public images pull anonymously)"
+  fi
+  _dpf_cluster_phase=$(kc get dpucluster carbide-dpf-cluster -n "${DPF_NS}" \
+    -o jsonpath='{.status.phase}' || true)
+  if [[ "${_dpf_cluster_phase}" == "Ready" ]]; then
+    pass "dpucluster/carbide-dpf-cluster: Ready"
+  else
+    fail "dpucluster/carbide-dpf-cluster: phase=${_dpf_cluster_phase:-unknown}"
+  fi
+  # DPFOperatorConfig only reaches Ready once its DPU-side services schedule,
+  # which needs actual DPU (BlueField) nodes. On a DPU-less cluster it stays
+  # Ready=False by design — warn, don't fail (see docs/manuals/dpf.md).
+  _dpf_config_ready=$(kc get dpfoperatorconfig dpfoperatorconfig -n "${DPF_NS}" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || true)
+  _dpf_count=$(kc get dpus.provisioning.dpu.nvidia.com -A \
+    -o name 2>/dev/null | wc -l | tr -d '[:space:]')
+  if [[ "${_dpf_config_ready}" == "True" ]]; then
+    pass "dpfoperatorconfig/dpfoperatorconfig: Ready"
+  elif [[ "${_dpf_count:-0}" == "0" ]]; then
+    warn "dpfoperatorconfig/dpfoperatorconfig: Ready=${_dpf_config_ready:-unknown} (no DPUs — DPU-side services can't schedule; expected)"
+  else
+    fail "dpfoperatorconfig/dpfoperatorconfig: Ready=${_dpf_config_ready:-unknown}"
+  fi
+elif kc get namespace dpf-operator-system &>/dev/null; then
+  # The operator deployment is absent but its namespace lingers — a partial or
+  # failed DPF install, not a clean opt-out. Fail rather than silently skip.
+  fail "dpf-operator-controller-manager: not found, but namespace dpf-operator-system exists (partial/failed DPF install)"
+else
+  skip "not installed (--skip-dpf was used)"
+fi
+
 # --------------------------------------------------------------------------
 # 2. Vault
 # --------------------------------------------------------------------------
@@ -321,12 +427,15 @@ fi
 # --------------------------------------------------------------------------
 section "NICo Pods"
 _check_deployment  "${NICO_NS}" nico-api
+_check_deployment  "${NICO_NS}" nico-bmc-proxy
 _check_deployment  "${NICO_NS}" nico-dhcp
 _check_statefulset "${NICO_NS}" nico-dns
+_check_deployment  "${NICO_NS}" nico-hardware-health
 _check_deployment  "${NICO_NS}" nico-pxe
+_check_deployment  "${NICO_NS}" nico-ssh-console-rs
 
 # Optional pods: warn if the deployment doesn't exist, fail if it exists but isn't ready
-for _OPT_DEP in nico-hardware-health nico-ssh-console-rs nico-dsx-exchange-consumer; do
+for _OPT_DEP in nico-dsx-exchange-consumer; do
   if kc get deployment -n "${NICO_NS}" "${_OPT_DEP}" &>/dev/null; then
     _check_deployment "${NICO_NS}" "${_OPT_DEP}"
   else
@@ -336,25 +445,33 @@ done
 
 section "NICo Flow"
 FLOW_NS="${FLOW_NS:-flow}"
+REST_NS="${REST_NS:-nico-rest}"
 if kc get ns "${FLOW_NS}" &>/dev/null; then
   _check_deployment "${FLOW_NS}" flow
-  for _S in psm-vault-token nsm-vault-token \
-            flow.nico.nico-pg-cluster.credentials \
-            psm.nico.nico-pg-cluster.credentials \
-            nsm.nico.nico-pg-cluster.credentials \
+  for _S in flow.nico.nico-pg-cluster.credentials \
             flow-certificate temporal-client-certs nico-roots; do
     _check_secret_exists "${FLOW_NS}" "${_S}"
   done
+# Key "REST installed" on its deployment: setup.sh 7a pre-creates the namespace.
+elif kc get deployment -n "${REST_NS}" nico-rest-api &>/dev/null; then
+  fail "flow namespace not present - NICo REST is installed but Flow is missing (setup.sh phase 7h installs it with REST)"
 else
-  skip "flow namespace not present — flow disabled or not yet deployed"
+  skip "flow namespace not present - NICo REST not installed (--skip-rest was used); Flow installs together with REST"
+fi
+
+section "RMS (Rack Manager Service)"
+RMS_NS="${RMS_NS:-rack-manager}"
+if kc get ns "${RMS_NS}" &>/dev/null; then
+  _check_deployment "${RMS_NS}" rms-api-server
+  for _S in rms-api-server-certificate rms.nico.nico-pg-cluster.credentials; do
+    _check_secret_exists "${RMS_NS}" "${_S}"
+  done
+else
+  skip "rack-manager namespace not present — RMS not installed (opt-in via --install-rms)"
 fi
 
 section "NICo Jobs"
 _check_job_complete "${NICO_NS}" vault-pki-config
-if kc get job -n "${NICO_NS}" flow-vault-tokens &>/dev/null; then
-  _check_job_complete "${NICO_NS}" flow-vault-tokens
-fi
-
 # Migration job: find by label (name includes a random suffix)
 _MIG_JOB=$(kc get jobs -n "${NICO_NS}" -l 'app.kubernetes.io/name=nico-api-migrate' \
   --sort-by=.metadata.creationTimestamp \
@@ -480,12 +597,17 @@ done < <(kc get externalsecret -A --no-headers \
 section "External Service VIPs (LoadBalancer)"
 while IFS= read -r _SVC; do
   [[ -z "${_SVC}" ]] && continue
-  _IP=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  _IPS=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
+    -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}')
   _PORT=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
     -o jsonpath='{.spec.ports[0].port}')
-  if [[ -n "${_IP}" && "${_IP}" != "pending" ]]; then
-    pass "svc/${_SVC}: ${_IP}:${_PORT}"
+  if [[ -n "${_IPS}" ]]; then
+    while IFS= read -r _IP; do
+      [[ -z "${_IP}" ]] && continue
+      _ADDRESS="${_IP}"
+      [[ "${_IP}" == *:* ]] && _ADDRESS="[${_IP}]"
+      pass "svc/${_SVC}: ${_ADDRESS}:${_PORT}"
+    done <<< "${_IPS}"
   else
     fail "svc/${_SVC}: no external IP (still pending)"
   fi
@@ -513,15 +635,15 @@ elif ! _pod_has_command "${METALLB_NS}" "${_SPEAKER}" speaker nc; then
 else
   while IFS= read -r _SVC; do
     [[ -z "${_SVC}" ]] && continue
-    _IP=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
-      -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    _IPS=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
+      -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}')
     _PORT=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
       -o jsonpath='{.spec.ports[0].port}')
     _PROTO=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
       -o jsonpath='{.spec.ports[0].protocol}')
 
     # Skip if no IP assigned yet
-    [[ -z "${_IP}" || "${_IP}" == "pending" ]] && continue
+    [[ -z "${_IPS}" ]] && continue
 
     # UDP-only services cannot be tested with TCP nc; DNS UDP is covered by the
     # DNS section, NTP has no reliable probe, DHCP requires a full handshake.
@@ -529,12 +651,19 @@ else
     [[ "${_PROTO}" == "UDP" ]] && continue
     printf '%s' "${_SVC}" | grep -q "udp" && continue
 
-    if kubectl exec -n "${METALLB_NS}" "${_SPEAKER}" -c speaker -- \
-        nc -zw2 "${_IP}" "${_PORT}" &>/dev/null; then
-      pass "svc/${_SVC}: ${_IP}:${_PORT} reachable from host network"
-    else
-      fail "svc/${_SVC}: ${_IP}:${_PORT} not reachable (BGP route missing or service not listening)"
-    fi
+    # One reachable VIP does not prove the other family works on a dual-stack Service.
+    while IFS= read -r _IP; do
+      [[ -z "${_IP}" ]] && continue
+      # Brackets are for display; nc takes the bare IP as its host argument.
+      _ADDRESS="${_IP}"
+      [[ "${_IP}" == *:* ]] && _ADDRESS="[${_IP}]"
+      if kubectl exec -n "${METALLB_NS}" "${_SPEAKER}" -c speaker -- \
+          nc -zw2 "${_IP}" "${_PORT}" &>/dev/null; then
+        pass "svc/${_SVC}: ${_ADDRESS}:${_PORT} reachable from host network"
+      else
+        fail "svc/${_SVC}: ${_ADDRESS}:${_PORT} not reachable (BGP route missing or service not listening)"
+      fi
+    done <<< "${_IPS}"
   done < <(kc get svc -n "${NICO_NS}" --no-headers 2>/dev/null | \
     awk '$2=="LoadBalancer"{print $1}')
 fi
@@ -604,7 +733,8 @@ else
     -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
   if [[ -z "${_UNBOUND_VIP:-}" ]]; then
     _UNBOUND_VIP=$(kc get svc -n "${NICO_NS}" -l "app.kubernetes.io/name=unbound" \
-      --no-headers 2>/dev/null | awk '$2=="LoadBalancer" && $4!="<pending>"{print $4; exit}' || true)
+      -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}{end}' | \
+      awk 'NF {print; exit}' || true)
   fi
 
   if [[ -n "${_SPEAKER:-}" && -n "${_UNBOUND_VIP:-}" ]]; then

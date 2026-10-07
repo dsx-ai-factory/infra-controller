@@ -9,12 +9,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 // StatusDetail represents entries in the status_detail table
@@ -35,6 +36,16 @@ type StatusDetailCreateInput struct {
 	EntityID string
 	Status   string
 	Message  *string
+}
+
+type StatusDetailUpdateInput struct {
+	StatusDetailID uuid.UUID
+	Status         string
+	Message        *string
+}
+
+type StatusDetailFilterInput struct {
+	EntityIDs []string
 }
 
 const (
@@ -66,36 +77,30 @@ func (sd *StatusDetail) BeforeAppendModel(ctx context.Context, query bun.Query) 
 // StatusDetailDAO is the data access interface for StatusDetail
 type StatusDetailDAO interface {
 	//
-	GetAllByEntityID(ctx context.Context, tx *db.Tx, entityID string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]StatusDetail, int, error)
-	//
-	GetAllByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]StatusDetail, int, error)
+	GetAll(ctx context.Context, tx *db.Tx, filter StatusDetailFilterInput, page paginator.PageInput) ([]StatusDetail, int, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (*StatusDetail, error)
 	//
-	CreateFromParams(ctx context.Context, tx *db.Tx, entityID string, status string, message *string) (*StatusDetail, error)
+	Create(ctx context.Context, tx *db.Tx, input StatusDetailCreateInput) (*StatusDetail, error)
 	//
 	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []StatusDetailCreateInput) ([]StatusDetail, error)
 	//
-	UpdateFromParams(ctx context.Context, tx *db.Tx, id uuid.UUID, status string, message *string) (*StatusDetail, error)
+	Update(ctx context.Context, tx *db.Tx, input StatusDetailUpdateInput) (*StatusDetail, error)
 	// GetRecentByEntityIDs returns most recent status records for specified entity IDs
 	GetRecentByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, recentCount int) ([]StatusDetail, error)
 }
 
 // StatusDetailSQLDAO is the data access object for StatusDetail
 type StatusDetailSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a StatusDetail by ID
-func (sdd StatusDetailSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (*StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetByID")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "id", id.String())
-	}
+	ctx, sdDAOSpan := cotel.StartSpan(ctx, "StatusDetailDAO.GetByID")
+	defer func() { cotel.EndSpan(sdDAOSpan, retErr) }()
+	cotel.SetAttribute(sdDAOSpan, attribute.String("id", id.String()))
 
 	sd := &StatusDetail{}
 
@@ -110,68 +115,30 @@ func (sdd StatusDetailSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UU
 	return sd, nil
 }
 
-// GetAllByEntityID returns status details for the given entity ID
-func (sdd StatusDetailSQLDAO) GetAllByEntityID(ctx context.Context, tx *db.Tx, entityID string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]StatusDetail, int, error) {
+// GetAll returns status details for the given set of entity IDs
+func (sdd StatusDetailSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter StatusDetailFilterInput, page paginator.PageInput) (_ []StatusDetail, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetAllByEntityID")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "entityID", entityID)
-	}
+	ctx, sdDAOSpan := cotel.StartSpan(ctx, "StatusDetailDAO.GetAll")
+	defer func() { cotel.EndSpan(sdDAOSpan, retErr) }()
 
 	sds := []StatusDetail{}
 
-	query := db.GetIDB(tx, sdd.dbSession).NewSelect().Model(&sds).Where("entity_id = ?", entityID)
-
-	// StatusDetail has a default order by of created desc
-	normalizedOrderBy := &paginator.OrderBy{
-		Field: "created",
-		Order: paginator.OrderDescending,
-	}
-	if orderBy != nil {
-		normalizedOrderBy = orderBy
-	}
-
-	paginator, err := paginator.NewPaginator(ctx, query, offset, limit, normalizedOrderBy, StatusDetailOrderByFields)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return sds, paginator.Total, nil
-}
-
-// GetAllByEntityIDs returns status details for the given set of entity IDs
-func (sdd StatusDetailSQLDAO) GetAllByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]StatusDetail, int, error) {
-	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetAllByEntityIDs")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-	}
-
-	sds := []StatusDetail{}
-
-	if len(entityIDs) == 0 {
+	if len(filter.EntityIDs) == 0 {
 		return sds, 0, nil
 	}
 
-	query := db.GetIDB(tx, sdd.dbSession).NewSelect().Model(&sds).Where("entity_id IN (?)", bun.In(entityIDs))
+	query := db.GetIDB(tx, sdd.dbSession).NewSelect().Model(&sds).Where("entity_id IN (?)", bun.In(filter.EntityIDs))
 
 	// StatusDetail has a default order by of created desc
 	normalizedOrderBy := &paginator.OrderBy{
 		Field: "created",
 		Order: paginator.OrderDescending,
 	}
-	if orderBy != nil {
-		normalizedOrderBy = orderBy
+	if page.OrderBy != nil {
+		normalizedOrderBy = page.OrderBy
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, offset, limit, normalizedOrderBy, StatusDetailOrderByFields)
+	paginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, normalizedOrderBy, StatusDetailOrderByFields)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -184,21 +151,18 @@ func (sdd StatusDetailSQLDAO) GetAllByEntityIDs(ctx context.Context, tx *db.Tx, 
 	return sds, paginator.Total, nil
 }
 
-// CreateFromParams creates a new StatusDetail from the given parameters
-func (sdd StatusDetailSQLDAO) CreateFromParams(ctx context.Context, tx *db.Tx, entityID string, status string, message *string) (*StatusDetail, error) {
+// Create creates a new StatusDetail from the given parameters
+func (sdd StatusDetailSQLDAO) Create(ctx context.Context, tx *db.Tx, input StatusDetailCreateInput) (_ *StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.CreateFromParams")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "entityID", entityID)
-
-	}
+	ctx, sdDAOSpan := cotel.StartSpan(ctx, "StatusDetailDAO.Create")
+	defer func() { cotel.EndSpan(sdDAOSpan, retErr) }()
+	cotel.SetAttribute(sdDAOSpan, attribute.String("entityID", input.EntityID))
 
 	sd := &StatusDetail{
 		ID:       uuid.New(),
-		EntityID: entityID,
-		Status:   status,
-		Message:  message,
+		EntityID: input.EntityID,
+		Status:   input.Status,
+		Message:  input.Message,
 		Count:    1,
 	}
 
@@ -210,19 +174,16 @@ func (sdd StatusDetailSQLDAO) CreateFromParams(ctx context.Context, tx *db.Tx, e
 	return sdd.GetByID(ctx, tx, sd.ID)
 }
 
-// UpdateFromParams updates the given StatusDetail with the given parameters
-func (sdd StatusDetailSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, id uuid.UUID, status string, message *string) (*StatusDetail, error) {
+// Update updates the given StatusDetail with the given parameters
+func (sdd StatusDetailSQLDAO) Update(ctx context.Context, tx *db.Tx, input StatusDetailUpdateInput) (_ *StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.UpdateFromParams")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "id", id.String())
-	}
+	ctx, sdDAOSpan := cotel.StartSpan(ctx, "StatusDetailDAO.Update")
+	defer func() { cotel.EndSpan(sdDAOSpan, retErr) }()
+	cotel.SetAttribute(sdDAOSpan, attribute.String("id", input.StatusDetailID.String()))
 
 	sd := &StatusDetail{}
 
-	err := db.GetIDB(tx, sdd.dbSession).NewSelect().Model(sd).Where("id = ?", id).Scan(ctx)
+	err := db.GetIDB(tx, sdd.dbSession).NewSelect().Model(sd).Where("id = ?", input.StatusDetailID).Scan(ctx)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, db.ErrDoesNotExist
@@ -230,7 +191,7 @@ func (sdd StatusDetailSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, i
 		return nil, err
 	}
 
-	if status == "" {
+	if input.Status == "" {
 		return nil, db.ErrInvalidValue
 	}
 
@@ -240,16 +201,19 @@ func (sdd StatusDetailSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, i
 	}
 
 	updatedFields := []string{}
-	if sd.Status != status {
-		upsd.Status = status
+	if sd.Status != input.Status {
+		upsd.Status = input.Status
 		updatedFields = append(updatedFields, "status")
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "status", status)
+		cotel.SetAttribute(sdDAOSpan, attribute.String("status", input.Status))
 	}
 
-	if sd.Message != message {
-		upsd.Message = message
+	messageChanged := (sd.Message == nil) != (input.Message == nil)
+	if sd.Message != nil && input.Message != nil {
+		messageChanged = *sd.Message != *input.Message
+	}
+	if messageChanged {
+		upsd.Message = input.Message
 		updatedFields = append(updatedFields, "message")
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "message", message)
 	}
 
 	if len(updatedFields) == 0 {
@@ -261,7 +225,7 @@ func (sdd StatusDetailSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, i
 
 	updatedFields = append(updatedFields, "updated")
 
-	_, err = db.GetIDB(tx, sdd.dbSession).NewUpdate().Model(upsd).Column(updatedFields...).Where("entity_id = ?", sd.EntityID).Exec(ctx)
+	_, err = db.GetIDB(tx, sdd.dbSession).NewUpdate().Model(upsd).Column(updatedFields...).Where("id = ?", sd.ID).Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -275,12 +239,10 @@ func (sdd StatusDetailSQLDAO) UpdateFromParams(ctx context.Context, tx *db.Tx, i
 }
 
 // GetRecentByEntityIDs returns most recent status records for specified entity IDs
-func (sdd StatusDetailSQLDAO) GetRecentByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, recentCount int) ([]StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) GetRecentByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, recentCount int) (_ []StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetRecentByEntityIDs")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-	}
+	ctx, sdDAOSpan := cotel.StartSpan(ctx, "StatusDetailDAO.GetRecentByEntityIDs")
+	defer func() { cotel.EndSpan(sdDAOSpan, retErr) }()
 
 	sds := []StatusDetail{}
 
@@ -301,17 +263,14 @@ func (sdd StatusDetailSQLDAO) GetRecentByEntityIDs(ctx context.Context, tx *db.T
 }
 
 // CreateMultiple creates multiple StatusDetails from the given parameters
-func (sdd StatusDetailSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []StatusDetailCreateInput) ([]StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []StatusDetailCreateInput) (_ []StatusDetail, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.CreateMultiple")
-	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
-		sdd.tracerSpan.SetAttribute(sdDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, sdDAOSpan := cotel.StartSpan(ctx, "StatusDetailDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(sdDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []StatusDetail{}, nil
@@ -364,7 +323,6 @@ func (sdd StatusDetailSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inp
 // NewStatusDetailDAO creates and returns a new data access object for StatusDetail
 func NewStatusDetailDAO(dbSession *db.Session) StatusDetailDAO {
 	return StatusDetailSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

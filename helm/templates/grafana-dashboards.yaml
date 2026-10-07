@@ -1,0 +1,19 @@
+{{- if .Values.grafanaDashboards.enabled }}
+{{- $annotations := deepCopy (.Values.grafanaDashboards.annotations | default dict) }}
+{{- if and .Values.grafanaDashboards.folderAnnotation .Values.grafanaDashboards.folder }}
+{{- $_ := set $annotations .Values.grafanaDashboards.folderAnnotation .Values.grafanaDashboards.folder }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico.grafanaDashboardsName" . }}
+  namespace: {{ .Values.grafanaDashboards.namespace | default .Release.Namespace | quote }}
+  labels:
+    {{- include "nico.grafanaDashboardLabels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{- (.Files.Glob "observability/dashboards/*.json").AsConfig | nindent 2 }}
+{{- end }}

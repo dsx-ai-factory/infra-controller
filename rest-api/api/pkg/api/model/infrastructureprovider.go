@@ -76,15 +76,16 @@ type APIInfrastructureProviderStats struct {
 func NewAPIInfrastructureProviderStats(mcstatsmap map[string]int, ipbstatsmap map[string]int, tastatsmap map[string]int) *APIInfrastructureProviderStats {
 	aips := APIInfrastructureProviderStats{
 		Machine: APIMachineStats{
-			Total:          mcstatsmap["total"],
-			Initializing:   mcstatsmap[cdbm.MachineStatusInitializing],
-			Reset:          mcstatsmap[cdbm.MachineStatusReset],
-			Ready:          mcstatsmap[cdbm.MachineStatusReady],
-			InUse:          mcstatsmap[cdbm.MachineStatusInUse],
-			Decommissioned: mcstatsmap[cdbm.MachineStatusDecommissioned],
-			Unknown:        mcstatsmap[cdbm.MachineStatusUnknown],
-			Error:          mcstatsmap[cdbm.MachineStatusError],
-			Maintenance:    mcstatsmap[cdbm.MachineStatusMaintenance],
+			Total:           mcstatsmap["total"],
+			Initializing:    mcstatsmap[cdbm.MachineStatusInitializing],
+			Reset:           mcstatsmap[cdbm.MachineStatusReset],
+			Ready:           mcstatsmap[cdbm.MachineStatusReady],
+			InUse:           mcstatsmap[cdbm.MachineStatusInUse],
+			Decommissioning: mcstatsmap[cdbm.MachineStatusDecommissioning],
+			Decommissioned:  mcstatsmap[cdbm.MachineStatusDecommissioned],
+			Unknown:         mcstatsmap[cdbm.MachineStatusUnknown],
+			Error:           mcstatsmap[cdbm.MachineStatusError],
+			Maintenance:     mcstatsmap[cdbm.MachineStatusMaintenance],
 		},
 		IPBlock: APIIPBlockStats{
 			Total:        ipbstatsmap["total"],

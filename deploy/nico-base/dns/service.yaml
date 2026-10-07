@@ -19,6 +19,7 @@ kind: Service
 metadata:
   name: nico-dns
 spec:
+  ipFamilyPolicy: PreferDualStack
   ports:
     - port: 53
       name: tcp

@@ -18,22 +18,20 @@
 use std::borrow::Cow;
 
 use mac_address::MacAddress;
-use rpc::machine_discovery::{NetworkInterface, PciDeviceProperties};
-pub type SlotNumber = usize;
+pub(crate) type SlotNumber = usize;
 
-pub struct Nic<'a> {
-    pub mac_address: MacAddress,
-    pub serial_number: Option<Cow<'a, str>>,
-    pub manufacturer: Option<Cow<'a, str>>,
-    pub model: Option<Cow<'a, str>>,
-    pub description: Option<Cow<'a, str>>,
-    pub part_number: Option<Cow<'a, str>>,
-    pub firmware_version: Option<Cow<'a, str>>,
-    pub is_mat_dpu: bool,
+pub(crate) struct Nic<'a> {
+    pub(crate) mac_address: MacAddress,
+    pub(crate) serial_number: Option<Cow<'a, str>>,
+    pub(crate) manufacturer: Option<Cow<'a, str>>,
+    pub(crate) model: Option<Cow<'a, str>>,
+    pub(crate) description: Option<Cow<'a, str>>,
+    pub(crate) part_number: Option<Cow<'a, str>>,
+    pub(crate) firmware_version: Option<Cow<'a, str>>,
 }
 
 impl Nic<'_> {
-    pub fn rooftop(mac: MacAddress) -> Nic<'static> {
+    pub(crate) fn rooftop(mac: MacAddress) -> Nic<'static> {
         let serial_number = Some(format!("RT{}", mac.to_string().replace(':', "")).into());
         Nic {
             manufacturer: Some("Rooftop Technologies".into()),
@@ -43,31 +41,6 @@ impl Nic<'_> {
             description: None,
             firmware_version: None,
             mac_address: mac,
-            is_mat_dpu: false,
-        }
-    }
-
-    pub fn discovery_info(&self, slot: SlotNumber) -> NetworkInterface {
-        let device_name = format!("enp{}s{}np0", slot >> 16, slot & 0xff);
-        let slot = format!("{:04x}:{:02x}:00.0", (slot >> 16), (slot & 0xFF));
-        NetworkInterface {
-            mac_address: self.mac_address.to_string(),
-            pci_properties: Some(PciDeviceProperties {
-                vendor: self
-                    .manufacturer
-                    .as_ref()
-                    .unwrap_or(&Cow::Borrowed(""))
-                    .to_string(),
-                device: self
-                    .model
-                    .as_ref()
-                    .unwrap_or(&Cow::Borrowed(""))
-                    .to_string(),
-                path: format!("/devices/pci0000:00/0000:00:00.0/{slot}/net/{device_name}"),
-                numa_node: 0,
-                description: self.description.as_ref().map(|v| v.to_string()),
-                slot: Some(slot),
-            }),
         }
     }
 }

@@ -47,6 +47,8 @@ spec:
               value: "full"
             - name: RUST_LIB_BACKTRACE # See https://doc.rust-lang.org/std/backtrace/index.html#environment-variables
               value: "0"
+            - name: NICO_HEALTH__COLLECTORS__LOGS__ENABLED
+              value: "true"
           ports:
             - name: metrics
               containerPort: 9009

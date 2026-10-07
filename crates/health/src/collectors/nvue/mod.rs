@@ -15,6 +15,6 @@
  * limitations under the License.
  */
 
-pub(crate) mod gnmi;
+pub(in crate::collectors) mod gnmi;
 pub(in crate::collectors) mod rest;
-pub(crate) mod tls;
+mod tls;

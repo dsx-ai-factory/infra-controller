@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
-pub fn str_to_os_id(
+pub(super) fn str_to_os_id(
     id: &str,
 ) -> CarbideCliResult<::carbide_uuid::operating_system::OperatingSystemId> {
     let id = uuid::Uuid::parse_str(id)
@@ -31,7 +31,7 @@ pub fn str_to_os_id(
     Ok(id)
 }
 
-pub fn str_to_ipxe_template_id(
+pub(super) fn str_to_ipxe_template_id(
     id: &str,
 ) -> CarbideCliResult<::carbide_uuid::ipxe_template::IpxeTemplateId> {
     let id = uuid::Uuid::parse_str(id)
@@ -41,7 +41,7 @@ pub fn str_to_ipxe_template_id(
 }
 
 /// Parse a "key=value" string into an `IpxeTemplateParameter`.
-pub fn parse_param(s: &str) -> Result<IpxeTemplateParameter, String> {
+pub(super) fn parse_param(s: &str) -> Result<IpxeTemplateParameter, String> {
     let (name, value) = s
         .split_once('=')
         .ok_or_else(|| format!("expected KEY=VALUE, got '{s}'"))?;
@@ -53,41 +53,41 @@ pub fn parse_param(s: &str) -> Result<IpxeTemplateParameter, String> {
 
 /// Local serializable mirror of `OperatingSystem` for JSON output.
 #[derive(Serialize)]
-pub struct SerializableOs {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub org: String,
+pub(super) struct SerializableOs {
+    id: String,
+    name: String,
+    description: Option<String>,
+    org: String,
     #[serde(rename = "type")]
-    pub os_type: String,
-    pub status: String,
-    pub is_active: bool,
-    pub allow_override: bool,
-    pub phone_home_enabled: bool,
-    pub user_data: Option<String>,
-    pub created: String,
-    pub updated: String,
-    pub ipxe_script: Option<String>,
-    pub ipxe_template_id: Option<String>,
-    pub ipxe_template_parameters: Vec<SerializableParam>,
-    pub ipxe_template_artifacts: Vec<SerializableArtifact>,
-    pub ipxe_template_definition_hash: Option<String>,
+    os_type: String,
+    status: String,
+    is_active: bool,
+    allow_override: bool,
+    phone_home_enabled: bool,
+    user_data: Option<String>,
+    created: String,
+    updated: String,
+    ipxe_script: Option<String>,
+    ipxe_template_id: Option<String>,
+    ipxe_template_parameters: Vec<SerializableParam>,
+    ipxe_template_artifacts: Vec<SerializableArtifact>,
+    ipxe_template_definition_hash: Option<String>,
 }
 
 #[derive(Serialize)]
-pub struct SerializableParam {
-    pub name: String,
-    pub value: String,
+struct SerializableParam {
+    name: String,
+    value: String,
 }
 
 #[derive(Serialize)]
-pub struct SerializableArtifact {
-    pub name: String,
-    pub url: String,
-    pub sha: Option<String>,
-    pub auth_type: Option<String>,
-    pub cache_strategy: String,
-    pub cached_url: Option<String>,
+pub(super) struct SerializableArtifact {
+    name: String,
+    url: String,
+    sha: Option<String>,
+    auth_type: Option<String>,
+    cache_strategy: String,
+    cached_url: Option<String>,
 }
 
 impl From<IpxeTemplateParameter> for SerializableParam {
@@ -126,7 +126,7 @@ impl From<OperatingSystem> for SerializableOs {
             id: os.id.map(|u| u.to_string()).unwrap_or_default(),
             name: os.name,
             description: os.description,
-            org: os.tenant_organization_id,
+            org: os.tenant_organization_id.unwrap_or_default(),
             os_type: forgerpc::OperatingSystemType::try_from(os.r#type)
                 .map(|t| t.as_str_name().to_string())
                 .unwrap_or_else(|_| os.r#type.to_string()),

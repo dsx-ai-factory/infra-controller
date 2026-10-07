@@ -472,3 +472,6 @@ impl InstanceType {
         true
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -57,7 +57,7 @@ pub struct TenantKeysetSearchFilter {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TenantError {
-    #[error("Publickey validation fail for instance {0}, key {1}")]
+    #[error("publickey validation fail for instance {0}, key {1}")]
     PublickeyValidationFailed(InstanceId, String),
 }
 
@@ -178,7 +178,7 @@ impl TenantOrganizationId {
 
 /// A string is not a valid Tenant ID
 #[derive(thiserror::Error, Debug)]
-#[error("ID {0} is not a valid Tenant Organization ID")]
+#[error("ID {0} is not a valid tenant organization ID")]
 pub struct InvalidTenantOrg(String);
 
 impl TryFrom<String> for TenantOrganizationId {

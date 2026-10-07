@@ -38,16 +38,16 @@ Preview the report without sending it:
     --template degraded --print-only
 
 ")]
-pub struct Args {
-    pub switch_id: SwitchId,
+pub(crate) struct Args {
+    pub(super) switch_id: SwitchId,
     #[clap(long, help = "New health report as json")]
-    pub health_report: Option<String>,
+    pub(super) health_report: Option<String>,
     #[clap(long, help = "Predefined Template name")]
-    pub template: Option<HealthReportTemplates>,
+    pub(super) template: Option<HealthReportTemplates>,
     #[clap(long, help = "Message to be filled in template.")]
-    pub message: Option<String>,
+    pub(super) message: Option<String>,
     #[clap(long, help = "Replace all other health reports with this source")]
-    pub replace: bool,
+    pub(super) replace: bool,
     #[clap(long, help = "Print the template that is going to be send to carbide")]
-    pub print_only: bool,
+    pub(super) print_only: bool,
 }

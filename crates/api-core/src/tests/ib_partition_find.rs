@@ -17,7 +17,6 @@
 
 use ::rpc::forge as rpc;
 use carbide_ib_fabric::config::IBFabricConfig;
-use carbide_uuid::infiniband::IBPartitionId;
 use rpc::forge_server::Forge;
 
 use crate::tests::common;
@@ -160,74 +159,7 @@ async fn test_find_ib_partitions_by_ids(pool: sqlx::PgPool) {
     );
 }
 
-#[crate::sqlx_test()]
-async fn test_find_ib_partitions_by_ids_over_max(pool: sqlx::PgPool) {
-    let mut config = common::api_fixtures::get_config();
-    config.ib_config = Some(IBFabricConfig {
-        enabled: true,
-        ..Default::default()
-    });
-
-    let env = common::api_fixtures::create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(config),
-    )
-    .await;
-
-    // create vector of IDs with more than max allowed
-    // it does not matter if these are real or not, since we are testing an error back for passing more than max
-    let end_index: u32 = env.config.max_find_by_ids + 1;
-    let ib_partition_ids: Vec<IBPartitionId> = (1..=end_index)
-        .map(|_| uuid::Uuid::new_v4().into())
-        .collect();
-
-    let request = tonic::Request::new(rpc::IbPartitionsByIdsRequest {
-        ib_partition_ids,
-        include_history: false,
-    });
-
-    let response = env.api.find_ib_partitions_by_ids(request).await;
-    // validate
-    assert!(
-        response.is_err(),
-        "expected an error when passing no machine IDs"
-    );
-    assert_eq!(
-        response.err().unwrap().message(),
-        format!(
-            "no more than {} IDs can be accepted",
-            env.config.max_find_by_ids
-        )
-    );
-}
-
-#[crate::sqlx_test()]
-async fn test_find_ib_partitions_by_ids_none(pool: sqlx::PgPool) {
-    let mut config = common::api_fixtures::get_config();
-    config.ib_config = Some(IBFabricConfig {
-        enabled: true,
-        ..Default::default()
-    });
-
-    let env = common::api_fixtures::create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(config),
-    )
-    .await;
-
-    let request_none = tonic::Request::new(rpc::IbPartitionsByIdsRequest {
-        ib_partition_ids: Vec::new(),
-        include_history: false,
-    });
-
-    let response_none = env.api.find_ib_partitions_by_ids(request_none).await;
-    // validate
-    assert!(
-        response_none.is_err(),
-        "expected an error when passing no machine IDs"
-    );
-    assert_eq!(
-        response_none.err().unwrap().message(),
-        "at least one ID must be provided",
-    );
-}
+// The empty-list and over-max guards for `find_ib_partitions_by_ids` are shared
+// API-layer code, proven once across representative RPCs in
+// `tests::find_by_ids_guards`. The shared test exercises this RPC under the
+// default env: the guard fires on the ID-list length before any IB-config check.

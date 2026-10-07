@@ -37,9 +37,22 @@
 //! Migrations consume their records within minutes either way.
 
 use mac_address::MacAddress;
-use sqlx::PgConnection;
+use sqlx::{FromRow, PgConnection};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
+
+/// One raw `retained_boot_interfaces` row: the preserved boot interface id for
+/// a MAC and when it was recorded, returned verbatim with no retention-window
+/// filtering. Built for the boot-interface troubleshooting view, which wants to
+/// surface stale records too -- the window-filtered [`find_by_mac`] and the
+/// consuming `take_by_mac` would hide or remove them.
+#[derive(Debug, Clone, FromRow)]
+pub struct RetainedBootInterfaceRecord {
+    pub mac_address: MacAddress,
+    pub boot_interface_id: String,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Record the boot interface pair for a MAC, overwriting any prior record
 /// (the newest observation wins).
@@ -77,6 +90,29 @@ pub async fn find_by_mac(
         .bind(mac_address)
         .bind(window.map(|w| w.num_seconds()))
         .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Fetch the full retained records for a set of MACs without consuming them
+/// and without any retention-window filtering -- every matching row, including
+/// ones aged past the configured window, is returned with its `recorded_at`.
+///
+/// This is the troubleshooting read: where [`find_by_mac`] answers "would this
+/// MAC's pair still apply?" (window-filtered, value only), this answers "what
+/// is actually on file for these MACs, fresh or stale?" so an operator can see
+/// a record that exists but has aged out. Production reuse flows must stay on
+/// the window-aware `take_by_mac`/`find_by_mac`.
+pub async fn find_records_by_macs(
+    db: impl DbReader<'_>,
+    mac_addresses: &[MacAddress],
+) -> Result<Vec<RetainedBootInterfaceRecord>, DatabaseError> {
+    let query = "SELECT mac_address, boot_interface_id, recorded_at \
+                 FROM retained_boot_interfaces WHERE mac_address = ANY($1) \
+                 ORDER BY mac_address";
+    sqlx::query_as(query)
+        .bind(mac_addresses)
+        .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -122,4 +158,195 @@ pub async fn delete_expired(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+    use mac_address::MacAddress;
+    use sqlx::PgConnection;
+
+    use super::{delete_expired, find_by_mac, find_records_by_macs, take_by_mac, upsert};
+
+    fn mac(last: u8) -> MacAddress {
+        MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, last])
+    }
+
+    /// Backdate a record's `recorded_at` so the window / expiry paths have a
+    /// stale row to act on -- production only ever writes `recorded_at = NOW()`.
+    async fn age_record(txn: &mut PgConnection, mac: MacAddress, seconds_ago: i64) {
+        sqlx::query(
+            "UPDATE retained_boot_interfaces \
+             SET recorded_at = NOW() - ($2::bigint * INTERVAL '1 second') \
+             WHERE mac_address = $1",
+        )
+        .bind(mac)
+        .bind(seconds_ago)
+        .execute(txn)
+        .await
+        .unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn upsert_then_find_by_mac_returns_the_retained_id(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            find_by_mac(txn.as_mut(), mac(1), None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NIC.Slot.7-1-1"),
+        );
+        // A MAC with nothing on file resolves to None.
+        assert_eq!(find_by_mac(txn.as_mut(), mac(2), None).await.unwrap(), None);
+    }
+
+    #[crate::sqlx_test]
+    async fn upsert_keeps_the_newest_id_for_a_mac(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.1-1").await.unwrap();
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            find_by_mac(txn.as_mut(), mac(1), None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NIC.Slot.7-1-1"),
+            "the newest observation wins on conflict",
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn take_by_mac_returns_the_id_and_consumes_the_row(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            take_by_mac(txn.as_mut(), mac(1), None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NIC.Slot.7-1-1"),
+        );
+        // The row is gone after a take...
+        assert_eq!(find_by_mac(txn.as_mut(), mac(1), None).await.unwrap(), None);
+        // ...so a second take finds nothing.
+        assert_eq!(take_by_mac(txn.as_mut(), mac(1), None).await.unwrap(), None);
+    }
+
+    #[crate::sqlx_test]
+    async fn find_by_mac_filters_records_aged_past_the_window(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
+            .await
+            .unwrap();
+        age_record(txn.as_mut(), mac(1), 3600).await; // an hour old
+
+        // Inside a generous window the pair still applies.
+        assert_eq!(
+            find_by_mac(txn.as_mut(), mac(1), Some(Duration::hours(2)))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NIC.Slot.7-1-1"),
+        );
+        // Aged past a tight window, it is filtered out.
+        assert_eq!(
+            find_by_mac(txn.as_mut(), mac(1), Some(Duration::seconds(60)))
+                .await
+                .unwrap(),
+            None,
+        );
+        // No window means forever, so it applies again.
+        assert_eq!(
+            find_by_mac(txn.as_mut(), mac(1), None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NIC.Slot.7-1-1"),
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn take_by_mac_withholds_a_stale_id_but_still_consumes_the_row(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
+            .await
+            .unwrap();
+        age_record(txn.as_mut(), mac(1), 3600).await; // an hour old
+
+        // Past the window the id is withheld -- a recycled MAC must not inherit it...
+        assert_eq!(
+            take_by_mac(txn.as_mut(), mac(1), Some(Duration::seconds(60)))
+                .await
+                .unwrap(),
+            None,
+        );
+        // ...but the row is consumed regardless, so a stale record can't linger.
+        assert_eq!(find_by_mac(txn.as_mut(), mac(1), None).await.unwrap(), None);
+    }
+
+    #[crate::sqlx_test]
+    async fn delete_expired_sweeps_only_aged_rows_and_noops_without_a_window(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.1-1").await.unwrap(); // fresh
+        upsert(txn.as_mut(), mac(2), "NIC.Slot.2-1").await.unwrap();
+        age_record(txn.as_mut(), mac(2), 3600).await; // stale
+
+        // Without a window nothing ever expires, so the sweep is a no-op.
+        assert_eq!(delete_expired(txn.as_mut(), None).await.unwrap(), 0);
+
+        // A window removes only the aged row.
+        assert_eq!(
+            delete_expired(txn.as_mut(), Some(Duration::seconds(60)))
+                .await
+                .unwrap(),
+            1,
+        );
+        assert_eq!(find_by_mac(txn.as_mut(), mac(2), None).await.unwrap(), None);
+        assert_eq!(
+            find_by_mac(txn.as_mut(), mac(1), None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NIC.Slot.1-1"),
+            "fresh records survive the sweep",
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn find_records_by_macs_returns_every_match_including_stale(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(txn.as_mut(), mac(1), "NIC.Slot.1-1").await.unwrap();
+        upsert(txn.as_mut(), mac(2), "NIC.Slot.2-1").await.unwrap();
+        age_record(txn.as_mut(), mac(1), 3600).await; // stale, but still surfaced
+
+        let records = find_records_by_macs(txn.as_mut(), &[mac(1), mac(2)])
+            .await
+            .unwrap();
+
+        // The troubleshooting read is unfiltered and ordered by MAC: both rows come
+        // back, the stale one included.
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].mac_address, mac(1));
+        assert_eq!(records[0].boot_interface_id, "NIC.Slot.1-1");
+        assert_eq!(records[1].mac_address, mac(2));
+        assert_eq!(records[1].boot_interface_id, "NIC.Slot.2-1");
+    }
 }

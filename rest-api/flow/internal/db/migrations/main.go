@@ -8,6 +8,7 @@ import (
 	"crypto/md5"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -103,12 +104,25 @@ func parseMigrationFilename(path string, is_up bool) (id string, name string, ok
 }
 
 func stringHash(contents []byte) string {
-	hash := md5.Sum([]byte(contents))
+	hash := md5.Sum(contents)
 	return hex.EncodeToString(hash[:])
 }
 
 func hashMatch(contents []byte, oldHash string) bool {
 	return stringHash(contents) == oldHash
+}
+
+func checkMigrationSignature(contents []byte, oldHash string, options MigrateOptions) (shouldUpdateSignature bool, err error) {
+	if hashMatch(contents, oldHash) {
+		return false, nil
+	}
+	if options.IgnoreSignatureChanges {
+		return true, nil
+	}
+	if strings.Contains(string(contents), "Allow hash changing") {
+		return false, nil
+	}
+	return false, errors.New("signature does not match")
 }
 
 // applyMigration will apply an individual migration to the database
@@ -153,23 +167,33 @@ func alternatePresent(path string) bool {
 	return false
 }
 
-// MigrateWithDB ensures that the database contains all currently known migrations.
-// Accepts a *bun.DB directly.
-func MigrateWithDB(ctx context.Context, db *bun.DB) error {
-	return migrateInternalWithDB(ctx, db, nil)
+// MigrateOptions controls optional forward-migration behavior.
+type MigrateOptions struct {
+	// IgnoreSignatureChanges accepts changed contents for migrations that are
+	// already installed. The migration SQL is not run again; only the stored
+	// hash is updated.
+	IgnoreSignatureChanges bool
+}
+
+// MigrateWithDB ensures that the database contains all currently known
+// migrations using the supplied options.
+func MigrateWithDB(ctx context.Context, db *bun.DB, options MigrateOptions) error {
+	return migrateInternalWithDB(ctx, db, nil, options)
 }
 
 // RollbackWithDB will roll back migrations that have been applied since the given time.
 // Accepts a *bun.DB directly.
 func RollbackWithDB(ctx context.Context, db *bun.DB, rollbackTime time.Time) error {
-	return migrateInternalWithDB(ctx, db, &rollbackTime)
+	return migrateInternalWithDB(ctx, db, &rollbackTime, MigrateOptions{})
 }
 
-// pendingMigration holds information about a migration that needs to be applied
-type pendingMigration struct {
+// migration holds information needed to apply a migration or update its
+// recorded signature.
+type migration struct {
 	id   string
 	name string
 	path string
+	hash string
 }
 
 // readMigrationContents reads the contents of a migration file
@@ -183,7 +207,7 @@ func readMigrationContents(path string) ([]byte, error) {
 }
 
 // migrateInternalWithDB migrates either up or down using a *bun.DB
-func migrateInternalWithDB(ctx context.Context, db *bun.DB, rollbackTime *time.Time) (errFinal error) {
+func migrateInternalWithDB(ctx context.Context, db *bun.DB, rollbackTime *time.Time, options MigrateOptions) (errFinal error) {
 	return db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error { //nolint:exhaustruct,varnamelen,wrapcheck // default options; tx is idiomatic; thin wrapper
 		// Lock the migration table manually in case we are running multiple instances that may try to upgrade simultaneously
 		if err := lockOrCreateMigrationTable(ctx, &tx); err != nil {
@@ -197,7 +221,8 @@ func migrateInternalWithDB(ctx context.Context, db *bun.DB, rollbackTime *time.T
 		}
 
 		isRollback := rollbackTime != nil
-		var pending []pendingMigration
+		var pending []migration
+		var changedSignatures []migration
 
 		// Collect all migrations that need to be applied
 		if err := fs.WalkDir(sqlMigrations, ".", func(path string, d fs.DirEntry, err error) error {
@@ -209,10 +234,10 @@ func migrateInternalWithDB(ctx context.Context, db *bun.DB, rollbackTime *time.T
 				return fmt.Errorf("Migration file %s does not have a matching down/up migration", path)
 			}
 
-			migration, alreadyApplied := appliedMigrations[id]
+			installedMigration, alreadyApplied := appliedMigrations[id]
 			if isRollback {
 				// For rollback: only include migrations that were applied after rollbackTime
-				if !alreadyApplied || !rollbackTime.Before(migration.applied) {
+				if !alreadyApplied || !rollbackTime.Before(installedMigration.applied) {
 					return nil
 				}
 			} else {
@@ -223,17 +248,38 @@ func migrateInternalWithDB(ctx context.Context, db *bun.DB, rollbackTime *time.T
 					if err != nil {
 						return err
 					}
-					if !hashMatch(contents, migration.hash) && !strings.Contains(string(contents), "Allow hash changing") {
+
+					shouldUpdateSignature, err := checkMigrationSignature(contents, installedMigration.hash, options)
+					if err != nil {
 						return fmt.Errorf("Hash for migration %s (%s) does not match already applied migration.  Something inappropriately altered the migration.  Aborting.", name, id)
 					}
+
+					if shouldUpdateSignature {
+						changedSignatures = append(
+							changedSignatures,
+							migration{
+								id:   id,
+								name: name,
+								hash: stringHash(contents),
+							},
+						)
+					}
+
 					return nil
 				}
 			}
 
-			pending = append(pending, pendingMigration{id: id, name: name, path: path})
+			pending = append(pending, migration{id: id, name: name, path: path})
 			return nil
 		}); err != nil {
 			return err
+		}
+
+		for _, migration := range changedSignatures {
+			log.Warn().Msgf("Accepting changed signature for installed migration %s (%s) without re-applying it", migration.name, migration.id)
+			if _, err := tx.ExecContext(ctx, "UPDATE migrations SET hash = ?0 WHERE id = ?1", migration.hash, migration.id); err != nil {
+				return fmt.Errorf("updating signature for installed migration %s (%s): %w", migration.name, migration.id, err)
+			}
 		}
 
 		// Sort migrations in the appropriate order
@@ -260,7 +306,7 @@ func migrateInternalWithDB(ctx context.Context, db *bun.DB, rollbackTime *time.T
 			}
 		}
 
-		if len(pending) == 0 {
+		if len(pending) == 0 && len(changedSignatures) == 0 {
 			log.Info().Msg("Database schema up to date, no migrations applied")
 		}
 

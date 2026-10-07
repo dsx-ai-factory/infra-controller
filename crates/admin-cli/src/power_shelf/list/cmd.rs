@@ -22,7 +22,7 @@ use super::args::Args;
 use crate::cfg::runtime::RuntimeConfig;
 use crate::rpc::ApiClient;
 
-pub async fn list_power_shelves(
+pub(super) async fn list_power_shelves(
     args: Args,
     api_client: &ApiClient,
     config: &RuntimeConfig,

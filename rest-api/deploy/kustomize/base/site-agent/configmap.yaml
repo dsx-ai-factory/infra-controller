@@ -17,8 +17,11 @@ data:
   ENABLE_DEBUG: "true"
   ENABLE_TLS: "true"
   # NICo Core configuration
-  NICO_ADDRESS: "nico-rest-mock-core:11079"
-  NICO_SEC_OPT: "0"
+  CORE_GRPC_ADDRESS: ""
+  CORE_GRPC_SEC_OPT: "0"
+  CORE_GRPC_CA_CERT_PATH: "/etc/core-grpc/ca.crt"
+  CORE_GRPC_CLIENT_CERT_PATH: "/etc/core-grpc/tls.crt"
+  CORE_GRPC_CLIENT_KEY_PATH: "/etc/core-grpc/tls.key"
   # Placeholder UUID - updated by setup-local.sh site_agent with real site ID from API
   CLUSTER_ID: "00000000-0000-4000-8000-000000000001"
   TEMPORAL_HOST: "temporal-frontend.temporal"
@@ -33,3 +36,5 @@ data:
   TEMPORAL_CERT_PATH: "/etc/temporal-certs"
   # Name of Temporal certificate secret
   TEMPORAL_CERT: "temporal-client-site-agent-certs"
+  # Name of the registration secret mounted at /etc/sitereg
+  BOOTSTRAP_SECRET_NAME: "site-registration"

@@ -15,27 +15,20 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
+mod args;
+mod cmd;
 
-#[cfg(test)]
-mod tests;
+pub(crate) use args::Cmd;
 
-pub use args::Cmd;
-
-use crate::cfg::dispatch::Dispatch;
+use crate::cfg::dispatch::dispatch_via_run;
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
 impl Run for Cmd {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmds::print_inventory(&ctx.api_client, self, ctx.config.page_size).await
+        cmd::print_inventory(&ctx.api_client, self, ctx.config.page_size).await
     }
 }
 
-impl Dispatch for Cmd {
-    async fn dispatch(self, mut ctx: RuntimeContext) -> CarbideCliResult<()> {
-        self.run(&mut ctx).await
-    }
-}
+dispatch_via_run!(Cmd);

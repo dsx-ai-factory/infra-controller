@@ -15,9 +15,8 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
-
+mod args;
+mod cmd;
 #[cfg(test)]
 mod tests;
 
@@ -25,14 +24,23 @@ mod tests;
 // This is different than others that pull in Cmd, since
 // this is just a single top-level command without any
 // subcommands.
-pub use args::Opts;
+pub(crate) use args::Opts;
 
-use crate::cfg::dispatch::Dispatch;
+use crate::cfg::dispatch::dispatch_via_run;
+use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
-impl Dispatch for Opts {
-    async fn dispatch(self, ctx: RuntimeContext) -> CarbideCliResult<()> {
-        cmds::handle_show_version(&self, &ctx.api_client, ctx.config.format).await
+impl Run for Opts {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::handle_show_version(
+            &self,
+            &ctx.api_client,
+            ctx.config.format,
+            &mut ctx.output_file,
+        )
+        .await
     }
 }
+
+dispatch_via_run!(Opts);

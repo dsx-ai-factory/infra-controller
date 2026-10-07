@@ -15,5 +15,6 @@
  * limitations under the License.
  */
 
-pub mod discover;
-pub mod expire;
+pub(crate) mod discover;
+pub(crate) mod expire;
+mod v6;

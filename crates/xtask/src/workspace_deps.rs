@@ -26,9 +26,9 @@ use walkdir::WalkDir;
 
 static REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.."); // crates/xtask/../..
 
-pub fn check(fix: bool) -> eyre::Result<CheckOutcome> {
+pub(super) fn check(fix: bool) -> eyre::Result<CheckOutcome> {
     let repo_root = PathBuf::from(REPO_ROOT).canonicalize()?;
-    let mut workspace = Workspace::load(repo_root).context("Error reading Cargo.toml files")?;
+    let mut workspace = Workspace::load(repo_root).context("error reading cargo.toml files")?;
 
     workspace.move_deps_to_workspace()?;
     let diffs = workspace.diffs()?;
@@ -42,13 +42,13 @@ pub fn check(fix: bool) -> eyre::Result<CheckOutcome> {
     }
 }
 
-pub enum CheckOutcome {
+pub(super) enum CheckOutcome {
     Success { fixed: Vec<(PathBuf, String)> },
     Failure { diffs: Vec<(PathBuf, String)> },
 }
 
 impl CheckOutcome {
-    pub fn report_and_exit(self) -> ! {
+    pub(super) fn report_and_exit(self) -> ! {
         match self {
             CheckOutcome::Success { fixed } if fixed.is_empty() => {
                 // All good, no fixes needed
@@ -185,7 +185,7 @@ impl Workspace {
                     } else if let Some(version) = dep.as_str() {
                         let version = Version::from(version).with_context(|| {
                             format!(
-                                "Error parsing version for dependency `{}` in {}",
+                                "error parsing version for dependency `{}` in {}",
                                 dep_name,
                                 toml_path.display()
                             )
@@ -232,7 +232,7 @@ impl Workspace {
     fn write_all(&self) -> eyre::Result<()> {
         for (path, document) in &self.non_workspace_cargo_tomls {
             std::fs::write(path, document.to_string())
-                .with_context(|| format!("Error writing to {}", path.display()))?;
+                .with_context(|| format!("error writing to {}", path.display()))?;
         }
 
         let workspace_cargo_toml_path = self.toplevel_cargo_toml_path();
@@ -268,7 +268,7 @@ fn specify_version(
 ) -> eyre::Result<()> {
     let Some(deps) = workspace_cargo_toml["workspace"]["dependencies"].as_table_mut() else {
         return Err(eyre::eyre!(
-            "no dependencies section in toplevel Cargo.toml"
+            "no dependencies section in toplevel cargo.toml"
         ));
     };
 

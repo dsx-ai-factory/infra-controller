@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn list(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(crate) async fn list(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let response = api_client.0.admin_list_resource_pools(data).await?;
     if response.pools.is_empty() {
         println!("No resource pools defined");

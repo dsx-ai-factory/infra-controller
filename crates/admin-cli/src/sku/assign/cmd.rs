@@ -21,7 +21,7 @@ use rpc::forge::SkuMachinePair;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn assign(
+pub(super) async fn assign(
     sku_id: String,
     machine_id: MachineId,
     force: bool,

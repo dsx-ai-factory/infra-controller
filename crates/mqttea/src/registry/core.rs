@@ -99,8 +99,9 @@ impl MqttRegistry {
 
             self.topic_patterns.push((regex, type_name.to_string()));
             debug!(
-                "Registered pattern '{}' for type '{}'",
-                regex_pattern, type_name
+                pattern = %regex_pattern,
+                message_type = %type_name,
+                "Registered MQTT topic pattern",
             );
         }
 
@@ -133,10 +134,10 @@ impl MqttRegistry {
         for (regex, type_name) in &self.topic_patterns {
             if regex.is_match(topic) {
                 debug!(
-                    "Topic '{}' matched pattern '{}' -> type '{}'",
-                    topic,
-                    regex.as_str(),
-                    type_name
+                    %topic,
+                    pattern = %regex.as_str(),
+                    message_type = %type_name,
+                    "Topic matched registered pattern",
                 );
                 return self
                     .entries
@@ -144,7 +145,7 @@ impl MqttRegistry {
                     .map(|entry| &entry.message_type_info);
             }
         }
-        debug!("Topic '{}' did not match any registered patterns", topic);
+        debug!(%topic, "Topic did not match any registered patterns");
         None
     }
 

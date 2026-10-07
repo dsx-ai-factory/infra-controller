@@ -4,14 +4,14 @@
 package nico
 
 import (
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ExtractPowerState derives an operations.PowerStatus from the first
 // ComputerSystem in a site exploration report.  Returns PowerStatusUnknown
 // when the report is nil or contains no systems.
-func ExtractPowerState(report *pb.EndpointExplorationReport) operations.PowerStatus {
+func ExtractPowerState(report *corev1.EndpointExplorationReport) operations.PowerStatus {
 	if report == nil {
 		return operations.PowerStatusUnknown
 	}
@@ -20,9 +20,9 @@ func ExtractPowerState(report *pb.EndpointExplorationReport) operations.PowerSta
 		return operations.PowerStatusUnknown
 	}
 	switch systems[0].GetPowerState() {
-	case pb.ComputerSystemPowerState_On:
+	case corev1.ComputerSystemPowerState_On:
 		return operations.PowerStatusOn
-	case pb.ComputerSystemPowerState_Off:
+	case corev1.ComputerSystemPowerState_Off:
 		return operations.PowerStatusOff
 	default:
 		return operations.PowerStatusUnknown

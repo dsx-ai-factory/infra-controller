@@ -35,7 +35,7 @@ Enable infinite boot and reboot to apply the BIOS change:
     --machine 12345678-1234-5678-90ab-cdef01234567 --reboot
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: InfiniteBootArgs,
+    pub(super) inner: InfiniteBootArgs,
 }

@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 # TODO: rename to carbide_dpu_remediation in source
@@ -38,6 +39,15 @@ uuid = { workspace = true }
 
 # [local-dependencies]
 carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
+carbide-instrument = { path = "../instrument" }
+carbide-rpc = { path = "../rpc" }
 carbide-tls = { path = "../tls" }
 carbide-uuid = { path = "../uuid" }
-carbide-rpc = { path = "../rpc" }
+carbide-utils = { path = "../utils" }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

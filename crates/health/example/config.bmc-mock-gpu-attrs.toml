@@ -1,0 +1,92 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Exercises the GPU identity telemetry attributes against a mock BMC.
+# Start the mock first:
+#
+#   cargo run -p bmc-mock -- --hardware-profile nvidia_dgx_h100 \
+#       --machine-role host --state-backend internal --port 18443
+#
+# Sensor metrics for each GPU chassis then carry gpu_uuid, gpu_serial,
+# gpu_chassis_serial, and gpu_model, distinct per slot, on the Prometheus
+# endpoint configured below.
+#
+# The same attributes are attached to SSE log records whose origin of condition
+# names a GPU chassis. Driving that path against the mock additionally needs a
+# Redfish EventService, which bmc-mock does not implement yet, so exercising it
+# currently requires hardware.
+
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "127.0.0.1"
+port = 18443
+mac = "aa:bb:cc:dd:ee:ff"
+username = "admin"
+password = "secret"
+rack_id = "RACK_1"
+machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", slot_number = 15, tray_index = 5 }
+
+[endpoint_sources.nico_api]
+enabled = false
+
+# Opt-in. Turning this off removes the gpu_* labels from every metric datapoint
+# and log record. It adds no Redfish requests either way.
+[attributes]
+gpu_identity = true
+
+[collectors.discovery]
+refresh_interval = "5m"
+discovery_concurrency = 1
+
+[collectors.reachability]
+enabled = false
+
+[collectors.sensors]
+sensor_fetch_interval = "15s"
+include_sensor_thresholds = false
+
+[collectors.metrics]
+enabled = false
+
+[collectors.firmware]
+firmware_refresh_interval = "30m"
+
+[collectors.logs]
+mode = "sse"
+
+[collectors.logs.sse]
+initial_backoff = "1s"
+max_backoff = "10s"
+
+[sinks.tracing]
+enabled = true
+
+[sinks.prometheus]
+enabled = true
+
+[sinks.health_report]
+enabled = false
+
+[sinks.rack_health_report]
+enabled = false
+
+[sinks.switch_health_report]
+enabled = false
+
+[sinks.power_shelf_health_report]
+enabled = false
+
+[metrics]
+endpoint = "127.0.0.1:19009"

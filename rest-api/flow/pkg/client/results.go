@@ -40,6 +40,11 @@ type IngestRackResult struct {
 	TaskIDs []uuid.UUID
 }
 
+// DecommissionRackResult represents the result of a DecommissionRack call.
+type DecommissionRackResult struct {
+	TaskIDs []uuid.UUID
+}
+
 // ListTasksResult represents the result of ListTasks call.
 type ListTasksResult struct {
 	Tasks []*types.Task

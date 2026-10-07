@@ -21,6 +21,7 @@ description = "State controller for VPC prefix lifecycle transitions"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 carbide-api-db = { path = "../api-db", default-features = false }

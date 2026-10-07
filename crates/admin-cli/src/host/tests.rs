@@ -25,9 +25,13 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
+use carbide_uuid::machine::StableHostMachineId;
 use clap::{CommandFactory, Parser};
+use rpc::forge::HostReprovisioningRequest;
+use rpc::forge::host_reprovisioning_request::Mode;
 
 use super::*;
+use crate::test_support::{parse_with_leaf_matches, raw_value};
 
 // verify_cmd_structure runs a baseline clap debug_assert()
 // to do basic command configuration checking and validation,
@@ -49,25 +53,20 @@ const TEST_MACHINE_ID: &str = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk
 // including testing required arguments, as well as optional
 // flag-specific checking.
 
-// variant names the top-level Cmd subcommand a valid argv routed to, so
-// "routes to the right variant" rows can yield a stable label.
-fn variant(cmd: &Cmd) -> &'static str {
-    match cmd {
-        Cmd::SetUefiPassword(_) => "set-uefi-password",
-        Cmd::ClearUefiPassword(_) => "clear-uefi-password",
-        Cmd::GenerateHostUefiPassword(_) => "generate-host-uefi-password",
-        _ => "other",
-    }
-}
-
 // The UEFI-password subcommands each route to their own top-level variant:
 // set/clear take a machine query, generate takes no args.
 #[test]
 fn uefi_password_subcommands_route_to_their_variant() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| variant(&cmd))
+            let subcommand = argv[1];
+            parse_with_leaf_matches::<Cmd>(argv, &[subcommand])
+                .map(|(cmd, _)| match cmd {
+                    Cmd::SetUefiPassword(_) => "set-uefi-password",
+                    Cmd::ClearUefiPassword(_) => "clear-uefi-password",
+                    Cmd::GenerateHostUefiPassword(_) => "generate-host-uefi-password",
+                    _ => panic!("expected a UEFI-password command"),
+                })
                 .map_err(drop)
         };
         "set-uefi-password with machine query" {
@@ -92,14 +91,23 @@ fn uefi_password_subcommands_route_to_their_variant() {
 fn reprovision_set_parses_fields() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Reprovision(reprovision::args::Args::Set(args)) => (
-                        args.id.to_string(),
-                        args.update_firmware,
-                        args.update_message,
-                    ),
-                    _ => panic!("expected Reprovision Set variant"),
+            parse_with_leaf_matches::<Cmd>(argv, &["reprovision", "set"])
+                .map(|(cmd, matches)| {
+                    let request = match cmd {
+                        Cmd::Reprovision(reprovision::Args::Set(args)) => {
+                            HostReprovisioningRequest::from(&args)
+                        }
+                        _ => panic!("expected Reprovision Set variant"),
+                    };
+                    assert_eq!(request.mode, Mode::Set as i32);
+                    (
+                        request
+                            .machine_id
+                            .expect("machine ID is required")
+                            .to_string(),
+                        matches.get_flag("update_firmware"),
+                        raw_value(&matches, "update_message"),
+                    )
                 })
                 .map_err(drop)
         };
@@ -133,12 +141,22 @@ fn reprovision_set_parses_fields() {
 fn reprovision_clear_parses_fields() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Reprovision(reprovision::args::Args::Clear(args)) => {
-                        (args.id.to_string(), args.update_firmware)
-                    }
-                    _ => panic!("expected Reprovision Clear variant"),
+            parse_with_leaf_matches::<Cmd>(argv, &["reprovision", "clear"])
+                .map(|(cmd, matches)| {
+                    let request = match cmd {
+                        Cmd::Reprovision(reprovision::Args::Clear(args)) => {
+                            HostReprovisioningRequest::from(args)
+                        }
+                        _ => panic!("expected Reprovision Clear variant"),
+                    };
+                    assert_eq!(request.mode, Mode::Clear as i32);
+                    (
+                        request
+                            .machine_id
+                            .expect("machine ID is required")
+                            .to_string(),
+                        matches.get_flag("update_firmware"),
+                    )
                 })
                 .map_err(drop)
         };
@@ -154,12 +172,16 @@ fn reprovision_clear_parses_fields() {
 fn reprovision_mark_manual_upgrade_complete_parses_fields() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Reprovision(reprovision::args::Args::MarkManualUpgradeComplete(args)) => {
-                        args.id.to_string()
-                    }
-                    _ => panic!("expected Reprovision MarkManualUpgradeComplete variant"),
+            parse_with_leaf_matches::<Cmd>(argv, &["reprovision", "mark-manual-upgrade-complete"])
+                .map(|(cmd, matches)| {
+                    assert!(matches!(
+                        cmd,
+                        Cmd::Reprovision(reprovision::Args::MarkManualUpgradeComplete(_))
+                    ));
+                    matches
+                        .get_one::<StableHostMachineId>("id")
+                        .expect("machine ID is required")
+                        .to_string()
                 })
                 .map_err(drop)
         };
@@ -180,9 +202,9 @@ fn reprovision_mark_manual_upgrade_complete_parses_fields() {
 fn reprovision_list_parses() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Reprovision(reprovision::args::Args::List) => "list",
+            parse_with_leaf_matches::<Cmd>(argv, &["reprovision", "list"])
+                .map(|(cmd, _)| match cmd {
+                    Cmd::Reprovision(reprovision::Args::List) => "list",
                     _ => panic!("expected Reprovision List variant"),
                 })
                 .map_err(drop)

@@ -21,7 +21,10 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn add_nic_lockdown_ikm(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn add_nic_lockdown_ikm(
+    data: Args,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
     api_client
         .0
         .create_credential(forgerpc::CredentialCreationRequest::try_from(data)?)

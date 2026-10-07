@@ -12,26 +12,27 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateVpcPrefix is a workflow to create an VpcPrefix using CreateVpcPrefixOnSite activity
-func CreateVpcPrefix(ctx workflow.Context, request *cwssaws.VpcPrefixCreationRequest) error {
+func CreateVpcPrefix(ctx workflow.Context, request *corev1.VpcPrefixCreationRequest) error {
 	logger := log.With().Str("Workflow", "CreateVpcPrefix").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -53,21 +54,20 @@ func CreateVpcPrefix(ctx workflow.Context, request *cwssaws.VpcPrefixCreationReq
 }
 
 // UpdateVpcPrefix is a workflow to update an VpcPrefix using UpdateVpcPrefixOnSite activity
-func UpdateVpcPrefix(ctx workflow.Context, request *cwssaws.VpcPrefixUpdateRequest) error {
+func UpdateVpcPrefix(ctx workflow.Context, request *corev1.VpcPrefixUpdateRequest) error {
 	logger := log.With().Str("Workflow", "UpdateVpcPrefix").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -89,22 +89,21 @@ func UpdateVpcPrefix(ctx workflow.Context, request *cwssaws.VpcPrefixUpdateReque
 }
 
 // DeleteVpcPrefix is a workflow to delete an VpcPrefix using DeleteVpcPrefixOnSite activity
-func DeleteVpcPrefix(ctx workflow.Context, request *cwssaws.VpcPrefixDeletionRequest) error {
+func DeleteVpcPrefix(ctx workflow.Context, request *corev1.VpcPrefixDeletionRequest) error {
 	logger := log.With().Str("Workflow", "DeleteVpcPrefix").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

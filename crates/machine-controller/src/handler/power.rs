@@ -30,18 +30,18 @@ use crate::handler::{PowerOptionConfig, handler_host_power_control, host_power_s
 
 // If power state is Paused and Reset, state machine can't take any decision on it.
 // Ignore power manager with a log and moved to state machine.
-pub enum UsablePowerState {
+enum UsablePowerState {
     Usable(PowerState),
     NotUsable(libredfish::PowerState),
 }
 
 // Handle power related stuff and return updated power options.
-pub async fn handle_power(
+pub(super) async fn handle_power(
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     power_options_config: &PowerOptionConfig,
 ) -> Result<PowerHandlingOutcome, StateHandlerError> {
-    if let Some(power_options) = &mh_snapshot.host_snapshot.power_options {
+    if let Some(power_options) = &mh_snapshot.host_snapshot.status.power_options {
         match power_options.desired_power_state {
             model::power_manager::PowerState::On => {
                 handle_power_desired_on(power_options, mh_snapshot, ctx, power_options_config).await
@@ -62,14 +62,14 @@ pub async fn handle_power(
         }
     } else {
         tracing::warn!(
-            "Power options are not available for host: {}",
-            mh_snapshot.host_snapshot.id
+            machine_id = %mh_snapshot.host_snapshot.id,
+            "Power options are not available for host"
         );
         Ok(PowerHandlingOutcome::new(None, true, None))
     }
 }
 
-pub async fn handle_power_desired_on(
+pub(super) async fn handle_power_desired_on(
     current_power_options: &PowerOptions,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
@@ -115,7 +115,8 @@ pub async fn handle_power_desired_on(
             }
             UsablePowerState::NotUsable(s) => {
                 tracing::warn!(
-                    "Not usable power state {s}. Since desired state is On, continuing state machine. Will check in next cycle."
+                    power_state = %s,
+                    "Not usable power state. Since desired state is On, continuing state machine. Will check in next cycle."
                 );
                 return Ok(PowerHandlingOutcome::new(
                     Some(updated_power_options),
@@ -158,7 +159,7 @@ pub async fn handle_power_desired_on(
     Ok(PowerHandlingOutcome::new(new_power_options, true, None))
 }
 
-pub async fn get_updated_power_options_desired_off(
+pub(super) async fn get_updated_power_options_desired_off(
     current_power_options: &PowerOptions,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
@@ -186,7 +187,7 @@ pub async fn get_updated_power_options_desired_off(
                     "Desired state is Off and actual state is Off.".to_string()
                 };
                 if let PowerState::On = power_state {
-                    tracing::warn!(cause);
+                    tracing::warn!(reason = %cause, "Skipping host power handling");
                 }
                 return Ok(PowerHandlingOutcome::new(
                     Some(updated_power_options),
@@ -198,7 +199,7 @@ pub async fn get_updated_power_options_desired_off(
                 let cause = format!(
                     "Not usable power state {s}. Since desired state is Off, not processing any event."
                 );
-                tracing::warn!(cause);
+                tracing::warn!(reason = %cause, "Skipping host power handling");
                 return Ok(PowerHandlingOutcome::new(
                     Some(updated_power_options),
                     false,

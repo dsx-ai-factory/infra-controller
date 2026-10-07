@@ -41,6 +41,11 @@ struct RackRecord {
     state_display: super::StateDisplay,
 }
 
+struct RackSwitchRecord {
+    id: String,
+    is_primary: bool,
+}
+
 impl From<rpc::forge::Rack> for RackRecord {
     fn from(rack: rpc::forge::Rack) -> Self {
         let lifecycle = rack
@@ -63,18 +68,18 @@ struct RackDetail {
     version: String,
     health_detail: super::HealthDetail,
     associated_machines: Vec<String>,
-    associated_switches: Vec<String>,
+    associated_switches: Vec<RackSwitchRecord>,
     associated_power_shelves: Vec<String>,
     metadata_detail: super::MetadataDetail,
     history: StateHistoryTable,
 }
 
 /// Show all racks
-pub async fn show_html(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(state: AxumState<Arc<Api>>) -> Response {
     let racks = match fetch_racks(&state).await {
         Ok(racks) => racks,
         Err(err) => {
-            tracing::error!(%err, "fetch_racks");
+            tracing::error!(error = %err, "fetch_racks");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading racks").into_response();
         }
     };
@@ -86,18 +91,18 @@ pub async fn show_html(state: AxumState<Arc<Api>>) -> Response {
 }
 
 /// Show all racks as JSON
-pub async fn show_json(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_json(state: AxumState<Arc<Api>>) -> Response {
     let racks = match fetch_racks(&state).await {
         Ok(racks) => racks,
         Err(err) => {
-            tracing::error!(%err, "fetch_racks");
+            tracing::error!(error = %err, "fetch_racks");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading racks").into_response();
         }
     };
     (StatusCode::OK, Json(racks)).into_response()
 }
 
-pub async fn fetch_racks(api: &Api) -> Result<rpc::forge::RackList, tonic::Status> {
+async fn fetch_racks(api: &Api) -> Result<rpc::forge::RackList, tonic::Status> {
     let request = tonic::Request::new(rpc::forge::RackSearchFilter::default());
 
     let rack_ids = api.find_rack_ids(request).await?.into_inner().rack_ids;
@@ -122,10 +127,7 @@ pub async fn fetch_racks(api: &Api) -> Result<rpc::forge::RackList, tonic::Statu
     Ok(rpc::forge::RackList { racks })
 }
 
-pub async fn fetch_rack(
-    api: &Api,
-    rack_id: &RackId,
-) -> Result<Option<::rpc::forge::Rack>, Response> {
+async fn fetch_rack(api: &Api, rack_id: &RackId) -> Result<Option<::rpc::forge::Rack>, Response> {
     let request = tonic::Request::new(rpc::forge::RacksByIdsRequest {
         rack_ids: vec![rack_id.clone()],
     });
@@ -150,7 +152,7 @@ pub async fn fetch_rack(
             return Ok(None);
         }
         Err(err) => {
-            tracing::error!(%err, %rack_id, "find_racks_by_ids");
+            tracing::error!(error = %err, %rack_id, "find_racks_by_ids");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
@@ -159,7 +161,7 @@ pub async fn fetch_rack(
 }
 
 /// View details about a Rack
-pub async fn detail(
+pub(super) async fn detail(
     AxumState(api): AxumState<Arc<Api>>,
     AxumPath(rack_id): AxumPath<String>,
     Query(_params): Query<HashMap<String, String>>,
@@ -174,27 +176,30 @@ pub async fn detail(
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
-    let maybe_rack = match fetch_rack(&api, &rack_id).await {
-        Ok(maybe_rack) => maybe_rack,
+    let rack = match fetch_rack(&api, &rack_id).await {
+        Ok(Some(rack)) => rack,
+        Ok(None) => {
+            return super::not_found_response(rack_id.to_string());
+        }
         Err(response) => return response,
     };
 
     if show_json {
-        return (StatusCode::OK, Json(maybe_rack)).into_response();
+        return (StatusCode::OK, Json(rack)).into_response();
     };
 
     let associated_machines = match fetch_machine_ids(api.clone(), rack_id.clone()).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "fetch_machine_ids");
+            tracing::error!(error = %err, "fetch_machine_ids");
             vec![]
         }
     };
 
-    let associated_switches = match fetch_switch_ids(&api, &rack_id).await {
-        Ok(ids) => ids,
+    let associated_switches = match fetch_switches(&api, &rack_id).await {
+        Ok(switches) => switches,
         Err(err) => {
-            tracing::error!(%err, "fetch_switch_ids");
+            tracing::error!(error = %err, "fetch_switches");
             vec![]
         }
     };
@@ -202,31 +207,25 @@ pub async fn detail(
     let associated_power_shelves = match fetch_power_shelf_ids(&api, &rack_id).await {
         Ok(ids) => ids,
         Err(err) => {
-            tracing::error!(%err, "fetch_power_shelf_ids");
+            tracing::error!(error = %err, "fetch_power_shelf_ids");
             vec![]
         }
     };
 
-    let version = maybe_rack
-        .as_ref()
-        .map(|r| r.version.clone())
-        .unwrap_or_default();
+    let version = rack.version.clone();
 
-    let lifecycle = maybe_rack
+    let lifecycle = rack
+        .status
         .as_ref()
-        .and_then(|r| r.status.as_ref())
         .and_then(|s| s.lifecycle.clone())
         .unwrap_or_default();
 
     let metadata_detail = super::MetadataDetail {
-        metadata: maybe_rack
-            .as_ref()
-            .and_then(|r| r.metadata.clone())
-            .unwrap_or_default(),
+        metadata: rack.metadata.clone().unwrap_or_default(),
         metadata_version: version.clone(),
     };
 
-    let rack_status = maybe_rack.as_ref().and_then(|rack| rack.status.as_ref());
+    let rack_status = rack.status.as_ref();
     let health_url = format!("/admin/rack/{rack_id}/health");
     let health_detail = super::HealthDetail::new(
         health_url,
@@ -247,7 +246,7 @@ pub async fn detail(
             records: records.into_iter().map(Into::into).collect(),
         },
         Err((code, err)) => {
-            tracing::error!(%code, %err, %rack_id, "fetch_rack_state_history_records");
+            tracing::error!(http_status = %code, error = %err, %rack_id, "fetch_rack_state_history_records");
             StateHistoryTable { records: vec![] }
         }
     };
@@ -267,10 +266,7 @@ pub async fn detail(
     (StatusCode::OK, Html(display.render().unwrap())).into_response()
 }
 
-pub async fn fetch_machine_ids(
-    api: Arc<Api>,
-    rack_id: RackId,
-) -> Result<Vec<String>, tonic::Status> {
+async fn fetch_machine_ids(api: Arc<Api>, rack_id: RackId) -> Result<Vec<String>, tonic::Status> {
     let request = tonic::Request::new(rpc::forge::MachineSearchConfig {
         include_predicted_host: true,
         rack_id: Some(rack_id.clone()),
@@ -287,19 +283,48 @@ pub async fn fetch_machine_ids(
         .collect())
 }
 
-async fn fetch_switch_ids(api: &Api, rack_id: &RackId) -> Result<Vec<String>, tonic::Status> {
+async fn fetch_switches(
+    api: &Api,
+    rack_id: &RackId,
+) -> Result<Vec<RackSwitchRecord>, tonic::Status> {
     let request = tonic::Request::new(rpc::forge::SwitchSearchFilter {
         rack_id: Some(rack_id.clone()),
         ..Default::default()
     });
 
-    Ok(api
-        .find_switch_ids(request)
-        .await?
-        .into_inner()
-        .ids
+    let switch_ids = api.find_switch_ids(request).await?.into_inner().ids;
+
+    if switch_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // find_switches_by_ids rejects a request with more IDs than the server's
+    // configured max_find_by_ids, so page the lookup to that limit. A zero/unset
+    // cap means the server enforces no limit.
+    let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
+    let chunk_size = if max_find_by_ids == 0 {
+        switch_ids.len()
+    } else {
+        max_find_by_ids
+    };
+
+    let mut switches = Vec::with_capacity(switch_ids.len());
+    for chunk in switch_ids.chunks(chunk_size) {
+        let page = api
+            .find_switches_by_ids(tonic::Request::new(rpc::forge::SwitchesByIdsRequest {
+                switch_ids: chunk.to_vec(),
+            }))
+            .await?
+            .into_inner();
+        switches.extend(page.switches);
+    }
+
+    Ok(switches
         .into_iter()
-        .map(|id| id.to_string())
+        .map(|switch| RackSwitchRecord {
+            id: switch.id.map(|id| id.to_string()).unwrap_or_default(),
+            is_primary: switch.is_primary,
+        })
         .collect())
 }
 

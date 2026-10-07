@@ -1,0 +1,287 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "title": "Service and site health",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "1 means that the NICo API process is serving metrics.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "READY" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_api_ready{job=~\"$job\"}) or vector(0)", "instant": true, "legendFormat": "NICo API", "range": false, "refId": "A" }
+      ],
+      "title": "API status",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Build version and Git SHA reported by the running NICo API.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 8, "x": 4, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "none", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "name", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (build_version, git_sha) (${metric_prefix}_api_version{job=~\"$job\"})", "instant": true, "legendFormat": "{{build_version}} ({{git_sha}})", "range": false, "refId": "A" }
+      ],
+      "title": "Running version",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Managed hosts with one or more active health alerts, summed across tenant-assignment states.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum(max by (healthy, in_use) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\"}))", "instant": true, "legendFormat": "Unhealthy hosts", "range": false, "refId": "A" }
+      ],
+      "title": "Unhealthy hosts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "DPUs with a recent health report (less than five minutes old).",
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "text" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] }, "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 5,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_dpus_up_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Online DPUs", "range": false, "refId": "A" }
+      ],
+      "title": "DPUs online",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "DPUs whose most recent report declared them healthy.",
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "text" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] }, "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 6,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_dpus_healthy_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Healthy DPUs", "range": false, "refId": "A" }
+      ],
+      "title": "DPUs healthy",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 7,
+      "panels": [],
+      "title": "Capacity",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 7, "x": 0, "y": 6 },
+      "id": 8,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Managed", "range": false, "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_hosts_usable_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Usable", "range": false, "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_hosts_in_use_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "In use", "range": false, "refId": "C" }
+      ],
+      "title": "Host capacity",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 7, "x": 7, "y": 6 },
+      "id": 9,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_gpus_total_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Managed", "range": false, "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_gpus_usable_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Usable", "range": false, "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_gpus_in_use_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "In use", "range": false, "refId": "C" }
+      ],
+      "title": "GPU capacity",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Free and allocated values in each NICo resource pool.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 10, "x": 14, "y": 6 },
+      "id": 10,
+      "options": { "displayMode": "gradient", "maxVizHeight": 300, "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "sizing": "auto", "valueMode": "color" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (pool) (${metric_prefix}_resourcepool_free_count{job=~\"$job\"})", "instant": true, "legendFormat": "{{pool}} free", "range": false, "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (pool) (${metric_prefix}_resourcepool_used_count{job=~\"$job\"})", "instant": true, "legendFormat": "{{pool}} used", "range": false, "refId": "B" }
+      ],
+      "title": "Resource pools",
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 },
+      "id": 11,
+      "panels": [],
+      "title": "Tenancy and inventory",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Allocated hosts and GPUs by tenant organization ID.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 10, "x": 0, "y": 12 },
+      "id": 12,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": [ "sum" ], "show": false }, "showHeader": true },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (tenant_org_id) (${metric_prefix}_hosts_in_use_by_tenant_count{job=~\"$job\",fresh=\"true\"})", "format": "table", "instant": true, "legendFormat": "Hosts", "range": false, "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (tenant_org_id) (${metric_prefix}_gpus_in_use_by_tenant_count{job=~\"$job\",fresh=\"true\"})", "format": "table", "instant": true, "legendFormat": "GPUs", "range": false, "refId": "B" }
+      ],
+      "title": "Tenant allocations",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 7, "x": 10, "y": 12 },
+      "id": 13,
+      "options": { "displayMode": "gradient", "maxVizHeight": 300, "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "sizing": "auto", "valueMode": "color" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Hosts", "range": false, "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_network_segments_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Network segments", "range": false, "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_vpc_prefixes_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "VPC prefixes", "range": false, "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_ib_partitions_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "IB partitions", "range": false, "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_switches_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Switches", "range": false, "refId": "E" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_racks_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Racks", "range": false, "refId": "F" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_power_shelves_total{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Power shelves", "range": false, "refId": "G" }
+      ],
+      "title": "Managed entities",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Current managed-host lifecycle distribution. For SLA and handling errors, see the nico-lifecycle dashboard.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "hideFrom": { "legend": false, "tooltip": false, "viz": false } }, "mappings": [] }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 7, "x": 17, "y": 12 },
+      "id": 14,
+      "options": { "displayLabels": [ "name", "percent" ], "legend": { "displayMode": "list", "placement": "right", "showLegend": true }, "pieType": "pie", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (state, substate) (${metric_prefix}_machines_per_state{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "{{state}} / {{substate}}", "range": false, "refId": "A" }
+      ],
+      "title": "Host lifecycle states",
+      "type": "piechart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "id": 15,
+      "panels": [],
+      "title": "Health alerts",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Managed hosts reporting each health probe alert. Counts are combined across tenant-assignment states.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "id": 16,
+      "options": { "displayMode": "gradient", "maxVizHeight": 300, "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "sizing": "auto", "valueMode": "color" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (probe_id, probe_target) (max by (probe_id, probe_target, in_use) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{job=~\"$job\",fresh=\"true\"}))", "instant": true, "legendFormat": "{{probe_id}} / {{probe_target}}", "range": false, "refId": "A" }
+      ],
+      "title": "Unhealthy hosts by probe",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Managed hosts with active health classifications, combined across tenant-assignment states.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "id": 17,
+      "options": { "displayMode": "gradient", "maxVizHeight": 300, "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "sizing": "auto", "valueMode": "color" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (classification) (max by (classification, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{job=~\"$job\",fresh=\"true\"}))", "instant": true, "legendFormat": "{{classification}}", "range": false, "refId": "A" }
+      ],
+      "title": "Unhealthy hosts by classification",
+      "type": "bargauge"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [ "nico", "infrastructure", "overview" ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "label": "Prometheus",
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": true, "text": "carbide", "value": "carbide" },
+        "description": "Prefix configured for NICo core metrics (carbide by default; alt_metric_prefix can add another prefix).",
+        "label": "Metric prefix",
+        "name": "metric_prefix",
+        "options": [ { "selected": true, "text": "carbide", "value": "carbide" } ],
+        "query": "carbide",
+        "type": "textbox"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(${metric_prefix}_api_ready, job)",
+        "includeAll": true,
+        "label": "NICo scrape job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": { "query": "label_values(${metric_prefix}_api_ready, job)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "NICo / Site Overview",
+  "uid": "nico-overview",
+  "version": 1
+}

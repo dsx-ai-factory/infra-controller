@@ -27,7 +27,7 @@ use x509_parser::validate::*;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn add_filename(filename: &str, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn add_filename(filename: &str, api_client: &ApiClient) -> CarbideCliResult<()> {
     let filepath = Path::new(filename);
     let is_pem = filepath.with_extension("pem").is_file();
     let is_der =

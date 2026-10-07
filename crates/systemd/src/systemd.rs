@@ -58,8 +58,10 @@ async fn sd_notify(msg: &str) -> eyre::Result<()> {
     let addr = if sock_path.as_bytes()[0] == b'@' {
         #[cfg(target_os = "linux")]
         {
+            // Linux abstract socket names must begin with a NUL byte.
+            // SAFETY: this branch established that the first byte is ASCII `@`. Replacing it
+            // with NUL preserves the UTF-8 invariant required by `String::as_mut_vec`.
             unsafe {
-                // abstract sockets must start with nul byte
                 sock_path.as_mut_vec()[0] = 0;
             }
             SocketAddr::from_abstract_name(sock_path.as_bytes())
@@ -68,7 +70,7 @@ async fn sd_notify(msg: &str) -> eyre::Result<()> {
         #[cfg(not(target_os = "linux"))]
         {
             eyre::bail!(
-                "Abstract Unix sockets (NOTIFY_SOCKET starting with @) are only supported on Linux"
+                "abstract unix sockets (NOTIFY_SOCKET starting with @) are only supported on linux"
             );
         }
     } else {
@@ -84,7 +86,7 @@ async fn sd_notify(msg: &str) -> eyre::Result<()> {
         .await
         .wrap_err("socket send error")?;
     if sent != msg.len() {
-        eyre::bail!("Short send {sent} / {}", msg.len());
+        eyre::bail!("short send {sent} / {}", msg.len());
     }
     Ok(())
 }

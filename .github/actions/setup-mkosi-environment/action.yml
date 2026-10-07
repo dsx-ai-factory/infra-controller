@@ -4,7 +4,11 @@ inputs:
   rust-version:
     description: 'Rust toolchain version to install'
     required: false
-    default: '1.90.0'
+    default: '1.96.0'
+  cargo-make-version:
+    description: 'cargo-make version to install (keep in sync with Makefile.toml config.min_version)'
+    required: false
+    default: '0.37.24'
   arch:
     description: 'Target architecture (x86_64 or aarch64)'
     required: false
@@ -13,10 +17,92 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # A cold run pulls ~120 packages from the distro mirror, and on arm64 a
+    # single stalled connection there has taken the whole job down: one 140 kB
+    # package burned two minutes of retries and then failed with a connection
+    # timeout. Keeping the .deb files between runs takes the mirror off the
+    # critical path entirely whenever the set of packages is unchanged.
+    - name: Compute apt cache key
+      id: apt-key
+      shell: bash
+      run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+    # The package list lives in this file, so its hash is what should rotate the
+    # cache. The trailing week keeps the contents from ageing indefinitely: a
+    # primary-key hit never re-saves, so without it the archive would drift
+    # further behind the mirror every run.
+    # restore/save rather than actions/cache, whose post step is `post-if:
+    # success()` and so would skip the save on exactly the run that needs it
+    # most -- the one the mirror just failed.
+    - name: Restore apt archives
+      id: apt-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/nico-apt-archives
+        key: apt-mkosi-${{ runner.arch }}-${{ hashFiles('.github/actions/setup-mkosi-environment/action.yml') }}-${{ steps.apt-key.outputs.week }}
+        restore-keys: |
+          apt-mkosi-${{ runner.arch }}-${{ hashFiles('.github/actions/setup-mkosi-environment/action.yml') }}-
+          apt-mkosi-${{ runner.arch }}-
+
     - name: Update package lists
       shell: bash
       run: |
-        sudo apt-get update
+        set -euo pipefail
+
+        # apt defaults to three tries against a 120s timeout, so one unhealthy
+        # mirror IP stalls for minutes before it gives up on a package. Failing
+        # faster and trying more often lands on a healthy IP sooner.
+        #
+        # DEP-11 and Translation indexes are the ones the mirror most often 503s
+        # on, and nothing here resolves an AppStream id or reads a localised
+        # description. Not asking for them drops about fifteen requests per
+        # update, and with them their chance of failing.
+        sudo tee /etc/apt/apt.conf.d/99-nico-acquire >/dev/null <<'EOF'
+        Acquire::Retries "5";
+        Acquire::http::Timeout "20";
+        Acquire::https::Timeout "20";
+        Acquire::Languages "none";
+        Acquire::IndexTargets::deb::DEP-11::DefaultEnabled "false";
+        Binary::apt-get::APT::Keep-Downloaded-Packages "true";
+        EOF
+
+        # apt only skips a download when the .deb is already in its own cache
+        # directory, so the restored archives have to be seeded into it.
+        mkdir -p ~/.cache/nico-apt-archives
+        sudo cp -n ~/.cache/nico-apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true
+
+        # Acquire::Retries only re-asks the same host, so the cloud regional
+        # mirror these runners point at returns 503 on every try while it is
+        # down. Walk independent origins instead, Canonical's own first and then
+        # two university mirrors. security.ubuntu.com is deliberately left
+        # alone, it is a separate origin and is not the one that fails.
+        if grep -qs ubuntu-ports /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+          repo_path=ubuntu-ports
+          fallbacks="https://ports.ubuntu.com/ubuntu-ports/
+                     https://mirrors.ocf.berkeley.edu/ubuntu-ports/
+                     https://mirrors.mit.edu/ubuntu-ports/"
+        else
+          repo_path=ubuntu
+          fallbacks="https://archive.ubuntu.com/ubuntu/
+                     https://mirrors.ocf.berkeley.edu/ubuntu/
+                     https://mirrors.mit.edu/ubuntu/"
+        fi
+
+        updated=0
+        if sudo apt-get update; then
+          updated=1
+        else
+          for base in ${fallbacks}; do
+            echo "::warning::apt-get update failed, retrying against ${base}"
+            sudo sed -i -E "\#security\.ubuntu\.com#! s#https?://[A-Za-z0-9._-]+/${repo_path}/?#${base}#g" \
+              /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            if sudo apt-get update; then
+              updated=1
+              break
+            fi
+          done
+        fi
+        [ "${updated}" = 1 ]
 
     - name: Install system dependencies
       shell: bash
@@ -85,6 +171,29 @@ runs:
         sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
         sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+    # Runs after a failed install too: apt keeps every .deb it did fetch before
+    # giving up, so banking them shrinks what the retry has to ask the mirror
+    # for. Owned by the runner user so the save step can read them back.
+    #
+    # !cancelled() rather than always(), so a superseded run that CI just
+    # cancelled stops promptly instead of lingering to bank a cache nobody
+    # asked for. An ordinary failure still saves.
+    - name: Collect apt archives
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: |
+        mkdir -p ~/.cache/nico-apt-archives
+        sudo cp -u /var/cache/apt/archives/*.deb ~/.cache/nico-apt-archives/ 2>/dev/null || true
+        sudo chown -R "$(id -u):$(id -g)" ~/.cache/nico-apt-archives
+        echo "apt archives held: $(find ~/.cache/nico-apt-archives -name '*.deb' | wc -l) packages ($(du -sh ~/.cache/nico-apt-archives | cut -f1))"
+
+    - name: Save apt archives
+      if: ${{ !cancelled() && steps.apt-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/nico-apt-archives
+        key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+
     - name: Install Rust toolchain
       shell: bash
       run: |
@@ -105,28 +214,62 @@ runs:
         # Ensure cargo is in PATH
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+    # `cargo install cargo-make` compiled the tool from source on every run,
+    # which cost several minutes and hurt most on arm64. Upstream publishes
+    # prebuilt binaries for x86_64 Linux only, so arm64 still has to build it
+    # once -- caching the resulting binary is what keeps that off the critical
+    # path on subsequent runs.
+    - name: Restore cargo-make
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-make
+        key: cargo-make-${{ inputs.cargo-make-version }}-${{ runner.os }}-${{ runner.arch }}
+
     - name: Install cargo-make
       shell: bash
+      env:
+        CARGO_MAKE_VERSION: ${{ inputs.cargo-make-version }}
       run: |
+        set -euo pipefail
         source $HOME/.cargo/env || true
-        if ! command -v cargo-make &> /dev/null; then
-          echo "Installing cargo-make..."
-          cargo install cargo-make --locked
-        else
-          echo "cargo-make is already installed"
-          cargo-make --version
+
+        if command -v cargo-make &> /dev/null; then
+          installed_version="$(cargo make --version | awk '{print $NF}')"
+          if [[ "${installed_version}" == "${CARGO_MAKE_VERSION}" ]]; then
+            echo "cargo-make ${installed_version} is already installed"
+            exit 0
+          fi
+          echo "Replacing cargo-make ${installed_version} with ${CARGO_MAKE_VERSION}"
         fi
 
-    - name: Install sccache (optional build cache)
-      shell: bash
-      run: |
-        source $HOME/.cargo/env || true
-        if ! command -v sccache &> /dev/null; then
-          echo "Installing sccache..."
-          cargo install sccache --locked
+        mkdir -p "$HOME/.cargo/bin"
+
+        # Upstream publishes x86_64-unknown-linux-{gnu,musl} only; there is no
+        # aarch64 asset, so that arch intentionally falls through to a source
+        # build and is served by the cache above from then on.
+        asset_arch=""
+        if [ "$(uname -m)" = "x86_64" ]; then
+          asset_arch="x86_64-unknown-linux-musl"
+        fi
+
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "${tmp}"' EXIT
+
+        url="https://github.com/sagiegurari/cargo-make/releases/download/${CARGO_MAKE_VERSION}/cargo-make-v${CARGO_MAKE_VERSION}-${asset_arch}.zip"
+
+        if [ -n "${asset_arch}" ] && curl -fsSL "${url}" -o "${tmp}/cargo-make.zip"; then
+          unzip -q -o "${tmp}/cargo-make.zip" -d "${tmp}"
+          install -m 0755 "$(find "${tmp}" -name cargo-make -type f | head -1)" "$HOME/.cargo/bin/cargo-make"
+          echo "Installed prebuilt cargo-make: $("$HOME/.cargo/bin/cargo-make" make --version)"
         else
-          echo "sccache is already installed"
-          sccache --version
+          echo "No prebuilt cargo-make for $(uname -m); building from source (cached for later runs)"
+          cargo install cargo-make --locked --version "${CARGO_MAKE_VERSION}"
+        fi
+
+        installed_version="$("$HOME/.cargo/bin/cargo-make" make --version | awk '{print $NF}')"
+        if [[ "${installed_version}" != "${CARGO_MAKE_VERSION}" ]]; then
+          echo "::error::Expected cargo-make ${CARGO_MAKE_VERSION}, installed ${installed_version}"
+          exit 1
         fi
 
     - name: Verify mkosi installation
@@ -165,8 +308,7 @@ runs:
         source $HOME/.cargo/env || true
         echo "Rust: $(rustc --version 2>/dev/null || echo 'not installed')"
         echo "Cargo: $(cargo --version 2>/dev/null || echo 'not installed')"
-        echo "cargo-make: $(cargo-make --version 2>/dev/null || echo 'not installed')"
-        echo "sccache: $(sccache --version 2>/dev/null || echo 'not installed')"
+        echo "cargo-make: $(cargo make --version 2>/dev/null || echo 'not installed')"
         echo ""
         echo "=== mkosi Ecosystem ==="
         echo "mkosi: $(mkosi --version 2>&1 | head -1 || echo 'not installed')"

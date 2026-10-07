@@ -20,7 +20,7 @@ use rpc::forge::PowerShelfDeletionRequest;
 use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub async fn delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
+pub(super) async fn delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
     let power_shelf_id = data
         .parse_power_shelf_id()
         .map_err(|e| color_eyre::eyre::eyre!(e))?;

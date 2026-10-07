@@ -6,7 +6,7 @@ package inventorysync
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
@@ -14,54 +14,152 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-// driftFieldSerialNumber is the canonical drift field name used by both the
-// machine and inventory paths when chassis serial mismatches show up.
-const driftFieldSerialNumber = "serial_number"
+type actualSyncResult struct {
+	componentType devicetypes.ComponentType
+	drifts        []model.ComponentDrift
+	syncOK        bool
+}
 
-// runActualSync runs every per-type actual-vs-expected drift detector,
-// concatenates their drifts, and logs a per-type "received from Core"
-// summary. Each type-specific function handles its own errors internally
-// and falls back to nil drifts; one type's RPC failure doesn't suppress the
-// others.
-//
-// allRPCOK is true only when every type's drift-affecting RPCs succeeded. The
-// drift table is a full-table replace with no per-type discriminator, so the
-// caller must not overwrite it from a partial view: if any type's RPC failed,
-// the previously persisted drifts are kept rather than being wiped. The
-// returned drifts are not yet persisted — runInventoryOne owns the
-// table-replacement transaction.
+// runActualSync runs every per-type actual-vs-expected drift detector and
+// returns each type's result independently. A type's result is authoritative
+// only when syncOK is true. The observed-domain projection remains best effort
+// because it does not contribute component drifts.
 func runActualSync(
 	ctx context.Context,
 	pool *cdb.Session,
 	nicoClient nicoapi.Client,
-) (drifts []model.ComponentDrift, allRPCOK bool) {
-	allRPCOK = true
+) []actualSyncResult {
+	results := make([]actualSyncResult, 0, 3)
 
 	computeReceived, machineDrifts, machineOK := syncMachines(ctx, pool, nicoClient)
-	drifts = append(drifts, machineDrifts...)
-	allRPCOK = allRPCOK && machineOK
+	results = append(results, actualSyncResult{
+		componentType: devicetypes.ComponentTypeCompute,
+		drifts:        machineDrifts,
+		syncOK:        machineOK,
+	})
 
 	switchesReceived, nvSwitchDrifts, switchOK := syncNVSwitchesNICo(ctx, pool, nicoClient)
-	drifts = append(drifts, nvSwitchDrifts...)
-	allRPCOK = allRPCOK && switchOK
+	results = append(results, actualSyncResult{
+		componentType: devicetypes.ComponentTypeNVSwitch,
+		drifts:        nvSwitchDrifts,
+		syncOK:        switchOK,
+	})
+
+	// Domain membership is observed topology rather than expected inventory.
+	// Project it after switch sync so this cycle's switch links are available.
+	syncObservedNVLinkDomainTopology(ctx, pool, nicoClient)
 
 	powershelvesReceived, powershelfDrifts, powershelfOK := syncPowershelvesNICo(ctx, pool, nicoClient)
-	drifts = append(drifts, powershelfDrifts...)
-	allRPCOK = allRPCOK && powershelfOK
+	results = append(results, actualSyncResult{
+		componentType: devicetypes.ComponentTypePowerShelf,
+		drifts:        powershelfDrifts,
+		syncOK:        powershelfOK,
+	})
+
+	// Rack health is a runtime snapshot like component health. It does not
+	// participate in component drift replacement, so a failed refresh preserves
+	// the previous snapshot without making component reconciliation partial.
+	syncRackHealth(ctx, pool, nicoClient)
+
+	allSyncOK := machineOK && switchOK && powershelfOK
 
 	log.Info().
 		Int("compute", computeReceived).
 		Int("nvswitches", switchesReceived).
 		Int("powershelves", powershelvesReceived).
-		Bool("all_rpc_ok", allRPCOK).
+		// Keep the established field for log-query compatibility. Its value has
+		// always represented the safety of the complete drift replacement, which
+		// now includes identity-reconciliation failures as well as RPC failures.
+		Bool("all_rpc_ok", allSyncOK).
+		Bool("all_sync_ok", allSyncOK).
 		Msgf("Inventory received from Core: compute=%d nvswitches=%d powershelves=%d",
 			computeReceived, switchesReceived, powershelvesReceived)
 
-	return drifts, allRPCOK
+	return results
+}
+
+func persistComponentHealthSnapshots(
+	ctx context.Context,
+	pool *cdb.Session,
+	healthByID map[string]*types.HealthReport,
+	componentsByExternalID map[string]*model.Component,
+) {
+	var toUpdate []model.Component
+	for externalID, health := range healthByID {
+		comp, ok := componentsByExternalID[externalID]
+		if !ok || comp.Health.Equal(health) {
+			continue
+		}
+		comp.Health = health
+		toUpdate = append(toUpdate, *comp)
+	}
+	if len(toUpdate) == 0 {
+		return
+	}
+	err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for _, component := range toUpdate {
+			err := component.SetHealthByComponentID(ctx, tx)
+			if err != nil {
+				return fmt.Errorf("set component health: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Msgf("Unable to persist component health snapshots: %v", err)
+	}
+}
+
+func syncRackHealth(ctx context.Context, pool *cdb.Session, nicoClient nicoapi.Client) {
+	racks, err := model.GetAllRacks(ctx, pool.DB)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve racks for health sync: %v", err)
+		return
+	}
+	racksByExternalID := make(map[string]*model.Rack, len(racks))
+	ids := make([]string, 0, len(racks))
+	for i := range racks {
+		rack := &racks[i]
+		if rack.ExternalID == nil || *rack.ExternalID == "" {
+			continue
+		}
+		ids = append(ids, *rack.ExternalID)
+		racksByExternalID[*rack.ExternalID] = rack
+	}
+	healthByID, err := nicoClient.FindRackHealthReports(ctx, ids)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve rack health from NICo: %v", err)
+		return
+	}
+	toUpdate := make([]model.Rack, 0, len(healthByID))
+	for id, health := range healthByID {
+		rack := racksByExternalID[id]
+		if rack == nil || rack.Health.Equal(health) {
+			continue
+		}
+		rack.Health = health
+		toUpdate = append(toUpdate, *rack)
+	}
+	if len(toUpdate) == 0 {
+		return
+	}
+	err = pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for _, rack := range toUpdate {
+			err := rack.SetHealthByExternalID(ctx, tx)
+			if err != nil {
+				return fmt.Errorf("set rack health: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Msgf("Unable to persist rack health snapshots: %v", err)
+	}
 }
 
 // mapKeys returns the keys of a string-keyed component map in arbitrary
@@ -123,101 +221,161 @@ func persistComponentOperationStatuses(
 	}
 }
 
-// applyInventoryToComponents extracts firmware_version and power_state from
-// GetComponentInventoryResponse and direct-writes them to the matching
-// components. Serial numbers are compared (not overwritten) and returned as
-// drift records. componentsByID maps the component_id echoed back in each
-// ComponentResult to the DB component. Shared by the switch and power-shelf
-// syncs; the machine sync uses pre-fetched MachineDetail directly instead of
-// going through GetComponentInventory.
+// applyInventoryToComponents projects every runtime field used by switch and
+// power-shelf synchronization.
 func applyInventoryToComponents(
 	ctx context.Context,
 	pool *cdb.Session,
-	resp *pb.GetComponentInventoryResponse,
+	resp *corev1.GetComponentInventoryResponse,
 	componentsByID map[string]*model.Component,
-) []model.ComponentDrift {
-	now := time.Now()
-	var drifts []model.ComponentDrift
-
+) {
+	firmwareUpdates := make([]model.Component, 0, len(resp.GetEntries()))
+	powerStateUpdates := make([]model.Component, 0, len(resp.GetEntries()))
 	for _, entry := range resp.GetEntries() {
-		result := entry.GetResult()
-		if result == nil {
-			continue
-		}
-		comp, ok := componentsByID[result.GetComponentId()]
+		comp, report, ok := successfulInventoryEntry(entry, componentsByID)
 		if !ok {
 			continue
 		}
-		if result.GetStatus() != pb.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			log.Warn().Msgf("Component %s: inventory status %s: %s", result.GetComponentId(), result.GetStatus(), result.GetError())
-			continue
+
+		if version := bmcFirmwareVersion(report); version != "" && comp.FirmwareVersion != version {
+			comp.FirmwareVersion = version
+			firmwareUpdates = append(firmwareUpdates, *comp)
 		}
 
-		report := entry.GetReport()
-		if report == nil {
-			continue
-		}
-
-		needsUpdate := false
-
-		// Extract firmware_version from the "BMC image" inventory entry
-		for _, svc := range report.GetService() {
-			for _, inv := range svc.GetInventories() {
-				if inv.GetDescription() == "BMC image" {
-					if v := inv.GetVersion(); v != "" && comp.FirmwareVersion != v {
-						comp.FirmwareVersion = v
-						needsUpdate = true
-					}
-				}
-			}
-		}
-
-		// Compare serial_number from first Chassis entry (drift, not overwrite)
-		if chassisList := report.GetChassis(); len(chassisList) > 0 {
-			if sn := chassisList[0].GetSerialNumber(); sn != "" && comp.SerialNumber != sn {
-				compID := comp.ID
-				extID := result.GetComponentId()
-				drifts = append(drifts, model.ComponentDrift{
-					ComponentID: &compID,
-					ExternalID:  &extID,
-					DriftType:   model.DriftTypeMismatch,
-					Diffs: []model.FieldDiff{{
-						FieldName:     driftFieldSerialNumber,
-						ExpectedValue: comp.SerialNumber,
-						ActualValue:   sn,
-					}},
-					CheckedAt: now,
-				})
-			}
-		}
-
-		// Extract power_state from first ComputerSystem entry
 		if systems := report.GetSystems(); len(systems) > 0 {
 			ps := computerSystemPowerStateToNICo(systems[0].GetPowerState())
 			if comp.PowerState == nil || *comp.PowerState != ps {
 				comp.PowerState = &ps
-				needsUpdate = true
-			}
-		}
-
-		if needsUpdate {
-			if err := comp.Patch(ctx, pool.DB); err != nil {
-				log.Error().Msgf("Component %s: unable to write inventory fields: %v", result.GetComponentId(), err)
+				powerStateUpdates = append(powerStateUpdates, *comp)
 			}
 		}
 	}
 
-	return drifts
+	if len(firmwareUpdates) == 0 && len(powerStateUpdates) == 0 {
+		return
+	}
+	if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for i := range firmwareUpdates {
+			if err := firmwareUpdates[i].SetFirmwareVersionByComponentID(ctx, tx); err != nil {
+				return fmt.Errorf("set firmware version: %w", err)
+			}
+		}
+		for i := range powerStateUpdates {
+			if err := powerStateUpdates[i].SetPowerStateByComponentID(ctx, tx); err != nil {
+				return fmt.Errorf("set power state: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Error().Msgf("Unable to persist component inventory fields: %v", err)
+	}
+}
+
+// applyFirmwareInventoryToComponents projects only firmware_version. Compute
+// power state remains owned by GetPowerStates rather than the exploration
+// report returned by GetComponentInventory. Use a targeted column update so a
+// stale component snapshot cannot overwrite fields owned by another job.
+func applyFirmwareInventoryToComponents(
+	ctx context.Context,
+	pool *cdb.Session,
+	resp *corev1.GetComponentInventoryResponse,
+	componentsByID map[string]*model.Component,
+) {
+	toUpdate := make([]model.Component, 0, len(resp.GetEntries()))
+	for _, entry := range resp.GetEntries() {
+		comp, report, ok := successfulInventoryEntry(entry, componentsByID)
+		if !ok {
+			continue
+		}
+		if version := bmcFirmwareVersion(report); version != "" && comp.FirmwareVersion != version {
+			comp.FirmwareVersion = version
+			toUpdate = append(toUpdate, *comp)
+		}
+	}
+
+	if len(toUpdate) == 0 {
+		return
+	}
+	if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for i := range toUpdate {
+			if err := toUpdate[i].SetFirmwareVersionByComponentID(ctx, tx); err != nil {
+				return fmt.Errorf("set firmware version: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Error().Msgf("Unable to persist component firmware versions: %v", err)
+	}
+}
+
+// successfulInventoryEntry validates an inventory entry and resolves the
+// component_id echoed by Core to its Flow component.
+func successfulInventoryEntry(
+	entry *corev1.ComponentInventoryEntry,
+	componentsByID map[string]*model.Component,
+) (*model.Component, *corev1.EndpointExplorationReport, bool) {
+	result := entry.GetResult()
+	if result == nil {
+		return nil, nil, false
+	}
+	comp, ok := componentsByID[result.GetComponentId()]
+	if !ok {
+		return nil, nil, false
+	}
+	if result.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+		log.Warn().Msgf("Component %s: inventory status %s: %s", result.GetComponentId(), result.GetStatus(), result.GetError())
+		return nil, nil, false
+	}
+	if entry.GetReport() == nil {
+		return nil, nil, false
+	}
+	return comp, entry.GetReport(), true
+}
+
+// bmcFirmwareVersion resolves BMC firmware for compute, switch, and power-shelf
+// inventory. Precedence is Core's canonical "bmc" version, then a known host
+// BMC inventory ID, then the legacy "BMC image" description. Retaining the
+// description match as a fallback lets a host BMC ID later in the report win
+// over accelerator BMC entries regardless of inventory ordering.
+func bmcFirmwareVersion(report *corev1.EndpointExplorationReport) string {
+	if report == nil {
+		return ""
+	}
+	if version := strings.TrimSpace(report.GetFirmwareVersions()["bmc"]); version != "" {
+		return version
+	}
+
+	descriptionFallback := ""
+	for _, svc := range report.GetService() {
+		for _, inv := range svc.GetInventories() {
+			version := strings.TrimSpace(inv.GetVersion())
+			if version == "" {
+				continue
+			}
+			switch inv.GetId() {
+			case "BMC", "FW_BMC_0", "HostBMC_0":
+				return version
+			}
+			if descriptionFallback == "" && inv.GetDescription() == "BMC image" {
+				descriptionFallback = version
+			}
+		}
+	}
+	return descriptionFallback
 }
 
 func computerSystemPowerStateToNICo(
-	ps pb.ComputerSystemPowerState,
+	ps corev1.ComputerSystemPowerState,
 ) nicoapi.PowerState {
 	switch ps {
-	case pb.ComputerSystemPowerState_On, pb.ComputerSystemPowerState_PoweringOn:
+	case corev1.ComputerSystemPowerState_On, corev1.ComputerSystemPowerState_PoweringOn:
 		return nicoapi.PowerStateOn
-	case pb.ComputerSystemPowerState_Off, pb.ComputerSystemPowerState_PoweringOff:
+	case corev1.ComputerSystemPowerState_Off, corev1.ComputerSystemPowerState_PoweringOff:
 		return nicoapi.PowerStateOff
+	case corev1.ComputerSystemPowerState_Hibernating:
+		return nicoapi.PowerStateHibernating
+	case corev1.ComputerSystemPowerState_Sleeping:
+		return nicoapi.PowerStateSleeping
 	default:
 		return nicoapi.PowerStateUnknown
 	}

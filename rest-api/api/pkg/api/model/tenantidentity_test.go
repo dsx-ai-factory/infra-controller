@@ -4,11 +4,12 @@
 package model
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -30,7 +31,7 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_Validate(t *testing.T) {
 		req.Issuer = issuer
 		return req
 	}
-	withTokenTtlSeconds := func(tokenTtlSeconds int) APITenantIdentityConfigCreateOrUpdateRequest {
+	withTokenTtlSeconds := func(tokenTtlSeconds uint32) APITenantIdentityConfigCreateOrUpdateRequest {
 		req := newValidRequest()
 		req.TokenTtlSeconds = tokenTtlSeconds
 		return req
@@ -111,7 +112,7 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_Validate(t *testing.T) {
 		{name: "signingKeyOverlapSeconds without rotateKey rejected",
 			req: func() APITenantIdentityConfigCreateOrUpdateRequest {
 				req := newValidRequest()
-				req.SigningKeyOverlapSeconds = cutil.GetPtr(900)
+				req.SigningKeyOverlapSeconds = cutil.GetPtr(uint32(900))
 				return req
 			}(),
 			wantErr: true},
@@ -119,7 +120,7 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_Validate(t *testing.T) {
 			req: func() APITenantIdentityConfigCreateOrUpdateRequest {
 				req := newValidRequest()
 				req.RotateKey = cutil.GetPtr(true)
-				req.SigningKeyOverlapSeconds = cutil.GetPtr(300)
+				req.SigningKeyOverlapSeconds = cutil.GetPtr(uint32(300))
 				return req
 			}(),
 			wantErr: true},
@@ -127,14 +128,14 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_Validate(t *testing.T) {
 			req: func() APITenantIdentityConfigCreateOrUpdateRequest {
 				req := newValidRequest()
 				req.RotateKey = cutil.GetPtr(true)
-				req.SigningKeyOverlapSeconds = cutil.GetPtr(600)
+				req.SigningKeyOverlapSeconds = cutil.GetPtr(uint32(600))
 				return req
 			}()},
 		{name: "rotateKey + signingKeyOverlapSeconds above tokenTtlSeconds accepted",
 			req: func() APITenantIdentityConfigCreateOrUpdateRequest {
 				req := newValidRequest()
 				req.RotateKey = cutil.GetPtr(true)
-				req.SigningKeyOverlapSeconds = cutil.GetPtr(3600)
+				req.SigningKeyOverlapSeconds = cutil.GetPtr(uint32(3600))
 				return req
 			}()},
 		{name: "rotateKey explicit false without signingKeyOverlapSeconds accepted",
@@ -159,12 +160,13 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_Validate(t *testing.T) {
 // TestAPITenantIdentityConfigCreateOrUpdateRequest_ToProto verifies the tenant identity create-or-update request maps populated and nil fields onto the SetTenantIdentityConfig proto as expected.
 func TestAPITenantIdentityConfigCreateOrUpdateRequest_ToProto(t *testing.T) {
 	t.Run("populates all fields", func(t *testing.T) {
+		maxUint32 := uint32(math.MaxUint32)
 		protoReq := APITenantIdentityConfigCreateOrUpdateRequest{
 			Enabled: cutil.GetPtr(true),
 			Issuer:  "https://carbide.example.com/iss", DefaultAudience: "openbao",
-			AllowedAudiences: []string{"openbao", "vault"}, TokenTtlSeconds: 600,
+			AllowedAudiences: []string{"openbao", "vault"}, TokenTtlSeconds: maxUint32,
 			SubjectPrefix: cutil.GetPtr("spiffe://carbide.nvidia.com"), RotateKey: cutil.GetPtr(true),
-			SigningKeyOverlapSeconds: cutil.GetPtr(3600),
+			SigningKeyOverlapSeconds: &maxUint32,
 		}.ToProto("acme-corp")
 		require.NotNil(t, protoReq)
 		assert.Equal(t, "acme-corp", protoReq.GetOrganizationId())
@@ -174,10 +176,10 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, "https://carbide.example.com/iss", cfg.GetIssuer())
 		assert.Equal(t, "openbao", cfg.GetDefaultAudience())
 		assert.Equal(t, []string{"openbao", "vault"}, cfg.GetAllowedAudiences())
-		assert.Equal(t, uint32(600), cfg.GetTokenTtlSec())
+		assert.Equal(t, maxUint32, cfg.GetTokenTtlSec())
 		assert.Equal(t, "spiffe://carbide.nvidia.com", cfg.GetSubjectPrefix())
 		assert.True(t, cfg.GetRotateKey())
-		assert.Equal(t, uint32(3600), cfg.GetSigningKeyOverlapSec())
+		assert.Equal(t, maxUint32, cfg.GetSigningKeyOverlapSec())
 	})
 
 	t.Run("enabled true maps to proto true", func(t *testing.T) {
@@ -226,18 +228,19 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_ToProto(t *testing.T) {
 // TestAPITenantIdentityConfig_FromResponseProto verifies the tenant identity config response correctly mirrors the gRPC reply including signing-key rotation overlap state.
 func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 	t.Run("full proto, single signing key", func(t *testing.T) {
+		maxUint32 := uint32(math.MaxUint32)
 		created := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 		updated := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
 		subjectPrefix := "spiffe://carbide.nvidia.com"
 		resp := &APITenantIdentityConfig{}
-		resp.FromResponseProto(&cwssaws.TenantIdentityConfigResponse{
+		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{
 			OrganizationId: "acme-corp",
-			Config: &cwssaws.TenantIdentityConfig{
+			Config: &corev1.TenantIdentityConfig{
 				Enabled: true, Issuer: "https://carbide.example.com/iss",
 				DefaultAudience: "openbao", AllowedAudiences: []string{"openbao"},
-				TokenTtlSec: 600, SubjectPrefix: &subjectPrefix,
+				TokenTtlSec: maxUint32, SubjectPrefix: &subjectPrefix,
 			},
-			SigningKeys: []*cwssaws.TenantIdentitySigningKey{
+			SigningKeys: []*corev1.TenantIdentitySigningKey{
 				{Kid: "key-123", Alg: "ES256", CurrentSigner: true},
 			},
 			CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(updated),
@@ -247,7 +250,7 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 		assert.Equal(t, "https://carbide.example.com/iss", resp.Issuer)
 		assert.Equal(t, "openbao", resp.DefaultAudience)
 		assert.Equal(t, []string{"openbao"}, resp.AllowedAudiences)
-		assert.Equal(t, 600, resp.TokenTtlSeconds)
+		assert.Equal(t, maxUint32, resp.TokenTtlSeconds)
 		assert.Equal(t, "spiffe://carbide.nvidia.com", resp.SubjectPrefix)
 		require.Len(t, resp.SigningKeys, 1)
 		assert.Equal(t, "key-123", resp.SigningKeys[0].Kid)
@@ -261,10 +264,10 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 	t.Run("rotation overlap: two signing keys, inactive one carries expireAt", func(t *testing.T) {
 		expire := time.Date(2026, 5, 12, 9, 30, 0, 0, time.UTC)
 		resp := &APITenantIdentityConfig{}
-		resp.FromResponseProto(&cwssaws.TenantIdentityConfigResponse{
+		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{
 			OrganizationId: "acme-corp",
-			Config:         &cwssaws.TenantIdentityConfig{Enabled: true},
-			SigningKeys: []*cwssaws.TenantIdentitySigningKey{
+			Config:         &corev1.TenantIdentityConfig{Enabled: true},
+			SigningKeys: []*corev1.TenantIdentitySigningKey{
 				{Kid: "kid-old", Alg: "ES256", CurrentSigner: false, ExpireAt: timestamppb.New(expire)},
 				{Kid: "kid-new", Alg: "ES256", CurrentSigner: true},
 			},
@@ -281,11 +284,169 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 
 	t.Run("minimal proto (no Config, no signing keys)", func(t *testing.T) {
 		resp := &APITenantIdentityConfig{}
-		resp.FromResponseProto(&cwssaws.TenantIdentityConfigResponse{OrganizationId: "acme-corp"})
+		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{OrganizationId: "acme-corp"})
 		assert.Equal(t, "acme-corp", resp.Org)
 		assert.Empty(t, resp.SigningKeys)
 		assert.False(t, resp.Enabled)
 	})
+}
+
+// TestAPITenantIdentityReencryptSecretsRequest_Validate verifies an optional scope uses the Core tenant organization identifier format without accepting blank scopes.
+func TestAPITenantIdentityReencryptSecretsRequest_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     APITenantIdentityReencryptSecretsRequest
+		wantErr string
+	}{
+		{name: "organization omitted"},
+		{
+			name: "organization supplied",
+			req: APITenantIdentityReencryptSecretsRequest{
+				OrganizationID: cutil.GetPtr("Tenant-Corp_01"),
+				DryRun:         true,
+			},
+		},
+		{
+			name: "organization is empty",
+			req: APITenantIdentityReencryptSecretsRequest{
+				OrganizationID: cutil.GetPtr(""),
+			},
+			wantErr: "organizationId must not be empty",
+		},
+		{
+			name: "blank organization cannot select all organizations",
+			req: APITenantIdentityReencryptSecretsRequest{
+				OrganizationID: cutil.GetPtr(" \t"),
+			},
+			wantErr: "organizationId must contain only ASCII letters, digits, underscores, and hyphens",
+		},
+		{
+			name: "invalid identifier character",
+			req: APITenantIdentityReencryptSecretsRequest{
+				OrganizationID: cutil.GetPtr("tenant.corp"),
+			},
+			wantErr: "organizationId must contain only ASCII letters, digits, underscores, and hyphens",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestAPITenantIdentityReencryptSecretsRequest_NormalizeOrganizationID verifies a supplied scope is lowercased to match stored Tenant and Core organization identifiers, and that an absent scope stays absent.
+func TestAPITenantIdentityReencryptSecretsRequest_NormalizeOrganizationID(t *testing.T) {
+	tests := []struct {
+		name string
+		req  APITenantIdentityReencryptSecretsRequest
+		want *string
+	}{
+		{name: "omitted scope stays absent"},
+		{
+			name: "mixed-case scope is lowercased",
+			req:  APITenantIdentityReencryptSecretsRequest{OrganizationID: cutil.GetPtr("Tenant-Corp_01")},
+			want: cutil.GetPtr("tenant-corp_01"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := tt.req
+			req.NormalizeOrganizationID()
+			assert.Equal(t, tt.want, req.OrganizationID)
+		})
+	}
+}
+
+// TestAPITenantIdentityReencryptSecretsRequest_ToProto verifies optional organization scope and dry-run behavior map directly to the Core request.
+func TestAPITenantIdentityReencryptSecretsRequest_ToProto(t *testing.T) {
+	tests := []struct {
+		name           string
+		req            APITenantIdentityReencryptSecretsRequest
+		wantOrg        string
+		wantOrgPresent bool
+		wantDryRun     bool
+	}{
+		{name: "organization omitted"},
+		{
+			name: "organization and dry-run supplied",
+			req: APITenantIdentityReencryptSecretsRequest{
+				OrganizationID: cutil.GetPtr("acme-corp"),
+				DryRun:         true,
+			},
+			wantOrg:        "acme-corp",
+			wantOrgPresent: true,
+			wantDryRun:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			protoRequest := tt.req.ToProto()
+			require.NotNil(t, protoRequest)
+			assert.Equal(t, tt.wantOrg, protoRequest.GetOrganizationId())
+			assert.Equal(t, tt.wantOrgPresent, protoRequest.OrganizationId != nil)
+			assert.Equal(t, tt.wantDryRun, protoRequest.GetDryRun())
+		})
+	}
+}
+
+// TestAPITenantIdentityReencryptSecretsResponse_FromProto verifies failure mapping and replacement, including an empty result and the nil-input no-op contract.
+func TestAPITenantIdentityReencryptSecretsResponse_FromProto(t *testing.T) {
+	previous := APITenantIdentityReencryptSecretsResponse{
+		RowsFailed: 1,
+		Failures: []APITenantIdentityReencryptFailure{{
+			OrganizationID: "tenant-corp",
+			Field:          "encrypted_signing_key_1",
+			Error:          "decryption failed",
+		}},
+	}
+	tests := []struct {
+		name    string
+		initial APITenantIdentityReencryptSecretsResponse
+		proto   *corev1.ReencryptTenantIdentitySecretsResponse
+		want    APITenantIdentityReencryptSecretsResponse
+	}{
+		{
+			name: "map per-field failure",
+			proto: &corev1.ReencryptTenantIdentitySecretsResponse{
+				RowsFailed: 1,
+				Failures: []*corev1.ReencryptTenantIdentityFailure{{
+					OrganizationId: "tenant-corp",
+					Field:          "encrypted_signing_key_1",
+					Error:          "decryption failed",
+				}},
+			},
+			want: previous,
+		},
+		{
+			name:    "empty result clears prior failures to a non-nil slice",
+			initial: previous,
+			proto:   &corev1.ReencryptTenantIdentitySecretsResponse{},
+			want: APITenantIdentityReencryptSecretsResponse{
+				Failures: []APITenantIdentityReencryptFailure{},
+			},
+		},
+		{
+			name:    "nil input preserves the receiver",
+			initial: previous,
+			want:    previous,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := tt.initial
+			response.FromProto(tt.proto)
+			assert.Equal(t, tt.want, response)
+		})
+	}
 }
 
 // TestAPITenantIdentityTokenDelegationCreateOrUpdateRequest_Validate verifies required fields and clientSecretBasic sub-field validation on the token delegation create-or-update request.
@@ -375,12 +536,12 @@ func TestAPITenantIdentityTokenDelegation_FromResponseProto(t *testing.T) {
 		created := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 		updated := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
 		resp := &APITenantIdentityTokenDelegation{}
-		resp.FromResponseProto(&cwssaws.TokenDelegationResponse{
+		resp.FromResponseProto(&corev1.TokenDelegationResponse{
 			OrganizationId:       "acme-corp",
 			TokenEndpoint:        "https://auth.acme.com/oauth2/token",
 			SubjectTokenAudience: "acme-exchange",
-			AuthMethodConfig: &cwssaws.TokenDelegationResponse_ClientSecretBasic{
-				ClientSecretBasic: &cwssaws.ClientSecretBasicResponse{
+			AuthMethodConfig: &corev1.TokenDelegationResponse_ClientSecretBasic{
+				ClientSecretBasic: &corev1.ClientSecretBasicResponse{
 					ClientId: "client-123", ClientSecretHash: "sha256:abcd1234",
 				},
 			},
@@ -399,7 +560,7 @@ func TestAPITenantIdentityTokenDelegation_FromResponseProto(t *testing.T) {
 
 	t.Run("none auth method (oneof unset)", func(t *testing.T) {
 		resp := &APITenantIdentityTokenDelegation{}
-		resp.FromResponseProto(&cwssaws.TokenDelegationResponse{
+		resp.FromResponseProto(&corev1.TokenDelegationResponse{
 			OrganizationId: "acme-corp", TokenEndpoint: "https://auth.acme.com/oauth2/token",
 			SubjectTokenAudience: "acme-exchange",
 		})
@@ -410,7 +571,7 @@ func TestAPITenantIdentityTokenDelegation_FromResponseProto(t *testing.T) {
 // TestAPIOpenIDConfiguration_FromResponseProto verifies the OpenID discovery response mirrors the gRPC reply, including jwks_uri and the always-empty id_token_signing_alg_values_supported.
 func TestAPIOpenIDConfiguration_FromResponseProto(t *testing.T) {
 	resp := &APIOpenIDConfiguration{}
-	resp.FromResponseProto(&cwssaws.OpenIdConfiguration{
+	resp.FromResponseProto(&corev1.OpenIdConfiguration{
 		Issuer:                           "https://carbide.example.com/iss",
 		JwksUri:                          "https://carbide.example.com/iss/.well-known/jwks.json",
 		ResponseTypesSupported:           []string{"token"},

@@ -15,12 +15,17 @@
  * limitations under the License.
  */
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
+
 use super::super::update_metadata;
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn bulk_update_metadata(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn bulk_update_metadata(
+    args: Args,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
     let mut rdr =
         csv::Reader::from_path(&args.filename).map_err(|e| CarbideCliError::IOError(e.into()))?;
 
@@ -43,8 +48,8 @@ pub async fn bulk_update_metadata(args: Args, api_client: &ApiClient) -> Carbide
                     tracing::error!("No SKU ID at line {current_line}");
                     continue;
                 };
-                let device_type = data.get(1).filter(|s| !s.is_empty()).map(str::to_owned);
-                let description = data.get(2).filter(|s| !s.is_empty()).map(str::to_owned);
+                let device_type = data.get(1).none_if_empty().map(str::to_owned);
+                let description = data.get(2).none_if_empty().map(str::to_owned);
 
                 // log errors but don't stop the processing
                 if let Err(e) = api_client

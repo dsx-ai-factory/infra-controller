@@ -24,84 +24,159 @@ use prettytable::{Cell, Row, Table};
 use rpc::admin_cli::OutputFormat;
 use rpc::protos::mlx_device as mlx_device_pb;
 
-use super::args::{InfoCommand, InfoDeviceCommand, InfoMachineCommand};
+use super::args::{InfoDeviceCommand, InfoIdentitiesCommand, InfoMachineCommand};
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
-use crate::mlx::{CliContext, wrap_text};
-
-// dispatch routes info subcommands to their handlers.
-pub async fn dispatch(command: InfoCommand, ctxt: &mut CliContext<'_, '_>) -> CarbideCliResult<()> {
-    match command {
-        InfoCommand::Device(cmd) => handle_device_info(cmd, ctxt).await,
-        InfoCommand::Machine(cmd) => handle_device_report(cmd, ctxt).await,
-    }
-}
+use crate::mlx::wrap_text;
+use crate::{async_write, async_write_table_as_csv, async_writeln};
 
 // handle_device_info gets an MlxDeviceInfo for a device on a machine.
-async fn handle_device_info(
-    cmd: InfoDeviceCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminDeviceInfoRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_show_device(request).await?;
+impl Run for InfoDeviceCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminDeviceInfoRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_show_device(request).await?;
 
-    let device_info: MlxDeviceInfo = match response.device_info {
-        Some(device_info) => device_info.try_into().map_err(|e| {
-            CarbideCliError::GenericError(format!("failed to convert device info: {}", e))
-        }),
-        None => Err(CarbideCliError::GenericError(
-            "no device info found for device".to_string(),
-        )),
-    }?;
+        let device_info: MlxDeviceInfo = match response.device_info {
+            Some(device_info) => device_info.try_into().map_err(|e| {
+                CarbideCliError::GenericError(format!("failed to convert device info: {}", e))
+            }),
+            None => Err(CarbideCliError::GenericError(
+                "no device info found for device".to_string(),
+            )),
+        }?;
 
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&device_info)?);
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&device_info)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&device_info)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_device_details_table(&device_info);
+            }
+            OutputFormat::Csv => {
+                println!("CSV not yet supported");
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&device_info)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_device_details_table(&device_info);
-        }
-        OutputFormat::Csv => {
-            println!("CSV not yet supported");
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 // handle_device_report gets an MlxDeviceReport for a machine.
-async fn handle_device_report(
-    cmd: InfoMachineCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminDeviceReportRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_show_machine(request).await?;
+impl Run for InfoMachineCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminDeviceReportRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_show_machine(request).await?;
 
-    let device_report: MlxDeviceReport = match response.device_report {
-        Some(device_report) => device_report.try_into().map_err(|e| {
-            CarbideCliError::GenericError(format!("failed to convert device report: {}", e))
-        }),
-        None => Err(CarbideCliError::GenericError(
-            "no device report found for device".to_string(),
-        )),
-    }?;
-    match ctxt.format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&device_report)?);
+        let device_report: MlxDeviceReport = match response.device_report {
+            Some(device_report) => device_report.try_into().map_err(|e| {
+                CarbideCliError::GenericError(format!("failed to convert device report: {}", e))
+            }),
+            None => Err(CarbideCliError::GenericError(
+                "no device report found for device".to_string(),
+            )),
+        }?;
+        match &ctx.config.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&device_report)?);
+            }
+            OutputFormat::Yaml => {
+                println!("{}", serde_yaml::to_string(&device_report)?);
+            }
+            OutputFormat::AsciiTable => {
+                print_report_table(&device_report);
+            }
+            OutputFormat::Csv => {
+                println!("CSV not yet supported");
+            }
         }
-        OutputFormat::Yaml => {
-            println!("{}", serde_yaml::to_string(&device_report)?);
-        }
-        OutputFormat::AsciiTable => {
-            print_report_table(&device_report);
-        }
-        OutputFormat::Csv => {
-            println!("CSV not yet supported");
-        }
+
+        Ok(())
     }
+}
 
-    Ok(())
+impl Run for InfoIdentitiesCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminDeviceIdentitiesRequest = self.into();
+        let response = ctx
+            .api_client
+            .0
+            .mlx_admin_show_device_identities(request)
+            .await?;
+
+        match ctx.config.format {
+            OutputFormat::Json => {
+                async_writeln!(
+                    ctx.output_file,
+                    "{}",
+                    serde_json::to_string_pretty(&response)?
+                )?;
+            }
+            OutputFormat::Yaml => {
+                async_write!(ctx.output_file, "{}", serde_yaml::to_string(&response)?)?;
+            }
+            OutputFormat::AsciiTable => {
+                let Some(report) = response.report else {
+                    async_writeln!(ctx.output_file, "No stored NIC observation")?;
+                    return Ok(());
+                };
+
+                let observed_at = report
+                    .observed_at
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "Unknown".to_string());
+                async_writeln!(ctx.output_file, "Scout observed at: {observed_at}")?;
+                async_writeln!(
+                    ctx.output_file,
+                    "Identity evidence only; firmware/reset eligibility is not established."
+                )?;
+                async_write!(ctx.output_file, "{}", identity_report_table(&report))?;
+            }
+            OutputFormat::Csv => {
+                let report = response.report.unwrap_or_default();
+                async_write_table_as_csv!(ctx.output_file, identity_report_table(&report))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn identity_report_table(report: &mlx_device_pb::MlxDeviceIdentityReport) -> Table {
+    let mut table = Table::new();
+    table.set_titles(Row::new(
+        ["PCI Name", "Base MAC", "Base GUID", "Managed DPU"]
+            .into_iter()
+            .map(Cell::new)
+            .collect(),
+    ));
+    for device in &report.devices {
+        let info = device.device_info.as_ref();
+        let managed_dpu = match device.managed_dpu_machine_ids.as_slice() {
+            [] => "Unknown".to_string(),
+            [machine_id] => machine_id.to_string(),
+            machine_ids => format!(
+                "Conflicting:\n{}",
+                machine_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        };
+        table.add_row(Row::new(vec![
+            Cell::new(info.map(|info| info.pci_name.as_str()).unwrap_or_default()),
+            Cell::new(info.map(|info| info.base_mac.as_str()).unwrap_or_default()),
+            Cell::new(
+                info.and_then(|info| info.base_guid.as_deref())
+                    .unwrap_or_default(),
+            ),
+            Cell::new(&managed_dpu),
+        ]));
+    }
+    table
 }
 
 // print_devices_table displays a list of devices in an ASCII table format.

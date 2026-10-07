@@ -15,24 +15,24 @@
  * limitations under the License.
  */
 use std::ffi::OsString;
-use std::fs::{self, DirEntry, File};
-use std::io::{Read, Result};
+use std::fs::{self, DirEntry};
+use std::io::Result;
 
 const SYSFS_NET_BASE: &str = "/sys/class/net";
 
-pub fn get_net_devices() -> Result<Vec<SysfsNetDevice>> {
+pub(super) fn get_net_devices() -> Result<Vec<SysfsNetDevice>> {
     let net_device_entries = fs::read_dir(SYSFS_NET_BASE)?;
     net_device_entries
         .map(|entry| entry.map(SysfsNetDevice::from))
         .collect()
 }
 
-pub struct SysfsNetDevice {
+pub(super) struct SysfsNetDevice {
     dir_entry: DirEntry,
 }
 
 impl SysfsNetDevice {
-    pub fn is_pci_device(&self) -> Result<bool> {
+    pub(super) fn is_pci_device(&self) -> Result<bool> {
         const PCI_PREFIX: &str = "../../devices/pci";
         let link_target = fs::read_link(self.dir_entry.path());
         link_target.map(|link_target| {
@@ -43,24 +43,7 @@ impl SysfsNetDevice {
         })
     }
 
-    // Return the contents of /sys/class/net/${device}/address -- this is
-    // not guaranteed to be in any particular format but we optimize for a
-    // human-readable EUI-48 (colon-separated hex bytes). No whitespace is
-    // removed, so there will probably be a newline at the end.
-    pub fn _get_encoded_address(&self) -> Result<Vec<u8>> {
-        const ASCII_EUI48_WITH_NEWLINE_LENGTH: usize = 18;
-        let mut address_contents = Vec::with_capacity(ASCII_EUI48_WITH_NEWLINE_LENGTH);
-        let address_path = {
-            let mut device_path = self.dir_entry.path();
-            device_path.push("address");
-            device_path
-        };
-        File::open(address_path)
-            .and_then(|mut address_file| address_file.read_to_end(&mut address_contents))
-            .and(Ok(address_contents))
-    }
-
-    pub fn entry_name(&self) -> OsString {
+    pub(super) fn entry_name(&self) -> OsString {
         self.dir_entry.file_name()
     }
 }

@@ -37,7 +37,7 @@ Restart reprovisioning for a host:
     $ nico-admin-cli dpu reprovision restart --id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Set the DPU in reprovisioning mode.")]
     Set(DpuReprovisionSet),
     #[clap(about = "Clear the reprovisioning mode.")]
@@ -63,23 +63,23 @@ Reprovision and update DPU firmware, recording a maintenance message:
     --update-firmware --update-message \"scheduled firmware refresh\"
 
 ")]
-pub struct DpuReprovisionSet {
+pub(crate) struct DpuReprovisionSet {
     #[clap(
         short,
         long,
         help = "DPU Machine ID for which reprovisioning is needed, or host machine id if all DPUs should be reprovisioned."
     )]
-    pub id: MachineId,
+    pub(super) id: MachineId,
 
     #[clap(short, long, action)]
-    pub update_firmware: bool,
+    update_firmware: bool,
 
     #[clap(
         long,
         alias = "maintenance_reference",
         help = "If set, a HostUpdateInProgress health alert will be applied to the host"
     )]
-    pub update_message: Option<String>,
+    pub(super) update_message: Option<String>,
 }
 
 impl From<&DpuReprovisionSet> for DpuReprovisioningRequest {
@@ -105,16 +105,16 @@ Clear reprovisioning for all DPUs on a host by passing the host machine id:
     $ nico-admin-cli dpu reprovision clear --id abcdef01-2345-6789-abcd-ef0123456789
 
 ")]
-pub struct DpuReprovisionClear {
+pub(crate) struct DpuReprovisionClear {
     #[clap(
         short,
         long,
         help = "DPU Machine ID for which reprovisioning should be cleared, or host machine id if all DPUs should be cleared."
     )]
-    pub id: MachineId,
+    id: MachineId,
 
     #[clap(short, long, action)]
-    pub update_firmware: bool,
+    update_firmware: bool,
 }
 
 impl From<&DpuReprovisionClear> for DpuReprovisioningRequest {
@@ -141,16 +141,16 @@ Restart reprovisioning and update DPU firmware:
     --update-firmware
 
 ")]
-pub struct DpuReprovisionRestart {
+pub(crate) struct DpuReprovisionRestart {
     #[clap(
         short,
         long,
         help = "Host Machine ID for which reprovisioning should be restarted."
     )]
-    pub id: MachineId,
+    id: MachineId,
 
     #[clap(short, long, action)]
-    pub update_firmware: bool,
+    update_firmware: bool,
 }
 
 impl From<&DpuReprovisionRestart> for DpuReprovisioningRequest {

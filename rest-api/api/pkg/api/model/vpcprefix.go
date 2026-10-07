@@ -5,26 +5,22 @@ package model
 
 import (
 	"errors"
+	"fmt"
+	"net/netip"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
-	// VpcPrefixBlockSizeMin is the minimum value of the VpcPrefixSize field
-	VpcPrefixBlockSizeMin = 8
-	// VpcPrefixBlockSizeMax is the maximum value of the VpcPrefixSize field
-	VpcPrefixBlockSizeMax = 31
-
-	validationErrorIPBlockIDRequired     = "IPBlockID is required in request"
-	validationErrorVpcPrefixBlockSizeMin = "prefixLength must be at least 8"
-	validationErrorVpcPrefixBlockSizeMax = "prefixLength must be at most 31"
+	validationErrorIPBlockIDRequired = "IPBlockID is required in request"
 )
 
 // APIVpcPrefixCreateRequest is the data structure to capture user request to create a new VpcPrefix
@@ -35,8 +31,102 @@ type APIVpcPrefixCreateRequest struct {
 	VpcID string `json:"vpcId"`
 	// IPBlockID is the derived ipBlockId for the tenant from an allocation
 	IPBlockID *string `json:"ipBlockId"`
+	// Prefix is the exact CIDR to reserve from the IP Block
+	Prefix *string `json:"prefix"`
 	// PrefixLength is the length of the prefix
-	PrefixLength int `json:"prefixLength"`
+	PrefixLength *int `json:"prefixLength"`
+}
+
+// GetPrefixLength returns the requested prefix length from either allocation
+// selector. Callers must run Validate first.
+func (vpcr *APIVpcPrefixCreateRequest) GetPrefixLength() (int, error) {
+	if vpcr.PrefixLength != nil {
+		return *vpcr.PrefixLength, nil
+	}
+	if vpcr.Prefix == nil {
+		return 0, errors.New("exactly one of `prefix` or `prefixLength` must be specified")
+	}
+
+	prefix, err := netip.ParsePrefix(*vpcr.Prefix)
+	if err != nil {
+		return 0, fmt.Errorf("prefix %q must be a valid CIDR", *vpcr.Prefix)
+	}
+	return prefix.Bits(), nil
+}
+
+// ValidatePrefixLength checks the effective prefix length against the maximum
+// resolved from the IP Block family and VPC address mode. Callers run Validate
+// first because those values are not part of the request body.
+func (vpcr *APIVpcPrefixCreateRequest) ValidatePrefixLength(maxPrefixLength int) error {
+	prefixLength, err := vpcr.GetPrefixLength()
+	if err != nil {
+		return validation.Errors{
+			validationCommonErrorField: err,
+		}
+	}
+	if prefixLength > maxPrefixLength {
+		field := "prefixLength"
+		message := fmt.Sprintf("prefixLength must be at most %d for this IP Block and VPC", maxPrefixLength)
+		if vpcr.Prefix != nil {
+			field = "prefix"
+			message = fmt.Sprintf("prefix %q must have a prefix length of at most %d for this IP Block and VPC", *vpcr.Prefix, maxPrefixLength)
+		}
+		return validation.Errors{
+			field: errors.New(message),
+		}
+	}
+
+	return nil
+}
+
+func (vpcr *APIVpcPrefixCreateRequest) validatePrefix() error {
+	if (vpcr.Prefix == nil) == (vpcr.PrefixLength == nil) {
+		return validation.Errors{
+			validationCommonErrorField: errors.New("exactly one of `prefix` or `prefixLength` must be specified"),
+		}
+	}
+
+	if vpcr.PrefixLength != nil {
+		return validation.ValidateStruct(vpcr,
+			validation.Field(&vpcr.PrefixLength,
+				validation.Required.Error(validationErrorValueRequired),
+				validation.Min(vpcprefix.PrefixLengthMinimum).Error(fmt.Sprintf("prefixLength must be at least %d", vpcprefix.PrefixLengthMinimum)),
+				validation.Max(vpcprefix.PrefixLengthMaximum).Error(fmt.Sprintf("prefixLength must be at most %d", vpcprefix.PrefixLengthMaximum))),
+		)
+	}
+
+	inputPrefix := *vpcr.Prefix
+	prefix, err := netip.ParsePrefix(inputPrefix)
+	if err != nil {
+		return validation.Errors{
+			"prefix": fmt.Errorf("prefix %q must be a valid CIDR", inputPrefix),
+		}
+	}
+	if prefix.Addr().Is4In6() {
+		return validation.Errors{
+			"prefix": fmt.Errorf("prefix %q must not use an IPv4-mapped IPv6 address", inputPrefix),
+		}
+	}
+	if prefix != prefix.Masked() {
+		return validation.Errors{
+			"prefix": fmt.Errorf("prefix %q must be network-aligned", inputPrefix),
+		}
+	}
+	if prefix.Bits() < vpcprefix.PrefixLengthMinimum || prefix.Bits() > vpcprefix.PrefixLengthMaximum {
+		return validation.Errors{
+			"prefix": fmt.Errorf(
+				"prefix %q has prefix length %d; must be between %d and %d",
+				inputPrefix,
+				prefix.Bits(),
+				vpcprefix.PrefixLengthMinimum,
+				vpcprefix.PrefixLengthMaximum,
+			),
+		}
+	}
+
+	canonicalPrefix := prefix.String()
+	vpcr.Prefix = &canonicalPrefix
+	return nil
 }
 
 // Validate ensure the values passed in request are acceptable
@@ -51,17 +141,13 @@ func (vpcr *APIVpcPrefixCreateRequest) Validate() error {
 		validation.Field(&vpcr.IPBlockID,
 			validation.Required.Error(validationErrorIPBlockIDRequired),
 			validation.When(vpcr.IPBlockID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
-		validation.Field(&vpcr.PrefixLength,
-			validation.Required.Error(validationErrorValueRequired),
-			validation.Min(VpcPrefixBlockSizeMin).Error(validationErrorVpcPrefixBlockSizeMin),
-			validation.Max(VpcPrefixBlockSizeMax).Error(validationErrorVpcPrefixBlockSizeMax)),
 	)
 
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return vpcr.validatePrefix()
 }
 
 // ToProto builds the workflow request that asks a Site to create a new
@@ -70,17 +156,17 @@ func (vpcr *APIVpcPrefixCreateRequest) Validate() error {
 // (Id, VpcId, Config.Prefix, Metadata.Name). The parent `vpc` is needed
 // to translate to the Site-facing VPC ID (`Vpc.GetSiteID`).
 //
-// The method trusts that the request has already been Validated. There
-// are no cross-context checks for this entity beyond what Validate
-// covers.
+// The method trusts that the request has already passed `Validate` and
+// `ValidatePrefixLength`; the handler supplies the resolved IP Block family
+// and VPC SLAAC setting before reaching this conversion.
 //
 // Precondition: `vpc` must be non-nil; a nil `vpc` produces a
 // `VpcPrefixCreationRequest` with an unset `VpcId`, which the Site
 // agent will reject. The current handler always provides a hydrated
 // parent VPC.
-func (vpcr *APIVpcPrefixCreateRequest) ToProto(vp *cdbm.VpcPrefix, vpc *cdbm.Vpc) *cwssaws.VpcPrefixCreationRequest {
+func (vpcr *APIVpcPrefixCreateRequest) ToProto(vp *cdbm.VpcPrefix, vpc *cdbm.Vpc) *corev1.VpcPrefixCreationRequest {
 	vpProto := vp.ToProto(vpc)
-	return &cwssaws.VpcPrefixCreationRequest{
+	return &corev1.VpcPrefixCreationRequest{
 		Id:       vpProto.Id,
 		VpcId:    vpProto.VpcId,
 		Config:   vpProto.Config,
@@ -94,6 +180,8 @@ type APIVpcPrefixUpdateRequest struct {
 	Name *string `json:"name"`
 	// IPBlockID is the derived ipBlockId for the tenant from an allocation
 	IPBlockID *string `json:"ipBlockId"`
+	// Prefix is the immutable CIDR allocated to the VpcPrefix
+	Prefix *string `json:"prefix"`
 	// PrefixLength is the length of the prefix
 	PrefixLength *int `json:"prefixLength"`
 }
@@ -112,6 +200,11 @@ func (vpur *APIVpcPrefixUpdateRequest) Validate() error {
 			"prefixLength": errors.New("prefix length modification is not supported at this time"),
 		}
 	}
+	if vpur.Prefix != nil {
+		return validation.Errors{
+			"prefix": errors.New("prefix modification is not supported"),
+		}
+	}
 
 	if err != nil {
 		return err
@@ -127,9 +220,9 @@ func (vpur *APIVpcPrefixUpdateRequest) Validate() error {
 // sending the post-merge state matches the pre-existing handler
 // behaviour. Currently only `Metadata.Name` flows over (`Prefix` is
 // immutable for VpcPrefix and rejected by Validate).
-func (vpur *APIVpcPrefixUpdateRequest) ToProto(vp *cdbm.VpcPrefix) *cwssaws.VpcPrefixUpdateRequest {
+func (vpur *APIVpcPrefixUpdateRequest) ToProto(vp *cdbm.VpcPrefix) *corev1.VpcPrefixUpdateRequest {
 	vpProto := vp.ToProto(nil)
-	return &cwssaws.VpcPrefixUpdateRequest{
+	return &corev1.VpcPrefixUpdateRequest{
 		Id:       vpProto.Id,
 		Metadata: vpProto.Metadata,
 	}

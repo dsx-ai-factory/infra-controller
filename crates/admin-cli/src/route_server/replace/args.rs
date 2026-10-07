@@ -30,7 +30,7 @@ Replace the entire route server list with a new set:
     $ nico-admin-cli route-server replace 10.0.0.1,10.0.0.2,10.0.0.3
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: AddressArgs,
+    pub(super) inner: AddressArgs,
 }

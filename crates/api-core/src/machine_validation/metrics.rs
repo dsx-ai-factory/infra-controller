@@ -21,17 +21,17 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::Meter;
 
 #[derive(Clone, Debug)]
-pub struct MachineValidationMetrics {
-    pub completed_validation: usize,
-    pub failed_validation: usize,
-    pub in_progress_validation: usize,
-    pub oldest_active_validation_age_seconds: u64,
-    pub stale_validation: usize,
-    pub tests: Vec<MachineValidationTest>,
+pub(super) struct MachineValidationMetrics {
+    pub(super) completed_validation: usize,
+    pub(super) failed_validation: usize,
+    pub(super) in_progress_validation: usize,
+    pub(super) oldest_active_validation_age_seconds: u64,
+    pub(super) stale_validation: usize,
+    pub(super) tests: Vec<MachineValidationTest>,
 }
 
 impl MachineValidationMetrics {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             completed_validation: 0,
             failed_validation: 0,
@@ -47,7 +47,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<MachineValida
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_machine_validation_completed")
-            .with_description("Count of machine validation that have completed successfully")
+            .with_description("Number of successfully completed machine validation runs")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.completed_validation as u64, attrs);
@@ -60,7 +60,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<MachineValida
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_machine_validation_failed")
-            .with_description("Count of machine validation that have failed")
+            .with_description("Number of failed machine validation runs")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.failed_validation as u64, attrs);
@@ -73,7 +73,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<MachineValida
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_machine_validation_in_progress")
-            .with_description("Count of machine validation that are in progress")
+            .with_description("Number of machine validation runs in progress")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.in_progress_validation as u64, attrs);
@@ -97,7 +97,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<MachineValida
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_machine_validation_stale_runs_count")
-            .with_description("Count of active machine validation runs considered stale")
+            .with_description("Number of active machine validation runs considered stale")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.stale_validation as u64, attrs);
@@ -131,12 +131,12 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<MachineValida
     }
 }
 
-pub struct MetricHolder {
+pub(super) struct MetricHolder {
     last_iteration_metrics: SharedMetricsHolder<MachineValidationMetrics>,
 }
 
 impl MetricHolder {
-    pub fn new(meter: Meter, hold_period: std::time::Duration) -> Self {
+    pub(super) fn new(meter: Meter, hold_period: std::time::Duration) -> Self {
         let last_iteration_metrics = SharedMetricsHolder::with_hold_period(hold_period);
         hydrate_meter(meter, last_iteration_metrics.clone());
         Self {
@@ -145,7 +145,7 @@ impl MetricHolder {
     }
 
     /// Updates the most recent metrics
-    pub fn update_metrics(&self, metrics: MachineValidationMetrics) {
+    pub(super) fn update_metrics(&self, metrics: MachineValidationMetrics) {
         self.last_iteration_metrics.update(metrics);
     }
 }
@@ -193,6 +193,8 @@ mod tests {
             components: vec![],
             last_modified_at: Utc::now(),
             is_enabled: true,
+            plugin: None,
+            full_host_approved: false,
         }];
         let test_meter = TestMeter::default();
 

@@ -32,7 +32,8 @@ use ::rpc::forge::{
 };
 use carbide_secrets::credentials::CredentialReader;
 use carbide_secrets::key_encryption;
-use db::{WithTransaction, tenant, tenant_identity_config};
+use carbide_utils::none_if_empty::NoneIfEmpty;
+use db::{ConditionalWrite, WithTransaction, tenant, tenant_identity_config};
 use model::tenant::identity_config::TenantIdentityCurrentSigningKeySlot;
 use model::tenant::{
     EncryptedSigningPrivateKey, EncryptedTokenDelegationAuthConfig, EncryptionKeyId,
@@ -48,7 +49,8 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_request_data_redacted};
 use crate::handlers::machine_identity::require_machine_identity_site_enabled;
 use crate::machine_identity::{
-    ReencryptBlobOutcome, decrypt_token_delegation_encrypted_blob,
+    MachineIdentityStoredSecretDecryptionFailed, ReencryptBlobOutcome,
+    StoredMachineIdentitySecretKind, decrypt_token_delegation_encrypted_blob,
     machine_identity_encryption_secret, reencrypt_ciphertext_if_needed,
 };
 
@@ -64,10 +66,11 @@ async fn tenant_identity_with_decrypted_token_delegation(
     )
     .await
     .inspect_err(|e| {
-        tracing::error!(
-            org_id = %cfg.organization_id.as_str(),
-            message = %e.message(),
-            "token delegation auth config decrypt failed"
+        carbide_instrument::emit(
+            MachineIdentityStoredSecretDecryptionFailed::TokenDelegationAuth {
+                organization_id: cfg.organization_id.to_string(),
+                error: e.message().to_string(),
+            },
         );
     })?;
     Ok(TenantIdentityConfigDecrypted {
@@ -269,7 +272,7 @@ pub(crate) async fn set_configuration(
 
     if !api.runtime_config.machine_identity.enabled {
         return Err(CarbideError::InvalidArgument(
-            "Machine identity must be enabled in site config before setting identity configuration"
+            "machine identity must be enabled in site config before setting identity configuration"
                 .to_string(),
         )
         .into());
@@ -388,7 +391,7 @@ pub(crate) async fn get_token_delegation(
 
     if !api.runtime_config.machine_identity.enabled {
         return Err(CarbideError::InvalidArgument(
-            "Machine identity must be enabled in site config".to_string(),
+            "machine identity must be enabled in site config".to_string(),
         )
         .into());
     }
@@ -442,7 +445,7 @@ pub(crate) async fn set_token_delegation(
 
     if !api.runtime_config.machine_identity.enabled {
         return Err(CarbideError::InvalidArgument(
-            "Machine identity must be enabled in site config".to_string(),
+            "machine identity must be enabled in site config".to_string(),
         )
         .into());
     }
@@ -533,7 +536,7 @@ pub(crate) async fn delete_token_delegation(
 
     if !api.runtime_config.machine_identity.enabled {
         return Err(CarbideError::InvalidArgument(
-            "Machine identity must be enabled in site config".to_string(),
+            "machine identity must be enabled in site config".to_string(),
         )
         .into());
     }
@@ -572,6 +575,12 @@ enum ReencryptFieldResult {
     Failed(ReencryptTenantIdentityFailure),
 }
 
+#[derive(Clone, Copy)]
+struct ReencryptField {
+    name: &'static str,
+    secret_kind: StoredMachineIdentitySecretKind,
+}
+
 fn tally_reencrypt_field(
     plan: &mut ReencryptOrgPlan,
     result: ReencryptFieldResult,
@@ -602,18 +611,20 @@ fn tally_reencrypt_field(
 async fn reencrypt_one_field(
     credentials: &dyn CredentialReader,
     org_id: &str,
-    field: &str,
+    field: ReencryptField,
     ciphertext: Option<&str>,
     target_key_id: &EncryptionKeyId,
     target_aes: &key_encryption::Aes256Key,
     dry_run: bool,
 ) -> Result<ReencryptFieldResult, Status> {
-    let Some(ciphertext) = ciphertext.filter(|s| !s.is_empty()) else {
+    let Some(ciphertext) = ciphertext.none_if_empty() else {
         return Ok(ReencryptFieldResult::Absent);
     };
     match reencrypt_ciphertext_if_needed(
         credentials,
         ciphertext,
+        field.secret_kind,
+        org_id,
         target_key_id,
         target_aes,
         dry_run,
@@ -628,7 +639,7 @@ async fn reencrypt_one_field(
         Err(status) => Ok(ReencryptFieldResult::Failed(
             ReencryptTenantIdentityFailure {
                 organization_id: org_id.to_string(),
-                field: field.to_string(),
+                field: field.name.to_string(),
                 error: status.message().to_string(),
             },
         )),
@@ -694,11 +705,17 @@ async fn reencrypt_signing_key_fields(
     for slot in [SigningKeySlot::Key1, SigningKeySlot::Key2] {
         let (field, ciphertext) = match slot {
             SigningKeySlot::Key1 => (
-                "encrypted_signing_key_1",
+                ReencryptField {
+                    name: "encrypted_signing_key_1",
+                    secret_kind: StoredMachineIdentitySecretKind::SigningKey,
+                },
                 plan.enc1.as_ref().map(|v| v.as_str()).map(str::to_string),
             ),
             SigningKeySlot::Key2 => (
-                "encrypted_signing_key_2",
+                ReencryptField {
+                    name: "encrypted_signing_key_2",
+                    secret_kind: StoredMachineIdentitySecretKind::SigningKey,
+                },
                 plan.enc2.as_ref().map(|v| v.as_str()).map(str::to_string),
             ),
         };
@@ -721,7 +738,7 @@ async fn reencrypt_signing_key_fields(
             };
             store_reencrypted_signing_key(
                 org_id_str,
-                field,
+                field.name,
                 enc_slot,
                 &mut plan.failures,
                 new_ciphertext,
@@ -770,7 +787,10 @@ async fn plan_org_reencrypt(
         reencrypt_one_field(
             credentials,
             org_id_str,
-            "encrypted_auth_method_config",
+            ReencryptField {
+                name: "encrypted_auth_method_config",
+                secret_kind: StoredMachineIdentitySecretKind::TokenDelegationAuth,
+            },
             delegation_ciphertext.as_deref(),
             target_key_id,
             target_aes,
@@ -857,41 +877,43 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
             continue;
         }
 
-        response.fields_reencrypted += plan.fields_reencrypted;
-        response.fields_skipped_on_target += plan.fields_skipped_on_target;
         if plan.any_change {
-            response.rows_updated += 1;
             if !dry_run {
                 let enc1 = plan.enc1;
                 let enc2 = plan.enc2;
                 let delegation = plan.delegation;
-                let org_id_for_txn = org_id.clone();
-                api.database_connection
+                let write = api
+                    .database_connection
                     .with_txn(|txn| {
                         Box::pin(async move {
-                            tenant_identity_config::find_for_update(&org_id_for_txn, txn)
-                                .await?
-                                .ok_or_else(|| db::DatabaseError::NotFoundError {
-                                    kind: "tenant_identity_config",
-                                    id: org_id_for_txn.as_str().to_string(),
-                                })?;
-                            tenant_identity_config::update_encrypted_fields(
-                                &org_id_for_txn,
-                                enc1,
-                                enc2,
-                                delegation,
-                                txn,
+                            let write = tenant_identity_config::update_encrypted_fields(
+                                &row, enc1, enc2, delegation, txn,
                             )
                             .await?;
-                            tenant::increment_version(org_id_for_txn.as_str(), txn).await?;
-                            Ok::<(), db::DatabaseError>(())
+                            if let ConditionalWrite::Applied(()) = write {
+                                tenant::increment_version(row.organization_id.as_str(), txn)
+                                    .await?;
+                            }
+                            Ok::<_, db::DatabaseError>(write)
                         })
                     })
                     .await??;
+                if let ConditionalWrite::NotApplied(reason) = write {
+                    response.rows_failed += 1;
+                    response.failures.push(ReencryptTenantIdentityFailure {
+                        organization_id: org_id.as_str().to_string(),
+                        field: "tenant_identity_config".to_string(),
+                        error: reason.to_string(),
+                    });
+                    continue;
+                }
             }
+            response.rows_updated += 1;
         } else {
             response.rows_skipped_all_on_target += 1;
         }
+        response.fields_reencrypted += plan.fields_reencrypted;
+        response.fields_skipped_on_target += plan.fields_skipped_on_target;
     }
 
     Ok(Response::new(response))

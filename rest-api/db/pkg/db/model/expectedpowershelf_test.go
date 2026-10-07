@@ -14,8 +14,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 )
 
@@ -38,8 +37,8 @@ func TestExpectedPowerShelf_FromProto(t *testing.T) {
 
 	t.Run("invalid id leaves eps.ID unchanged", func(t *testing.T) {
 		eps := &ExpectedPowerShelf{ID: id}
-		eps.FromProto(&cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: "not-a-uuid"},
+		eps.FromProto(&corev1.ExpectedPowerShelf{
+			ExpectedPowerShelfId: &corev1.UUID{Value: "not-a-uuid"},
 			BmcMacAddress:        "aa:bb",
 		})
 
@@ -49,12 +48,12 @@ func TestExpectedPowerShelf_FromProto(t *testing.T) {
 
 	t.Run("populates all proto fields", func(t *testing.T) {
 		eps := &ExpectedPowerShelf{}
-		eps.FromProto(&cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: id.String()},
+		eps.FromProto(&corev1.ExpectedPowerShelf{
+			ExpectedPowerShelfId: &corev1.UUID{Value: id.String()},
 			BmcMacAddress:        "aa:bb:cc:dd:ee:ff",
 			ShelfSerialNumber:    "SSN-1",
 			BmcIpAddress:         "10.0.0.1",
-			RackId:               &cwssaws.RackId{Id: rackID},
+			RackId:               &corev1.RackId{Id: rackID},
 			Name:                 &name,
 			Manufacturer:         &manufacturer,
 			Model:                &model,
@@ -62,8 +61,8 @@ func TestExpectedPowerShelf_FromProto(t *testing.T) {
 			SlotId:               &slot,
 			TrayIdx:              &trayIdx,
 			HostId:               &host,
-			Metadata: &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{
+			Metadata: &corev1.Metadata{
+				Labels: []*corev1.Label{
 					{Key: "env", Value: cutil.GetPtr("prod")},
 				},
 			},
@@ -90,8 +89,8 @@ func TestExpectedPowerShelf_FromProto(t *testing.T) {
 
 	t.Run("empty BmcIpAddress yields nil pointer", func(t *testing.T) {
 		eps := &ExpectedPowerShelf{BmcIpAddress: cutil.GetPtr("stale")}
-		eps.FromProto(&cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: id.String()},
+		eps.FromProto(&corev1.ExpectedPowerShelf{
+			ExpectedPowerShelfId: &corev1.UUID{Value: id.String()},
 			BmcIpAddress:         "",
 		})
 
@@ -101,8 +100,8 @@ func TestExpectedPowerShelf_FromProto(t *testing.T) {
 	t.Run("nil RackId clears eps.RackID", func(t *testing.T) {
 		stale := "stale-rack"
 		eps := &ExpectedPowerShelf{RackID: &stale}
-		eps.FromProto(&cwssaws.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &cwssaws.UUID{Value: id.String()},
+		eps.FromProto(&corev1.ExpectedPowerShelf{
+			ExpectedPowerShelfId: &corev1.UUID{Value: id.String()},
 			BmcMacAddress:        "aa:bb",
 		})
 
@@ -232,8 +231,6 @@ func TestExpectedPowerShelfSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -363,8 +360,6 @@ func TestExpectedPowerShelfSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -509,8 +504,6 @@ func TestExpectedPowerShelfSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -616,8 +609,6 @@ func TestExpectedPowerShelfSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -696,8 +687,6 @@ func TestExpectedPowerShelfSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -751,9 +740,45 @@ func TestExpectedPowerShelfSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+}
+
+func TestExpectedPowerShelfSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedPowerShelfSetupSchema(t, dbSession)
+
+	existing := testExpectedPowerShelfSQLDAOCreateExpectedPowerShelves(ctx, t, dbSession)
+	dao := NewExpectedPowerShelfDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	assert.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedPowerShelfCreateInput{ExpectedPowerShelfID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:33:ee:01", ShelfSerialNumber: "other-site", CreatedBy: user.ID})
+	assert.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedPowerShelfCreateInput{
+		{ExpectedPowerShelfID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:33:ff:01", ShelfSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedPowerShelfID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:33:ff:02", ShelfSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	assert.NoError(t, err)
+	if assert.Len(t, result, 2) {
+		assert.Equal(t, "replacement-1", result[0].ShelfSerialNumber)
+	}
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	assert.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	assert.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedPowerShelfFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
 }

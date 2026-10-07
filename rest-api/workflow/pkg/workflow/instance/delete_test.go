@@ -14,8 +14,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 type DeleteInstanceTestSuite struct {
@@ -37,8 +37,8 @@ func (s *DeleteInstanceTestSuite) Test_DeleteInstanceWorkflow_Success() {
 	var instanceManager instanceActivity.ManageInstance
 
 	instanceID := uuid.New()
-	request := &cwssaws.InstanceReleaseRequest{
-		Id: &cwssaws.InstanceId{
+	request := &corev1.InstanceReleaseRequest{
+		Id: &corev1.InstanceId{
 			Value: instanceID.String(),
 		},
 	}
@@ -58,8 +58,8 @@ func (s *DeleteInstanceTestSuite) Test_DeleteInstanceWorkflow_DeleteInstanceViaS
 
 	instanceID := uuid.New()
 
-	request := &cwssaws.InstanceReleaseRequest{
-		Id: &cwssaws.InstanceId{
+	request := &corev1.InstanceReleaseRequest{
+		Id: &corev1.InstanceId{
 			Value: instanceID.String(),
 		},
 	}

@@ -25,7 +25,7 @@ Reboot a machine:
     $ nico-admin-cli machine reboot --machine 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "ID of the machine to reboot")]
-    pub machine: String,
+    pub(super) machine: String,
 }

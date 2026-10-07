@@ -23,7 +23,7 @@ pub type OtelView = Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync + 's
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Error building opentelemetry View: {0}")]
+    #[error("error building opentelemetry view: {0}")]
     ViewBuilding(#[from] NewViewError),
 }
 
@@ -69,7 +69,11 @@ pub fn new_view(
             .with_unit(i.unit().to_owned())
             .build()
             .inspect_err(|e| {
-                tracing::error!("BUG: Could not build stream from view {}: {}", i.name(), e)
+                tracing::error!(
+                    view = i.name(),
+                    error = %e,
+                    "BUG: Could not build stream from view"
+                )
             })
             .ok()
     }))
@@ -77,7 +81,7 @@ pub fn new_view(
 
 #[derive(thiserror::Error, Debug)]
 pub enum NewViewError {
-    #[error("Metrics view name {name:?} is an invalid glob: {error}")]
+    #[error("metrics view name {name:?} is an invalid glob: {error}")]
     Glob {
         name: &'static str,
         error: glob::PatternError,

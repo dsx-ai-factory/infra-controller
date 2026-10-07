@@ -20,7 +20,7 @@
 #[macro_export]
 macro_rules! define_sqlx_fixtures {
     ( $($file:expr),* $(,)? ) => {
-        pub fn sqlx_fixture_from_str(s: &str) -> sqlx::testing::TestFixture {
+        pub(crate) fn sqlx_fixture_from_str(s: &str) -> sqlx::testing::TestFixture {
             match s {
                 $(
                     $file => sqlx::testing::TestFixture {

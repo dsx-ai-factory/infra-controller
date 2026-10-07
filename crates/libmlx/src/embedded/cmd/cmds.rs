@@ -243,6 +243,7 @@ fn cmd_registry_check(
         uefi_version_virtio_blk_current: None,
         uefi_version_virtio_net_current: None,
         base_mac: None,
+        base_guid: None,
         status: None,
         part_number,
         fw_version_current,

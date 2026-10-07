@@ -25,7 +25,7 @@ use model::site_explorer::{
     BootOrder, ComputerSystem, EndpointExplorationReport, ExploredManagedHost,
 };
 
-pub trait BootOrderReporter: Send + Sync {
+pub(super) trait BootOrderReporter: Send + Sync {
     fn report(
         &self,
         reason: BootOrderReportReason,
@@ -51,7 +51,7 @@ const BOOT_ORDER_MAX_LOGGED_HOST_PER_ITERATION: u32 = 10;
 /// reconciliates boot order expected by managed host state machine
 /// and H/W.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BootOrderReportReason {
+pub(super) enum BootOrderReportReason {
     ChangeDetected,
     PeriodicUpdate,
     NewHost,
@@ -69,7 +69,7 @@ impl fmt::Display for BootOrderReportReason {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct TracingBootOrderReporter;
+pub(super) struct TracingBootOrderReporter;
 
 impl BootOrderReporter for TracingBootOrderReporter {
     fn report(
@@ -83,7 +83,7 @@ impl BootOrderReporter for TracingBootOrderReporter {
         let boot_orders = BootOrderDisplayProxy { systems };
 
         tracing::info!(
-            %bmc_ip,
+            bmc_ip_address = %bmc_ip,
             machine_id = ?machine_id,
             ?boot_orders,
             reason = %reason,
@@ -92,7 +92,7 @@ impl BootOrderReporter for TracingBootOrderReporter {
     }
 }
 
-pub struct BootOrderTracker<R = TracingBootOrderReporter> {
+pub(super) struct BootOrderTracker<R = TracingBootOrderReporter> {
     cached_boot_order: HashMap<IpAddr, BootOrderStatus>,
     reporter: R,
 }
@@ -108,7 +108,7 @@ impl<R: Default> Default for BootOrderTracker<R> {
 
 #[cfg(test)]
 impl<R> BootOrderTracker<R> {
-    pub fn new(reporter: R) -> Self {
+    fn new(reporter: R) -> Self {
         Self {
             cached_boot_order: HashMap::new(),
             reporter,
@@ -117,7 +117,7 @@ impl<R> BootOrderTracker<R> {
 }
 
 impl<R: BootOrderReporter> BootOrderTracker<R> {
-    pub fn track_hosts(
+    pub(super) fn track_hosts(
         &mut self,
         now: Instant,
         reports: &[(ExploredManagedHost, EndpointExplorationReport)],
@@ -196,14 +196,14 @@ struct BootOrderStatus {
 }
 
 impl BootOrderStatus {
-    pub fn new(report_time: std::time::Instant, systems: &[ComputerSystem]) -> Self {
+    fn new(report_time: std::time::Instant, systems: &[ComputerSystem]) -> Self {
         BootOrderStatus {
             report_time,
             boot_order: Self::collect_boot_order(systems),
         }
     }
 
-    pub fn boot_order_updated(&mut self, systems: &[ComputerSystem]) -> bool {
+    fn boot_order_updated(&mut self, systems: &[ComputerSystem]) -> bool {
         if systems.len() != self.boot_order.len() {
             self.boot_order = Self::collect_boot_order(systems);
             return true;

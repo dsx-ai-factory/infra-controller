@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use super::Base;
 
-pub async fn find(
+pub(super) async fn find(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -112,12 +112,15 @@ async fn find_by_uuid(state: Arc<Api>, u: uuid::Uuid) -> Response {
             return (StatusCode::NOT_FOUND, "UUID does not match anything").into_response();
         }
         Err(err) => {
-            tracing::error!(%err, "find_by_uuid error calling grpc identify_uuid");
+            tracing::error!(error = %err, "find_by_uuid error calling grpc identify_uuid");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
     let Ok(object_type) = forgerpc::UuidType::try_from(out.object_type) else {
-        tracing::error!("Invalid UuidType from carbide api: {}", out.object_type);
+        tracing::error!(
+            object_type = out.object_type,
+            "Invalid UuidType from carbide api",
+        );
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     use forgerpc::UuidType::*;
@@ -152,12 +155,15 @@ async fn find_by_mac(state: Arc<Api>, mac: mac_address::MacAddress) -> impl Into
             return (StatusCode::NOT_FOUND, "MAC does not match anything").into_response();
         }
         Err(err) => {
-            tracing::error!(%err, "find_by_mac error calling grpc identify_mac");
+            tracing::error!(error = %err, "find_by_mac error calling grpc identify_mac");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
     let Ok(object_type) = forgerpc::MacOwner::try_from(out.object_type) else {
-        tracing::error!("Invalid MacOwner from carbide api: {}", out.object_type);
+        tracing::error!(
+            object_type = out.object_type,
+            "Invalid MacOwner from carbide api",
+        );
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     use forgerpc::MacOwner::*;
@@ -192,7 +198,7 @@ async fn find_by_serial(state: Arc<Api>, serial_number: &str) -> Option<MachineI
             None
         }
         Err(err) => {
-            tracing::info!(%err, serial_number, "find_by_serial error");
+            tracing::info!(error = %err, serial_number, "find_by_serial error");
             None
         }
     }

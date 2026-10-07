@@ -10,12 +10,12 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 var (
 	// Time when the Machine/InstanceType association ID attribute will be deprecated.
-	machineInstanceTypeAssociationIDDeprecationTime, _ = time.Parse(time.RFC1123, "Thu, 09 Jul 2026 00:00:00 UTC")
+	machineInstanceTypeAssociationIDDeprecationTime = time.Date(2026, time.August, 9, 0, 0, 0, 0, time.UTC)
 
 	machineInstanceTypeDeprecations = []DeprecatedEntity{
 		{
@@ -51,8 +51,8 @@ func (mitcr *APIMachineInstanceTypeCreateRequest) Validate() error {
 // that the handler has performed any cross-context checks Validate
 // cannot see (RBAC, ownership, capability match against the
 // InstanceType, etc.).
-func (mitcr *APIMachineInstanceTypeCreateRequest) ToProto(it *cdbm.InstanceType) *cwssaws.AssociateMachinesWithInstanceTypeRequest {
-	return &cwssaws.AssociateMachinesWithInstanceTypeRequest{
+func (mitcr *APIMachineInstanceTypeCreateRequest) ToProto(it *cdbm.InstanceType) *corev1.AssociateMachinesWithInstanceTypeRequest {
+	return &corev1.AssociateMachinesWithInstanceTypeRequest{
 		InstanceTypeId: it.ID.String(),
 		MachineIds:     mitcr.MachineIDs,
 	}
@@ -61,27 +61,30 @@ func (mitcr *APIMachineInstanceTypeCreateRequest) ToProto(it *cdbm.InstanceType)
 // APIMachineInstanceType is the data structure to capture Machine Instance Type
 type APIMachineInstanceType struct {
 	// ID is the unique UUID v4 identifier for the Machine Instance Type
-	ID string `json:"id"`
+	ID *string `json:"id,omitempty"`
 	// MachineID is the ID of the associated Machine
 	MachineID string `json:"machineId"`
 	// InstanceTypeID is the ID of the associated Instance Type
 	InstanceTypeID string `json:"instanceTypeId"`
-	// Deprecations is the list of deprecation messages denoting fields which are being deprecated
-	Deprecations []APIDeprecation `json:"deprecations,omitempty"`
 	// Created is the date and time the Machine Instance Type was created
 	Created time.Time `json:"created"`
 	// Updated is the date and time the Machine Instance Type was last updated
 	Updated time.Time `json:"updated"`
+	// Deprecations is the list of deprecation messages denoting fields which are being deprecated
+	Deprecations []APIDeprecation `json:"deprecations,omitempty"`
 }
 
 // NewAPIMachineInstanceType creates a new APIMachineInstanceType
 func NewAPIMachineInstanceType(dbmit *cdbm.MachineInstanceType) *APIMachineInstanceType {
 	apiMachineInstanceType := &APIMachineInstanceType{
-		ID:             dbmit.ID.String(),
 		MachineID:      dbmit.MachineID,
 		InstanceTypeID: dbmit.InstanceTypeID.String(),
 		Created:        dbmit.Created,
 		Updated:        dbmit.Updated,
+	}
+
+	if time.Now().Before(machineInstanceTypeAssociationIDDeprecationTime) {
+		apiMachineInstanceType.ID = cutil.GetPtr(dbmit.ID.String())
 	}
 
 	// Populate deprecation metadata for deprecated response fields.

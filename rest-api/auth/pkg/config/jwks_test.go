@@ -241,6 +241,142 @@ func TestJwksConfig_UpdateJWKs(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("failed update is throttled while cache is empty", func(t *testing.T) {
+		requestCount := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+
+		config := &JwksConfig{
+			URL:    server.URL,
+			Issuer: "test.example.com",
+		}
+
+		require.Error(t, config.UpdateJWKS())
+		assert.False(t, config.LastAttempted.IsZero())
+		assert.True(t, config.LastUpdated.IsZero())
+
+		assert.ErrorIs(t, config.UpdateJWKS(), core.ErrJWKSNotInitialized)
+		assert.Equal(t, 1, requestCount)
+
+		config.Lock()
+		config.LastAttempted = time.Now().Add(-minUpdateInterval)
+		config.Unlock()
+
+		require.Error(t, config.UpdateJWKS())
+		assert.Equal(t, 2, requestCount)
+	})
+
+	t.Run("in-flight update remains retryable", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			warmCache bool
+		}{
+			{name: "cold cache"},
+			{name: "warm cache", warmCache: true},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+				require.NoError(t, err)
+
+				requestStarted := make(chan struct{})
+				releaseResponse := make(chan struct{})
+				responseResult := make(chan error, 2)
+				var requestStartedOnce sync.Once
+				var releaseResponseOnce sync.Once
+				release := func() {
+					releaseResponseOnce.Do(func() { close(releaseResponse) })
+				}
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requestStartedOnce.Do(func() { close(requestStarted) })
+					<-releaseResponse
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, writeErr := w.Write([]byte(createJWKSResponse(privateKey.Public().(*rsa.PublicKey), "new-key-id", "RS256", "sig")))
+					responseResult <- writeErr
+				}))
+				defer server.Close()
+				defer release()
+
+				config := &JwksConfig{
+					URL:    server.URL,
+					Issuer: "test.example.com",
+				}
+				if tt.warmCache {
+					oldPrivateKey, keyErr := rsa.GenerateKey(rand.Reader, 2048)
+					require.NoError(t, keyErr)
+					config.jwks = &core.JWKS{Set: &jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+						Key:       oldPrivateKey.Public(),
+						KeyID:     "old-key-id",
+						Algorithm: "RS256",
+						Use:       "sig",
+					}}}}
+				}
+
+				tokenString, err := createTokenWithGoJose(privateKey, true, "new-key-id")
+				require.NoError(t, err)
+				updateResult := make(chan error, 1)
+				go func() {
+					updateResult <- config.UpdateJWKS()
+				}()
+
+				select {
+				case <-requestStarted:
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for JWKS request to start")
+				}
+
+				type validationResult struct {
+					token *jwt.Token
+					err   error
+				}
+				validationDone := make(chan validationResult, 1)
+				go func() {
+					token, validationErr := config.ValidateToken(tokenString, jwt.MapClaims{})
+					validationDone <- validationResult{token: token, err: validationErr}
+				}()
+
+				select {
+				case result := <-validationDone:
+					t.Fatalf("validation returned before the in-flight update completed: %v", result.err)
+				case <-time.After(50 * time.Millisecond):
+				}
+
+				release()
+				select {
+				case err := <-responseResult:
+					require.NoError(t, err)
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for JWKS response")
+				}
+				select {
+				case err := <-updateResult:
+					require.NoError(t, err)
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for JWKS update")
+				}
+				select {
+				case result := <-validationDone:
+					require.NoError(t, result.err)
+					require.NotNil(t, result.token)
+					assert.True(t, result.token.Valid)
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for token validation")
+				}
+				select {
+				case err := <-responseResult:
+					t.Fatalf("token validation started an unexpected second JWKS request: %v", err)
+				default:
+				}
+			})
+		}
+	})
 }
 
 // TestJwksConfig_Concurrency tests thread safety of JWKS operations
@@ -926,4 +1062,73 @@ func TestValidateAudiences(t *testing.T) {
 		err := config.ValidateAudience(claims)
 		assert.ErrorIs(t, err, core.ErrInvalidAudience)
 	})
+}
+
+func TestGetOrgDataFromClaimMappingAudiences(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     *JwksConfig
+		claims     jwt.MapClaims
+		requestOrg string
+		wantErr    error
+	}{
+		{
+			name: "matching audience authorizes org",
+			config: &JwksConfig{ClaimMappings: []ClaimMapping{{
+				OrgName:   "acme",
+				Roles:     []string{"TENANT_ADMIN"},
+				Audiences: []string{"org-acme"},
+			}}},
+			claims:     jwt.MapClaims{"aud": []string{"issuer-audience", "org-acme"}},
+			requestOrg: "acme",
+		},
+		{
+			name: "wrong audience denies org",
+			config: &JwksConfig{ClaimMappings: []ClaimMapping{{
+				OrgName:   "acme",
+				Roles:     []string{"TENANT_ADMIN"},
+				Audiences: []string{"org-acme"},
+			}}},
+			claims:     jwt.MapClaims{"aud": "different-audience"},
+			requestOrg: "acme",
+			wantErr:    core.ErrInvalidAudience,
+		},
+		{
+			name: "mapping without audiences remains allowed",
+			config: &JwksConfig{ClaimMappings: []ClaimMapping{{
+				OrgName: "acme",
+				Roles:   []string{"TENANT_ADMIN"},
+			}}},
+			claims:     jwt.MapClaims{},
+			requestOrg: "acme",
+		},
+		{
+			name: "reserved dynamic org is rejected before audience",
+			config: &JwksConfig{
+				ClaimMappings: []ClaimMapping{{
+					OrgAttribute:   "org",
+					RolesAttribute: "roles",
+					Audiences:      []string{"org-acme"},
+				}},
+				ReservedOrgNames: map[string]bool{"acme": true},
+			},
+			claims:     jwt.MapClaims{"org": "acme", "roles": []string{"TENANT_ADMIN"}, "aud": "different-audience"},
+			requestOrg: "acme",
+			wantErr:    core.ErrReservedOrgName,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orgData, _, err := tt.config.GetOrgDataFromClaim(tt.claims, tt.requestOrg)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				assert.Nil(t, orgData)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Contains(t, orgData, strings.ToLower(tt.requestOrg))
+		})
+	}
 }

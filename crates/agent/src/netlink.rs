@@ -227,7 +227,8 @@ pub async fn get_all_interface_links() -> Result<HashMap<String, InterfaceLinkDa
                 None => {
                     let idx = link_message.header.index;
                     tracing::warn!(
-                        "Network interface with index {idx} doesn't have a name (no IfName attribute)"
+                        interface_index = idx,
+                        "Network interface doesn't have a name (no IfName attribute)"
                     );
                     None
                 }

@@ -21,7 +21,7 @@ use super::{add, print_empty_template, remove, show};
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "List health report sources for a switch")]
     Show(show::Args),
     #[clap(about = "Insert a health report source for a switch")]

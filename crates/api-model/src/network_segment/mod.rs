@@ -36,6 +36,9 @@ use crate::state_history::StateHistoryRecord;
 
 mod slas;
 
+pub const MTU_MIN: i32 = 576;
+pub const MTU_MAX: i32 = 9000;
+
 #[derive(Clone, Debug, Default)]
 pub struct NetworkSegmentSearchFilter {
     pub name: Option<String>,
@@ -74,16 +77,26 @@ pub enum NetworkSegmentDeletionState {
 
 // How we specifiy a network segment in the config file
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkDefinition {
     #[serde(rename = "type")]
     pub segment_type: NetworkDefinitionSegmentType,
     /// CIDR notation
     pub prefix: IpNetwork,
-    /// Usually the first IP in the prefix range
-    pub gateway: IpAddr,
+    /// Optional IPv6 CIDR for dual-stack config-seeded segments.
+    #[serde(default)]
+    pub prefix_v6: Option<IpNetwork>,
+    /// Required for IPv4 prefixes, usually the first IP in the prefix range.
+    /// IPv6-only definitions may omit it. Supplied values are ignored but remain
+    /// accepted for compatibility with older configurations.
+    pub gateway: Option<IpAddr>,
+    /// DHCPv6 relay link-address used to identify this segment. It may
+    /// be outside `prefix_v6`, so it is modeled separately from gateway.
+    #[serde(default)]
+    pub dhcpv6_link_address: Option<IpAddr>,
     /// Typically 9000 for admin network, 1500 for underlay
     pub mtu: i32,
-    /// How many addresses to skip before allocating
+    /// Non-negative number of addresses to skip before allocating.
     pub reserve_first: i32,
     /// Controls whether DHCP allocates IPs dynamically from the pool
     /// for this specific network (with the ability to have per-IP static
@@ -93,10 +106,44 @@ pub struct NetworkDefinition {
     /// behavior of Carbide + carbide-dhcp.
     #[serde(default)]
     pub allocation_strategy: AllocationStrategy,
+    /// Allows NICo to infer modified EUI-64 SLAAC addresses for clients making
+    /// stateless DHCPv6 requests and add them to interface address state.
+    /// Inference also requires dynamic allocation, exactly one IPv6 `/64`, and
+    /// an interface without an existing IPv6 address.
+    ///
+    /// This defaults to `false`. Set it only when clients on this segment
+    /// derive SLAAC addresses from their MAC addresses using modified EUI-64.
+    /// The value is applied when the segment is first seeded; later config
+    /// edits do not update the stored segment.
+    #[serde(default)]
+    pub infer_slaac_eui64_addresses: bool,
     /// Set to the name of a VPC to attach this network segment to a VPC on creation. Will fail if
     /// the VPC is not defined. You probably want to add a vpc with a corresponding name to the
     /// config via `[vpcs.<name>]` for this to work when data is initially being seeded.
     pub vpc_name: Option<String>,
+}
+
+impl NetworkDefinition {
+    pub fn validate(&self, name: &str) -> Result<(), crate::ConfigValidationError> {
+        if self.mtu < MTU_MIN || self.mtu > MTU_MAX {
+            return Err(crate::ConfigValidationError::InvalidValue(format!(
+                "network \"{name}\": mtu {} is out of range ({MTU_MIN}-{MTU_MAX})",
+                self.mtu
+            )));
+        }
+        if self.prefix.is_ipv4() && self.gateway.is_none() {
+            return Err(crate::ConfigValidationError::InvalidValue(format!(
+                "network \"{name}\": gateway is required for an IPv4 prefix"
+            )));
+        }
+        if self.reserve_first < 0 {
+            return Err(crate::ConfigValidationError::InvalidValue(format!(
+                "network \"{name}\": reserve_first must be non-negative, got {}",
+                self.reserve_first
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Copy, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -162,6 +209,11 @@ pub struct NetworkSegmentConfig {
     pub mtu: i32,
     pub segment_type: NetworkSegmentType,
     pub allocation_strategy: AllocationStrategy,
+    /// Whether NICo may infer modified EUI-64 SLAAC addresses for clients
+    /// making stateless DHCPv6 requests and add them to interface address
+    /// state. Inference also requires dynamic allocation, exactly one IPv6
+    /// `/64`, and an interface without an IPv6 address.
+    pub infer_slaac_eui64_addresses: bool,
     pub vpc_id: Option<VpcId>,
 }
 
@@ -199,6 +251,34 @@ impl NetworkSegment {
     /// Returns whether the segment was deleted by the user
     pub fn is_marked_as_deleted(&self) -> bool {
         self.deleted.is_some()
+    }
+
+    /// Returns the IPv6 `/64` prefix NICo may use to infer a modified EUI-64
+    /// SLAAC address for this segment.
+    ///
+    /// This is a segment-only predicate: relay context, requested addresses, and
+    /// client identity must not influence it. Per-interface address ownership is
+    /// checked at the DHCP call site.
+    pub fn slaac_eui64_inference_prefix(&self) -> Option<&IpNetwork> {
+        if !self.config.infer_slaac_eui64_addresses
+            || self.config.allocation_strategy == AllocationStrategy::Reserved
+        {
+            return None;
+        }
+
+        // The DB currently enforces one prefix per family per segment; keep this
+        // defensive guard so non-DB callers or future schema changes cannot infer
+        // an address when v6 prefix selection is ambiguous.
+        let mut v6_prefixes = self
+            .prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv6());
+        let prefix = &v6_prefixes.next()?.prefix;
+        if v6_prefixes.next().is_some() || prefix.prefix() != 64 {
+            return None;
+        }
+
+        Some(prefix)
     }
 }
 
@@ -254,6 +334,7 @@ pub struct NewNetworkSegment {
     pub segment_type: NetworkSegmentType,
     pub can_stretch: Option<bool>,
     pub allocation_strategy: AllocationStrategy,
+    pub infer_slaac_eui64_addresses: bool,
 }
 
 impl FromStr for NetworkSegmentType {
@@ -314,6 +395,7 @@ impl<'r> FromRow<'r, PgRow> for NetworkSegment {
                 mtu: row.try_get("mtu")?,
                 segment_type: row.try_get("network_segment_type")?,
                 allocation_strategy: row.try_get("allocation_strategy").unwrap_or_default(),
+                infer_slaac_eui64_addresses: row.try_get("infer_slaac_eui64_addresses")?,
                 vpc_id: row.try_get("vpc_id")?,
             },
             status: NetworkSegmentStatus {
@@ -341,23 +423,84 @@ impl NewNetworkSegment {
         domain_id: DomainId,
         value: &NetworkDefinition,
     ) -> Result<Self, ModelError> {
-        let prefix = NewNetworkPrefix {
+        value
+            .validate(name)
+            .map_err(|err| ModelError::InvalidArgument(err.to_string()))?;
+
+        // Validate the optional IPv6-specific config before expanding it
+        // into persisted prefix rows.
+        if let Some(prefix_v6) = value.prefix_v6
+            && !prefix_v6.is_ipv6()
+        {
+            return Err(ModelError::InvalidArgument(
+                "NetworkDefinition.prefix_v6 must be an IPv6 prefix.".to_string(),
+            ));
+        }
+
+        if let Some(link_address) = value.dhcpv6_link_address
+            && !link_address.is_ipv6()
+        {
+            return Err(ModelError::InvalidArgument(
+                "NetworkDefinition.dhcpv6_link_address must be an IPv6 address.".to_string(),
+            ));
+        }
+
+        // Keep the one-prefix-per-family invariant explicit before the
+        // database unique index has to reject the insert.
+        if let Some(prefix_v6) = value.prefix_v6
+            && value.prefix.is_ipv6() == prefix_v6.is_ipv6()
+        {
+            return Err(ModelError::InvalidArgument(
+                "NetworkDefinition cannot contain more than one prefix from the same address family."
+                    .to_string(),
+            ));
+        }
+
+        // A DHCPv6 link-address only has meaning when there is a v6 prefix row
+        // to carry it.
+        if value.prefix.is_ipv4()
+            && value.prefix_v6.is_none()
+            && value.dhcpv6_link_address.is_some()
+        {
+            return Err(ModelError::InvalidArgument(
+                "NetworkDefinition.dhcpv6_link_address requires an IPv6 prefix.".to_string(),
+            ));
+        }
+
+        // Expand the config definition into one row for the primary prefix and
+        // an optional second row for the dual-stack IPv6 prefix.
+        let mut prefixes = vec![NewNetworkPrefix {
             prefix: value.prefix,
-            gateway: Some(value.gateway),
+            gateway: value.gateway.filter(|_| value.prefix.is_ipv4()),
+            dhcpv6_link_address: if value.prefix.is_ipv6() {
+                value.dhcpv6_link_address
+            } else {
+                None
+            },
             num_reserved: value.reserve_first,
-        };
+        }];
+        if let Some(prefix_v6) = value.prefix_v6 {
+            prefixes.push(NewNetworkPrefix {
+                prefix: prefix_v6,
+                gateway: None,
+                dhcpv6_link_address: value.dhcpv6_link_address,
+                num_reserved: value.reserve_first,
+            });
+        }
+
         Ok(NewNetworkSegment {
             id: uuid::Uuid::new_v4().into(),
             name: name.to_string(), // Set by the caller later
             subdomain_id: Some(domain_id),
             vpc_id: None,
             mtu: value.mtu,
-            prefixes: vec![prefix],
+            prefixes,
             vlan_id: None,
             vni: None,
             segment_type: value.segment_type.into(),
             can_stretch: None,
             allocation_strategy: value.allocation_strategy,
+            infer_slaac_eui64_addresses: value.infer_slaac_eui64_addresses,
         })
     }
 }
@@ -366,6 +509,7 @@ impl NewNetworkSegment {
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{scenarios, value_scenarios};
+    use carbide_uuid::network::NetworkPrefixId;
 
     use super::*;
 
@@ -380,6 +524,96 @@ mod tests {
         NetworkSegmentControllerState::Deleting {
             deletion_state: NetworkSegmentDeletionState::DBDelete,
         }
+    }
+
+    /// Builds a minimal network segment fixture for segment-level predicate tests.
+    fn test_segment(
+        infer_slaac_eui64_addresses: bool,
+        allocation_strategy: AllocationStrategy,
+        prefixes: &[&str],
+    ) -> NetworkSegment {
+        let segment_id = NetworkSegmentId::new();
+        let now = Utc::now();
+
+        NetworkSegment {
+            id: segment_id,
+            version: ConfigVersion::initial(),
+            config: NetworkSegmentConfig {
+                name: "test-segment".to_string(),
+                subdomain_id: None,
+                mtu: 1500,
+                segment_type: NetworkSegmentType::Admin,
+                allocation_strategy,
+                infer_slaac_eui64_addresses,
+                vpc_id: None,
+            },
+            status: NetworkSegmentStatus {
+                controller_state: Versioned::new(
+                    NetworkSegmentControllerState::Ready,
+                    ConfigVersion::initial(),
+                ),
+                controller_state_outcome: None,
+                history: Vec::new(),
+                vlan_id: None,
+                vni: None,
+                can_stretch: None,
+            },
+            prefixes: prefixes
+                .iter()
+                .map(|prefix| NetworkPrefix {
+                    id: NetworkPrefixId::new(),
+                    segment_id,
+                    prefix: prefix.parse().unwrap(),
+                    gateway: None,
+                    dhcpv6_link_address: None,
+                    num_reserved: 0,
+                    vpc_prefix_id: None,
+                    vpc_prefix: None,
+                    svi_ip: None,
+                    num_free_ips: None,
+                })
+                .collect(),
+            created: now,
+            updated: now,
+            deleted: None,
+        }
+    }
+
+    #[test]
+    fn slaac_eui64_inference_requires_opt_in_and_one_dynamic_v6_64_prefix() {
+        // `slaac_eui64_inference_prefix` is the segment-level gate for inferring
+        // an address. Keep the opt-in beside the prefix and allocation checks so
+        // the DHCP handler cannot accidentally bypass one of them.
+        value_scenarios!(
+            run = |segment: NetworkSegment| segment.slaac_eui64_inference_prefix().copied();
+            "opted-in dynamic segment with one v6 /64" {
+                test_segment(true, AllocationStrategy::Dynamic, &["2001:db8::/64"]) => Some("2001:db8::/64".parse().unwrap()),
+            }
+
+            "opted-in dynamic dual-stack segment with one v6 /64" {
+                test_segment(true, AllocationStrategy::Dynamic, &["192.0.2.0/24", "2001:db8::/64"]) => Some("2001:db8::/64".parse().unwrap()),
+            }
+
+            "default-off dynamic segment with one v6 /64" {
+                test_segment(false, AllocationStrategy::Dynamic, &["2001:db8::/64"]) => None,
+            }
+
+            "opted-in reserved segment with one v6 /64" {
+                test_segment(true, AllocationStrategy::Reserved, &["2001:db8::/64"]) => None,
+            }
+
+            "opted-in dynamic segment with no v6 prefix" {
+                test_segment(true, AllocationStrategy::Dynamic, &["192.0.2.0/24"]) => None,
+            }
+
+            "opted-in dynamic segment with non-64 v6 prefix" {
+                test_segment(true, AllocationStrategy::Dynamic, &["2001:db8::/80"]) => None,
+            }
+
+            "opted-in dynamic segment with ambiguous v6 prefixes" {
+                test_segment(true, AllocationStrategy::Dynamic, &["2001:db8::/64", "2001:db8:1::/80"]) => None,
+            }
+        );
     }
 
     #[test]
@@ -579,6 +813,172 @@ mod tests {
         );
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct BuiltPrefix {
+        prefix: String,
+        gateway: Option<String>,
+        dhcpv6_link_address: Option<String>,
+        num_reserved: i32,
+    }
+
+    /// Builds a config network definition for segment expansion tests.
+    fn definition(
+        prefix: &str,
+        prefix_v6: Option<&str>,
+        dhcpv6_link_address: Option<&str>,
+    ) -> NetworkDefinition {
+        NetworkDefinition {
+            segment_type: NetworkDefinitionSegmentType::Admin,
+            prefix: prefix.parse().unwrap(),
+            prefix_v6: prefix_v6.map(|prefix| prefix.parse().unwrap()),
+            gateway: Some(prefix.parse::<IpNetwork>().unwrap().network()),
+            dhcpv6_link_address: dhcpv6_link_address.map(|addr| addr.parse().unwrap()),
+            mtu: 1500,
+            reserve_first: 5,
+            allocation_strategy: AllocationStrategy::Dynamic,
+            infer_slaac_eui64_addresses: false,
+            vpc_name: None,
+        }
+    }
+
+    /// Expands a network definition and returns the persisted prefix shape.
+    fn build_definition_prefixes(value: NetworkDefinition) -> Result<Vec<BuiltPrefix>, String> {
+        NewNetworkSegment::build_from("test-segment", uuid::Uuid::new_v4().into(), &value)
+            .map(|segment| {
+                segment
+                    .prefixes
+                    .into_iter()
+                    .map(|prefix| BuiltPrefix {
+                        prefix: prefix.prefix.to_string(),
+                        gateway: prefix.gateway.map(|addr| addr.to_string()),
+                        dhcpv6_link_address: prefix
+                            .dhcpv6_link_address
+                            .map(|addr| addr.to_string()),
+                        num_reserved: prefix.num_reserved,
+                    })
+                    .collect()
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    /// Verifies config-seeded segments expand to at most one prefix per family.
+    #[test]
+    fn build_from_network_definition_expands_dual_stack_prefixes() {
+        scenarios!(
+            // Build the config-seeded segment and project the prefix rows that
+            // will be persisted.
+            run = build_definition_prefixes;
+            "v4-only keeps the legacy gateway row" {
+                definition("192.0.2.0/24", None, None) => Yields(vec![
+                    BuiltPrefix {
+                        prefix: "192.0.2.0/24".to_string(),
+                        gateway: Some("192.0.2.0".to_string()),
+                        dhcpv6_link_address: None,
+                        num_reserved: 5,
+                    },
+                ]),
+            }
+
+            "v6-only has no gateway and carries the dhcpv6 link-address" {
+                definition("2001:db8::/64", None, Some("2001:db8:ffff::1")) => Yields(vec![
+                    BuiltPrefix {
+                        prefix: "2001:db8::/64".to_string(),
+                        gateway: None,
+                        dhcpv6_link_address: Some("2001:db8:ffff::1".to_string()),
+                        num_reserved: 5,
+                    },
+                ]),
+            }
+
+            "dual-stack builds one row per family" {
+                definition("192.0.2.0/24", Some("2001:db8::/64"), Some("2001:db8:ffff::1")) => Yields(vec![
+                    BuiltPrefix {
+                        prefix: "192.0.2.0/24".to_string(),
+                        gateway: Some("192.0.2.0".to_string()),
+                        dhcpv6_link_address: None,
+                        num_reserved: 5,
+                    },
+                    BuiltPrefix {
+                        prefix: "2001:db8::/64".to_string(),
+                        gateway: None,
+                        dhcpv6_link_address: Some("2001:db8:ffff::1".to_string()),
+                        num_reserved: 5,
+                    },
+                ]),
+            }
+
+            "prefix_v6 must be IPv6" {
+                definition("192.0.2.0/24", Some("198.51.100.0/24"), None) => Fails,
+            }
+
+            "two IPv6 prefixes are rejected" {
+                definition("2001:db8:1::/64", Some("2001:db8:2::/64"), None) => Fails,
+            }
+
+            "dhcpv6 link-address must be IPv6" {
+                definition("192.0.2.0/24", Some("2001:db8::/64"), Some("192.0.2.1")) => Fails,
+            }
+
+            "dhcpv6 link-address requires a v6 prefix" {
+                definition("192.0.2.0/24", None, Some("2001:db8::1")) => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn build_from_network_definition_keeps_slaac_inference_setting() {
+        value_scenarios!(
+            run = |infer_slaac_eui64_addresses| {
+                let mut definition = definition("2001:db8::/64", None, None);
+                definition.infer_slaac_eui64_addresses = infer_slaac_eui64_addresses;
+
+                NewNetworkSegment::build_from(
+                    "test-segment",
+                    uuid::Uuid::new_v4().into(),
+                    &definition,
+                )
+                .unwrap()
+                .infer_slaac_eui64_addresses
+            };
+            "inference disabled" {
+                false => false,
+            }
+
+            "inference enabled" {
+                true => true,
+            }
+        );
+    }
+
+    #[test]
+    fn network_definition_requires_gateway_when_ipv4_is_present() {
+        scenarios!(
+            run = |prefix_v6| {
+                let mut definition = definition("192.0.2.0/24", prefix_v6, None);
+                definition.gateway = None;
+                definition.validate("test-net").map_err(|err| err.to_string())
+            };
+            "IPv4-only requires a gateway" {
+                None => FailsWith("invalid value: network \"test-net\": gateway is required for an IPv4 prefix".to_string()),
+            }
+            "an additional IPv6 prefix does not make the IPv4 gateway optional" {
+                Some("2001:db8::/64") => FailsWith("invalid value: network \"test-net\": gateway is required for an IPv4 prefix".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn build_from_network_definition_rejects_missing_ipv4_gateway() {
+        let mut definition = definition("192.0.2.0/24", None, None);
+        definition.gateway = None;
+
+        let err = build_definition_prefixes(definition).unwrap_err();
+        assert!(
+            err.contains("gateway is required for an IPv4 prefix"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn allocation_strategy_round_trips_through_json() {
         scenarios!(
@@ -616,5 +1016,70 @@ mod tests {
                 Some(stamp) => true,
             }
         );
+    }
+
+    fn network_definition_with_mtu(mtu: i32) -> NetworkDefinition {
+        NetworkDefinition {
+            segment_type: NetworkDefinitionSegmentType::Admin,
+            prefix: "10.0.0.0/24".parse().unwrap(),
+            prefix_v6: None,
+            gateway: Some("10.0.0.1".parse().unwrap()),
+            dhcpv6_link_address: None,
+            mtu,
+            reserve_first: 0,
+            allocation_strategy: AllocationStrategy::default(),
+            infer_slaac_eui64_addresses: false,
+            vpc_name: None,
+        }
+    }
+
+    #[test]
+    fn network_definition_validate_rejects_out_of_range_mtu() {
+        value_scenarios!(
+            run = |mtu: i32| network_definition_with_mtu(mtu).validate("test-net").is_err();
+            "MTU below minimum is rejected" {
+                575 => true,
+            }
+            "MTU above maximum is rejected" {
+                9001 => true,
+            }
+            "minimum boundary MTU is accepted" {
+                576 => false,
+            }
+            "maximum boundary MTU is accepted" {
+                9000 => false,
+            }
+            "typical standard MTU is accepted" {
+                1500 => false,
+            }
+        );
+    }
+
+    #[test]
+    fn network_definition_validate_error_names_the_network_and_mtu() {
+        let err = network_definition_with_mtu(9214)
+            .validate("test-inband")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("test-inband"),
+            "error should name the network: {err}"
+        );
+        assert!(
+            err.contains("9214"),
+            "error should include the bad MTU value: {err}"
+        );
+    }
+
+    #[test]
+    fn network_definition_validate_rejects_negative_reservations() {
+        let mut definition = network_definition_with_mtu(1500);
+        definition.reserve_first = -1;
+        let error = definition.validate("test-net").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::ConfigValidationError::InvalidValue(message)
+                if message.contains("test-net") && message.contains("-1")
+        ));
     }
 }

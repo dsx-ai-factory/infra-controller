@@ -85,11 +85,11 @@ impl From<forgerpc::Sku> for SkuRowDisplay {
 }
 
 /// List SKUs
-pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let skus = match fetch_skus(state.clone()).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "fetch_skus");
+            tracing::error!(error = %err, "fetch_skus");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading skus").into_response();
         }
     };
@@ -100,11 +100,11 @@ pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let skus = match fetch_skus(state).await {
         Ok(n) => n,
         Err(err) => {
-            tracing::error!(%err, "fetch_skus");
+            tracing::error!(error = %err, "fetch_skus");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading SKUs").into_response();
         }
     };
@@ -171,7 +171,7 @@ impl From<forgerpc::Sku> for SkuDetail {
 }
 
 /// View SKU details
-pub async fn detail(
+pub(super) async fn detail(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(sku_id): AxumPath<String>,
 ) -> Response {
@@ -203,7 +203,7 @@ pub async fn detail(
             return super::not_found_response(sku_id);
         }
         Err(err) => {
-            tracing::error!(%err, "find_skus_by_ids");
+            tracing::error!(error = %err, "find_skus_by_ids");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading SKUs").into_response();
         }
     };

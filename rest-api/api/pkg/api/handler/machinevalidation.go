@@ -9,41 +9,42 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
 	tp "go.temporal.io/sdk/temporal"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateMachineValidationTestHandler is the API Handler for creating new MachineValidationTest
 type CreateMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateMachineValidationTestHandler initializes and returns a new handler for creating MachineValidationTest
 func NewCreateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) CreateMachineValidationTestHandler {
 	return CreateMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -59,7 +60,7 @@ func NewCreateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 201 {object} model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test [post]
 func (handler CreateMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Create", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -150,7 +151,7 @@ func (handler CreateMachineValidationTestHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", createWorkflowID).Msg("executed synchronous create MachineValidationTest workflow")
 
 	// Execute create workflow synchronously
-	var createProtoResponse *cwssaws.MachineValidationTestAddUpdateResponse
+	var createProtoResponse *corev1.MachineValidationTestAddUpdateResponse
 	err = createWorkflowRun.Get(createCtx, &createProtoResponse)
 
 	if err != nil {
@@ -179,21 +180,19 @@ func (handler CreateMachineValidationTestHandler) Handle(c echo.Context) error {
 
 // UpdateMachineValidationTestHandler is the API Handler for update existing MachineValidationTest
 type UpdateMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateMachineValidationTestHandler initializes and returns a new handler for updating MachineValidationTest
 func NewUpdateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateMachineValidationTestHandler {
 	return UpdateMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -209,7 +208,7 @@ func NewUpdateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 201 {object} model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test/{id}/version/{version} [patch]
 func (handler UpdateMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Update", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -238,9 +237,9 @@ func (handler UpdateMachineValidationTestHandler) Handle(c echo.Context) error {
 
 	// get ID of the test
 	testID := c.Param("id")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID))
 	testVersion := c.Param("version")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion))
 
 	// Validate request
 	// Bind request data to API model
@@ -300,7 +299,7 @@ func (handler UpdateMachineValidationTestHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", updateWorkflowID).Msg("executed synchronous update MachineValidationTest workflow")
 
 	// Execute update workflow synchronously
-	var updateProtoResponse *cwssaws.MachineValidationTestAddUpdateResponse
+	var updateProtoResponse *corev1.MachineValidationTestAddUpdateResponse
 	err = updateWorkflowRun.Get(updateCtx, &updateProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -326,7 +325,7 @@ func (handler UpdateMachineValidationTestHandler) Handle(c echo.Context) error {
 	return c.JSON(http.StatusOK, apiObject)
 }
 
-func getMachineValidationTest(ctx context.Context, echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, testID string, testVersion string) (*cwssaws.MachineValidationTest, error) {
+func getMachineValidationTest(ctx context.Context, echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, testID string, testVersion string) (*corev1.MachineValidationTest, error) {
 	// get newly created test to be returned
 	getWorkflowOptions := tclient.StartWorkflowOptions{
 		ID:                       fmt.Sprintf("machine-validation-test-get-%s-%s", testID, testVersion),
@@ -335,7 +334,7 @@ func getMachineValidationTest(ctx context.Context, echoCtx echo.Context, logger 
 	}
 
 	// build protobuf request
-	getProtoRequest := &cwssaws.MachineValidationTestsGetRequest{
+	getProtoRequest := &corev1.MachineValidationTestsGetRequest{
 		TestId:  cutil.GetPtr(testID),
 		Version: cutil.GetPtr(testVersion),
 	}
@@ -357,7 +356,7 @@ func getMachineValidationTest(ctx context.Context, echoCtx echo.Context, logger 
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationTest workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.MachineValidationTestsGetResponse
+	var getProtoResponse *corev1.MachineValidationTestsGetResponse
 	err = getWorkflowRun.Get(getCtx, &getProtoResponse)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get MachineValidationTest")
@@ -375,21 +374,19 @@ func getMachineValidationTest(ctx context.Context, echoCtx echo.Context, logger 
 
 // GetAllMachineValidationTestHandler is the API Handler to get all MachineValidationTests
 type GetAllMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllMachineValidationTestHandler initializes and returns a new handler to get all MachineValidationTests
 func NewGetAllMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllMachineValidationTestHandler {
 	return GetAllMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -404,7 +401,7 @@ func NewGetAllMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 200 {object} []model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test [get]
 func (handler GetAllMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "GetAll", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -487,7 +484,7 @@ func (handler GetAllMachineValidationTestHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationTests workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.MachineValidationTestsGetResponse
+	var getProtoResponse *corev1.MachineValidationTestsGetResponse
 	err = getWorkflowRun.Get(updateCtx, &getProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -511,21 +508,19 @@ func (handler GetAllMachineValidationTestHandler) Handle(c echo.Context) error {
 
 // GetMachineValidationTestHandler is the API Handler to get MachineValidationTest
 type GetMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetMachineValidationTestHandler initializes and returns a new handler to get MachineValidationTest
 func NewGetMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetMachineValidationTestHandler {
 	return GetMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -540,7 +535,7 @@ func NewGetMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Clien
 // @Success 200 {object} model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test [get]
 func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Get", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -569,9 +564,9 @@ func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
 
 	// get ID of the test
 	testID := c.Param("id")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID))
 	testVersion := c.Param("version")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion))
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -605,7 +600,7 @@ func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
 		TaskQueue:                queue.SiteTaskQueue,
 	}
 	// build protobuf update request
-	getProtoRequest := &cwssaws.MachineValidationTestsGetRequest{
+	getProtoRequest := &corev1.MachineValidationTestsGetRequest{
 		TestId:  &testID,
 		Version: &testVersion,
 	}
@@ -625,7 +620,7 @@ func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationTests workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.MachineValidationTestsGetResponse
+	var getProtoResponse *corev1.MachineValidationTestsGetResponse
 	err = getWorkflowRun.Get(updateCtx, &getProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -651,46 +646,204 @@ func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
 	return c.JSON(http.StatusOK, model.NewAPIMachineValidationTest(getProtoResponse.Tests[0]))
 }
 
+func getMachineForValidation(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, provider *cdbm.InfrastructureProvider, machineID string) (*cdbm.Machine, *cutil.APIError) {
+	machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machineID, []string{cdbm.SiteRelationName}, false)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return nil, cutil.NewAPIError(http.StatusNotFound, "Could not find Machine with specified ID", nil)
+		}
+		logger.Error().Err(err).Msg("failed to retrieve Machine details from DB")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine details, DB error", nil)
+	}
+
+	if machine.InfrastructureProviderID != provider.ID {
+		logger.Error().Msg("Machine doesn't belong to org's Infrastructure provider")
+		return nil, cutil.NewAPIError(http.StatusNotFound, "Could not find Machine with specified ID", nil)
+	}
+
+	if machine.Site == nil {
+		logger.Error().Msg("Related Site was not returned for Machine DB entity")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site details for Machine, DB error", nil)
+	}
+
+	return machine, nil
+}
+
+// CreateMachineValidationRunHandler creates an on-demand validation run for a Machine.
+type CreateMachineValidationRunHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+}
+
+// NewCreateMachineValidationRunHandler returns a new CreateMachineValidationRunHandler.
+func NewCreateMachineValidationRunHandler(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) CreateMachineValidationRunHandler {
+	return CreateMachineValidationRunHandler{
+		dbSession: dbSession,
+		scp:       scp,
+	}
+}
+
+// Handle godoc
+// @Summary Create an on-demand Machine validation run
+// @Description Create an on-demand validation run for a Machine.
+// @Tags machine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param machineId path string true "ID of Machine"
+// @Param request body model.APIMachineValidationRunCreateRequest false "On-demand Machine validation options"
+// @Success 202 {object} model.APIMachineValidationRun
+// @Router /v2/org/{org}/nico/machine/{machineId}/validation/run [post]
+func (h CreateMachineValidationRunHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "Create", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+
+	if dbUser == nil {
+		logger.Error().Msg("Invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	ok, err := auth.ValidateOrgMembership(dbUser, org)
+	if !ok {
+		if err != nil {
+			logger.Error().Err(err).Msg("Error validating org membership for User in request")
+		} else {
+			logger.Warn().Msg("Could not validate org membership for user, access denied")
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	}
+
+	if !auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole) {
+		logger.Warn().Msg("user does not have Provider Admin role, access denied")
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
+	}
+
+	machineID := c.Param("id")
+	if machineID == "" {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine ID was not specified in URL", nil)
+	}
+
+	apiRequest := model.APIMachineValidationRunCreateRequest{}
+	if err := c.Bind(&apiRequest); err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+
+	if err := apiRequest.Validate(); err != nil {
+		logger.Warn().Err(err).Msg("Error validating Machine Validation Run creation request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Machine Validation Run creation request data", err)
+	}
+
+	provider, err := common.GetInfrastructureProviderForOrg(ctx, nil, h.dbSession, org)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error getting infrastructure provider for org")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
+	}
+
+	machine, apiError := getMachineForValidation(ctx, logger, h.dbSession, provider, machineID)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if machine.IsMissingOnSite {
+		logger.Error().Msg("Machine is missing on site, unable to start on-demand validation")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine is missing on site, unable to start on-demand validation", nil)
+	}
+
+	site := machine.Site
+	if site.Status != cdbm.SiteStatusRegistered {
+		logger.Warn().Msg("Site specified in request data is not in Registered state")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data is not in Registered state, cannot execute admin operation", nil)
+	}
+
+	siteClient, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve workflow client for Site", nil)
+	}
+
+	logger.Info().Str("machine_id", machineID).Str("site_id", site.ID.String()).Msg("Starting on-demand Machine validation via Core gRPC proxy")
+
+	coreResponse := &corev1.MachineValidationOnDemandResponse{}
+	apiError = common.ExecuteCoreGRPC(
+		ctx,
+		siteClient,
+		corev1.Forge_OnDemandMachineValidation_FullMethodName,
+		apiRequest.ToProto(machineID),
+		coreResponse,
+		site.ID.String(),
+	)
+	if apiError != nil {
+		logAPIError(logger, apiError, "Failed to start on-demand Machine validation via Core gRPC proxy")
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, nil)
+	}
+
+	return c.JSON(http.StatusAccepted, model.NewAPIMachineValidationRunFromOnDemandResponse(coreResponse))
+}
+
+func resolveMachineValidationTarget(ctx context.Context, c echo.Context, logger zerolog.Logger, dbSession *cdb.Session, provider *cdbm.InfrastructureProvider) (string, *cdbm.Site, *cutil.APIError) {
+	machineID := c.Param("id")
+	if machineID != "" {
+		machine, apiError := getMachineForValidation(ctx, logger, dbSession, provider, machineID)
+		if apiError != nil {
+			return machineID, nil, apiError
+		}
+		return machineID, machine.Site, nil
+	}
+
+	machineID = c.Param("machineID")
+	siteID := c.Param("siteID")
+	site, err := common.GetSiteFromIDString(ctx, nil, siteID, dbSession)
+	if err != nil {
+		logger.Warn().Err(err).Str("Site ID", siteID).Msg("error getting site from request")
+		return machineID, nil, cutil.NewAPIError(http.StatusBadRequest, "Error retrieving Site in request", nil)
+	}
+	if site.InfrastructureProviderID != provider.ID {
+		return machineID, nil, cutil.NewAPIError(http.StatusBadRequest, "Site specified in request doesn't belong to current org's Provider", nil)
+	}
+
+	return machineID, site, nil
+}
+
 // GetMachineValidationResultsHandler is the API Handler to get MachineValidationResults
 type GetMachineValidationResultsHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetMachineValidationResultsHandler initializes and returns a new handler to get MachineValidationResults
 func NewGetMachineValidationResultsHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetMachineValidationResultsHandler {
 	return GetMachineValidationResultsHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
-// @Summary Get MachineValidationResults
-// @Description Get MachineValidationResults
-// @Tags MachineValidationTest
+// @Summary Get Machine validation results
+// @Description Get Machine validation results
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
+// @Param machineId path string true "ID of Machine"
 // @Success 200 {object} []model.APIMachineValidationResult
-// @Router /v2/org/{org}/nico/site/{site}/machine-validation/results/machine/{id} [get]
+// @Router /v2/org/{org}/nico/machine/{machineId}/validation/result [get]
 func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationResult", "Get", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationResult", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 	if dbUser == nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
-	siteID := c.Param("siteID")
-
 	// Validate org
 	ok, err := auth.ValidateOrgMembership(dbUser, org)
 	if !ok {
@@ -702,16 +855,12 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to update MachineValidationTest
+	// Validate role, only Provider Admins are allowed to retrieve Machine validation results
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
-
-	// get machine id
-	machineID := c.Param("machineID")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", machineID), logger)
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -720,15 +869,10 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
 	}
 
-	// Validate the site for which we query tests
-	site, err := common.GetSiteFromIDString(ctx, nil, siteID, handler.dbSession)
-	if err != nil {
-		logger.Warn().Err(err).Str("Site ID", siteID).Msg("error getting site from request")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving Site in request", nil)
-	}
-	// verify site's infrastructure provider matches org's infrastructure provider
-	if site.InfrastructureProviderID != ip.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request doesn't belong to current org's Provider", nil)
+	machineID, site, apiError := resolveMachineValidationTarget(ctx, c, logger, handler.dbSession, ip)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Get the temporal client for the site we are working with
@@ -745,8 +889,8 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 		TaskQueue:                queue.SiteTaskQueue,
 	}
 	// build protobuf request
-	getProtoRequest := &cwssaws.MachineValidationGetRequest{
-		MachineId:      &cwssaws.MachineId{Id: machineID},
+	getProtoRequest := &corev1.MachineValidationGetRequest{
+		MachineId:      &corev1.MachineId{Id: machineID},
 		IncludeHistory: true,
 	}
 
@@ -765,7 +909,7 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationResults workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.MachineValidationResultList
+	var getProtoResponse *corev1.MachineValidationResultList
 	err = getWorkflowRun.Get(updateCtx, &getProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -779,7 +923,7 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("completed synchronous get MachineValidationResults workflow")
 
 	// Create response
-	var response []*model.APIMachineValidationResult
+	response := make([]*model.APIMachineValidationResult, 0, len(getProtoResponse.GetResults()))
 	for _, proto := range getProtoResponse.GetResults() {
 		response = append(response, model.NewAPIMachineValidationResult(proto))
 	}
@@ -789,44 +933,41 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 
 // GetAllMachineValidationRunHandler is the API Handler to get all MachineValidationRuns
 type GetAllMachineValidationRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllMachineValidationRunHandler initializes and returns a new handler to get all MachineValidationRuns
 func NewGetAllMachineValidationRunHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllMachineValidationRunHandler {
 	return GetAllMachineValidationRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
-// @Summary Get all MachineValidationRuns
-// @Description Get all MachineValidationRuns
-// @Tags MachineValidationTest
+// @Summary Get Machine validation runs
+// @Description Get Machine validation runs
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
+// @Param machineId path string true "ID of Machine"
 // @Success 200 {object} []model.APIMachineValidationRun
-// @Router /v2/org/{org}/nico/site/{site}/machine-validation/runs/machine/{id} [get]
+// @Router /v2/org/{org}/nico/machine/{machineId}/validation/run [get]
 func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "GetAll", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 	if dbUser == nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
-	siteID := c.Param("siteID")
-
 	// Validate org
 	ok, err := auth.ValidateOrgMembership(dbUser, org)
 	if !ok {
@@ -838,16 +979,12 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to update MachineValidationTest
+	// Validate role, only Provider Admins are allowed to retrieve Machine validation runs
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
-
-	// get machine id
-	machineID := c.Param("machineID")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", machineID), logger)
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -856,15 +993,10 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
 	}
 
-	// Validate the site for which we query tests
-	site, err := common.GetSiteFromIDString(ctx, nil, siteID, handler.dbSession)
-	if err != nil {
-		logger.Warn().Err(err).Str("Site ID", siteID).Msg("error getting site from request")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving Site in request", nil)
-	}
-	// verify site's infrastructure provider matches org's infrastructure provider
-	if site.InfrastructureProviderID != ip.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request doesn't belong to current org's Provider", nil)
+	machineID, site, apiError := resolveMachineValidationTarget(ctx, c, logger, handler.dbSession, ip)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Get the temporal client for the site we are working with
@@ -881,8 +1013,8 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 		TaskQueue:                queue.SiteTaskQueue,
 	}
 	// build protobuf request
-	getProtoRequest := &cwssaws.MachineValidationRunListGetRequest{
-		MachineId:      &cwssaws.MachineId{Id: machineID},
+	getProtoRequest := &corev1.MachineValidationRunListGetRequest{
+		MachineId:      &corev1.MachineId{Id: machineID},
 		IncludeHistory: true,
 	}
 
@@ -901,7 +1033,7 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationRuns workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.MachineValidationRunList
+	var getProtoResponse *corev1.MachineValidationRunList
 	err = getWorkflowRun.Get(updateCtx, &getProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -915,7 +1047,7 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("completed synchronous get MachineValidationRuns workflow")
 
 	// Create response
-	var response []*model.APIMachineValidationRun
+	response := make([]*model.APIMachineValidationRun, 0, len(getProtoResponse.GetRuns()))
 	for _, proto := range getProtoResponse.GetRuns() {
 		response = append(response, model.NewAPIMachineValidationRun(proto))
 	}
@@ -925,21 +1057,19 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 
 // GetAllMachineValidationExternalConfigHandler is the API Handler to get all MachineValidationExternalConfigs
 type GetAllMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllMachineValidationExternalConfigHandler initializes and returns a new handler to get all MachineValidationExternalConfigs
 func NewGetAllMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllMachineValidationExternalConfigHandler {
 	return GetAllMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -954,7 +1084,7 @@ func NewGetAllMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 200 {object} []model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config [get]
 func (handler GetAllMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "GetAll", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1013,7 +1143,7 @@ func (handler GetAllMachineValidationExternalConfigHandler) Handle(c echo.Contex
 		TaskQueue:                queue.SiteTaskQueue,
 	}
 	// build protobuf request
-	getProtoRequest := &cwssaws.GetMachineValidationExternalConfigsRequest{}
+	getProtoRequest := &corev1.GetMachineValidationExternalConfigsRequest{}
 
 	logger.Info().Msg("triggering MachineValidationRun get workflow")
 
@@ -1030,7 +1160,7 @@ func (handler GetAllMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationExternalConfigs workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.GetMachineValidationExternalConfigsResponse
+	var getProtoResponse *corev1.GetMachineValidationExternalConfigsResponse
 	err = getWorkflowRun.Get(updateCtx, &getProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -1054,21 +1184,19 @@ func (handler GetAllMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 // GetMachineValidationExternalConfigHandler is the API Handler to get MachineValidationExternalConfig
 type GetMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetMachineValidationExternalConfigHandler initializes and returns a new handler to get MachineValidationTest
 func NewGetMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetMachineValidationExternalConfigHandler {
 	return GetMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1083,7 +1211,7 @@ func NewGetMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tcl
 // @Success 200 {object} model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config/{name} [get]
 func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Get", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1112,7 +1240,7 @@ func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) 
 
 	// get ID of the test
 	cfgName := c.Param("cfgName")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("external_config_name", cfgName), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("external_config_name", cfgName))
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -1146,7 +1274,7 @@ func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) 
 		TaskQueue:                queue.SiteTaskQueue,
 	}
 	// build protobuf update request
-	getProtoRequest := &cwssaws.GetMachineValidationExternalConfigsRequest{
+	getProtoRequest := &corev1.GetMachineValidationExternalConfigsRequest{
 		Names: []string{cfgName},
 	}
 
@@ -1165,7 +1293,7 @@ func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) 
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationExternalConfig workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.GetMachineValidationExternalConfigsResponse
+	var getProtoResponse *corev1.GetMachineValidationExternalConfigsResponse
 	err = getWorkflowRun.Get(updateCtx, &getProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -1193,21 +1321,19 @@ func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) 
 
 // CreateMachineValidationExternalConfigHandler is the API Handler for creating new MachineValidationExternalConfig
 type CreateMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateMachineValidationExternalConfigHandler initializes and returns a new handler for creating MachineValidationExternalConfig
 func NewCreateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) CreateMachineValidationExternalConfigHandler {
 	return CreateMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1223,7 +1349,7 @@ func NewCreateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 201 {object} model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config [post]
 func (handler CreateMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Create", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1341,21 +1467,19 @@ func (handler CreateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 // UpdateMachineValidationExternalConfigHandler is the API Handler for update existing MachineValidationExternalConfig
 type UpdateMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateMachineValidationExternalConfigHandler initializes and returns a new handler for updating MachineValidationExternalConfig
 func NewUpdateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateMachineValidationExternalConfigHandler {
 	return UpdateMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1371,7 +1495,7 @@ func NewUpdateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 200 {object} model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config/{name} [patch]
 func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Update", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1400,7 +1524,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 	// get name
 	extCfgName := c.Param("cfgName")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName))
 
 	// Bind request data to API model
 	apiRequest := model.APIMachineValidationExternalConfigUpdateRequest{}
@@ -1449,7 +1573,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 		TaskQueue:                queue.SiteTaskQueue,
 	}
 	// build protobuf update request
-	updateProtoRequest := &cwssaws.AddUpdateMachineValidationExternalConfigRequest{
+	updateProtoRequest := &corev1.AddUpdateMachineValidationExternalConfigRequest{
 		Name:        extCfgName,
 		Description: currentExtCfgProto.Description,
 		Config:      currentExtCfgProto.Config,
@@ -1476,7 +1600,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	logger.Info().Str("Workflow ID", updateWorkflowID).Msg("executed synchronous update MachineValidationExternalConfig workflow")
 
 	// Execute update workflow synchronously
-	var updateProtoResponse *cwssaws.MachineValidationTestAddUpdateResponse
+	var updateProtoResponse *corev1.MachineValidationTestAddUpdateResponse
 	err = updateWorkflowRun.Get(updateCtx, &updateProtoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -1502,7 +1626,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	return c.JSON(http.StatusOK, apiObject)
 }
 
-func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, cfgName string) (*cwssaws.MachineValidationExternalConfig, error) {
+func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, cfgName string) (*corev1.MachineValidationExternalConfig, error) {
 	// get newly created test to be returned
 	getWorkflowOptions := tclient.StartWorkflowOptions{
 		ID:                       fmt.Sprintf("machine-validation-ext-cfg-get-%s", cfgName),
@@ -1511,7 +1635,7 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 	}
 
 	// build protobuf request
-	getProtoRequest := &cwssaws.GetMachineValidationExternalConfigsRequest{
+	getProtoRequest := &corev1.GetMachineValidationExternalConfigsRequest{
 		Names: []string{cfgName},
 	}
 
@@ -1532,7 +1656,7 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("executed synchronous get MachineValidationExternalConfig workflow")
 
 	// Execute get workflow synchronously
-	var getProtoResponse *cwssaws.GetMachineValidationExternalConfigsResponse
+	var getProtoResponse *corev1.GetMachineValidationExternalConfigsResponse
 	err = getWorkflowRun.Get(getCtx, &getProtoResponse)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get MachineValidationExternalConfig")
@@ -1550,21 +1674,19 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 
 // DeleteMachineValidationExternalConfigHandler is the API Handler for delete existing MachineValidationExternalConfig
 type DeleteMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteMachineValidationExternalConfigHandler initializes and returns a new handler for updating MachineValidationExternalConfig
 func NewDeleteMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteMachineValidationExternalConfigHandler {
 	return DeleteMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1579,7 +1701,7 @@ func NewDeleteMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 202
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config/{name} [delete]
 func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Delete", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1608,7 +1730,7 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 	// get name
 	extCfgName := c.Param("cfgName")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName))
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -1671,5 +1793,5 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 	// Create response
 	logger.Info().Msg("finishing API handler")
-	return c.JSON(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

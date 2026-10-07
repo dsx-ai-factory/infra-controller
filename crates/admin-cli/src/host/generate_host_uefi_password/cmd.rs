@@ -19,7 +19,7 @@ use carbide_secrets::credentials::Credentials;
 
 use crate::errors::CarbideCliResult;
 
-pub fn generate_uefi_password() -> CarbideCliResult<()> {
+pub(super) fn generate_uefi_password() -> CarbideCliResult<()> {
     let password = Credentials::generate_password_no_special_char();
     println!("Generated Bios Admin Password: {password}");
     Ok(())

@@ -3,6 +3,12 @@
 
 package util
 
+import (
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
 // IntPtrToUint32Ptr converts a `*int` to a `*uint32`. nil in, nil out.
 // Callers must ensure the int sits in `[0, MaxUint32]`; the cast
 // otherwise silently wraps. Under the proto-conversion convention,
@@ -38,4 +44,52 @@ func Uint32PtrToIntPtr(u *uint32) *int {
 // `GetTimePtr` helpers that previously lived in `db/pkg/db`.
 func GetPtr[T any](v T) *T {
 	return &v
+}
+
+// GetPtrIfNotZero returns nil for a type's zero value or a pointer to a copy
+// of v otherwise.
+func GetPtrIfNotZero[T comparable](v T) *T {
+	var zero T
+	if v == zero {
+		return nil
+	}
+
+	return &v
+}
+
+// GetValueOrZero returns a type's zero value for nil or the dereferenced value
+// otherwise.
+func GetValueOrZero[T any](v *T) T {
+	if v == nil {
+		var zero T
+
+		return zero
+	}
+
+	return *v
+}
+
+// StrPtrToProtoTimePtr converts a string pointer to a protobuf timestamp pointer
+func StrPtrToProtoTimePtr(s *string) *timestamppb.Timestamp {
+	if s == nil {
+		return nil
+	}
+
+	t, err := time.Parse(time.RFC3339Nano, *s)
+	if err != nil {
+		return nil
+	}
+
+	return timestamppb.New(t)
+}
+
+// ProtoTimePtrToStrPtr converts a protobuf timestamp pointer to a string pointer
+func ProtoTimePtrToStrPtr(t *timestamppb.Timestamp) *string {
+	if t == nil {
+		return nil
+	}
+
+	s := t.AsTime().Format(time.RFC3339Nano)
+
+	return &s
 }

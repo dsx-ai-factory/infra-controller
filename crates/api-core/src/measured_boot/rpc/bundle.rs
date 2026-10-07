@@ -44,7 +44,7 @@ use crate::measured_boot::convert_vec;
 
 /// handle_create_measurement_bundle handles the CreateMeasurementBundle
 /// API endpoint.
-pub async fn handle_create_measurement_bundle(
+pub(crate) async fn handle_create_measurement_bundle(
     api: &Api,
     req: CreateMeasurementBundleRequest,
 ) -> Result<CreateMeasurementBundleResponse, Status> {
@@ -71,7 +71,7 @@ pub async fn handle_create_measurement_bundle(
 
 /// handle_delete_measurement_bundle handles the DeleteMeasurementBundle
 /// API endpoint.
-pub async fn handle_delete_measurement_bundle(
+pub(crate) async fn handle_delete_measurement_bundle(
     api: &Api,
     req: DeleteMeasurementBundleRequest,
 ) -> Result<DeleteMeasurementBundleResponse, Status> {
@@ -111,7 +111,7 @@ pub async fn handle_delete_measurement_bundle(
 
 /// handle_rename_measurement_bundle handles the RenameMeasurementBundle
 /// API endpoint.
-pub async fn handle_rename_measurement_bundle(
+pub(crate) async fn handle_rename_measurement_bundle(
     api: &Api,
     req: RenameMeasurementBundleRequest,
 ) -> Result<RenameMeasurementBundleResponse, Status> {
@@ -151,7 +151,7 @@ pub async fn handle_rename_measurement_bundle(
 
 /// handle_update_measurement_bundle handles the UpdateMeasurementBundle
 /// API endpoint.
-pub async fn handle_update_measurement_bundle(
+pub(crate) async fn handle_update_measurement_bundle(
     api: &Api,
     req: UpdateMeasurementBundleRequest,
 ) -> Result<UpdateMeasurementBundleResponse, Status> {
@@ -192,7 +192,7 @@ pub async fn handle_update_measurement_bundle(
 
 /// handle_show_measurement_bundle handles the ShowMeasurementBundle
 /// API endpoint.
-pub async fn handle_show_measurement_bundle(
+pub(crate) async fn handle_show_measurement_bundle(
     api: &Api,
     req: ShowMeasurementBundleRequest,
 ) -> Result<ShowMeasurementBundleResponse, Status> {
@@ -227,7 +227,7 @@ pub async fn handle_show_measurement_bundle(
 
 /// handle_show_measurement_bundles handles the ShowMeasurementBundles
 /// API endpoint.
-pub async fn handle_show_measurement_bundles(
+pub(crate) async fn handle_show_measurement_bundles(
     api: &Api,
     _req: ShowMeasurementBundlesRequest,
 ) -> Result<ShowMeasurementBundlesResponse, Status> {
@@ -245,7 +245,7 @@ pub async fn handle_show_measurement_bundles(
 
 /// handle_list_measurement_bundles handles the ListMeasurementBundles
 /// API endpoint.
-pub async fn handle_list_measurement_bundles(
+pub(crate) async fn handle_list_measurement_bundles(
     api: &Api,
     _req: ListMeasurementBundlesRequest,
 ) -> Result<ListMeasurementBundlesResponse, Status> {
@@ -264,7 +264,7 @@ pub async fn handle_list_measurement_bundles(
 
 /// handle_list_measurement_bundle_machines handles the
 /// ListMeasurementBundleMachines API endpoint.
-pub async fn handle_list_measurement_bundle_machines(
+pub(crate) async fn handle_list_measurement_bundle_machines(
     api: &Api,
     req: ListMeasurementBundleMachinesRequest,
 ) -> Result<ListMeasurementBundleMachinesResponse, Status> {
@@ -301,7 +301,7 @@ pub async fn handle_list_measurement_bundle_machines(
     Ok(ListMeasurementBundleMachinesResponse { machine_ids })
 }
 
-pub async fn handle_find_closest_match(
+pub(crate) async fn handle_find_closest_match(
     api: &Api,
     req: FindClosestBundleMatchRequest,
 ) -> Result<ShowMeasurementBundleResponse, Status> {

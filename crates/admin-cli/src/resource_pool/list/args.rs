@@ -25,7 +25,7 @@ List all resource pools with their stats:
     $ nico-admin-cli resource-pool list
 
 ")]
-pub struct Args;
+pub(crate) struct Args;
 
 impl From<Args> for ::rpc::forge::ListResourcePoolsRequest {
     fn from(_args: Args) -> Self {

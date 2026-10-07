@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 // src/main.rs
 // PoC/demo of the mqttea client library.
@@ -164,8 +165,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client
             .on_message(|client, message: HelloWorld, topic| async move {
                 info!(
-                    "HelloWorld on {}: '{}' from device {} (timestamp: {})",
-                    topic, message.message, message.device_id, message.timestamp
+                    topic = %topic,
+                    payload = %message.message,
+                    device_id = %message.device_id,
+                    timestamp = message.timestamp,
+                    "received HelloWorld message"
                 );
                 let response_message: StringMessage =
                     format!("i got your message that said: {}", message.message).into();
@@ -179,7 +183,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await
                 {
-                    warn!("failed to publish response message: {:?}", publish_err);
+                    warn!(
+                        error = ?publish_err,
+                        "failed to publish response message"
+                    );
                 }
             })
             .await;
@@ -188,8 +195,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client
             .on_message(|_client, message: CatStatus, topic| async move {
                 info!(
-                    "CatStatus on {}: {} is feeling {}",
-                    topic, message.name, message.mood,
+                    topic = %topic,
+                    cat_name = %message.name,
+                    mood = %message.mood,
+                    "received CatStatus message"
                 );
             })
             .await;
@@ -199,11 +208,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .on_message(|_client, message: RawMessage, topic| async move {
                 println!("FYI: Received message on unmapped topic: '{topic}'");
                 match String::from_utf8(message.payload.clone()) {
-                    Ok(text) => info!("RawMessage on {}: '{}'", topic, text),
+                    Ok(text) => info!(
+                        topic = %topic,
+                        payload = %text,
+                        "received raw text message"
+                    ),
                     Err(_) => info!(
-                        "RawMessage on {}: {} bytes of binary data",
-                        topic,
-                        message.payload.len()
+                        topic = %topic,
+                        payload_bytes = message.payload.len(),
+                        "received raw binary message"
                     ),
                 }
             })

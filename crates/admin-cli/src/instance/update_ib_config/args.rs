@@ -28,14 +28,14 @@ Update an instance's InfiniBand configuration:
     --config '{\"partitions\":[]}'
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, required(true))]
-    pub instance: InstanceId,
+    pub(super) instance: InstanceId,
     #[clap(
         long,
         required(true),
         help = "IB configuration in JSON format",
         value_name = "IB_JSON"
     )]
-    pub config: InstanceInfinibandConfig,
+    pub(super) config: InstanceInfinibandConfig,
 }

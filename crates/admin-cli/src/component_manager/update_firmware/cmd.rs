@@ -23,7 +23,7 @@ use crate::component_manager::common;
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
 
-pub async fn update_firmware(
+pub(super) async fn update_firmware(
     opts: Args,
     format: OutputFormat,
     api_client: &ApiClient,

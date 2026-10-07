@@ -18,10 +18,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -114,6 +114,12 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 	skg2 := testBuildSSHKeyGroup(t, dbSession, "sre-ssh-group-2", tnOrg, nil, tn1.ID, nil, cdbm.SSHKeyGroupStatusDeleting, tnu1.ID)
 	assert.NotNil(t, skg2)
 
+	skg3 := testBuildSSHKeyGroup(t, dbSession, "sre-ssh-group-3", tnOrg, nil, tn1.ID, nil, cdbm.SSHKeyGroupStatusSynced, tnu1.ID)
+	assert.NotNil(t, skg3)
+
+	skgsa3 := testBuildSSHKeyGroupSiteAssociation(t, dbSession, skg3.ID, st1.ID, nil, cdbm.SSHKeyGroupSiteAssociationStatusSynced, tnu1.ID)
+	assert.NotNil(t, skgsa3)
+
 	goodPublicKey1 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICip4hl6WjuVHs60PeikVUs0sWE/kPhk2D0rRHWsIuyL jdoe@test.com"
 	goodPublicKeyRSA1 := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDBlrwxTSSkPGrJ5nfJsx1AXHP/JCLMO1ukrSJqZThZ+CHrk5l2UeRFc0eD6RM+DoQ/YWoSoFItMIV8SdcDBKfG4lXrMLkr13IyBZ5c6RaEn9a4BEhhfFzWuXJoxnvPSSOboiuhYNDa58oj0Qp+TYX475NDBoE48ZmHA8RWPirD7KgzAgsq3Tdj1CZG60Zy2ff/mpcpNkmoU0KuVhtIy0eqXtv3GQmuKKiJf8GNIMZ7gjzZsQkSmYmpUmCQbQGQ7VzuRLVjUElcI8oAedIWSkk7fWoJBBd1jAGr4ATxbf0ltzcVvnCeNmU3f6n1sjKIuKavPRQnD3IntR2O38RgSOuv jdoe1@test1.com"
 	goodPublicKeyRSA2 := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCKAzJrQfiWS2z/fOfDkSromUi7wv9KYwtL4IROE8hBoF8KRPysSzIglcqE65+xjJP1utFFh3YXgpe+MQMeRTshVXyqqGo04nNAO+/XvgakAdPH2w6zC30Yd+Ex4AbeJkvV0NfVZdOad52W3LnDic5t1dyhcam4Ig8o97RH919Ih08RGcewKNF46WQODJr7SdA3o0/iPVHatkKmU2HNEx2gVbVMyttn4iuYmm12UeN7KESFEkHO5Ayu5hJS74mBwvytQH5iz63G7lVIa2bGPpK8/korRS/++gMl0oncFQYJ07FlInDhlT+BmotpMtWvHWI5Ajf+3rOfSSQ6w/whDh05"
@@ -132,6 +138,9 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 	okBodyWithDeletingSSHKeyGroup, err := json.Marshal(model.APISSHKeyCreateRequest{Name: "ok6", PublicKey: goodPublicKeyRSA2, SSHKeyGroupID: cutil.GetPtr(skg2.ID.String())})
 	assert.Nil(t, err)
+	goodPublicKeyRSA3 := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCBlrwxTSSkPGrJ5nfJsx1AXHP/JCLMO1ukrSJqZThZ+CHrk5l2UeRFc0eD6RM+DoQ/YWoSoFItMIV8SdcDBKfG4lXrMLkr13IyBZ5c6RaEn9a4BEhhfFzWuXJoxnvPSSOboiuhYNDa58oj0Qp+TYX475NDBoE48ZmHA8RWPirD7KgzAgsq3Tdj1CZG60Zy2ff/mpcpNkmoU0KuVhtIy0eqXtv3GQmuKKiJf8GNIMZ7gjzZsQkSmYmpUmCQbQGQ7VzuRLVjUElcI8oAedIWSkk7fWoJBBd1jAGr4ATxbf0ltzcVvnCeNmU3f6n1sjKIuKavPRQnD3IntR2O38RgSOuv jdoe3@test.com"
+	okBodyWithSSHKeyGroupWithSite, err := json.Marshal(model.APISSHKeyCreateRequest{Name: "ok7", PublicKey: goodPublicKeyRSA3, SSHKeyGroupID: cutil.GetPtr(skg3.ID.String())})
+	assert.Nil(t, err)
 
 	errBodyDoesntValidate, err := json.Marshal(struct{ Name string }{Name: "test"})
 	assert.Nil(t, err)
@@ -139,7 +148,7 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                      string
@@ -251,10 +260,21 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 		},
 		{
-			name:                      "success case sshkeygroup specified",
+			name:                      "success case sshkeygroup specified with no site associations, status unchanged",
 			reqOrgName:                tnOrg,
 			reqBody:                   string(okBodyWithSSHKeyGroup),
 			reqSSHKeyGroupID:          skg1.ID,
+			user:                      tnu1,
+			expectedErr:               false,
+			expectedStatus:            http.StatusCreated,
+			expectedSSHKeyGroup:       true,
+			expectedSSHKeyGroupStatus: cdbm.SSHKeyGroupStatusSynced,
+		},
+		{
+			name:                      "success case sshkeygroup specified with a site association, status set to syncing",
+			reqOrgName:                tnOrg,
+			reqBody:                   string(okBodyWithSSHKeyGroupWithSite),
+			reqSSHKeyGroupID:          skg3.ID,
 			user:                      tnu1,
 			expectedErr:               false,
 			expectedStatus:            http.StatusCreated,
@@ -297,7 +317,6 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			csgh := CreateSSHKeyHandler{
@@ -371,7 +390,7 @@ func TestSSHKeyHandler_GetByID(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -482,7 +501,6 @@ func TestSSHKeyHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dsgh := GetSSHKeyHandler{
@@ -572,7 +590,7 @@ func TestSSHKeyHandler_GetAll(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -744,7 +762,6 @@ func TestSSHKeyHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gsgh := GetAllSSHKeyHandler{
@@ -844,7 +861,7 @@ func TestSSHKeyHandler_Update(t *testing.T) {
 
 	cfg := common.GetTestConfig()
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -975,7 +992,6 @@ func TestSSHKeyHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			usgh := UpdateSSHKeyHandler{
@@ -1061,7 +1077,7 @@ func TestSSHKeyHandler_Delete(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID"), mock.AnythingOfType("string")).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                      string
@@ -1148,7 +1164,6 @@ func TestSSHKeyHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dsgh := DeleteSSHKeyHandler{
@@ -1175,7 +1190,9 @@ func TestSSHKeyHandler_Delete(t *testing.T) {
 				assert.Equal(t, "", sk.PublicKey)
 				// verify sk associations
 				skaDAO := cdbm.NewSSHKeyAssociationDAO(dbSession)
-				_, tot, err := skaDAO.GetAll(ctx, nil, []uuid.UUID{sk1.ID}, nil, nil, nil, nil, nil)
+				_, tot, err := skaDAO.GetAll(ctx, nil, cdbm.SSHKeyAssociationFilterInput{
+					SSHKeyIDs: []uuid.UUID{sk1.ID},
+				}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 0, tot)
 

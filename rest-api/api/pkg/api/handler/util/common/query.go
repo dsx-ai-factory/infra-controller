@@ -4,6 +4,8 @@
 package common
 
 import (
+	"strconv"
+
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/labstack/echo/v4"
 )
@@ -26,4 +28,23 @@ func GetSearchQuery(c echo.Context) *string {
 	}
 
 	return &searchQuery
+}
+
+// ParseOptionalBoolQueryParam parses an optional boolean query parameter,
+// returning nil when the parameter is absent so callers can distinguish
+// "not provided" from an explicit false. It returns an error when the parameter
+// is present but is not a valid boolean. Use this for tri-state filters where
+// an absent parameter must mean "do not filter" rather than "filter on false".
+func ParseOptionalBoolQueryParam(c echo.Context, name string) (*bool, error) {
+	raw := c.QueryParam(name)
+	if raw == "" {
+		return nil, nil
+	}
+
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return &v, nil
 }

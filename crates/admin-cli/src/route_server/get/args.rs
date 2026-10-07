@@ -25,4 +25,4 @@ List all configured route servers:
     $ nico-admin-cli route-server get
 
 ")]
-pub struct Args {}
+pub(crate) struct Args {}

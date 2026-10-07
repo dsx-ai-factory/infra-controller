@@ -8,6 +8,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
@@ -16,8 +19,11 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 )
@@ -71,6 +77,57 @@ func (s *PostgresStore) CreateTask(
 	return nil
 }
 
+// LockRack takes a transaction-scoped advisory lock for rack-level task
+// admission. The lock is released automatically when the transaction ends.
+func (s *PostgresStore) LockRack(ctx context.Context, rackID uuid.UUID) error {
+	if rackID == uuid.Nil {
+		return errors.GRPCErrorInvalidArgument("rack ID is required")
+	}
+	return s.lockAdvisoryKey(ctx, rackID.String())
+}
+
+// LockIdempotencyKey takes a transaction-scoped advisory lock for stable
+// submission lookup and resume. The lock is released automatically when the
+// transaction ends.
+func (s *PostgresStore) LockIdempotencyKey(ctx context.Context, key string) error {
+	if key == "" {
+		return errors.GRPCErrorInvalidArgument("idempotency key is required")
+	}
+	return s.lockAdvisoryKey(ctx, key)
+}
+
+func (s *PostgresStore) lockAdvisoryKey(ctx context.Context, key string) error {
+	tx, ok := ctx.Value(txKey).(bun.Tx)
+	if !ok {
+		return errors.GRPCErrorInternal("advisory lock requires an active transaction")
+	}
+
+	if _, err := tx.
+		NewSelect().
+		ColumnExpr("pg_advisory_xact_lock(hashtextextended(?, 0))", key).
+		Exec(ctx); err != nil {
+		return errors.GRPCErrorInternal(err.Error())
+	}
+	return nil
+}
+
+// GetTaskByIdempotencyKey retrieves the existing task for a stable submission
+// key. A missing key returns nil so callers can continue normal creation.
+func (s *PostgresStore) GetTaskByIdempotencyKey(
+	ctx context.Context,
+	key string,
+) (*taskdef.Task, error) {
+	taskDao, err := model.GetTaskByIdempotencyKey(ctx, s.idb(ctx), key)
+	if err != nil {
+		if s.pg.GetErrorChecker().IsErrNoRows(err) {
+			return nil, nil
+		}
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+
+	return taskFromDAO(taskDao)
+}
+
 // GetTask retrieves a single task by its ID.
 func (s *PostgresStore) GetTask(
 	ctx context.Context,
@@ -80,7 +137,7 @@ func (s *PostgresStore) GetTask(
 	if err != nil {
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
-	return dao.TaskFrom(taskDao), nil
+	return taskFromDAO(taskDao)
 }
 
 // GetTasks retrieves tasks by their IDs.
@@ -100,7 +157,11 @@ func (s *PostgresStore) GetTasks(
 			return nil, errors.GRPCErrorInternal(err.Error())
 		}
 
-		results = append(results, dao.TaskFrom(taskDao))
+		converted, err := taskFromDAO(taskDao)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, converted)
 	}
 
 	return results, nil
@@ -119,10 +180,124 @@ func (s *PostgresStore) ListTasks(
 
 	results := make([]*taskdef.Task, 0, len(taskDaos))
 	for _, taskDao := range taskDaos {
-		results = append(results, dao.TaskFrom(&taskDao))
+		converted, err := taskFromDAO(&taskDao)
+		if err != nil {
+			return nil, 0, err
+		}
+		results = append(results, converted)
 	}
 
 	return results, total, nil
+}
+
+// ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks for
+// the requested racks.
+func (s *PostgresStore) ListNonTerminalTasksForRacks(
+	ctx context.Context,
+	rackIDs []uuid.UUID,
+) ([]*taskdef.Task, error) {
+	taskDaos, err := model.ListTasksForRacksByStatus(
+		ctx,
+		s.pg.DB,
+		rackIDs,
+		taskcommon.NonTerminalTaskStatuses(),
+	)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+
+	results := make([]*taskdef.Task, 0, len(taskDaos))
+	for i := range taskDaos {
+		converted, err := taskFromDAO(&taskDaos[i])
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, converted)
+	}
+	return results, nil
+}
+
+// LatestLeakageShutdownTaskStatuses returns one newest leakage-triggered
+// forced-shutdown Task status per requested component. The component predicate
+// uses the existing task attributes GIN index; the lateral expansion identifies
+// which requested component each matching Task targets.
+func (s *PostgresStore) LatestLeakageShutdownTaskStatuses(
+	ctx context.Context,
+	componentIDs []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	statuses := make(map[uuid.UUID]taskcommon.TaskStatus)
+	componentIDs = normalizedUUIDs(componentIDs)
+	if len(componentIDs) == 0 {
+		return statuses, nil
+	}
+
+	type componentTaskStatus struct {
+		ComponentID uuid.UUID             `bun:"component_id"`
+		Status      taskcommon.TaskStatus `bun:"status"`
+	}
+
+	rows := make([]componentTaskStatus, 0, len(componentIDs))
+	err := s.idb(ctx).NewSelect().
+		TableExpr("task AS t").
+		ColumnExpr("DISTINCT ON (target.component_id) target.component_id::uuid AS component_id").
+		ColumnExpr("t.status").
+		Join("JOIN event_action_executions AS eae ON eae.id = t.trigger_id").
+		Join("JOIN events AS e ON e.id = eae.event_id").
+		Join("CROSS JOIN LATERAL jsonb_each(COALESCE(t.attributes->'components_by_type', '{}'::jsonb)) AS target_group(component_type, component_ids)").
+		Join("CROSS JOIN LATERAL jsonb_array_elements_text(target_group.component_ids) AS target(component_id)").
+		Where("t.trigger_type = ?", operation.TriggerTypeEventRuleExecution).
+		Where("e.event_type = ?", leakage.TypeHardwareLeakDetected).
+		Where("t.type = ?", taskcommon.TaskTypePowerControl).
+		Where("t.information->>'operation' = ?", strconv.Itoa(int(operations.PowerOperationForcePowerOff))).
+		Where("target.component_id IN (?)", bun.In(uuidStrings(componentIDs))).
+		Where("?", bun.Safe(taskComponentsAnyPredicate(componentIDs))).
+		OrderExpr("target.component_id, t.created_at DESC, t.id DESC").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+	for _, row := range rows {
+		statuses[row.ComponentID] = row.Status
+	}
+
+	return statuses, nil
+}
+
+func normalizedUUIDs(ids []uuid.UUID) []uuid.UUID {
+	unique := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		if id != uuid.Nil {
+			unique[id] = struct{}{}
+		}
+	}
+
+	result := make([]uuid.UUID, 0, len(unique))
+	for id := range unique {
+		result = append(result, id)
+	}
+	slices.SortFunc(result, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return result
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	return result
+}
+
+func taskComponentsAnyPredicate(ids []uuid.UUID) string {
+	predicates := make([]string, len(ids))
+	for i, id := range ids {
+		predicates[i] = fmt.Sprintf(
+			`t.attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
+			id.String(),
+		)
+	}
+	return "(" + strings.Join(predicates, " OR ") + ")"
 }
 
 // UpdateScheduledTask updates task scheduling information.
@@ -131,25 +306,30 @@ func (s *PostgresStore) UpdateScheduledTask(
 	task *taskdef.Task,
 ) error {
 	taskDao := dao.TaskTo(task)
-	if err := taskDao.UpdateScheduledTask(ctx, s.pg.DB); err != nil {
+	if err := taskDao.UpdateScheduledTask(ctx, s.idb(ctx)); err != nil {
 		return errors.GRPCErrorInternal(err.Error())
 	}
 
 	return nil
 }
 
-// UpdateTaskStatus persists status, message, and (optionally) the report
-// snapshot. The report carried in arg is treated as authoritative: when
-// non-empty it replaces the stored document, when empty the stored
-// document is left untouched (the underlying model omits the report
-// column from the UPDATE in that case). No read-modify-write is performed,
-// so concurrent transitions cannot lose updates.
+// UpdateTaskStatus persists status and message, plus optional report and queue
+// deadline changes. Finished statuses clear the queue deadline; otherwise nil
+// optional values leave their stored columns untouched. No read-modify-write is
+// performed, so concurrent transitions cannot lose updates.
 func (s *PostgresStore) UpdateTaskStatus(
 	ctx context.Context,
 	arg *taskdef.TaskStatusUpdate,
 ) error {
 	taskDao := &model.Task{ID: arg.ID}
-	err := taskDao.UpdateTaskStatus(ctx, s.idb(ctx), arg.Status, arg.Message, arg.Report)
+	err := taskDao.UpdateTaskStatus(
+		ctx,
+		s.idb(ctx),
+		arg.Status,
+		arg.Message,
+		arg.Report,
+		arg.QueueExpiresAt,
+	)
 	if err != nil {
 		return errors.GRPCErrorInternal(err.Error())
 	}
@@ -195,7 +375,11 @@ func (s *PostgresStore) ListActiveTasksForRack(
 
 	result := make([]*taskdef.Task, len(tasks))
 	for i := range tasks {
-		result[i] = dao.TaskFrom(&tasks[i])
+		converted, err := taskFromDAO(&tasks[i])
+		if err != nil {
+			return nil, err
+		}
+		result[i] = converted
 	}
 	return result, nil
 }
@@ -215,9 +399,22 @@ func (s *PostgresStore) ListWaitingTasksForRack(
 
 	result := make([]*taskdef.Task, len(tasks))
 	for i := range tasks {
-		result[i] = dao.TaskFrom(&tasks[i])
+		converted, err := taskFromDAO(&tasks[i])
+		if err != nil {
+			return nil, err
+		}
+		result[i] = converted
 	}
 	return result, nil
+}
+
+func taskFromDAO(taskDAO *model.Task) (*taskdef.Task, error) {
+	converted, err := dao.TaskFrom(taskDAO)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+
+	return converted, nil
 }
 
 // ListRacksWithWaitingTasks returns distinct rack IDs with waiting tasks.

@@ -19,7 +19,7 @@
 
 use carbide_uuid::infiniband::IBPartitionId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError, ObjectColumnFilter};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::ib_partition::{self, IBPartition, IBPartitionControllerState};
@@ -71,7 +71,7 @@ impl StateControllerIO for IBPartitionStateControllerIO {
                 "IBPartition::find()",
                 sqlx::Error::Decode(
                     eyre::eyre!(
-                        "Searching for IBPartition {} returned multiple results",
+                        "searching for IBPartition {} returned multiple results",
                         partition_id
                     )
                     .into(),
@@ -98,7 +98,7 @@ impl StateControllerIO for IBPartitionStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db::ib_partition::try_update_controller_state(
             txn,
             *object_id,
@@ -143,6 +143,11 @@ impl StateControllerIO for IBPartitionStateControllerIO {
             IBPartitionControllerState::Error { .. } => ("error", ""),
             IBPartitionControllerState::Deleting => ("deleting", ""),
         }
+    }
+
+    fn manual_intervention_reason(state: &Self::ControllerState) -> Option<&'static str> {
+        // The stored cause is free text, so the reason is a fixed token.
+        matches!(state, IBPartitionControllerState::Error { .. }).then_some("error")
     }
 
     fn state_sla(

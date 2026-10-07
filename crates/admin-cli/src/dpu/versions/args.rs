@@ -28,7 +28,7 @@ Show only DPUs that need a firmware upgrade:
     $ nico-admin-cli dpu versions --updates-only
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, help = "Only show DPUs that need upgrades")]
-    pub updates_only: bool,
+    pub(super) updates_only: bool,
 }

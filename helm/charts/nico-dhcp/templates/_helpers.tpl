@@ -134,6 +134,7 @@ controls the YAML→JSON name mapping.
 {{- if not $apiUrl -}}
 {{- $apiUrl = printf "https://%s.%s.svc.cluster.local:1079" $apiSvc $ns -}}
 {{- end -}}
+{{- $metricsEndpoint := default "[::]:1089" $hp.nicoMetricsEndpoint -}}
 {{- $libPath := default "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so" $k.hookLibraryPath -}}
 {{- $extraHooks := default (list) $k.additionalHooksLibraries -}}
 {{- $ic := default (dict) $k.interfacesConfig -}}
@@ -142,6 +143,45 @@ controls the YAML→JSON name mapping.
 {{- $ld := default (dict) $k.leaseDatabase -}}
 {{- $subnets := default (list) $k.subnet4 -}}
 {{- $loggers := default (list) $k.loggers -}}
+{{- $declineProbationPeriod := 900 -}}
+{{- if hasKey $k "declineProbationPeriod" -}}
+{{- $declineProbationPeriod = $k.declineProbationPeriod -}}
+{{- end -}}
+{{/*
+  DHCP server identifier (option 54) — pin to the stable DHCP VIP so client
+  unicast renewals survive pod replacement (issue #3663). Without this, kea
+  advertises the ephemeral pod IP: a rescheduled pod leaves every leased BMC
+  unicast-renewing against a dead address until the rebind timer forces a
+  broadcast. Resolution order:
+    1. config.kea.serverIdentifier — explicit override, validated as IPv4
+       (render fails on a malformed explicit value).
+    2. externalService.annotations["metallb.universe.tf/loadBalancerIPs"] —
+       the VIP the chart already advertises; first entry when comma-separated.
+       Used only when it parses as a single IPv4 — a missing/odd annotation
+       silently falls through so upgrades from values that predate this
+       field can never fail at render time.
+    3. Neither — the option is omitted entirely and kea falls back to its
+       default (pod IP), which is byte-identical to the pre-#3663 rendering.
+*/}}
+{{- $ipv4Pattern := "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" -}}
+{{/* printf "%v" coerces non-string overrides (bare numbers, maps) to a string
+     so they reach the friendly IPv4-validation fail below instead of erroring
+     inside sprig's trim with an opaque type message. */}}
+{{- $serverIdentifier := trim (printf "%v" (default "" $k.serverIdentifier)) -}}
+{{- if and $serverIdentifier (not (regexMatch $ipv4Pattern $serverIdentifier)) -}}
+{{- fail (printf "nico-dhcp: config.kea.serverIdentifier must be a single IPv4 address (the stable DHCP VIP); got %q" $serverIdentifier) -}}
+{{- end -}}
+{{- if not $serverIdentifier -}}
+{{- $es := default (dict) .Values.externalService -}}
+{{- if $es.enabled -}}
+{{- $esAnnotations := default (dict) $es.annotations -}}
+{{- $vipAnnotation := index $esAnnotations "metallb.universe.tf/loadBalancerIPs" -}}
+{{- $firstVip := trim (first (splitList "," (printf "%v" (default "" $vipAnnotation)))) -}}
+{{- if regexMatch $ipv4Pattern $firstVip -}}
+{{- $serverIdentifier = $firstVip -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {
   "Dhcp4": {
     "interfaces-config": {
@@ -157,7 +197,16 @@ controls the YAML→JSON name mapping.
     "renew-timer": {{ default 900 $k.renewTimer | toJson }},
     "rebind-timer": {{ default 1800 $k.rebindTimer | toJson }},
     "valid-lifetime": {{ default 3600 $k.validLifetime | toJson }},
-    {{- /*
+    "decline-probation-period": {{ $declineProbationPeriod | toJson }},
+{{- if $serverIdentifier }}
+    "option-data": [
+      {
+        "name": "dhcp-server-identifier",
+        "data": {{ $serverIdentifier | quote }}
+      }
+    ],
+{{- end }}
+    {{/*
       Hook parameters — write both nico-* and carbide-* keys with identical
       values so the kea hook library (crates/dhcp/src/kea/loader.cc still
       reads carbide-*) and any future nico-named build both find the value
@@ -177,8 +226,8 @@ controls the YAML→JSON name mapping.
         "parameters": {
           "nico-api-url": {{ $apiUrl | quote }},
           "carbide-api-url": {{ $apiUrl | quote }},
-          "nico-metrics-endpoint": {{ default "[::]:1089" $hp.nicoMetricsEndpoint | quote }},
-          "carbide-metrics-endpoint": {{ default "[::]:1089" $hp.nicoMetricsEndpoint | quote }},
+          "nico-metrics-endpoint": {{ $metricsEndpoint | quote }},
+          "carbide-metrics-endpoint": {{ $metricsEndpoint | quote }},
           "nico-nameservers": {{ $hp.nameservers | quote }},
           "carbide-nameservers": {{ $hp.nameservers | quote }},
           "nico-ntpserver": {{ $hp.ntpServer | quote }},

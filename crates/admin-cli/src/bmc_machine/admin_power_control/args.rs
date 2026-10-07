@@ -41,11 +41,11 @@ Gracefully restart a machine:
     --machine 12345678-1234-5678-90ab-cdef01234567 --action graceful-restart
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "ID of the machine to reboot")]
-    pub machine: String,
+    machine: String,
     #[clap(long, help = "Power control action")]
-    pub action: AdminPowerControlAction,
+    action: AdminPowerControlAction,
 }
 
 impl From<Args> for forgerpc::AdminPowerControlRequest {

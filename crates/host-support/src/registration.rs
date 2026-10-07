@@ -28,17 +28,17 @@ use tryhard::RetryFutureConfig;
 
 #[derive(thiserror::Error, Debug)]
 pub enum RegistrationError {
-    #[error("Transport error {0}")]
+    #[error("transport error {0}")]
     TransportError(String),
-    #[error("Tonic status error {0}")]
+    #[error("tonic status error {0}")]
     TonicStatusError(#[from] tonic::Status),
-    #[error("Missing machine id in API server response. Should be impossible")]
+    #[error("missing machine id in API server response. should be impossible")]
     MissingMachineId,
-    #[error("Attestation failed")]
+    #[error("attestation failed")]
     AttestationFailed,
-    #[error("Failed to retrieve or write client certificate: {0}")]
+    #[error("failed to retrieve or write client certificate: {0}")]
     ClientCertificateError(eyre::Report),
-    #[error("Missing certificate in DiscoverMachine reply")]
+    #[error("missing certificate in DiscoverMachine reply")]
     MissingCertificate,
 }
 
@@ -101,18 +101,15 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
     // let response = connection.your_api_endpoint(request).await?;
     //
     async fn connect(&self, purpose: &str) -> Result<ForgeClientT, RegistrationError> {
-        tracing::debug!("creating tls client connection for {purpose}");
+        tracing::debug!(purpose, "creating tls client connection");
         let client = ForgeTlsClient::new(self.config);
         match client.build(self.api_url.to_string()).await {
             Ok(connection) => {
-                tracing::debug!(
-                    "created tls client connection for {purpose}: {:?}",
-                    connection
-                );
+                tracing::debug!(purpose, ?connection, "created tls client connection");
                 Ok(connection)
             }
             Err(e) => {
-                tracing::error!("could not create tls client for {purpose}: {:?}", e);
+                tracing::error!(purpose, error = ?e, "could not create tls client");
                 Err(RegistrationError::TransportError(e.to_string()))
             }
         }
@@ -127,14 +124,14 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
         info: MachineDiscoveryInfo,
         attempt: u32,
     ) -> Result<rpc::MachineDiscoveryResult, RegistrationError> {
-        tracing::info!("Attempting to discover_machine (attempt: {})", attempt);
+        tracing::info!(attempt, "Attempting to discover_machine");
 
         // Create a new connection off of the ForgeTlsClient.
         let mut connection = self.connect("discover_machine_once").await?;
 
         // Create a new request with the provided MachineDiscoveryInfo.
         let request = tonic::Request::new(info);
-        tracing::debug!("register_machine request {:?}", request);
+        tracing::debug!(?request, "discover_machine request");
 
         // And now attempt to send the request.
         Ok(connection
@@ -142,9 +139,9 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
             .await
             .inspect_err(|err| {
                 tracing::error!(
-                    "Error attempting to discover_machine (attempt: {}): {}",
                     attempt,
-                    err.to_string()
+                    error = %err,
+                    "Error attempting to discover_machine"
                 );
             })?
             .into_inner())
@@ -152,7 +149,7 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
 
     // discover_machine is a retrying wrapper around making
     // discover_machine gRPC calls to the Carbide API.
-    pub async fn discover_machine(
+    async fn discover_machine(
         &mut self,
         info: MachineDiscoveryInfo,
     ) -> Result<rpc::MachineDiscoveryResult, RegistrationError> {
@@ -180,15 +177,13 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
 
         // Create a new request with the provided AttestQuoteRequest.
         let request = tonic::Request::new(quote.clone());
-        tracing::debug!("attest_quote request {:?}", request);
+        tracing::debug!(?request, "attest_quote request");
 
         // And now attempt to send the request.
         Ok(connection
             .attest_quote(request)
             .await
-            .inspect_err(|err| {
-                tracing::error!("Error attempting to attest_quote: {}", err.to_string())
-            })?
+            .inspect_err(|err| tracing::error!(error = %err, "Error attempting to attest_quote"))?
             .into_inner())
     }
 }
@@ -207,7 +202,7 @@ fn create_client_config(
             .map_err(|e| RegistrationError::TransportError(e.to_string()))?,
         false => ForgeClientConfig::new(root_ca, None),
     };
-    tracing::debug!("{purpose} client_config {:?}", forge_client_config);
+    tracing::debug!(purpose, ?forge_client_config, "client_config");
     Ok(forge_client_config)
 }
 
@@ -243,7 +238,7 @@ pub async fn register_machine(
         discovery_reporter: discovery_reporter as i32,
         discovery_reporter_version: reporter_version,
     };
-    tracing::info!("register_machine discovery_info {:?}", info);
+    tracing::info!(machine_discovery_info = ?info, "register_machine discovery_info");
 
     let forge_client_config = create_client_config("register_machine", use_mgmt_vrf, root_ca)?;
     let response = RegistrationClient::new(forge_api, &forge_client_config, retry)
@@ -289,14 +284,7 @@ pub async fn attest_quote(
 
     let _ = write_certs(response.machine_certificate, None).await;
 
-    tracing::info!(
-        "Attestation result is {}",
-        if response.success {
-            "SUCCESS"
-        } else {
-            "FAILURE"
-        }
-    );
+    tracing::info!(success = response.success, "Attestation result");
 
     Ok(response.success)
 }
@@ -320,18 +308,129 @@ pub async fn write_certs(
         tokio::fs::write(client_cert, combined_cert)
             .await
             .wrap_err(format!(
-                "Failed to write new machine certificate PEM to {client_cert}"
+                "failed to write new machine certificate PEM to {client_cert}"
             ))?;
-        tracing::info!("Wrote new machine certificate PEM to: {:?}", client_cert);
+        tracing::info!(%client_cert, "Wrote new machine certificate PEM");
 
-        tokio::fs::write(client_key, machine_certificate.private_key.as_slice())
+        write_private_key(client_key, machine_certificate.private_key.as_slice())
             .await
             .wrap_err(format!(
-                "Failed to write new machine certificate key to: {client_key}"
+                "failed to write new machine certificate key to: {client_key}"
             ))?;
     } else {
         return Err(eyre::eyre!("write_certs: machine_certificate is empty"));
     }
 
     Ok(())
+}
+
+/// Writes the machine private key owner-readable only (0600). The key is
+/// created with the restrictive mode from the first byte — not chmod'ed after
+/// the fact — so there is no window where it sits world-readable; a pre-existing
+/// key file from an older agent (written 0644 via plain `fs::write`) is
+/// tightened as well. Everything that legitimately reads the key (dpu-agent,
+/// scout, fmds, otelcol) runs as root, so 0600 root-owned loses nobody access.
+#[cfg(unix)]
+async fn write_private_key(path: &str, key: &[u8]) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    // `mode` only applies at creation; tighten files that already existed.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .await?;
+    file.write_all(key).await?;
+    // `sync_all`, not `flush`: flushing only pushes the buffer into the kernel.
+    // The agent's very next act is to use this key, and a DPU losing power
+    // between the write and the writeback would leave a truncated or empty key
+    // behind a certificate that looks installed — a state the mismatch check in
+    // the minter reports as a failure but cannot repair without re-enrolment.
+    file.sync_all().await
+}
+
+#[cfg(not(unix))]
+async fn write_private_key(path: &str, key: &[u8]) -> Result<(), std::io::Error> {
+    tokio::fs::write(path, key).await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// `write_certs` concatenates and writes bytes without parsing them, so
+    /// these are opaque sentinels rather than PEM. Real-looking `-----BEGIN EC
+    /// PRIVATE KEY-----` markers would buy nothing here and trip secret
+    /// scanners, which match the marker and not its contents.
+    fn test_certificate() -> MachineCertificate {
+        MachineCertificate {
+            public_key: b"test-leaf-certificate-bytes".to_vec(),
+            issuing_ca: b"test-issuing-ca-bytes".to_vec(),
+            private_key: b"test-machine-private-key-bytes".to_vec(),
+        }
+    }
+
+    fn key_mode(path: &str) -> u32 {
+        std::fs::metadata(path)
+            .expect("key metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[tokio::test]
+    async fn private_key_is_written_owner_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = ClientCert {
+            cert_path: dir.path().join("cert.pem").to_string_lossy().into_owned(),
+            key_path: dir.path().join("cert.key").to_string_lossy().into_owned(),
+        };
+
+        write_certs(Some(test_certificate()), Some(&paths))
+            .await
+            .expect("write_certs succeeds");
+
+        assert_eq!(key_mode(&paths.key_path), 0o600, "fresh key must be 0600");
+        let cert = std::fs::read_to_string(&paths.cert_path).expect("cert readable");
+        assert!(
+            cert.contains("leaf") && cert.contains("ca"),
+            "cert file carries leaf + chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_existing_loose_key_is_tightened_on_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = ClientCert {
+            cert_path: dir.path().join("cert.pem").to_string_lossy().into_owned(),
+            key_path: dir.path().join("cert.key").to_string_lossy().into_owned(),
+        };
+        // A key written by an older agent via plain fs::write (umask default).
+        std::fs::write(&paths.key_path, b"old key").expect("seed old key");
+        std::fs::set_permissions(&paths.key_path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen");
+
+        write_certs(Some(test_certificate()), Some(&paths))
+            .await
+            .expect("write_certs succeeds");
+
+        assert_eq!(
+            key_mode(&paths.key_path),
+            0o600,
+            "renewal must tighten an old 0644 key"
+        );
+        let key = std::fs::read_to_string(&paths.key_path).expect("key readable by owner");
+        assert!(
+            key.contains("test-machine-private-key-bytes"),
+            "key content replaced"
+        );
+    }
 }

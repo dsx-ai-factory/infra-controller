@@ -19,6 +19,7 @@ const (
 	TaskTypePowerControl      TaskType = "power_control"
 	TaskTypeFirmwareControl   TaskType = "firmware_control"
 	TaskTypeBringUp           TaskType = "bring_up"
+	TaskTypeDecommission      TaskType = "decommission"
 )
 
 func TaskTypeFromString(s string) TaskType {
@@ -31,6 +32,8 @@ func TaskTypeFromString(s string) TaskType {
 		return TaskTypeFirmwareControl
 	case TaskTypeBringUp.String():
 		return TaskTypeBringUp
+	case TaskTypeDecommission.String():
+		return TaskTypeDecommission
 	default:
 		return TaskTypeUnknown
 	}
@@ -68,8 +71,8 @@ const (
 	TaskStatusCompleted  TaskStatus = "completed"
 	TaskStatusFailed     TaskStatus = "failed"
 	TaskStatusTerminated TaskStatus = "terminated"
-	// TaskStatusWaiting means the task was queued due to a conflict and is
-	// waiting for the rack to become available. It is NOT a finished state.
+	// TaskStatusWaiting means the task is waiting for a pre-execution condition,
+	// such as rack availability or target linkage. It is NOT a finished state.
 	TaskStatusWaiting TaskStatus = "waiting"
 )
 
@@ -77,6 +80,16 @@ func (s TaskStatus) IsFinished() bool {
 	return s == TaskStatusCompleted ||
 		s == TaskStatusFailed ||
 		s == TaskStatusTerminated
+}
+
+// NonTerminalTaskStatuses returns every status surfaced by active-only task
+// queries and inventory task statistics.
+func NonTerminalTaskStatuses() []TaskStatus {
+	return []TaskStatus{
+		TaskStatusWaiting,
+		TaskStatusPending,
+		TaskStatusRunning,
+	}
 }
 
 type TaskListOptions struct {

@@ -28,4 +28,4 @@ Same, using the short alias:
     $ nico-admin-cli dpf sv
 
 ")]
-pub struct Args {}
+pub(crate) struct Args {}

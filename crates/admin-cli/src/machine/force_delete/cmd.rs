@@ -25,7 +25,7 @@ use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn force_delete(mut query: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn force_delete(mut query: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     const RETRY_TIME: Duration = Duration::from_secs(5);
     const MAX_WAIT_TIME: Duration = Duration::from_secs(60 * 20);
 

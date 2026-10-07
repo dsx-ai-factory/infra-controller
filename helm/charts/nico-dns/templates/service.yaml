@@ -6,6 +6,7 @@ metadata:
   labels:
     {{- include "nico-dns.labels" . | nindent 4 }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-dns.selectorLabels" . | nindent 4 }}
   ports:

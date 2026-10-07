@@ -17,11 +17,13 @@
 
 use std::sync::Arc;
 
+use carbide_instrument::{Outcome, emit};
 use carbide_uuid::switch::SwitchId;
 
 use super::dedup_queue::DedupQueue;
 use super::{
-    CollectorEvent, DataSink, EventContext, HealthReport, HealthReportTarget, ReportSource,
+    CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
+    HealthReportTarget, ReportSource,
 };
 use crate::HealthError;
 use crate::api_client::ApiClientWrapper;
@@ -65,17 +67,16 @@ impl SwitchHealthReportSink {
 
                     match report.as_ref().try_into() {
                         Ok(converted) => {
-                            if let Err(error) = worker_client
+                            let result = worker_client
                                 .submit_switch_health_report(&key.id, converted)
-                                .await
-                            {
-                                tracing::warn!(
-                                    ?error,
-                                    worker_id,
-                                    switch_id = %key.id,
-                                    "Failed to submit switch health report"
-                                );
-                            }
+                                .await;
+                            emit(HealthReportSubmitted {
+                                target: HealthReportTarget::Switch,
+                                outcome: Outcome::from(&result),
+                                id: key.id.to_string(),
+                                worker_id,
+                                error: result.err().map(|e| e.to_string()).unwrap_or_default(),
+                            });
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -102,13 +103,17 @@ impl DataSink for SwitchHealthReportSink {
         "switch_health_report_sink"
     }
 
-    fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), HealthError> {
         let CollectorEvent::HealthReport(report) = event else {
-            return;
+            return Ok(());
         };
 
         if report.target != Some(HealthReportTarget::Switch) {
-            return;
+            return Ok(());
         }
 
         if self.skip_empty_reports && report.is_empty() {
@@ -116,7 +121,7 @@ impl DataSink for SwitchHealthReportSink {
                 source = ?report.source,
                 "Skipping empty switch health report"
             );
-            return;
+            return Ok(());
         }
 
         let switch_id = if let Some(switch_id) = context.switch_id() {
@@ -126,7 +131,9 @@ impl DataSink for SwitchHealthReportSink {
                 endpoint_key = context.endpoint_key(),
                 "Received switch-target HealthReport event without switch_id context"
             );
-            return;
+            return Err(HealthError::GenericError(
+                "switch-target health report event without switch_id context".to_string(),
+            ));
         };
 
         let key = SwitchHealthReportKey {
@@ -134,5 +141,7 @@ impl DataSink for SwitchHealthReportSink {
             source: report.source,
         };
         self.queue.save_latest(key, Arc::clone(report));
+
+        Ok(())
     }
 }

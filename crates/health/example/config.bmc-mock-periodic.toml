@@ -1,0 +1,68 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# BMC Mock should be running on localhost:1266 for this config to work. You can run it with `cargo run -p bmc-mock`.
+#
+# Variant of config.bmc-mock.toml that additionally enables PERIODIC log
+# collection and demonstrates the collectors.logs.periodic.exclude_services
+# option (see the [collectors.logs.periodic] section at the bottom).
+
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "127.0.0.1"
+port = 1266
+mac = "aa:bb:cc:dd:ee:ff"
+username = "admin"
+password = "secret"
+rack_id = "RACK_1"
+machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", slot_number = 15, tray_index = 5, nvlink_domain_uuid = "00000000-0000-0000-0000-000000000000" }
+
+[endpoint_sources.nico_api]
+enabled = false
+
+[processors.leak_detection]
+enabled = true
+minimum_alerts_per_report = 2
+
+[processors.rack_leak]
+leaking_tray_threshold = 1
+
+[sinks.tracing]
+enabled = true
+
+[sinks.prometheus]
+enabled = true
+
+[sinks.health_report]
+enabled = false
+
+[sinks.rack_health_report]
+enabled = false
+
+
+# Periodic log collection (only mode where exclude_services applies; SSE never
+# enumerates LogServices). exclude_services skips any Redfish LogService whose
+# odata id contains one of the listed substrings — e.g. the bmcweb "Journal"
+# HTTP-access log, which is high-volume noise and self-referential (polling the
+# BMC generates Journal entries that the next poll re-collects). Defaults to
+# ["Journal"]; set to [] to collect from every discovered LogService.
+[collectors.logs]
+mode = "periodic"
+
+[collectors.logs.periodic]
+logs_collection_interval = "1m"
+state_refresh_interval = "30m"
+logs_state_file = "/tmp/logs_collector_{machine_id}.json"
+exclude_services = ["Journal"]

@@ -33,6 +33,7 @@ type ParsedRow = HashMap<String, String>;
 type CachedRows = HashMap<String, ParsedRow>;
 
 enum DeleteTarget {
+    All,
     Row(String),
     Leaf {
         instance_id: String,
@@ -119,9 +120,10 @@ impl GnmiOnChangeProcessor {
             Some(proto::subscribe_response::Response::Error(e)) => {
                 stream_metrics.stream_errors_total.inc();
                 tracing::warn!(
-                    code = e.code,
-                    message = %e.message,
+                    grpc_status_code = e.code,
+                    error = %e.message,
                     stream = %self.collector_name,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "nvue_gnmi ON_CHANGE: server error in stream"
                 );
                 return;
@@ -149,7 +151,7 @@ impl GnmiOnChangeProcessor {
             .map(|p| p.elem.as_slice())
             .unwrap_or_default();
 
-        let mut updated_rows: CachedRows = HashMap::new();
+        let mut updated_rows = CachedRows::new();
         let mut delete_targets = Vec::new();
 
         for update in &notification.update {
@@ -182,8 +184,9 @@ impl GnmiOnChangeProcessor {
 
         for path in &notification.delete {
             let combined: Vec<&PathElem> = prefix_elems.iter().chain(path.elem.iter()).collect();
-            if let Some(delete_target) = delete_target_from_path(&combined) {
-                delete_targets.push(delete_target);
+
+            if let Some(target) = delete_target_from_path(&combined) {
+                delete_targets.push(target);
             }
         }
 
@@ -193,10 +196,20 @@ impl GnmiOnChangeProcessor {
         };
 
         let mut rows_to_emit = CachedRows::new();
+        let mut rows_to_prune = Vec::new();
+
         for target in delete_targets {
             match target {
+                DeleteTarget::All => {
+                    rows_to_prune.extend(cached_rows.keys().cloned());
+                    cached_rows.clear();
+                    rows_to_emit.clear();
+                }
                 DeleteTarget::Row(instance_id) => {
-                    cached_rows.remove(&instance_id);
+                    if cached_rows.remove(&instance_id).is_some() {
+                        rows_to_emit.remove(&instance_id);
+                        rows_to_prune.push(instance_id);
+                    }
                 }
                 DeleteTarget::Leaf {
                     instance_id,
@@ -207,6 +220,8 @@ impl GnmiOnChangeProcessor {
                     {
                         if row.is_empty() {
                             cached_rows.remove(&instance_id);
+                            rows_to_emit.remove(&instance_id);
+                            rows_to_prune.push(instance_id);
                         } else {
                             rows_to_emit.insert(instance_id, row.clone());
                         }
@@ -221,6 +236,7 @@ impl GnmiOnChangeProcessor {
 
             for (leaf_name, value) in updated_row {
                 let is_changed = row.get(&leaf_name) != Some(&value);
+
                 if is_changed {
                     row.insert(leaf_name, value);
                     changed = true;
@@ -234,6 +250,18 @@ impl GnmiOnChangeProcessor {
 
         let entity_count = cached_rows.len();
         drop(cached_rows);
+
+        if let Some(sink) = &self.data_sink {
+            for instance_id in rows_to_prune {
+                sink.prune_metrics(
+                    &self.event_context,
+                    Some("on_change_row"),
+                    &[(Cow::Borrowed("instance_id"), instance_id)],
+                    None,
+                    None,
+                );
+            }
+        }
 
         for (instance_id, row) in rows_to_emit {
             self.emit_row_as_metric(&instance_id, &row);
@@ -258,6 +286,7 @@ impl GnmiOnChangeProcessor {
             instance_id,
             severity,
             text,
+            rack_id = self.event_context.rack_id().map(tracing::field::display),
             "nvue_gnmi ON_CHANGE: row received"
         );
 
@@ -301,22 +330,40 @@ fn find_instance_key_with_index<'a>(elems: &[&'a PathElem]) -> Option<(usize, &'
 }
 
 fn delete_target_from_path(elems: &[&PathElem]) -> Option<DeleteTarget> {
-    let (instance_index, instance_id) = find_instance_key_with_index(elems)?;
-    if elems.len() == instance_index + 1 {
-        return Some(DeleteTarget::Row(instance_id.to_string()));
+    let [root, rest @ ..] = elems else {
+        return Some(DeleteTarget::All);
+    };
+
+    if root.name != "system-events" {
+        return None;
     }
 
-    elems.last().map(|leaf_elem| DeleteTarget::Leaf {
-        instance_id: instance_id.to_string(),
-        leaf_name: leaf_elem.name.clone(),
-    })
+    let [event, tail @ ..] = rest else {
+        return Some(DeleteTarget::All);
+    };
+
+    if event.name != "system-event" {
+        return None;
+    }
+
+    match (event.key.get("event-id"), tail) {
+        (None, []) => Some(DeleteTarget::All),
+        (None, [state]) if state.name == "state" => Some(DeleteTarget::All),
+        (Some(id), []) => Some(DeleteTarget::Row(id.clone())),
+        (Some(id), [state]) if state.name == "state" => Some(DeleteTarget::Row(id.clone())),
+        (Some(id), [state, leaf]) if state.name == "state" => Some(DeleteTarget::Leaf {
+            instance_id: id.clone(),
+            leaf_name: leaf.name.clone(),
+        }),
+        _ => None,
+    }
 }
 
 fn severity_to_f64(severity: Option<&str>) -> f64 {
     match severity {
         Some(s) if s.eq_ignore_ascii_case("informational") => 1.0,
-        Some(s) if s.eq_ignore_ascii_case("warning") => 2.0,
-        Some(s) if s.eq_ignore_ascii_case("error") => 3.0,
+        Some(s) if s.eq_ignore_ascii_case("warning") || s.eq_ignore_ascii_case("minor") => 2.0,
+        Some(s) if s.eq_ignore_ascii_case("error") || s.eq_ignore_ascii_case("major") => 3.0,
         Some(s) if s.eq_ignore_ascii_case("critical") => 4.0,
         _ => 0.0,
     }
@@ -332,6 +379,8 @@ mod tests {
 
     use super::*;
     use crate::endpoint::{BmcAddr, EndpointMetadata, SwitchData, SwitchEndpointRole};
+    use crate::metrics::MetricsManager;
+    use crate::sink::PrometheusSink;
 
     const TEST_COLLECTOR_NAME: &str = "nvue_gnmi_system_events";
 
@@ -345,11 +394,16 @@ mod tests {
             "capturing_sink"
         }
 
-        fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+        fn try_handle_event(
+            &self,
+            context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), crate::HealthError> {
             self.events
                 .lock()
                 .expect("lock poisoned")
                 .push((context.clone(), event.clone()));
+            Ok(())
         }
     }
 
@@ -373,11 +427,12 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: None,
-                mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
             },
             collector_type,
             metadata: None,
             rack_id: None,
+            labels: Default::default(),
         }
     }
 
@@ -471,7 +526,9 @@ mod tests {
     fn test_severity_to_f64() {
         assert_eq!(severity_to_f64(Some("informational")), 1.0);
         assert_eq!(severity_to_f64(Some("warning")), 2.0);
+        assert_eq!(severity_to_f64(Some("MINOR")), 2.0);
         assert_eq!(severity_to_f64(Some("error")), 3.0);
+        assert_eq!(severity_to_f64(Some("MAJOR")), 3.0);
         assert_eq!(severity_to_f64(Some("critical")), 4.0);
         assert_eq!(severity_to_f64(Some("CRITICAL")), 4.0);
         assert_eq!(severity_to_f64(Some("other")), 0.0);
@@ -771,16 +828,19 @@ mod tests {
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
                     port: None,
-                    mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                    mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
                 },
                 collector_type: ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
+                labels: Default::default(),
                 metadata: Some(EndpointMetadata::Switch(SwitchData {
                     id: Some(switch_id),
                     serial: "SN-SWITCH-001".to_string(),
                     slot_number: Some(7),
                     tray_index: Some(3),
+                    nvlink_domain_uuid: None,
                     endpoint_role: SwitchEndpointRole::Host,
                     is_primary: false,
+                    nmxc_enabled: false,
                     nmxt_enabled: false,
                 })),
                 rack_id: Some(RackId::new("RACK_2")),
@@ -841,5 +901,146 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "instance_id" && value == "42")
         );
+    }
+
+    #[test]
+    fn row_delete_removes_only_the_matching_prometheus_series() {
+        let manager = Arc::new(MetricsManager::new("test").unwrap());
+        let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").unwrap());
+        let processor = test_processor(Some(sink));
+
+        for id in ["1", "2"] {
+            processor.process_notification(&make_system_events_notification(vec![
+                make_system_event_update(id, "severity", "critical"),
+            ]));
+        }
+
+        let row_delete = proto::Path {
+            elem: vec![make_path_elem("system-event", &[("event-id", "1")])],
+            ..Default::default()
+        };
+
+        let mut deleted = make_system_events_notification(Vec::new());
+        deleted.delete.push(row_delete.clone());
+        processor.process_notification(&deleted);
+
+        let export = manager.export_telemetry().unwrap();
+
+        assert!(!export.contains("instance_id=\"1\""));
+        assert!(export.contains("instance_id=\"2\""));
+
+        let mut replacement = make_system_events_notification(vec![make_system_event_update(
+            "1", "severity", "warning",
+        )]);
+
+        replacement.delete.push(row_delete);
+        processor.process_notification(&replacement);
+
+        let export = manager.export_telemetry().unwrap();
+
+        assert!(export.contains("instance_id=\"1\""));
+        assert!(export.contains("instance_id=\"2\""));
+    }
+
+    #[test]
+    fn ancestor_deletes_remove_cached_rows_and_prometheus_series() {
+        let cases = [
+            ("root", Vec::new()),
+            ("list", vec![make_path_elem("system-event", &[])]),
+            (
+                "state",
+                vec![
+                    make_path_elem("system-event", &[("event-id", "1")]),
+                    make_path_elem("state", &[]),
+                ],
+            ),
+        ];
+
+        for (case, path) in cases {
+            let manager = Arc::new(MetricsManager::new("test").unwrap());
+            let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").unwrap());
+            let processor = test_processor(Some(sink));
+
+            for id in ["1", "2"] {
+                processor.process_notification(&make_system_events_notification(vec![
+                    make_system_event_update(id, "severity", "critical"),
+                ]));
+            }
+
+            let deleted = proto::Notification {
+                delete: vec![proto::Path {
+                    elem: path,
+                    ..Default::default()
+                }],
+                ..make_system_events_notification(Vec::new())
+            };
+
+            let count = processor.process_notification(&deleted);
+            let export = manager.export_telemetry().unwrap();
+
+            assert!(!export.contains("instance_id=\"1\""), "{case}: {export}");
+
+            if case == "state" {
+                assert_eq!(count, 1, "{case}");
+                assert!(export.contains("instance_id=\"2\""), "{case}: {export}");
+            } else {
+                assert_eq!(count, 0, "{case}");
+                assert!(!export.contains("instance_id=\"2\""), "{case}: {export}");
+            }
+
+            let replacement = proto::Notification {
+                delete: deleted.delete,
+                ..make_system_events_notification(vec![make_system_event_update(
+                    "1", "severity", "warning",
+                )])
+            };
+
+            processor.process_notification(&replacement);
+
+            let export = manager.export_telemetry().unwrap();
+            assert!(export.contains("instance_id=\"1\""), "{case}: {export}");
+        }
+    }
+
+    #[test]
+    fn overlapping_deletes_do_not_restore_removed_row() {
+        let updates = vec![
+            make_system_event_update("17", "severity", "critical"),
+            make_system_event_update("17", "text", "cached event text"),
+        ];
+
+        let row = proto::Path {
+            elem: vec![make_path_elem("system-event", &[("event-id", "17")])],
+            ..Default::default()
+        };
+
+        let severity = updates[0].path.clone().unwrap();
+        let text = updates[1].path.clone().unwrap();
+
+        for (case, deletes) in [
+            ("leaf then row", vec![severity.clone(), row]),
+            ("all leaves", vec![severity, text]),
+        ] {
+            let manager = Arc::new(MetricsManager::new("test").unwrap());
+            let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").unwrap());
+            let processor = test_processor(Some(sink));
+
+            processor.process_notification(&make_system_events_notification(updates.clone()));
+
+            assert!(
+                manager
+                    .export_telemetry()
+                    .unwrap()
+                    .contains("instance_id=\"17\"")
+            );
+
+            let mut deleted = make_system_events_notification(Vec::new());
+            deleted.delete = deletes;
+            processor.process_notification(&deleted);
+
+            let export = manager.export_telemetry().unwrap();
+
+            assert!(!export.contains("instance_id=\"17\""), "{case}: {export}");
+        }
     }
 }

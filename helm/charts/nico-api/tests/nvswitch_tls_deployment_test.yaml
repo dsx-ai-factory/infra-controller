@@ -1,0 +1,45 @@
+suite: NVSwitch TLS deployment integration
+templates:
+  - deployment.yaml
+tests:
+  - it: mounts the NICo client Secret read-only
+    set:
+      nvSwitchTls:
+        nicoClient:
+          enabled: true
+          secretName: nico-nmxc-client-tls
+          mountPath: /var/run/secrets/nmxc-client
+          uris:
+            - spiffe://switch.local/nico-system/sa/nico-nmxc
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nvswitch-nico-client
+            mountPath: /var/run/secrets/nmxc-client
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nvswitch-nico-client
+            secret:
+              secretName: nico-nmxc-client-tls
+
+  - it: never mounts the generated switch server Secret
+    set:
+      nvSwitchTls:
+        switchServer:
+          enabled: true
+          secretName: generated-switch-server-tls
+          dnsNames:
+            - nvswitch.nico.local
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nvswitch-server
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            secret:
+              secretName: generated-switch-server-tls

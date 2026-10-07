@@ -31,11 +31,11 @@ pub enum MqtteaClientError {
     ConnectionError(#[from] rumqttc::ClientError),
     // SerializationError occurs when converting messages to bytes
     // fails (malformed data).
-    #[error("Message serialization error: {0}")]
+    #[error("message serialization error: {0}")]
     SerializationError(#[from] prost::EncodeError),
     // ProtobufDeserializationError occurs when protobuf message
     // parsing fails (corrupted data, schema mismatch).
-    #[error("Protobuf deserialization error: {0}")]
+    #[error("protobuf deserialization error: {0}")]
     ProtobufDeserializationError(#[from] prost::DecodeError),
     // JsonSerializationError occurs when JSON message serialization fails.
     #[error("JSON serialization error: {0}")]
@@ -53,36 +53,36 @@ pub enum MqtteaClientError {
     YamlDeserializationError(#[source] serde_yaml::Error),
     // UnknownMessageType occurs when received message topic doesn't
     // match any registered patterns.
-    #[error("Unknown message type for topic: {0}")]
+    #[error("unknown message type for topic: {0}")]
     UnknownMessageType(String),
     // TopicParsingError occurs when topic format is invalid or
     // contains illegal characters.
-    #[error("Topic parsing error: {0}")]
+    #[error("topic parsing error: {0}")]
     TopicParsingError(String),
     // UnsupportedSerializationType occurs when message uses unknown
     // serialization format.
-    #[error("Unsupported serialization type: {0:?}")]
+    #[error("unsupported serialization type: {0:?}")]
     UnsupportedSerializationType(String),
     // RawMessageError occurs when custom raw message processing fails
     // (custom validation, format errors).
-    #[error("Raw message error: {0}")]
+    #[error("raw message error: {0}")]
     RawMessageError(String),
     // UnregisteredType occurs when trying to serialize/deserialize a
     // type that wasn't registered.
-    #[error("Type not registered in message registry: {0}")]
+    #[error("type not registered in message registry: {0}")]
     UnregisteredType(String),
     //InvalidUtf8 occurs when converting bytes to string fails.
-    #[error("Invalid UTF-8 encoding: {0}")]
+    #[error("invalid UTF-8 encoding: {0}")]
     InvalidUtf8(String),
     // PatternCompilationError occurs when regex pattern compilation fails.
-    #[error("Pattern compilation error: {0}")]
+    #[error("pattern compilation error: {0}")]
     PatternCompilationError(String),
     // AlreadyStartedError occurs when connect() has already
     // been called on the client.
-    #[error("Already started error: connect() has already been called on the client")]
+    #[error("already started error: connect() has already been called on the client")]
     AlreadyStartedError,
     // CredentialsError occurs when fetching credentials from a provider fails.
-    #[error("Credentials provider error: {0}")]
+    #[error("credentials provider error: {0}")]
     CredentialsError(String),
 }
 

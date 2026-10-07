@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -139,7 +139,7 @@ pub struct NewAppliedRemediation {
 #[derive(Clone, Debug)]
 pub struct AppliedRemediation {
     pub id: RemediationId,
-    pub dpu_machine_id: MachineId,
+    pub dpu_machine_id: DpuMachineId,
     pub attempt: i32,
     pub succeeded: bool,
     pub status: HashMap<String, String>,

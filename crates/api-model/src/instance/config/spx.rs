@@ -48,7 +48,10 @@ impl InstanceSpxConfig {
 pub enum SpxAttachmentType {
     Physical = 0,
     Virtual = 1,
-    Ovn = 2,
+    // Matches the wire value in forge.proto's SpxAttachmentType (OVS = 3; 2 is
+    // reserved for the retired Ovn). This enum is bridged to the proto enum by
+    // raw i32, so the discriminants must stay in sync.
+    Ovs = 3,
 }
 
 impl TryFrom<i32> for SpxAttachmentType {
@@ -58,13 +61,21 @@ impl TryFrom<i32> for SpxAttachmentType {
         match value {
             0 => Ok(SpxAttachmentType::Physical),
             1 => Ok(SpxAttachmentType::Virtual),
-            2 => Ok(SpxAttachmentType::Ovn),
+            3 => Ok(SpxAttachmentType::Ovs),
             _ => Err("Invalid SpxAttachmentType value"),
         }
     }
 }
 
 /// The configuration that a customer desires for an instances SpectrumX NICs
+/// This is the structure that gets stored in the database as a part of the instance
+/// config. The difference between this and the rpc InstanceSpxAttachment that is
+/// sent to us by the customer when configuring the instance is that this structure
+/// contains the mac address of the NIC. When configuring an instance, the customer
+/// does not necessarily know which MH they will be allocated. So they have no way
+/// of knowing the MAC address of each device instance. When allocating or updating
+/// an instance, we figure out the MAC address of each device instance in the
+/// allocate_spx_port_mac routine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceSpxAttachment {
     pub device: String,
@@ -72,5 +83,17 @@ pub struct InstanceSpxAttachment {
     pub mac_address: Option<String>,
     pub spx_partition_id: SpxPartitionId,
     pub attachment_type: SpxAttachmentType,
-    pub virtual_function_id: Option<u32>,
+    pub attachment_vf: Option<SpxAttachmentVf>,
+    pub attachment_ovs: Option<SpxAttachmentOvs>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentVf {
+    pub vf_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentOvs {
+    pub bridge_name: String,
+    pub ovn_network_name: Option<String>,
 }

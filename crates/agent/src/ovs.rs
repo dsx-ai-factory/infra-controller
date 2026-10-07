@@ -15,13 +15,17 @@
  * limitations under the License.
  */
 
+use std::time::Duration;
+
 use eyre::WrapErr;
+
+use crate::instrumentation::OvsRestart;
 
 /// ovs-vswitchd is part of HBN. It handles network packets in user-space using DPDK
 /// (https://www.dpdk.org/). By default it uses 100% of a CPU core to poll for new packets, never
 /// yielding. Here we set it to yield the CPU for up to 100us if it's been idle recently.
 /// 100us was recommended by NBU/HBN team.
-pub async fn set_vswitchd_yield() -> eyre::Result<()> {
+pub(super) async fn set_vswitchd_yield() -> eyre::Result<()> {
     let mut cmd = tokio::process::Command::new("/usr/bin/ovs-vsctl");
     // table: o
     // record: .
@@ -34,24 +38,49 @@ pub async fn set_vswitchd_yield() -> eyre::Result<()> {
         .arg("other_config:pmd-sleep-max=100")
         .kill_on_drop(true);
     let cmd_str = super::pretty_cmd(cmd.as_std());
-    tracing::trace!("set_ovs_vswitchd_yield running: {cmd_str}");
+    tracing::trace!(command = cmd_str.as_str(), "set_ovs_vswitchd_yield running");
 
     // It takes less than 1s, so allow up to 5
     let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
         .await
-        .wrap_err("Timeout")?
-        .wrap_err("Error running command")?;
+        .wrap_err("timeout")?
+        .wrap_err("error running command")?;
     if !out.status.success() {
         tracing::error!(
-            " STDOUT {cmd_str}: {}",
-            String::from_utf8_lossy(&out.stdout)
+            command = cmd_str.as_str(),
+            stdout = %String::from_utf8_lossy(&out.stdout),
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "OVS command failed"
         );
-        tracing::error!(
-            " STDERR {cmd_str}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        eyre::bail!("Failed running ovs-vsctl command. Check logs for stdout/stderr.");
+        eyre::bail!("failed running ovs-vsctl command. check logs for stdout/stderr");
     }
 
+    Ok(())
+}
+
+/// Restart the OVS service (ovs-vswitchd) via systemctl.
+pub(super) async fn restart_ovs() -> eyre::Result<()> {
+    let restart = tokio::time::timeout(
+        Duration::from_secs(180),
+        tokio::process::Command::new("systemctl")
+            .args(["restart", "ovs-vswitchd.service"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let restart = match restart {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => eyre::bail!("failed to execute systemctl restart: {}", e),
+        Err(_) => eyre::bail!("timeout (180s) waiting for ovs-vswitchd.service restart"),
+    };
+
+    if !restart.status.success() {
+        eyre::bail!(
+            "systemctl restart ovs-vswitchd.service failed (status: {})",
+            restart.status
+        );
+    }
+
+    carbide_instrument::emit(OvsRestart::Succeeded {});
     Ok(())
 }

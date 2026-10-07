@@ -29,9 +29,9 @@ Delete only specific versions, keeping the rest:
     --versions 1.0,1.1
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long = "id", help = "The extension service ID to delete")]
-    pub service_id: String,
+    service_id: String,
 
     #[clap(
         short = 'v',
@@ -39,7 +39,7 @@ pub struct Args {
         help = "Version strings to delete (optional, leave empty to keep all versions)",
         value_delimiter = ','
     )]
-    pub versions: Vec<String>,
+    versions: Vec<String>,
 }
 
 impl From<Args> for ::rpc::forge::DeleteDpuExtensionServiceRequest {

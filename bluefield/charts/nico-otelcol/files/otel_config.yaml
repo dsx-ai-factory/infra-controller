@@ -5,6 +5,12 @@ extensions:
     fsync: true
 
 receivers:
+  # OTLP receiver for DPU workloads to emit tracing spans
+  otlp/workloads:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+
   filelog/doca:
     include:
       - /var/log/doca/hbn/frr/frr.log
@@ -25,17 +31,18 @@ receivers:
     start_at: beginning
     storage: file_storage/cursors
 
-  # nico-dpu-agent runs as a containerized DaemonSet pod, so its logs are
-  # written to stdout and captured by the container runtime under
-  # /var/log/pods, not to a journald systemd unit. Read them from there.
+  # nico-dpu-agent and its LLDP sidecar run in a containerized DaemonSet pod,
+  # so their logs are captured by the container runtime under /var/log/pods,
+  # not by journald. Read both container log directories from there.
   filelog/nico-dpu-agent:
     # DPF names the pod <dpu-cluster>-nico-dpu-agent-<hash>-<podhash>, so the
     # pod directory is /var/log/pods/<ns>_<dpu-cluster>-nico-dpu-agent-.../. The
-    # only stable anchor is the container directory, whose name is fixed by the
-    # DaemonSet container name (nico-dpu-agent; the init container lives in the
-    # separate nico-dpu-agent-init directory). Match on that instead.
+    # stable anchors are the container directories, whose names are fixed by the
+    # DaemonSet container names (nico-dpu-agent and nico-lldp-sidecar; the init
+    # container lives in nico-dpu-agent-init). Match on those instead.
     include:
       - /var/log/pods/*/nico-dpu-agent/*.log
+      - /var/log/pods/*/nico-lldp-sidecar/*.log
     include_file_name: false
     include_file_path: true
     start_at: beginning
@@ -46,11 +53,11 @@ receivers:
       - type: container
         add_metadata_from_filepath: true
       # Extract the log level emitted by the agent (logfmt: level=INFO) for
-      # severity. The agent also writes non-logfmt lines to stderr (e.g.
-      # multi-line backtraces / JSON dumps); the `if` guard skips the parser
-      # for those so they pass through instead of logging a "does not match"
-      # error per line. To extract more key=value pairs, use key_value_parser
-      # in place of regex_parser then drop unwanted pairs in the transform.
+      # severity. The sidecar and agent also write non-logfmt lines to stderr;
+      # the `if` guard skips the parser for those so they pass through instead
+      # of logging a "does not match" error per line. To extract more key=value
+      # pairs, use key_value_parser in place of regex_parser then drop unwanted
+      # pairs in the transform.
       - type: regex_parser
         if: 'body contains "level="'
         regex: 'level=(?P<level>\w+)'
@@ -232,6 +239,15 @@ receivers:
       filesystem:
       paging:
 
+  punt_stats:
+    # Written by the punt-stats-helper sidecar (see daemonset.yaml), which is
+    # the only container with containerd-socket/crictl exec access. The
+    # chart replaces this path with puntStatsHelper.dstPath.
+    file_path: /var/run/punt-stats/punt
+    # 5m hits Prometheus staleness limit, causing a discontinuity in the
+    # graphed time series.
+    scrape_interval: 4m
+
 processors:
   batch/logs:
     send_batch_size: 8192
@@ -242,8 +258,11 @@ processors:
   batch/metrics-disk:
     send_batch_size: 8192
     timeout: 75s
+  batch/traces:
+    send_batch_size: 8192
+    timeout: 5s
   fileresource:
-    file_paths: 
+    file_paths:
       - /run/otelcol-contrib/machine-id
       - /run/otelcol-contrib/host-machine-id
     poll_interval: 5s
@@ -324,6 +343,16 @@ processors:
       - key: component
         value: transceiver-exporter
         action: upsert
+  resource/traces-workloads:
+    attributes:
+      - key: component
+        value: dpu-workloads
+        action: upsert
+  resource/punt-stats:
+    attributes:
+      - key: component
+        value: punt_stats
+        action: upsert
   resourcedetection:
     # Add hostname at the resource level
     detectors: ["system"]
@@ -335,15 +364,16 @@ processors:
           enabled: false
         host.id:
           enabled: false
-  # The agent's logs now arrive via filelog (body is the plain message), so the
-  # journald-specific body extraction does not apply. Preserve the systemd.unit
-  # label so existing dashboards and telemetry_stats groupings keep working.
+  # The agent and sidecar logs arrive via filelog (body is the plain message),
+  # so journald-specific body extraction does not apply. Preserve distinct
+  # systemd.unit labels for existing dashboards and telemetry_stats groupings.
   transform/nico-dpu-agent:
     error_mode: ignore
     log_statements:
       - context: log
         statements:
           - set(attributes["systemd.unit"], "nico-dpu-agent")
+          - set(attributes["systemd.unit"], "nico-lldp-sidecar") where IsMatch(attributes["log.file.path"], "/nico-lldp-sidecar/")
           - delete_key(attributes, "level")
   transform/journald-kernel:
     error_mode: ignore
@@ -397,6 +427,15 @@ exporters:
 
 service:
   pipelines:
+    traces/workloads:
+      receivers: [otlp/workloads]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/traces-workloads
+        - batch/traces
+      exporters: [otlp/site]
     logs/nico-dpu-agent:
       receivers: [filelog/nico-dpu-agent]
       processors:
@@ -500,6 +539,15 @@ service:
         - memory_limiter
         - resourcedetection
         - resource/log-stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/punt-stats:
+      receivers: [punt_stats]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/punt-stats
+        - telemetry_stats
         - batch/metrics
       exporters: [otlp/site, prometheus]
   extensions: [file_storage/cursors]

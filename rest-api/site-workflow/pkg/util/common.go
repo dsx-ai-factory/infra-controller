@@ -4,7 +4,7 @@
 package util
 
 import (
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // GetStrPtr returns a pointer to the string passed in
@@ -12,7 +12,7 @@ func GetStrPtr(s string) *string {
 	return &s
 }
 
-func ProtobufUUIDListToStringList(ids []*cwssaws.UUID) []string {
+func ProtobufUUIDListToStringList(ids []*corev1.UUID) []string {
 	s := make([]string, len(ids))
 
 	for i, u := range ids {
@@ -26,11 +26,11 @@ func ProtobufUUIDListToStringList(ids []*cwssaws.UUID) []string {
 	return s
 }
 
-func StringsToProtobufUUIDList(ids []string) []*cwssaws.UUID {
-	s := make([]*cwssaws.UUID, len(ids))
+func StringsToProtobufUUIDList(ids []string) []*corev1.UUID {
+	s := make([]*corev1.UUID, len(ids))
 
 	for i, u := range ids {
-		s[i] = &cwssaws.UUID{Value: u}
+		s[i] = &corev1.UUID{Value: u}
 	}
 
 	return s

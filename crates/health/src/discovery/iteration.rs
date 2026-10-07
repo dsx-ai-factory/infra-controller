@@ -20,12 +20,21 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::{StreamExt, stream};
+
 use super::DiscoveryIterationStats;
-use super::cleanup::stop_removed_bmc_collectors;
+use super::cleanup::{
+    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_machine_collectors,
+    stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
+};
 use super::context::{CollectorKind, DiscoveryLoopContext};
-use super::spawn::spawn_collectors_for_endpoint;
+use super::identity::ensure_primary_system_uuid;
+use super::reachability::reconcile_reachability_collectors;
+use super::spawn::{spawn_collectors_for_endpoint, switch_supports_nmxc_subscription};
 use crate::HealthError;
-use crate::endpoint::{BmcEndpoint, EndpointSource};
+use crate::config::Configurable;
+use crate::endpoint::{BmcEndpoint, EndpointSnapshot, EndpointSource};
+use crate::inventory::InventoryRefreshFailed;
 use crate::sharding::ShardManager;
 use crate::sink::DataSink;
 
@@ -36,6 +45,25 @@ fn active_keys(sharded_endpoints: &[Arc<BmcEndpoint>]) -> HashSet<Cow<'static, s
         .collect()
 }
 
+/// Returns active endpoint keys that remain eligible for NMX-C Subscribe collection.
+fn nmxc_subscription_keys(sharded_endpoints: &[Arc<BmcEndpoint>]) -> HashSet<Cow<'static, str>> {
+    sharded_endpoints
+        .iter()
+        .filter(|endpoint| switch_supports_nmxc_subscription(endpoint))
+        .map(|endpoint| Cow::Owned(endpoint.key()))
+        .collect()
+}
+
+/// Runs one endpoint discovery pass and reconciles collectors for this shard.
+///
+/// Collector spawning is attempted for every endpoint. Each failure is logged
+/// and returned in processing order after reachability reconciliation. Spawn
+/// failures take precedence if reachability reconciliation also fails; the
+/// reachability failure is logged separately.
+///
+/// # Errors
+///
+/// Returns endpoint discovery, collector spawning, or reachability errors.
 pub async fn run_discovery_iteration(
     endpoint_source: Arc<dyn EndpointSource>,
     shard_manager: &ShardManager,
@@ -46,8 +74,11 @@ pub async fn run_discovery_iteration(
     let iteration_start = Instant::now();
 
     let fetch_start = Instant::now();
-    let endpoints = match endpoint_source.fetch_bmc_hosts().await {
-        Ok(v) => v,
+    let EndpointSnapshot {
+        endpoints,
+        inventory,
+    } = match endpoint_source.fetch_snapshot().await {
+        Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!(error = ?e, "Could not fetch endpoints");
             return Err(e);
@@ -64,6 +95,48 @@ pub async fn run_discovery_iteration(
         .cloned()
         .collect();
 
+    match inventory {
+        Ok(Some(inventory)) => {
+            let sharded_racks = inventory
+                .racks
+                .into_iter()
+                .filter(|rack| shard_manager.should_monitor_key(rack.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            let sharded_inventory_components = inventory
+                .components
+                .into_iter()
+                .filter(|component| shard_manager.should_monitor_key(component.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            ctx.inventory_metrics
+                .reconcile(&sharded_racks, &sharded_inventory_components);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            carbide_instrument::emit(InventoryRefreshFailed {
+                error: error.to_string(),
+            });
+        }
+    }
+
+    // Resolve machine identity before collectors start when possible. Shared
+    // write-once state propagates the result to running collectors and caches
+    // both present and absent UUIDs, preventing repeated successful BMC queries.
+    let identity_concurrency = ctx.discovery_config.discovery_concurrency.max(1);
+    stream::iter(sharded_endpoints.iter().cloned())
+        .map(|endpoint| async move {
+            if let Err(error) = ensure_primary_system_uuid(&endpoint).await {
+                tracing::warn!(
+                    ?error,
+                    bmc_address = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    "Could not resolve primary ComputerSystem UUID; continuing without it"
+                );
+            }
+        })
+        .buffer_unordered(identity_concurrency)
+        .collect::<Vec<()>>()
+        .await;
+
     if sharded_endpoints.is_empty() {
         tracing::warn!("No endpoints assigned to this shard");
     } else {
@@ -76,12 +149,69 @@ pub async fn run_discovery_iteration(
     // prune before respawn so downgraded auto-mode endpoints get replaced
     ctx.collectors.prune_finished_logs();
 
-    for endpoint in &sharded_endpoints {
-        spawn_collectors_for_endpoint(ctx, endpoint, data_sink.clone(), metrics_prefix)?;
-    }
+    // Metadata changes keep the same endpoint key and collector type. Complete
+    // old collector cleanup before respawn so a late CollectorRemoved cannot
+    // unregister the replacement's metrics.
+    stop_stale_machine_collectors(ctx, &sharded_endpoints).await;
+    stop_stale_switch_collectors(ctx, &sharded_endpoints).await;
+    stop_stale_power_shelf_collectors(ctx, &sharded_endpoints).await;
 
     let active_endpoints = active_keys(&sharded_endpoints);
-    stop_removed_bmc_collectors(ctx, &active_endpoints);
+    stop_removed_bmc_collectors(ctx, &active_endpoints).await;
+
+    // One endpoint's failure must not prevent independent endpoint collectors
+    // from starting. Preserve every failure for diagnostics and retry policy.
+    let mut spawn_errors = Vec::new();
+
+    for endpoint in &sharded_endpoints {
+        if let Err(error) =
+            spawn_collectors_for_endpoint(ctx, endpoint, data_sink.clone(), metrics_prefix)
+        {
+            let endpoint_key = endpoint.key();
+
+            tracing::error!(
+                ?error,
+                %endpoint_key,
+                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                "Could not spawn collectors for endpoint"
+            );
+
+            spawn_errors.push((endpoint_key, error));
+        }
+    }
+
+    // Reachability owns its cleanup lifecycle, so reconcile it even when
+    // ordinary collectors cannot start. Their aggregate takes precedence over
+    // a reachability error, which is logged separately below.
+    let reachability_result = reconcile_reachability_collectors(
+        ctx,
+        &sharded_endpoints,
+        data_sink.clone(),
+        metrics_prefix,
+    )
+    .await;
+
+    if matches!(&ctx.nmxc_config, Configurable::Enabled(_)) {
+        // Endpoints can remain active while Carbide API changes primary or
+        // NMX-C desired-state flags. Reconcile existing streams against the
+        // same target policy used for spawn.
+        let nmxc_eligible_endpoints = nmxc_subscription_keys(&sharded_endpoints);
+        stop_ineligible_nmxc_collectors(ctx, &nmxc_eligible_endpoints);
+    } else {
+        // If config disables NMX-C after streams already started, no endpoint
+        // remains eligible even though the endpoint keys may still be active.
+        stop_ineligible_nmxc_collectors(ctx, &HashSet::new());
+    }
+
+    if !spawn_errors.is_empty() {
+        if let Err(error) = reachability_result {
+            tracing::error!(?error, "Could not reconcile TCP reachability collectors");
+        }
+
+        return Err(HealthError::CollectorSpawnErrors(spawn_errors));
+    }
+
+    reachability_result?;
 
     let iteration_duration = iteration_start.elapsed();
     ctx.discovery_iteration_histogram
@@ -98,16 +228,24 @@ pub async fn run_discovery_iteration(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use carbide_instrument::testing::capture_logs_async;
     use carbide_uuid::rack::RackId;
     use mac_address::MacAddress;
 
     use super::*;
+    use crate::config::{Config, Configurable, NmxtCollectorConfig, ReachabilityCollectorConfig};
     use crate::endpoint::test_support::endpoint_with_creds;
     use crate::endpoint::{
-        BmcAddr, BmcCredentials, EndpointMetadata, SwitchData, SwitchEndpointRole,
+        BmcAddr, BmcCredentials, ComponentInventory, EndpointMetadata, InventorySnapshot,
+        RackInventory, StaticEndpointSource, SwitchData, SwitchEndpointRole,
     };
+    use crate::limiter::NoopLimiter;
+    use crate::metrics::MetricsManager;
+    use crate::sink::PrometheusSink;
 
+    /// Builds a generic endpoint fixture for discovery iteration tests.
     fn endpoint(mac: MacAddress, switch: bool, rack_id: Option<RackId>) -> Arc<BmcEndpoint> {
         let metadata = switch.then(|| {
             EndpointMetadata::Switch(SwitchData {
@@ -115,8 +253,10 @@ mod tests {
                 serial: format!("serial-{mac}"),
                 slot_number: None,
                 tray_index: None,
+                nvlink_domain_uuid: None,
                 endpoint_role: SwitchEndpointRole::Host,
                 is_primary: false,
+                nmxc_enabled: false,
                 nmxt_enabled: false,
             })
         });
@@ -124,7 +264,7 @@ mod tests {
             BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: Some(443),
-                mac,
+                mac: Some(mac),
             },
             BmcCredentials::UsernamePassword {
                 username: "user".to_string(),
@@ -133,6 +273,162 @@ mod tests {
             metadata,
             rack_id,
         ))
+    }
+
+    /// Builds a switch-host endpoint with primary and NMX-C desired-state flags.
+    fn switch_endpoint(mac: MacAddress, is_primary: bool, nmxc_enabled: bool) -> Arc<BmcEndpoint> {
+        switch_endpoint_with_role(mac, SwitchEndpointRole::Host, is_primary, nmxc_enabled)
+    }
+
+    /// Builds a switch endpoint with an explicit endpoint role.
+    fn switch_endpoint_with_role(
+        mac: MacAddress,
+        endpoint_role: SwitchEndpointRole,
+        is_primary: bool,
+        nmxc_enabled: bool,
+    ) -> Arc<BmcEndpoint> {
+        Arc::new(endpoint_with_creds(
+            BmcAddr {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: Some(443),
+                mac: Some(mac),
+            },
+            BmcCredentials::UsernamePassword {
+                username: "user".to_string(),
+                password: Some("pass".to_string()),
+            },
+            Some(EndpointMetadata::Switch(SwitchData {
+                id: None,
+                serial: format!("serial-{mac}"),
+                slot_number: None,
+                tray_index: None,
+                nvlink_domain_uuid: None,
+                endpoint_role,
+                is_primary,
+                nmxc_enabled,
+                nmxt_enabled: false,
+            })),
+            None,
+        ))
+    }
+
+    struct SuccessfulThenFailedInventorySource {
+        successful_snapshot_returned: AtomicBool,
+        rack: RackInventory,
+        component: ComponentInventory,
+    }
+
+    impl EndpointSource for SuccessfulThenFailedInventorySource {
+        fn fetch_bmc_hosts<'a>(
+            &'a self,
+        ) -> crate::endpoint::BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn fetch_snapshot<'a>(
+            &'a self,
+        ) -> crate::endpoint::BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+            Box::pin(async move {
+                let inventory = if self
+                    .successful_snapshot_returned
+                    .swap(true, Ordering::SeqCst)
+                {
+                    Err(HealthError::GenericError(
+                        "simulated inventory refresh failure".to_string(),
+                    ))
+                } else {
+                    Ok(Some(InventorySnapshot {
+                        racks: vec![self.rack.clone()],
+                        components: vec![self.component.clone()],
+                    }))
+                };
+
+                Ok(EndpointSnapshot {
+                    endpoints: Vec::new(),
+                    inventory,
+                })
+            })
+        }
+    }
+
+    fn inventory_exposition(exposition: &str) -> Vec<&str> {
+        exposition
+            .lines()
+            .filter(|line| {
+                line.contains("_component_inventory_info")
+                    || line.contains("_rack_nvlink_domain_info")
+                    || line.contains("_rack_session_start_time_seconds")
+                    || line.contains("_inventory_last_success_time_seconds")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn failed_inventory_refresh_retains_last_successful_snapshot() {
+        let rack_id = RackId::new("rack-inventory-retention");
+        let source: Arc<dyn EndpointSource> = Arc::new(SuccessfulThenFailedInventorySource {
+            successful_snapshot_returned: AtomicBool::new(false),
+            rack: RackInventory {
+                rack_id: rack_id.clone(),
+                created_seconds: Some(1_800_000_000),
+                created_nanos: Some(123_000_000),
+            },
+            component: ComponentInventory {
+                rack_id,
+                metadata: EndpointMetadata::Switch(SwitchData {
+                    id: None,
+                    serial: "switch-retained-after-failure".to_string(),
+                    slot_number: Some(1),
+                    tray_index: None,
+                    nvlink_domain_uuid: None,
+                    endpoint_role: SwitchEndpointRole::Bmc,
+                    is_primary: false,
+                    nmxc_enabled: false,
+                    nmxt_enabled: false,
+                }),
+                bmc_mac: Some(MacAddress::from_str("02:00:00:00:00:41").unwrap()),
+            },
+        });
+        let metrics_manager = Arc::new(
+            MetricsManager::new("inventory_retention_iteration")
+                .expect("metrics manager should start"),
+        );
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics_manager.clone(),
+            Arc::new(config),
+        )
+        .expect("discovery context should start");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("successful inventory iteration should complete");
+        let before_failure = metrics_manager.export_metrics().unwrap();
+        let inventory_before_failure = inventory_exposition(&before_failure);
+        assert!(before_failure.contains("carbide_hardware_health_component_inventory_info{"));
+        assert!(
+            before_failure.contains("carbide_hardware_health_rack_session_start_time_seconds{")
+        );
+        assert!(
+            before_failure.contains("carbide_hardware_health_inventory_last_success_time_seconds")
+        );
+
+        run_discovery_iteration(source, &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("collector discovery should continue after inventory failure");
+        let after_failure = metrics_manager.export_metrics().unwrap();
+
+        assert_eq!(
+            inventory_exposition(&after_failure),
+            inventory_before_failure,
+            "failed inventory refresh must retain component, rack, and last-success series"
+        );
     }
 
     #[tokio::test]
@@ -155,5 +451,281 @@ mod tests {
             HashSet::from([Cow::Owned(ep1.key()), Cow::Owned(ep2.key())])
         );
         assert_ne!(ep1.hash_key(), Cow::<str>::Owned(ep1.key()));
+    }
+
+    #[tokio::test]
+    /// Verifies NMX-C eligibility cleanup keys include only primary enabled switch hosts.
+    async fn test_nmxc_subscription_keys_only_include_primary_enabled_switch_hosts() {
+        let primary_enabled = switch_endpoint(
+            MacAddress::from_str("00:00:00:00:00:11").unwrap(),
+            true,
+            true,
+        );
+
+        let secondary_enabled = switch_endpoint(
+            MacAddress::from_str("00:00:00:00:00:12").unwrap(),
+            false,
+            true,
+        );
+
+        let primary_disabled = switch_endpoint(
+            MacAddress::from_str("00:00:00:00:00:13").unwrap(),
+            true,
+            false,
+        );
+
+        let primary_bmc_enabled = switch_endpoint_with_role(
+            MacAddress::from_str("00:00:00:00:00:14").unwrap(),
+            SwitchEndpointRole::Bmc,
+            true,
+            true,
+        );
+
+        let non_switch = endpoint(
+            MacAddress::from_str("00:00:00:00:00:15").unwrap(),
+            false,
+            None,
+        );
+
+        let expected_key = Cow::Owned(primary_enabled.key());
+
+        let keys = nmxc_subscription_keys(&[
+            primary_enabled,
+            secondary_enabled,
+            primary_disabled,
+            primary_bmc_enabled,
+            non_switch,
+        ]);
+
+        assert_eq!(keys, HashSet::from([expected_key]));
+    }
+
+    #[tokio::test]
+    async fn reachability_does_not_change_duplicate_endpoint_spawning() {
+        let mac = MacAddress::from_str("00:00:00:00:00:21").unwrap();
+        let first = switch_endpoint(mac, false, false);
+        let mut duplicate = first.as_ref().clone();
+
+        let Some(EndpointMetadata::Switch(switch)) = duplicate.metadata.as_mut() else {
+            panic!("test endpoint should contain switch metadata");
+        };
+
+        switch.nmxt_enabled = true;
+
+        let source: Arc<dyn EndpointSource> = Arc::new(StaticEndpointSource::new(vec![
+            first.as_ref().clone(),
+            duplicate,
+        ]));
+
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        config.collectors.sensors = Configurable::Disabled;
+        config.collectors.leak_detector = Configurable::Disabled;
+        config.collectors.nmxt = Configurable::Enabled(NmxtCollectorConfig::default());
+        config.collectors.reachability =
+            Configurable::Enabled(ReachabilityCollectorConfig::default());
+
+        let metrics_manager = Arc::new(
+            MetricsManager::new("duplicate_keys_with_reachability")
+                .expect("metrics manager should start"),
+        );
+
+        let mut ctx =
+            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
+                .expect("discovery context should start");
+
+        let stats = run_discovery_iteration(
+            source,
+            &ShardManager {
+                shard: 0,
+                shards_count: 1,
+            },
+            &mut ctx,
+            None,
+            "test",
+        )
+        .await
+        .expect("discovery iteration should succeed");
+
+        assert_eq!(stats.discovered_endpoints, 2);
+        assert_eq!(stats.sharded_endpoints, 2);
+        assert!(ctx.collectors.contains(CollectorKind::Nmxt, &first.key()));
+
+        let collector = ctx
+            .collectors
+            .map_mut(CollectorKind::Nmxt)
+            .remove(first.key().as_str())
+            .expect("NMX-T collector should have started");
+
+        collector.stop().await;
+    }
+
+    #[tokio::test]
+    async fn discovery_iteration_attempts_all_spawns_and_reconciles_before_spawn_errors() {
+        let active_endpoint = endpoint(
+            MacAddress::from_str("00:00:00:00:00:31").unwrap(),
+            false,
+            None,
+        );
+
+        let later_endpoint = endpoint(
+            MacAddress::from_str("00:00:00:00:00:32").unwrap(),
+            false,
+            None,
+        );
+
+        let second_conflicting_endpoint = endpoint(
+            MacAddress::from_str("00:00:00:00:00:33").unwrap(),
+            false,
+            None,
+        );
+
+        let source: Arc<dyn EndpointSource> = Arc::new(StaticEndpointSource::new(vec![
+            active_endpoint.as_ref().clone(),
+            later_endpoint.as_ref().clone(),
+            second_conflicting_endpoint.as_ref().clone(),
+        ]));
+
+        let metrics_manager = Arc::new(
+            MetricsManager::new("removed_nmxc_shutdown").expect("metrics manager should start"),
+        );
+
+        let _conflicting_registry = metrics_manager
+            .create_collector_registry(
+                format!("entity_discovery_collector_{}", active_endpoint.key()),
+                "test",
+            )
+            .expect("conflicting registry should start");
+
+        let _second_conflicting_registry = metrics_manager
+            .create_collector_registry(
+                format!(
+                    "entity_discovery_collector_{}",
+                    second_conflicting_endpoint.key()
+                ),
+                "test",
+            )
+            .expect("second conflicting registry should start");
+
+        let _reachability_conflicting_registry = metrics_manager
+            .create_collector_registry(
+                format!("reachability_collector_{}", active_endpoint.key()),
+                "test",
+            )
+            .expect("conflicting reachability registry should start");
+
+        let mut config = Config::default();
+        config.collectors.reachability =
+            Configurable::Enabled(ReachabilityCollectorConfig::default());
+
+        let sink: Arc<dyn DataSink> = Arc::new(
+            PrometheusSink::new(metrics_manager.clone(), "test")
+                .expect("Prometheus sink should start"),
+        );
+
+        let mut ctx =
+            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
+                .expect("discovery context should start");
+
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let collector_cancelled = Arc::clone(&cancelled);
+        let collector_release = Arc::clone(&release);
+
+        ctx.collectors.insert(
+            CollectorKind::Nmxc,
+            Cow::Borrowed("removed-switch"),
+            crate::collectors::Collector::spawn_task(move |cancel| async move {
+                cancel.cancelled().await;
+                collector_cancelled.notify_one();
+                collector_release.notified().await;
+            }),
+        );
+
+        ctx.collectors.insert(
+            CollectorKind::Nmxc,
+            Cow::Owned(active_endpoint.key()),
+            crate::collectors::Collector::spawn_task(|cancel| async move {
+                cancel.cancelled().await;
+            }),
+        );
+
+        let iteration_sink = sink.clone();
+
+        let iteration = tokio::spawn(async move {
+            let (result, logs) = capture_logs_async(run_discovery_iteration(
+                source,
+                &ShardManager {
+                    shard: 0,
+                    shards_count: 1,
+                },
+                &mut ctx,
+                Some(iteration_sink),
+                "test",
+            ))
+            .await;
+
+            (result, ctx, logs)
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancelled.notified())
+            .await
+            .expect("removed collector should be cancelled");
+
+        assert!(!iteration.is_finished());
+
+        release.notify_one();
+
+        let (result, mut ctx, logs) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), iteration)
+                .await
+                .expect("discovery iteration should finish after collector shutdown")
+                .expect("discovery task should not panic");
+
+        let error = result.expect_err("collector registry conflict should fail spawning");
+
+        let HealthError::CollectorSpawnErrors(spawn_errors) = error else {
+            panic!("expected aggregate collector spawn error");
+        };
+
+        let [(first_key, first_error), (second_key, second_error)] = spawn_errors.as_slice() else {
+            panic!("expected both endpoint spawn errors");
+        };
+
+        assert_eq!(first_key, &active_endpoint.key());
+
+        assert!(matches!(
+            first_error,
+            HealthError::PrometheusError(prometheus::Error::AlreadyReg)
+        ));
+
+        assert_eq!(second_key, &second_conflicting_endpoint.key());
+
+        assert!(matches!(
+            second_error,
+            HealthError::PrometheusError(prometheus::Error::AlreadyReg)
+        ));
+
+        assert!(
+            ctx.collectors
+                .contains(CollectorKind::Discovery, &later_endpoint.key()),
+            "the later endpoint must still be spawned after the first endpoint fails",
+        );
+
+        assert!(
+            !ctx.collectors
+                .contains(CollectorKind::Nmxc, &active_endpoint.key())
+        );
+
+        assert!(logs.iter().any(|log| {
+            log.message == "Could not reconcile TCP reachability collectors"
+                && log
+                    .field("error")
+                    .is_some_and(|error| error.contains("AlreadyReg"))
+        }));
+
+        reconcile_reachability_collectors(&mut ctx, &[], Some(sink), "test")
+            .await
+            .expect("reachability cleanup should succeed");
     }
 }

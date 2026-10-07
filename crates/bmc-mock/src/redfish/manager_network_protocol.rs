@@ -22,7 +22,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn manager_resource<'a>(manager_id: &'a str) -> redfish::Resource<'a> {
+pub(super) fn manager_resource<'a>(manager_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/NetworkProtocol");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -33,13 +33,13 @@ pub fn manager_resource<'a>(manager_id: &'a str) -> redfish::Resource<'a> {
 }
 
 /// Get builder of the network adapter.
-pub fn builder(resource: &redfish::Resource) -> ManagerNetworkProtocolBuilder {
+pub(super) fn builder(resource: &redfish::Resource) -> ManagerNetworkProtocolBuilder {
     ManagerNetworkProtocolBuilder {
         value: resource.json_patch(),
     }
 }
 
-pub struct ManagerNetworkProtocolBuilder {
+pub(super) struct ManagerNetworkProtocolBuilder {
     value: serde_json::Value,
 }
 
@@ -52,11 +52,25 @@ impl Builder for ManagerNetworkProtocolBuilder {
 }
 
 impl ManagerNetworkProtocolBuilder {
-    pub fn ipmi_enabled(self, value: bool) -> Self {
-        self.apply_patch(json!({"IPMI": { "ProtocolEnabled": value }}))
+    pub(super) fn ipmi(self, enabled: bool, port: Option<u16>) -> Self {
+        let value = self.apply_patch(json!({"IPMI": { "ProtocolEnabled": enabled }}));
+        match port {
+            Some(port) => value.apply_patch(json!({"IPMI": { "Port": port }})),
+            None => value,
+        }
     }
 
-    pub fn build(self) -> serde_json::Value {
+    pub(super) fn ntp(self, protocol_enabled: bool, servers: &[impl AsRef<str>]) -> Self {
+        let servers = servers.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        self.apply_patch(json!({
+            "NTP": {
+                "NTPServers": servers,
+                "ProtocolEnabled": protocol_enabled,
+            },
+        }))
+    }
+
+    pub(super) fn build(self) -> serde_json::Value {
         self.value
     }
 }

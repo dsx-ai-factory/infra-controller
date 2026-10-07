@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use diff::Result as DiffResult;
 use eyre::{OptionExt, WrapErr};
 use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
@@ -163,7 +163,7 @@ impl ServiceAddresses {
     /// containerized mode the agent's own `/etc/resolv.conf` points at the
     /// cluster DNS, so nameservers are read from a file the init-container
     /// populated from the *host's* `/etc/resolv.conf`.
-    pub async fn build(
+    pub(super) async fn build(
         agent_platform_type: &AgentPlatformType,
         is_fake_dpu: bool,
     ) -> Result<Self, eyre::Report> {
@@ -178,12 +178,12 @@ impl ServiceAddresses {
             .await
             .wrap_err("DNS resolver for carbide-pxe")?;
         // This log should be removed after some time.
-        tracing::info!(?pxe_ips, "Pxe server resolved");
+        tracing::info!(pxe_ip_addresses = ?pxe_ips, "Pxe server resolved");
 
         let ntpservers = match url_resolver.resolve("carbide-ntp.forge").await {
             Ok(x) => {
                 // This log should be removed after some time.
-                tracing::info!(?x, "NTP servers resolved.");
+                tracing::info!(ntp_server_ip_addresses = ?x, "NTP servers resolved.");
                 x
             }
             Err(e) => {
@@ -264,7 +264,7 @@ pub async fn get_instance(
         Ok(response) => response.into_inner().instances,
         Err(err) => {
             return Err(eyre::eyre!(
-                "Error while executing the FindInstanceByMachineId gRPC call: {}",
+                "error while executing the FindInstanceByMachineId gRPC call: {}",
                 err.to_string()
             ));
         }
@@ -282,7 +282,7 @@ pub async fn get_sitename(client: &mut ForgeClientT) -> Result<Option<String>, e
         Ok(response) => response.into_inner(),
         Err(err) => {
             return Err(eyre::eyre!(
-                "Error while executing the Version gRPC call: {}",
+                "error while executing the version gRPC call: {}",
                 err.to_string()
             ));
         }
@@ -302,14 +302,14 @@ pub async fn get_periodic_dpu_config(
     dpu_machine_id: &MachineId,
 ) -> Result<rpc::forge::ManagedHostNetworkConfigResponse, eyre::Error> {
     let request = tonic::Request::new(ManagedHostNetworkConfigRequest {
-        dpu_machine_id: Some(*dpu_machine_id),
+        dpu_machine_id: Some(DpuMachineId::try_from(*dpu_machine_id)?),
     });
 
     let resp = match client.get_managed_host_network_config(request).await {
         Ok(response) => response,
         Err(err) => {
             return Err(eyre::eyre!(
-                "Error while executing the GetManagedHostNetworkConfig gRPC call: {}",
+                "error while executing the GetManagedHostNetworkConfig gRPC call: {}",
                 err.to_string()
             ));
         }
@@ -325,7 +325,7 @@ pub async fn phone_home(
 ) -> Result<Timestamp, eyre::Error> {
     let Some(instance) = get_instance(client, dpu_machine_id).await? else {
         return Err(eyre::eyre!(
-            "No instance found with dpu_machine {}.",
+            "no instance found with dpu_machine {}",
             dpu_machine_id
         ));
     };
@@ -348,7 +348,7 @@ pub async fn phone_home(
 pub fn get_host_boot_timestamp() -> Result<u64, eyre::Error> {
     let proc_stat = File::open("/proc/stat")
         .map(BufReader::new)
-        .wrap_err("Couldn't open /proc/stat")?;
+        .wrap_err("couldn't open /proc/stat")?;
     let btime_value = proc_stat
         .lines()
         .find_map(|line| match line {
@@ -364,11 +364,11 @@ pub fn get_host_boot_timestamp() -> Result<u64, eyre::Error> {
             err => Some(err),
         })
         .transpose()
-        .wrap_err("Couldn't read /proc/stat")?
-        .ok_or_eyre("Couldn't find btime line in /proc/stat")?;
+        .wrap_err("couldn't read /proc/stat")?
+        .ok_or_eyre("couldn't find btime line in /proc/stat")?;
     btime_value
         .parse()
-        .wrap_err("Couldn't parse btime value as u64")
+        .wrap_err("couldn't parse btime value as u64")
 }
 
 #[cfg(test)]

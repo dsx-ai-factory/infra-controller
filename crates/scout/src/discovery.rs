@@ -22,7 +22,7 @@ use crate::CarbideClientError;
 use crate::cfg::Options;
 use crate::client::create_forge_client;
 
-pub(crate) async fn completed(
+pub(super) async fn completed(
     config: &Options,
     machine_id: &MachineId,
 ) -> Result<(), CarbideClientError> {
@@ -33,7 +33,7 @@ pub(crate) async fn completed(
     client.discovery_completed(request).await?;
     Ok(())
 }
-pub(crate) async fn rebooted(
+pub(super) async fn rebooted(
     config: &Options,
     machine_id: &MachineId,
 ) -> Result<(), CarbideClientError> {

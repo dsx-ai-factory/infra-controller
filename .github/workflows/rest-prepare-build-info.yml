@@ -21,9 +21,17 @@ on:
       full_sha:
         description: "Full SHA of the current commit"
         value: ${{ jobs.prepare.outputs.full_sha }}
+      binary_version:
+        description: "Version embedded in production REST command binaries"
+        value: ${{ jobs.prepare.outputs.binary_version }}
+      build_timestamp:
+        description: "UTC RFC3339 timestamp embedded in production REST command binaries"
+        value: ${{ jobs.prepare.outputs.build_timestamp }}
       target_registry:
         description: "Target NVCR registry path"
         value: ${{ jobs.prepare.outputs.target_registry }}
+      target_ngc_path:
+        value: ${{ jobs.prepare.outputs.target_ngc_path }}
       branch_name:
         description: "Sanitized branch name for use in image tags"
         value: ${{ jobs.prepare.outputs.branch_name }}
@@ -52,7 +60,10 @@ jobs:
       semantic_version: ${{ steps.generate-version.outputs.semantic_version }}
       short_sha: ${{ steps.generate-version.outputs.short_sha }}
       full_sha: ${{ steps.generate-version.outputs.full_sha }}
+      binary_version: ${{ steps.generate-version.outputs.binary_version }}
+      build_timestamp: ${{ steps.generate-version.outputs.build_timestamp }}
       target_registry: ${{ steps.generate-version.outputs.target_registry }}
+      target_ngc_path: ${{ steps.generate-version.outputs.target_ngc_path }}
       branch_name: ${{ steps.generate-version.outputs.branch_name }}
       branch_sha_tag: ${{ steps.generate-version.outputs.branch_sha_tag }}
       is_main_branch: ${{ steps.generate-version.outputs.is_main_branch }}
@@ -64,65 +75,131 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
+          # Full depth so `git describe --tags` below can reach the last tag.
+          # Submodules are not checked out: this job reads nothing outside the
+          # git metadata of the superproject.
           fetch-depth: 0
-          submodules: recursive
 
       - name: Generate version and build information
         id: generate-version
+        env:
+          REGISTRY_OVERRIDE: ${{ vars.NICO_TARGET_IMAGE_REGISTRY }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
+          NGC_PATH_OVERRIDE: ${{ vars.NICO_TARGET_NGC_PATH }}
         run: |
-          git fetch --tags --force
-          RAW_VERSION=$(git describe --tags --first-parent --always --long)
+          RAW_VERSION=$(git describe --tags --first-parent --always)
           SEMANTIC_VERSION="${RAW_VERSION}"
 
           SHORT_SHA=$(git rev-parse --short HEAD)
           FULL_SHA=$(git rev-parse HEAD)
 
-          target_registry="nvcr.io/0837451325059433/carbide-dev"
+          if [[ "${REGISTRY_OVERRIDE}${NGC_PATH_OVERRIDE}" == *$'\n'* || "${REGISTRY_OVERRIDE}${NGC_PATH_OVERRIDE}" == *$'\r'* ]]; then
+            echo "::error::registry variables must be single-line values"
+            exit 1
+          fi
+          # canonical endpoints are constants: variables must not redirect them
+          if [ "${GITHUB_REPOSITORY}" = "dsx-ai-factory/infra-controller" ]; then
+            target_registry="nvcr.io/0837451325059433/carbide-dev"
+          else
+            if [ -z "${REGISTRY_OVERRIDE}" ]; then
+              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside dsx-ai-factory/infra-controller"
+              exit 1
+            fi
+            _norm="${REGISTRY_OVERRIDE%/}"
+            _host=$(printf '%s' "${_norm%%/*}" | tr '[:upper:]' '[:lower:]'); _host="${_host%:443}"
+            _path=$(printf '%s' "${_norm#*/}" | tr '[:upper:]' '[:lower:]')
+            case "${_host}/${_path}" in
+              "nvcr.io/0837451325059433/carbide-dev"|"nvcr.io/0837451325059433/carbide")
+                echo "::error::this repository must not target the canonical registries"
+                exit 1;;
+            esac
+            target_registry="${REGISTRY_OVERRIDE}"
+          fi
+          target_registry="${target_registry%/}"
 
-          BRANCH_NAME="${{ github.ref_name }}"
+          BRANCH_NAME="${GITHUB_REF_NAME}"
           BRANCH_NAME=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
           BRANCH_SHA_TAG="${BRANCH_NAME}-${SHORT_SHA}"
 
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
             IS_MAIN_BRANCH="true"
           else
             IS_MAIN_BRANCH="false"
           fi
 
-          REF_NAME="${{ github.ref_name }}"
+          REF_NAME="${GITHUB_REF_NAME}"
           if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
             RELEASE_TAG="${REF_NAME}"
           else
             RELEASE_TAG=""
           fi
 
-          if echo "${{ github.event.head_commit.message }}" | grep -q "push-container"; then
+          # Keep this precedence aligned with the manual-only resolver in
+          # rest-build-binaries.yml.
+          if [ "${IS_MAIN_BRANCH}" = "true" ]; then
+            BINARY_VERSION="${SEMANTIC_VERSION}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            BINARY_VERSION="${RELEASE_TAG}"
+          elif [ -n "${BRANCH_NAME}" ]; then
+            BINARY_VERSION="${BRANCH_SHA_TAG}"
+          else
+            echo "::error::cannot derive a binary version from ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          if [[ ! "${BINARY_VERSION}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::derived binary version is not safe: ${BINARY_VERSION}"
+            exit 1
+          fi
+          BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          if printf '%s' "${COMMIT_MESSAGE}" | grep -q "push-container"; then
             PUSH_REQUESTED="true"
           else
             PUSH_REQUESTED="false"
           fi
 
-          echo "semantic_version=$SEMANTIC_VERSION" >> $GITHUB_OUTPUT
-          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "full_sha=$FULL_SHA" >> $GITHUB_OUTPUT
-          echo "target_registry=$target_registry" >> $GITHUB_OUTPUT
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "branch_sha_tag=$BRANCH_SHA_TAG" >> $GITHUB_OUTPUT
-          echo "is_main_branch=$IS_MAIN_BRANCH" >> $GITHUB_OUTPUT
-          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          echo "push_requested=$PUSH_REQUESTED" >> $GITHUB_OUTPUT
+          # Helm chart version: strip leading `v`, then for non-exact-tag commits replace the
+          # last `-` with `.` to align with core helm_version (e.g. `v1.6.0-3-gabc1234` -> `1.6.0-3.gabc1234`).
+          HELM_VERSION="${RAW_VERSION#v}"
+          if [[ "$RAW_VERSION" =~ -g[0-9a-f]+$ ]]; then
+            HELM_VERSION="${HELM_VERSION%-*}.${HELM_VERSION##*-}"
+          fi
 
-          # Strict SemVer for Helm chart version, aligned with core's helm_version derivation.
-          # `git describe` output `v1.6.0-3-gabc1234` becomes `1.6.0-3.gabc1234`
-          # (leading `v` stripped, last `-` -> `.`).
-          HELM_VERSION_BASE="${RAW_VERSION#v}"
-          HELM_VERSION=$(echo "$HELM_VERSION_BASE" | sed 's/\(.*\)-/\1./')
-          echo "helm_version=$HELM_VERSION" >> $GITHUB_OUTPUT
+          if [ "${GITHUB_REPOSITORY}" != "dsx-ai-factory/infra-controller" ]; then
+            case "${NGC_PATH_OVERRIDE%/}" in
+              "0837451325059433/carbide-dev"|"0837451325059433/carbide")
+                echo "::error::this repository must not publish helm/resources to the canonical NGC path"
+                exit 1;;
+            esac
+          fi
+
+          {
+            echo "semantic_version=${SEMANTIC_VERSION}"
+            echo "short_sha=${SHORT_SHA}"
+            echo "full_sha=${FULL_SHA}"
+            echo "binary_version=${BINARY_VERSION}"
+            echo "build_timestamp=${BUILD_TIMESTAMP}"
+            echo "target_registry=${target_registry}"
+            if [ "${GITHUB_REPOSITORY}" = "dsx-ai-factory/infra-controller" ]; then
+              echo "target_ngc_path=${target_registry#*/}"
+            else
+              echo "target_ngc_path=${NGC_PATH_OVERRIDE:-}"
+            fi
+            echo "branch_name=${BRANCH_NAME}"
+            echo "branch_sha_tag=${BRANCH_SHA_TAG}"
+            echo "is_main_branch=${IS_MAIN_BRANCH}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "push_requested=${PUSH_REQUESTED}"
+            echo "helm_version=${HELM_VERSION}"
+          } >> "${GITHUB_OUTPUT}"
 
           echo "Generated build information:"
           echo "  SEMANTIC_VERSION: $SEMANTIC_VERSION"
           echo "  SHORT_SHA: $SHORT_SHA"
           echo "  FULL_SHA: $FULL_SHA"
+          echo "  BINARY_VERSION: $BINARY_VERSION"
+          echo "  BUILD_TIMESTAMP: $BUILD_TIMESTAMP"
           echo "  TARGET_REGISTRY: $target_registry"
           echo "  BRANCH_NAME: $BRANCH_NAME"
           echo "  BRANCH_SHA_TAG: $BRANCH_SHA_TAG"
@@ -132,18 +209,36 @@ jobs:
           echo "  HELM_VERSION: $HELM_VERSION"
 
       - name: Generate build summary
+        env:
+          SUMMARY_SEMANTIC_VERSION: ${{ steps.generate-version.outputs.semantic_version }}
+          SUMMARY_SHORT_SHA: ${{ steps.generate-version.outputs.short_sha }}
+          SUMMARY_BINARY_VERSION: ${{ steps.generate-version.outputs.binary_version }}
+          SUMMARY_BUILD_TIMESTAMP: ${{ steps.generate-version.outputs.build_timestamp }}
+          SUMMARY_FULL_SHA: ${{ steps.generate-version.outputs.full_sha }}
+          SUMMARY_REF_NAME: ${{ github.ref_name }}
+          SUMMARY_BRANCH_NAME: ${{ steps.generate-version.outputs.branch_name }}
+          SUMMARY_BRANCH_SHA_TAG: ${{ steps.generate-version.outputs.branch_sha_tag }}
+          SUMMARY_IS_MAIN_BRANCH: ${{ steps.generate-version.outputs.is_main_branch }}
+          SUMMARY_RELEASE_TAG: ${{ steps.generate-version.outputs.release_tag }}
+          SUMMARY_PUSH_REQUESTED: ${{ steps.generate-version.outputs.push_requested }}
+          SUMMARY_HELM_VERSION: ${{ steps.generate-version.outputs.helm_version }}
+          SUMMARY_TARGET_REGISTRY: ${{ steps.generate-version.outputs.target_registry }}
         run: |
-          echo "# Build Information Generated" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Version Details" >> $GITHUB_STEP_SUMMARY
-          echo "- **Semantic Version**: \`${{ steps.generate-version.outputs.semantic_version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Short SHA**: \`${{ steps.generate-version.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Full SHA**: \`${{ steps.generate-version.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch Name (sanitized)**: \`${{ steps.generate-version.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch-SHA Tag**: \`${{ steps.generate-version.outputs.branch_sha_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Is Main Branch**: \`${{ steps.generate-version.outputs.is_main_branch }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release Tag**: \`${{ steps.generate-version.outputs.release_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Push Requested**: \`${{ steps.generate-version.outputs.push_requested }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Helm Version**: \`${{ steps.generate-version.outputs.helm_version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Target Registry**: \`${{ steps.generate-version.outputs.target_registry }}\`" >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+
+          {
+            printf '%s\n' "# Build Information Generated" "" "## Version Details"
+            printf '%s\n' "- **Semantic Version**: \`${SUMMARY_SEMANTIC_VERSION}\`"
+            printf '%s\n' "- **Short SHA**: \`${SUMMARY_SHORT_SHA}\`"
+            printf '%s\n' "- **Binary Version**: \`${SUMMARY_BINARY_VERSION}\`"
+            printf '%s\n' "- **Build Timestamp**: \`${SUMMARY_BUILD_TIMESTAMP}\`"
+            printf '%s\n' "- **Full SHA**: \`${SUMMARY_FULL_SHA}\`"
+            printf '%s\n' "- **Branch**: \`${SUMMARY_REF_NAME}\`"
+            printf '%s\n' "- **Branch Name (sanitized)**: \`${SUMMARY_BRANCH_NAME}\`"
+            printf '%s\n' "- **Branch-SHA Tag**: \`${SUMMARY_BRANCH_SHA_TAG}\`"
+            printf '%s\n' "- **Is Main Branch**: \`${SUMMARY_IS_MAIN_BRANCH}\`"
+            printf '%s\n' "- **Release Tag**: \`${SUMMARY_RELEASE_TAG}\`"
+            printf '%s\n' "- **Push Requested**: \`${SUMMARY_PUSH_REQUESTED}\`"
+            printf '%s\n' "- **Helm Version**: \`${SUMMARY_HELM_VERSION}\`"
+            printf '%s\n' "- **Target Registry**: \`${SUMMARY_TARGET_REGISTRY}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

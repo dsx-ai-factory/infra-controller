@@ -25,65 +25,66 @@ use measured_boot::records::MeasurementJournalRecord;
 use measured_boot::{ToTable, just_print_summary};
 use serde::Serialize;
 
-use crate::attestation::measured_boot::global;
-use crate::attestation::measured_boot::journal::args::{CmdJournal, Delete, List, Promote, Show};
+use crate::attestation::measured_boot::journal::args::{Delete, List, Promote, Show};
 use crate::attestation::measured_boot::report::args::Promote as ReportPromoteArgs;
 use crate::attestation::measured_boot::report::cmds::promote as report_promote;
-use crate::cli_output;
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-/// dispatch matches + dispatches the correct command for
-/// the `journal` subcommand.
-pub async fn dispatch(
-    cmd: CmdJournal,
-    cli: &mut global::cmds::CliData<'_, '_>,
-) -> CarbideCliResult<()> {
-    match cmd {
-        CmdJournal::Delete(local_args) => {
-            cli_output(
-                delete(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
+impl Run for Delete {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            delete(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Show {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if self.journal_id.is_some() {
+            crate::cli_output(
+                show_by_id(&ctx.api_client, self).await?,
+                &ctx.config.format,
                 crate::Destination::Stdout(),
-            )?;
-        }
-        CmdJournal::Show(local_args) => {
-            if local_args.journal_id.is_some() {
-                cli_output(
-                    show_by_id(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            } else {
-                cli_output(
-                    show_all(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-        }
-        CmdJournal::List(local_args) => {
-            cli_output(
-                list(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
+            )
+        } else {
+            crate::cli_output(
+                show_all(&ctx.api_client, self).await?,
+                &ctx.config.format,
                 crate::Destination::Stdout(),
-            )?;
-        }
-        CmdJournal::Promote(local_args) => {
-            cli_output(
-                promote(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
+            )
         }
     }
-    Ok(())
+}
+
+impl Run for List {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Promote {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            promote(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
 }
 
 /// delete deletes an existing journal entry.
 ///
 /// `journal delete <journal-id>`
-pub async fn delete(grpc_conn: &ApiClient, delete: Delete) -> CarbideCliResult<MeasurementJournal> {
+async fn delete(grpc_conn: &ApiClient, delete: Delete) -> CarbideCliResult<MeasurementJournal> {
     let response = grpc_conn.0.delete_measurement_journal(delete).await?;
 
     MeasurementJournal::from_grpc_opt(response.journal)
@@ -93,7 +94,7 @@ pub async fn delete(grpc_conn: &ApiClient, delete: Delete) -> CarbideCliResult<M
 /// show_by_id shows all info about a journal entry for the provided ID.
 ///
 /// `journal show <journal-id>`
-pub async fn show_by_id(grpc_conn: &ApiClient, show: Show) -> CarbideCliResult<MeasurementJournal> {
+async fn show_by_id(grpc_conn: &ApiClient, show: Show) -> CarbideCliResult<MeasurementJournal> {
     let response = grpc_conn
         .0
         .show_measurement_journal(ShowMeasurementJournalRequest::try_from(show)?)
@@ -106,10 +107,7 @@ pub async fn show_by_id(grpc_conn: &ApiClient, show: Show) -> CarbideCliResult<M
 /// show_all shows all info about all journal entries.
 ///
 /// `journal show`
-pub async fn show_all(
-    grpc_conn: &ApiClient,
-    _show: Show,
-) -> CarbideCliResult<MeasurementJournalList> {
+async fn show_all(grpc_conn: &ApiClient, _show: Show) -> CarbideCliResult<MeasurementJournalList> {
     Ok(MeasurementJournalList(
         grpc_conn
             .0
@@ -128,10 +126,7 @@ pub async fn show_all(
 /// list just lists all journal IDs.
 ///
 /// `journal list`
-pub async fn list(
-    grpc_conn: &ApiClient,
-    list: List,
-) -> CarbideCliResult<MeasurementJournalRecordList> {
+async fn list(grpc_conn: &ApiClient, list: List) -> CarbideCliResult<MeasurementJournalRecordList> {
     Ok(MeasurementJournalRecordList(
         grpc_conn
             .0
@@ -155,10 +150,7 @@ pub async fn list(
 /// the report associated with the journal.
 ///
 /// `journal promote <journal-id> [--pcr-registers <range0>,...]`
-pub async fn promote(
-    grpc_conn: &ApiClient,
-    promote: Promote,
-) -> CarbideCliResult<MeasurementBundle> {
+async fn promote(grpc_conn: &ApiClient, promote: Promote) -> CarbideCliResult<MeasurementBundle> {
     let journal = show_by_id(
         grpc_conn,
         Show {
@@ -181,7 +173,7 @@ pub async fn promote(
 /// for a Vec<MeasurementJournalRecord> so the ToTable trait can
 /// be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementJournalRecordList(Vec<MeasurementJournalRecord>);
+struct MeasurementJournalRecordList(Vec<MeasurementJournalRecord>);
 
 impl ToTable for MeasurementJournalRecordList {
     fn into_table(self) -> eyre::Result<String> {
@@ -242,7 +234,7 @@ impl ToTable for MeasurementJournalRecordList {
 /// pattern for a Vec<MeasurementJournal> so the ToTable
 /// trait can be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementJournalList(Vec<MeasurementJournal>);
+struct MeasurementJournalList(Vec<MeasurementJournal>);
 
 // When `journal show` gets called (for all entries), and the output format
 // is the default table view, this gets used to print a pretty table.

@@ -25,7 +25,7 @@ Browse a Redfish resource tree via the API server (no BMC --address needed):
     $ nico-admin-cli browse redfish --uri /redfish/v1/Systems
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "Redfish URI")]
-    pub uri: String,
+    pub(super) uri: String,
 }

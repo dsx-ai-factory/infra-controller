@@ -232,19 +232,16 @@ mod sqlx_db_tests {
 
 impl fmt::Display for VpcVirtualizationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EthernetVirtualizer | Self::EthernetVirtualizerWithNvue => write!(f, "etv"),
-            Self::Fnn => write!(f, "fnn"),
-            Self::Flat => write!(f, "flat"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
-/// Concatenate a required IPv4 value with an optional IPv6 value into a vector.
-/// Empty IPv6 strings are filtered out.
-pub fn build_dual_stack_list(v4: String, v6: Option<String>) -> Vec<String> {
-    std::iter::once(v4)
-        .chain(v6.filter(|s| !s.is_empty()))
+/// Concatenate IPv4 and IPv6 values in family order. Empty strings and `None`
+/// represent absent families and are omitted.
+pub fn build_dual_stack_list(v4: Option<String>, v6: Option<String>) -> Vec<String> {
+    v4.into_iter()
+        .chain(v6)
+        .filter(|value| !value.is_empty())
         .collect()
 }
 
@@ -256,7 +253,7 @@ impl FromStr for VpcVirtualizationType {
             "etv" | "etv_nvue" => Ok(Self::EthernetVirtualizer),
             "fnn" => Ok(Self::Fnn),
             "flat" => Ok(Self::Flat),
-            x => Err(eyre::eyre!(format!("Unknown virt type {}", x))),
+            x => Err(eyre::eyre!(format!("unknown virt type {}", x))),
         }
     }
 }
@@ -307,7 +304,7 @@ pub fn get_svi_ip(
 ) -> eyre::Result<Option<IpNetwork>> {
     if virtualization_type == VpcVirtualizationType::Fnn && is_l2_segment {
         let Some(svi_ip) = svi_ip else {
-            return Err(eyre::eyre!(format!("SVI IP is not allocated.",)));
+            return Err(eyre::eyre!(format!("SVI IP is not allocated",)));
         };
 
         return Ok(Some(IpNetwork::new(*svi_ip, prefix)?));
@@ -379,11 +376,11 @@ mod tests {
                 Ok::<_, ()>(tokens.iter().all(|t| produced.contains(t)))
             };
             "error names the unknown token" {
-                ("bogus", &["Unknown virt type", "bogus"][..]) => Yields(true),
+                ("bogus", &["unknown virt type", "bogus"][..]) => Yields(true),
             }
 
             "error echoes a numeric token" {
-                ("42", &["Unknown virt type", "42"][..]) => Yields(true),
+                ("42", &["unknown virt type", "42"][..]) => Yields(true),
             }
         );
     }
@@ -547,23 +544,27 @@ mod tests {
         value_scenarios!(
             run = |(v4, v6)| build_dual_stack_list(v4, v6);
             "v4 only when v6 is absent" {
-                ("10.0.0.1".to_string(), None) => vec!["10.0.0.1".to_string()],
+                (Some("10.0.0.1".to_string()), None) => vec!["10.0.0.1".to_string()],
             }
 
             "v4 then v6 when both present" {
-                ("10.0.0.1".to_string(), Some("2001:db8::1".to_string())) => vec!["10.0.0.1".to_string(), "2001:db8::1".to_string()],
+                (Some("10.0.0.1".to_string()), Some("2001:db8::1".to_string())) => vec!["10.0.0.1".to_string(), "2001:db8::1".to_string()],
             }
 
             "empty v6 string is filtered out" {
-                ("10.0.0.1".to_string(), Some(String::new())) => vec!["10.0.0.1".to_string()],
+                (Some("10.0.0.1".to_string()), Some(String::new())) => vec!["10.0.0.1".to_string()],
             }
 
-            "v4 is kept even when empty (it is required)" {
-                (String::new(), None) => vec![String::new()],
+            "both families absent" {
+                (None, None) => vec![],
             }
 
-            "empty v4 with a real v6 keeps both" {
-                (String::new(), Some("2001:db8::1".to_string())) => vec![String::new(), "2001:db8::1".to_string()],
+            "v6 only when v4 is absent" {
+                (None, Some("2001:db8::1".to_string())) => vec!["2001:db8::1".to_string()],
+            }
+
+            "empty strings for both families are absent" {
+                (Some(String::new()), Some(String::new())) => vec![],
             }
         );
     }

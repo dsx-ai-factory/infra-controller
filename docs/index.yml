@@ -16,6 +16,11 @@ navigation:
       path: index.md
       icon: home
 
+    - changelog: ../fern/changelog
+      title: Release Notes
+      icon: clock
+      slug: release-notes
+
     - section: Overview
       contents:
         - page: What is NICo?
@@ -52,19 +57,26 @@ navigation:
           contents:
             - page: Reference Installation
               path: getting-started/installation-options/reference-install.md
-            - page: Day 0 IP and Network Configuration
-              path: getting-started/installation-options/day0-ip-network-config.md
             - page: DPF Setup for NICo Integration
               path: manuals/dpf.md
               slug: dpf-setup
             - page: Day 0 Machine Identity
               path: getting-started/installation-options/day0-machine-identity.md
+            - page: Day 0 Credential Store
+              path: getting-started/installation-options/day0-credential-store.md
           slug: installation-options
 
     - section: Architecture
       contents:
         - page: Overview and Components
           path: architecture/overview.md
+        - page: NICo Flow
+          path: architecture/flow.md
+          slug: flow
+        - section: Backends
+          contents:
+            - page: RMS
+              path: architecture/backends/rms.md
         - section: Redfish
           contents:
             - page: Redfish Workflow
@@ -95,19 +107,35 @@ navigation:
               path: architecture/state_machines/managedhost.md
             - page: Switch
               path: architecture/state_machines/switch.md
+            - page: Switch Certificate Configuration
+              path: architecture/state_machines/switch_configure_certificate.md
             - page: Power Shelf
               path: architecture/state_machines/power_shelf.md
-            - page: Rack State Machine
+            - page: Rack (Machine / Switch / Power Shelf)
+              path: architecture/state_machines/rackstatemachine.md
+            - page: On-Demand Rack Maintenance
               path: architecture/state_machines/rack.md
         - page: SuperNIC Lockdown Key Management
           path: architecture/supernic_lockdown_key_management.md
 
     - section: Provisioning (Day 0)
       contents:
+        - page: IP and Network Configuration
+          path: provisioning/ip-and-network-configuration.md
+        - page: Deploy DHCPv6
+          path: provisioning/dhcpv6-deployment.md
         - page: Ingesting Hosts
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
           path: provisioning/ingesting-hosts-rest-api.md
+        - page: Discovery OS cloud-init (Scout)
+          path: provisioning/discovery-os-cloud-init.md
+        - page: Configure Expected Machine Interfaces
+          path: provisioning/expected-machine-interfaces.md
+        - page: Site Setup API Parity
+          path: provisioning/site-setup-api-parity.md
+        - page: Boot Interfaces and DPU Policies
+          path: provisioning/boot-interfaces-and-dpu-modes.md
         - page: Machine Validation
           path: provisioning/machine-validation.md
         - page: SKU Validation
@@ -119,17 +147,43 @@ navigation:
       contents:
         - page: Network Isolation
           path: configuration/network-isolation.md
+        - section: InfiniBand
+          contents:
+            - page: InfiniBand Setup
+              path: playbooks/ib_runbook.md
+            - page: InfiniBand Partitioning
+              path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: Tenant Management with Keycloak
+          path: configuration/tenant-management-keycloak.md
+        - page: Image-Based Operating Systems
+          path: configuration/image-based-operating-systems.md
+        - page: Templated iPXE Operating Systems
+          path: configuration/templated-ipxe-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity
           path: configuration/machine_identity.md
+        - page: Secrets Storage
+          path: configuration/secrets-storage.md
+        - page: Credential Sources
+          path: configuration/credential-sources.md
         - page: Host Naming
           path: configuration/host-naming.md
+        - page: DNS
+          path: configuration/dns.md
+        - page: Flow Component Managers
+          path: configuration/flow-component-manager.md
+          slug: flow-component-managers
+        - page: RMS Configuration
+          path: configuration/rms.md
 
     - section: Operations (Day 2)
       contents:
+        - page: Upgrading NICo
+          path: manuals/upgrade.md
+          slug: upgrading-nico
         - section: DPU Management
           contents:
             - page: DPU Lifecycle Management
@@ -140,18 +194,57 @@ navigation:
               path: manuals/dpu_extension_service.md
             - page: BlueField DPU Operations
               path: dpu-management/dpu-operations.md
-        - page: Firmware Updates
-          path: operations/firmware-updates.md
+        - section: Flow Operations
+          slug: flow-operations
+          contents:
+            - page: Overview
+              path: operations/flow/overview.md
+              slug: overview
+            - page: Operation Rules
+              path: operations/flow/operation-rules.md
+              slug: operation-rules
+            - page: Task Schedules
+              path: operations/flow/task-schedules.md
+              slug: task-schedules
+            - page: Operation Runs
+              path: operations/flow/operation-runs.md
+              slug: operation-runs
+        - section: Firmware Updates
+          contents:
+            - page: Overview
+              path: operations/firmware-updates.md
+            - page: Configure Firmware Versions
+              path: operations/firmware-updates/configuration.md
+            - page: Pre-ingestion Firmware Updates
+              path: operations/firmware-updates/pre-ingestion.md
+            - page: Managed Host Firmware Updates
+              path: operations/firmware-updates/host-firmware.md
+            - page: DPU Firmware Updates
+              path: operations/firmware-updates/dpu-firmware.md
+            - page: Rack and Tray Firmware Updates
+              path: operations/firmware-updates/rack-component-firmware.md
+        - page: NVOS Password Rotation
+          path: operations/nvos-password-rotation.md
         - page: Monitoring and Health
           path: operations/monitoring-health.md
+        - page: NICo MCP Server
+          path: operations/nico-mcp.md
         - page: Tenant Lifecycle Cleanup
           path: operations/tenant-lifecycle-cleanup.md
+        - section: Decommissioning
+          contents:
+            - page: Overview
+              path: decommissioning/index.md
+            - page: Decommission Managed Hosts and DPUs
+              path: decommissioning/hosts.md
+            - page: Decommission Managed Switches
+              path: decommissioning/switches.md
+            - page: Decommission Managed Power Shelves
+              path: decommissioning/power-shelves.md
         - page: Network Isolation
           path: manuals/network_isolation.md
         - page: Network Security Groups
           path: manuals/networking/network_security_groups.md
-        - page: InfiniBand Partitioning
-          path: manuals/networking/infiniband_partitioning.md
         - page: Machine Identity KEK Rotation
           path: manuals/machine_identity_kek_rotation.md
         - page: Machine Identity Verification
@@ -160,12 +253,18 @@ navigation:
           path: manuals/machine_identity_signing_key_rotation.md
         - page: NVLink Partitioning
           path: manuals/nvlink_partitioning.md
-        - page: Rack-Level Administration (RLA)
+        - page: NMX-C Certificate Monitoring and Rotation
+          path: operations/nvlink-certificate-rotation.md
+        - page: Rack-Level Administration
           path: manuals/rack_level_admin.md
+        - page: Leak Detection & Handling
+          path: operations/leak-detection-handling.md
         - section: Managing VPCs
           contents:
             - page: VPC Routing Profiles
               path: manuals/vpc/vpc_routing_profiles.md
+            - page: Changing a VPC Routing Profile
+              path: manuals/vpc/changing_vpc_routing_profiles.md
             - page: VPC Peering
               path: manuals/vpc/vpc_peering_management.md
             - page: VPC Network Virtualization
@@ -194,12 +293,18 @@ navigation:
               path: manuals/repair/repair_integration.md
         - section: Observability
           contents:
-            - page: Core Metrics
+            - page: Alerts
+              path: observability/alerts.md
+            - page: Core Metrics List
               path: observability/core_metrics.md
-            - page: Traces
-              path: observability/tracing.md
+            - page: Metrics and Dashboards
+              path: observability/metrics.md
             - page: Logging
               path: observability/logging.md
+            - page: Machines and DPU Logging
+              path: observability/machine-dpu-logs.md
+            - page: Traces
+              path: observability/tracing.md
         - page: NICo Debug WebUI
           path: operations/debug_webui.md
         - section: Playbooks
@@ -210,47 +315,64 @@ navigation:
               path: playbooks/force_delete.md
             - page: Rebooting a Machine
               path: playbooks/machine_reboot.md
-            - page: InfiniBand Setup
-              path: playbooks/ib_runbook.md
             - section: Stuck Objects
               contents:
                 - page: Overview and General Troubleshooting
                   path: playbooks/stuck_objects/stuck_objects.md
-                - page: Common Mitigations
-                  path: playbooks/stuck_objects/common_mitigations.md
-                - page: Stuck in WaitingForNetworkConfig and DPU Health
-                  path: playbooks/stuck_objects/waiting_for_network_config.md
-                - page: Adding New Machines to an Existing Site
-                  path: playbooks/stuck_objects/adding_new_machines.md
-                - page: State Machine Debugging
-                  path: playbooks/stuck_objects/state_machine_debugging.md
                 - page: Diagnostic Tools
                   path: playbooks/stuck_objects/diagnostic_tools.md
+                - page: State Machine Debugging
+                  path: playbooks/stuck_objects/state_machine_debugging.md
+                - page: Common Mitigations
+                  path: playbooks/stuck_objects/common_mitigations.md
+                - page: Adding New Machines to an Existing Site
+                  path: playbooks/stuck_objects/adding_new_machines.md
+                - page: Dell PowerEdge Missing DPU Boot Device
+                  path: playbooks/stuck_objects/dell_poweredge_boot_issues.md
                 - page: DPU Provisioning Failures
                   path: playbooks/stuck_objects/dpu_provisioning_failures.md
-                - page: Host Ingestion Failures
-                  path: playbooks/stuck_objects/host_ingestion_failures.md
                 - page: Health Alerts and Overrides
                   path: playbooks/stuck_objects/health_alerts.md
-                - page: Network Connectivity Issues
-                  path: playbooks/stuck_objects/network_connectivity.md
+                - page: Host Ingestion Failures
+                  path: playbooks/stuck_objects/host_ingestion_failures.md
+                - page: Instance Boot Connection Timeout
+                  path: playbooks/stuck_objects/instance_boot_connection_timeout.md
                 - page: Instance and Fabric Issues
                   path: playbooks/stuck_objects/instance_and_fabric_issues.md
+                - page: Lenovo SR675 V3 Stuck Polling BIOS Setup
+                  path: playbooks/stuck_objects/lenovo_sr675_v3_polling_bios_setup.md
+                - page: Machine Stuck in DPUInitializing/Init During Ingestion
+                  path: playbooks/stuck_objects/dpu_initializing_init.md
+                - page: Managed Host Stuck in UEFI Setup
+                  path: playbooks/stuck_objects/host_initializing_uefi_setup.md
+                - page: Network Connectivity Issues
+                  path: playbooks/stuck_objects/network_connectivity.md
                 - page: Site Controller Health
                   path: playbooks/stuck_objects/site_controller_health.md
+                - page: Stuck in WaitingForNetworkConfig and DPU Health
+                  path: playbooks/stuck_objects/waiting_for_network_config.md
+                - page: Troubleshooting BgpPeeringTor Alerts
+                  path: playbooks/stuck_objects/bgp_peering_tor_alert.md
                 - page: Troubleshooting noDpuLogsWarning Alerts
                   path: playbooks/troubleshooting_noDpuLogsWarning_alerts.md
             - section: Debugging Machine
               contents:
+                - page: Booting into Linux Scout
+                  path: playbooks/debugging_machine/force_linux_scout_boot.md
                 - page: Collecting Debug Bundles
                   path: playbooks/debugging_machine/debug_bundle.md
+        - page: NVLink Domain Health Reports
+          path: operations/nvlink-domain-health-reports.md
 
     - section: Reference
       contents:
         - page: Hardware Compatibility List
           path: hcl.md
-        - page: Release Notes
-          path: release-notes.md
+        - page: Release Policy
+          path: ../RELEASE.md
+        - page: QA Process
+          path: development/qa_process.md
+          slug: qa-process
         - page: FAQs
           path: faq.md
         - section: Development
@@ -261,12 +383,24 @@ navigation:
               path: bootable_artifacts.md
             - page: Local Development
               path: development.md
+            - section: Flow
+              contents:
+                - page: Implementation Overview
+                  path: development/flow/flow-internals.md
+                - page: Operation Rule Execution
+                  path: development/flow/operation-rule-execution.md
+                - page: Task Schedule Implementation
+                  path: development/flow/task-schedule-internals.md
+            - page: Instrumentation
+              path: observability/instrumentation.md
             - page: Running a PXE Client in a VM
               path: development/vm_pxe_client.md
             - page: TLS and SPIFFE Certificates
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: NICo mTLS and Authorization
+              path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev
               path: development/issuer_ca_recreate.md
             - page: Visual Studio Code Remote Development
@@ -277,8 +411,20 @@ navigation:
                   path: development/schema.md
             - page: Adding Support for New Hardware
               path: development/new_hardware_support.md
+            - page: Testing with the Sushy Emulator
+              path: development/sushy_bmc_emulator.md
             - page: Build Guide
               path: development/build-guide.md
+            - page: Machine-a-tron Deployment
+              path: development/machine-a-tron-deployment.md
+            - page: Machine-a-tron RMS Mock
+              path: development/machine-a-tron-rms-mock.md
+            - page: Machine-a-tron NMX-C Mock
+              path: development/machine-a-tron-nmxc-mock.md
+            - page: Machine-a-tron Scale Testing
+              path: development/machine-a-tron-scale-testing.md
+            - page: Large Site Sizing and Settings
+              path: development/large-site-sizing-and-settings.md
         - page: Glossary
           path: glossary.md
 
@@ -287,11 +433,107 @@ navigation:
     - page: Getting Started
       path: ../rest-api/openapi/getting-started.md
       icon: circle-play
+    - page: Authentication and Authorization
+      path: ../rest-api/openapi/auth.md
+      icon: key
+    - page: Resource Overview
+      path: ../rest-api/openapi/resource-overview.md
+      icon: layer-group
     - page: Example REST API Workflows
-      path: ../rest-api/openapi/example_workflows.md
+      path: ../rest-api/openapi/example-workflows.md
       icon: gear
     - page: Deprecations
       path: ../rest-api/openapi/deprecations.md
       icon: bell
     - api: API Reference
       tag-description-pages: true
+      layout:
+        - serviceAccount
+        - infrastructureProvider
+        - tenant
+        - tenantAccount
+        - site
+        - bmcCredential
+        - uefiCredential
+        - measuredBootTrustedMachine
+        - measuredBootTrustedProfile
+        - credentialRotation
+        - siteExplorer
+        - allocation
+        - ipBlock
+        - vpc
+        - vpcPeering
+        - vpcPrefix
+        - subnet
+        - expectedMachine
+        - expectedPowerShelf
+        - expectedRack
+        - expectedRackGroup
+        - expectedSwitch
+        - sku
+        - infiniBandPartition
+        - spectrumXPartition
+        - nvLinkLogicalPartition
+        - instanceType
+        - instance
+        - operatingSystem
+        - machine:
+            contents:
+              - section: Inventory
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine
+                  - GET /v2/org/{org}/nico/machine/label/key
+                  - GET /v2/org/{org}/nico/machine/label/key/{key}/value
+                  - GET /v2/org/{org}/nico/machine/{machineId}
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}
+                  - GET /v2/org/{org}/nico/machine-capability
+              - section: Power and Lifecycle
+                skip-slug: true
+                contents:
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/power
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/bmc/reset
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/chassis/{chassisId}/reset
+                  - POST /v2/org/{org}/nico/machine/{machineId}/decommission
+              - section: DPU
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/dpu
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/dpu/reprovision
+              - section: Health and Status
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/health-report
+                  - PUT /v2/org/{org}/nico/machine/{machineId}/health-report
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}/health-report/{source}
+                  - GET /v2/org/{org}/nico/machine/{machineId}/status-history
+              - section: Validation
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/validation/run
+                  - POST /v2/org/{org}/nico/machine/{machineId}/validation/run
+                  - GET /v2/org/{org}/nico/machine/{machineId}/validation/result
+              - section: Statistics
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/gpu/stats
+                  - GET /v2/org/{org}/nico/machine/instance-type/stats/summary
+                  - GET /v2/org/{org}/nico/machine/instance-type/stats
+        - dpuMachine
+        - domain
+        - rack
+        - tray
+        - rule
+        - task
+        - taskRun
+        - iPxeTemplate
+        - networkSecurityGroup
+        - dpuExtensionService
+        - sshKeyGroup
+        - sshKey
+        - user
+        - metadata
+        - audit
+        - hostFirmwareConfig
+        - tenantIdentity

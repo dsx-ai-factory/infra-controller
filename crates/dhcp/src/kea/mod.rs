@@ -15,4 +15,8 @@
  * limitations under the License.
  */
 /// cbindgen:ignore
+#[allow(
+    unreachable_pub,
+    reason = "Kea loads these public hook symbols from the dynamic library"
+)]
 mod ffi;

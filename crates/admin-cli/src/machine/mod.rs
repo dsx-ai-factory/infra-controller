@@ -15,36 +15,45 @@
  * limitations under the License.
  */
 
-pub mod auto_update;
-pub mod common;
-pub mod force_delete;
-pub mod hardware_info;
-pub mod health_report;
-pub mod metadata;
-pub mod network;
-pub mod nvlink_info;
-pub mod positions;
-pub mod reboot;
-pub mod show;
+mod auto_update;
+mod common;
+mod force_delete;
+mod hardware_info;
+mod health_history;
+mod health_report;
+mod metadata;
+pub(crate) mod network;
+mod nvlink_info;
+mod positions;
+mod reboot;
+mod show;
 
 #[cfg(test)]
 mod tests;
 
 // Cross-module re-exports.
-pub use auto_update::args::Args as MachineAutoupdate;
+pub(crate) use auto_update::args::Args as MachineAutoupdate;
 use clap::Parser;
-pub use common::{MachineQuery, NetworkConfigQuery};
-pub use health_report::args::HealthReportTemplates;
-pub use health_report::cmd::get_health_report;
-pub use show::args::Args as ShowMachine;
-pub use show::cmd::{get_next_free_machine, handle_show};
+pub(crate) use common::{MachineQuery, NetworkConfigQuery};
+pub(crate) use health_report::args::HealthReportTemplates;
+pub(crate) use health_report::cmd::{get_empty_template, get_health_report};
+pub(crate) use show::args::Args as ShowMachine;
+pub(crate) use show::cmd::{get_next_free_machine, get_next_free_machine_prefetched, handle_show};
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Display Machine information")]
     Show(show::Args),
+    // Hidden: the view moved to the top-level `boot-interface show`. This
+    // variant keeps `machine boot-interfaces` parsing for existing scripts and
+    // runs the exact same handler (the payload type is the new command's Args).
+    #[clap(
+        hide = true,
+        about = "Moved: use `boot-interface show` (kept as a hidden alias)"
+    )]
+    BootInterfaces(crate::boot_interface::show::Args),
     #[clap(subcommand, about = "Networking information")]
     Network(network::Args),
     #[clap(
@@ -76,6 +85,8 @@ pub enum Cmd {
             - Power shelf ID: Associated power shelf"
     )]
     Positions(positions::Args),
-    #[clap(subcommand, about = "Update/show NVLink info for an MNNVL machine")]
+    #[clap(subcommand, about = "Show NVLink info for an MNNVL machine")]
     NvlinkInfo(nvlink_info::Args),
+    #[clap(about = "Show machine health history")]
+    HealthHistory(health_history::Args),
 }

@@ -14,30 +14,73 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod common;
+pub(super) mod common;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod dns;
+pub(super) mod console_log;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod forge;
+mod dns;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod health;
+pub(super) mod forge;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod machine_discovery;
+mod health;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod measured_boot;
+pub(super) mod machine_discovery;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod mlx_device;
+mod measured_boot;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod scout_firmware_upgrade;
+mod mlx_device;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
-pub mod site_explorer;
+mod scout_firmware_upgrade;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
+#[allow(non_snake_case, unknown_lints, clippy::all)]
+#[rustfmt::skip]
+mod site_explorer;

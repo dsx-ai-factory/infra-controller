@@ -23,7 +23,7 @@
   path: /spec/template/spec/containers/0/volumeMounts/0
   value:
     name: boot-artifacts
-    mountPath: /nico-boot-artifacts/blobs/internal
+    mountPath: /forge-boot-artifacts/blobs/internal
 
 - op: add
   path: /spec/template/spec/containers/0
@@ -32,10 +32,10 @@
     image: yourdockerregistry.com/path/to/boot-artifacts-x86_64:latest
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "cp -r /x86_64 /nico-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
-        mountPath: /nico-boot-artifacts/blobs/internal
+        mountPath: /forge-boot-artifacts/blobs/internal
 - op: add
   path: /spec/template/spec/containers/0
   value:
@@ -43,10 +43,10 @@
     image: yourdockerregistry.com/path/to/boot-artifacts-aarch64:latest
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "cp -r /aarch64 /nico-boot-artifacts/blobs/internal; cp -r /apt /nico-boot-artifacts/blobs/internal; cp -r /firmware /nico-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "cp -r /aarch64 /forge-boot-artifacts/blobs/internal; cp -r /apt /forge-boot-artifacts/blobs/internal; cp -r /firmware /forge-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
-        mountPath: /nico-boot-artifacts/blobs/internal
+        mountPath: /forge-boot-artifacts/blobs/internal
 
 # We keep this image around to still provide access to the previous
 # qcow-imager.efi/root binaries for backward compatibility, this should be
@@ -58,10 +58,10 @@
     image: yourdockerregistry.com/path/to/boot-artifacts-x86_64:v2023.11-rc1-16-gf7aebdcc
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "mkdir -vp /nico-boot-artifacts/blobs/internal/x86_64 && cp -fr /x86_64/qcow-imaging* /nico-boot-artifacts/blobs/internal/x86_64; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "mkdir -vp /forge-boot-artifacts/blobs/internal/x86_64 && cp -fr /x86_64/qcow-imaging* /forge-boot-artifacts/blobs/internal/x86_64; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
-        mountPath: /nico-boot-artifacts/blobs/internal
+        mountPath: /forge-boot-artifacts/blobs/internal
 - op: add
   path: /spec/template/spec/containers/0
   value:
@@ -69,7 +69,7 @@
     image: yourdockerregistry.com/path/to/nvmetal-scout-burn-in:1.3.0
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "cp -r /machine-validation /nico-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
-        mountPath: /nico-boot-artifacts/blobs/internal
+        mountPath: /forge-boot-artifacts/blobs/internal

@@ -27,6 +27,9 @@ INSTALL_CERT_MANAGER="${LOCAL_DEV_INSTALL_CERT_MANAGER:-1}"
 INSTALL_LOCAL_ISSUER="${LOCAL_DEV_INSTALL_LOCAL_ISSUER:-1}"
 INSTALL_POSTGRES="${LOCAL_DEV_INSTALL_POSTGRES:-1}"
 INSTALL_VAULT="${LOCAL_DEV_INSTALL_VAULT:-1}"
+INSTALL_REST_PREREQS="${LOCAL_DEV_INSTALL_REST_PREREQS:-1}"
+INSTALL_TEMPORAL="${LOCAL_DEV_INSTALL_TEMPORAL:-1}"
+INSTALL_KEYCLOAK="${LOCAL_DEV_INSTALL_KEYCLOAK:-1}"
 
 POSTGRES_NAMESPACE="${POSTGRES_NAMESPACE:-postgres}"
 POSTGRES_HOST="${LOCAL_DEV_POSTGRES_HOST:-postgres.${POSTGRES_NAMESPACE}.svc.cluster.local}"
@@ -36,13 +39,23 @@ POSTGRES_USER="${LOCAL_DEV_POSTGRES_USER:-nico}"
 POSTGRES_PASSWORD="${LOCAL_DEV_POSTGRES_PASSWORD:-nico}"
 POSTGRES_SSL_MODE="${LOCAL_DEV_POSTGRES_SSL_MODE:-disable}"
 
-VAULT_NAMESPACE="${VAULT_NAMESPACE:-vault}"
-VAULT_ADDR="${LOCAL_DEV_VAULT_ADDR:-http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200}"
+REST_NAMESPACE="nico-rest"
+REST_POSTGRES_DB="${LOCAL_DEV_REST_POSTGRES_DB:-nico_rest}"
+REST_POSTGRES_USER="${LOCAL_DEV_REST_POSTGRES_USER:-nico_rest}"
+REST_POSTGRES_PASSWORD="${LOCAL_DEV_REST_POSTGRES_PASSWORD:-nico_rest}"
+TEMPORAL_NAMESPACE="temporal"
+
+# Kubernetes namespace hosting the local development Vault. Keep this distinct
+# from VAULT_NAMESPACE, which selects a Vault Enterprise/HCP namespace.
+VAULT_KUBERNETES_NAMESPACE="${LOCAL_DEV_VAULT_KUBERNETES_NAMESPACE:-vault}"
+VAULT_ADDR="${LOCAL_DEV_VAULT_ADDR:-http://vault.${VAULT_KUBERNETES_NAMESPACE}.svc.cluster.local:8200}"
 VAULT_TOKEN="${LOCAL_DEV_VAULT_TOKEN:-root}"
 VAULT_KV_MOUNT="${LOCAL_DEV_VAULT_KV_MOUNT:-secrets}"
 VAULT_PKI_MOUNT="${LOCAL_DEV_VAULT_PKI_MOUNT:-certs}"
 VAULT_PKI_ROLE_NAME="${LOCAL_DEV_VAULT_PKI_ROLE_NAME:-nico-cluster}"
 VAULT_AUTH_MODE="${LOCAL_DEV_VAULT_AUTH_MODE:-root-token}"
+VAULT_ADMIN_CA_FILE="${LOCAL_DEV_VAULT_ADMIN_CA_FILE:-}"
+ADMIN_ROOT_CERT_PEM=""
 
 CERT_ISSUER_KIND="${LOCAL_DEV_CERT_ISSUER_KIND:-Issuer}"
 CERT_ISSUER_NAME="${LOCAL_DEV_CERT_ISSUER_NAME:-local-ca-issuer}"
@@ -57,6 +70,61 @@ require_bin() {
     printf 'missing required binary: %s\n' "$1" >&2
     exit 1
   }
+}
+
+rest_postgres_sql() {
+  local rest_postgres_db_b64
+  local rest_postgres_password_b64
+  local rest_postgres_user_b64
+
+  rest_postgres_db_b64="$(printf '%s' "${REST_POSTGRES_DB}" | base64 | tr -d '\n')"
+  rest_postgres_user_b64="$(printf '%s' "${REST_POSTGRES_USER}" | base64 | tr -d '\n')"
+  rest_postgres_password_b64="$(printf '%s' "${REST_POSTGRES_PASSWORD}" | base64 | tr -d '\n')"
+
+  printf '%s\n' \
+    "SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', convert_from(decode('${rest_postgres_user_b64}', 'base64'), 'UTF8'), convert_from(decode('${rest_postgres_password_b64}', 'base64'), 'UTF8'))" \
+    "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = convert_from(decode('${rest_postgres_user_b64}', 'base64'), 'UTF8'))" \
+    '\gexec' \
+    "SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', convert_from(decode('${rest_postgres_user_b64}', 'base64'), 'UTF8'), convert_from(decode('${rest_postgres_password_b64}', 'base64'), 'UTF8'))" \
+    '\gexec' \
+    'DO $$' \
+    'BEGIN' \
+    "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'keycloak') THEN" \
+    "    CREATE ROLE keycloak LOGIN PASSWORD 'keycloak';" \
+    '  END IF;' \
+    "  ALTER ROLE keycloak WITH LOGIN PASSWORD 'keycloak';" \
+    "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'temporal') THEN" \
+    "    CREATE ROLE temporal LOGIN PASSWORD 'temporal' CREATEDB;" \
+    '  END IF;' \
+    "  ALTER ROLE temporal WITH LOGIN PASSWORD 'temporal' CREATEDB;" \
+    'END' \
+    '$$;' \
+    "SELECT format('CREATE DATABASE %I OWNER %I', convert_from(decode('${rest_postgres_db_b64}', 'base64'), 'UTF8'), convert_from(decode('${rest_postgres_user_b64}', 'base64'), 'UTF8'))" \
+    "WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = convert_from(decode('${rest_postgres_db_b64}', 'base64'), 'UTF8'))" \
+    '\gexec' \
+    "SELECT format('%I', convert_from(decode('${rest_postgres_db_b64}', 'base64'), 'UTF8')) AS rest_postgres_db_quoted" \
+    '\gset' \
+    '\connect :rest_postgres_db_quoted' \
+    "SELECT format('GRANT ALL ON SCHEMA public TO %I', convert_from(decode('${rest_postgres_user_b64}', 'base64'), 'UTF8'))" \
+    '\gexec' \
+    'CREATE EXTENSION IF NOT EXISTS pg_trgm;' \
+    '\connect postgres' \
+    "SELECT 'CREATE DATABASE keycloak OWNER keycloak'" \
+    "WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'keycloak')" \
+    '\gexec' \
+    '\connect keycloak' \
+    'GRANT ALL ON SCHEMA public TO keycloak;' \
+    '\connect postgres' \
+    "SELECT 'CREATE DATABASE temporal OWNER temporal'" \
+    "WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'temporal')" \
+    '\gexec' \
+    "SELECT 'CREATE DATABASE temporal_visibility OWNER temporal'" \
+    "WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'temporal_visibility')" \
+    '\gexec' \
+    '\connect temporal' \
+    'GRANT ALL ON SCHEMA public TO temporal;' \
+    '\connect temporal_visibility' \
+    'GRANT ALL ON SCHEMA public TO temporal;'
 }
 
 install_cert_manager() {
@@ -77,12 +145,17 @@ install_cert_manager() {
 }
 
 apply_core_objects() {
-  log "Applying namespace and connection objects in ${NAMESPACE}"
+  log "Applying Core namespaces and connection objects in ${NAMESPACE}"
   kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ${NAMESPACE}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: forge-system
 ---
 apiVersion: v1
 kind: Secret
@@ -93,7 +166,7 @@ type: Opaque
 stringData:
   username: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  host: ${POSTGRES_HOST}
+  host: "${POSTGRES_HOST}"
   port: "${POSTGRES_PORT}"
   dbname: ${POSTGRES_DB}
   uri: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
@@ -104,7 +177,7 @@ metadata:
   name: nico-system-nico-database-config
   namespace: ${NAMESPACE}
 data:
-  DB_HOST: ${POSTGRES_HOST}
+  DB_HOST: "${POSTGRES_HOST}"
   DB_PORT: "${POSTGRES_PORT}"
   DB_NAME: ${POSTGRES_DB}
 ---
@@ -130,8 +203,17 @@ EOF
 }
 
 apply_local_postgres() {
+  local rest_postgres_init=""
+
   if [[ "${INSTALL_POSTGRES}" != "1" ]]; then
     return
+  fi
+
+  if [[ "${INSTALL_REST_PREREQS}" == "1" ]]; then
+    rest_postgres_init="$(
+      printf '  002-create-rest-databases.sql: |\n'
+      rest_postgres_sql | sed 's/^/    /'
+    )"
   fi
 
   log "Applying local PostgreSQL deployment"
@@ -157,6 +239,7 @@ data:
     \$\$;
     SELECT 'CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER}'
     WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${POSTGRES_DB}')\gexec
+${rest_postgres_init}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -217,6 +300,12 @@ spec:
 EOF
 
   kubectl rollout status statefulset/postgres -n "${POSTGRES_NAMESPACE}" --timeout=180s >/dev/null
+
+  if [[ "${INSTALL_REST_PREREQS}" == "1" ]]; then
+    log "Ensuring REST, Temporal, and Keycloak databases exist"
+    rest_postgres_sql | kubectl exec -i -n "${POSTGRES_NAMESPACE}" statefulset/postgres -- \
+      psql -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null
+  fi
 }
 
 apply_local_vault() {
@@ -229,13 +318,13 @@ apply_local_vault() {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ${VAULT_NAMESPACE}
+  name: ${VAULT_KUBERNETES_NAMESPACE}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: vault
-  namespace: ${VAULT_NAMESPACE}
+  namespace: ${VAULT_KUBERNETES_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -250,14 +339,15 @@ spec:
         - name: vault
           image: hashicorp/vault:1.20.2
           imagePullPolicy: IfNotPresent
+          # Vault's IPv6 wildcard serves IPv6 probes and IPv4 bootstrap requests.
           args:
             - server
             - -dev
-            - -dev-listen-address=0.0.0.0:8200
+            - -dev-listen-address=[::]:8200
             - -dev-root-token-id=${VAULT_TOKEN}
           env:
             - name: VAULT_DEV_LISTEN_ADDRESS
-              value: 0.0.0.0:8200
+              value: "[::]:8200"
           ports:
             - containerPort: 8200
               name: http
@@ -272,7 +362,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: vault
-  namespace: ${VAULT_NAMESPACE}
+  namespace: ${VAULT_KUBERNETES_NAMESPACE}
 spec:
   selector:
     app: vault
@@ -282,10 +372,10 @@ spec:
       targetPort: 8200
 EOF
 
-  kubectl rollout status statefulset/vault -n "${VAULT_NAMESPACE}" --timeout=180s >/dev/null
+  kubectl rollout status statefulset/vault -n "${VAULT_KUBERNETES_NAMESPACE}" --timeout=180s >/dev/null
 
   log "Configuring Vault mounts and local role"
-  kubectl exec -n "${VAULT_NAMESPACE}" statefulset/vault -- sh -lc "
+  kubectl exec -n "${VAULT_KUBERNETES_NAMESPACE}" statefulset/vault -- sh -lc "
     set -euo pipefail
     export VAULT_ADDR=http://127.0.0.1:8200
     export VAULT_TOKEN='${VAULT_TOKEN}'
@@ -324,6 +414,102 @@ EOF
       echo '{\"UsernamePassword\":{\"username\":\"root\",\"password\":\"vault-password\"}}' | \
       vault kv put '${VAULT_KV_MOUNT}/machines/all_hosts/site_default/uefi-metadata-items/auth' - >/dev/null
   " >/dev/null
+}
+
+load_admin_root_cert_pem() {
+  if [[ -n "${VAULT_ADMIN_CA_FILE}" ]]; then
+    if [[ ! -f "${VAULT_ADMIN_CA_FILE}" || ! -r "${VAULT_ADMIN_CA_FILE}" ]]; then
+      printf 'Vault admin CA file is not a readable regular file: %s\n' \
+        "${VAULT_ADMIN_CA_FILE}" >&2
+      exit 1
+    fi
+    ADMIN_ROOT_CERT_PEM="$(<"${VAULT_ADMIN_CA_FILE}")"
+  elif [[ "${INSTALL_VAULT}" == "1" ]]; then
+    log "Reading the local Vault PKI CA for Core admin-client trust"
+    ADMIN_ROOT_CERT_PEM="$(
+      kubectl exec -n "${VAULT_KUBERNETES_NAMESPACE}" statefulset/vault -- \
+        env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN="${VAULT_TOKEN}" \
+        vault read -field=certificate "${VAULT_PKI_MOUNT}/cert/ca"
+    )"
+  else
+    return
+  fi
+
+  require_bin awk
+  require_bin openssl
+
+  if ! printf '%s\n' "${ADMIN_ROOT_CERT_PEM}" | awk '
+    BEGIN {
+      in_certificate = 0
+      certificate_count = 0
+      certificate_has_data = 0
+      invalid = 0
+    }
+    {
+      sub(/\r$/, "")
+      if ($0 == "-----BEGIN CERTIFICATE-----") {
+        if (in_certificate) {
+          invalid = 1
+          exit
+        }
+        in_certificate = 1
+        certificate_has_data = 0
+        next
+      }
+      if ($0 == "-----END CERTIFICATE-----") {
+        if (!in_certificate || !certificate_has_data) {
+          invalid = 1
+          exit
+        }
+        in_certificate = 0
+        certificate_count++
+        next
+      }
+      if (in_certificate) {
+        if ($0 !~ /^[A-Za-z0-9+\/=]+$/) {
+          invalid = 1
+          exit
+        }
+        certificate_has_data = 1
+        next
+      }
+      if ($0 !~ /^[[:space:]]*$/) {
+        invalid = 1
+        exit
+      }
+    }
+    END {
+      exit(invalid || in_certificate || certificate_count == 0)
+    }
+  '; then
+    printf '%s\n' \
+      'Vault admin CA must contain only bare PEM CERTIFICATE blocks and whitespace' >&2
+    exit 1
+  fi
+
+  local certificate_pem=""
+  local line
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    if [[ "${line}" == "-----BEGIN CERTIFICATE-----" ]]; then
+      certificate_pem="${line}"$'\n'
+      continue
+    fi
+    if [[ -z "${certificate_pem}" ]]; then
+      continue
+    fi
+
+    certificate_pem+="${line}"$'\n'
+    if [[ "${line}" != "-----END CERTIFICATE-----" ]]; then
+      continue
+    fi
+    if ! openssl x509 -noout <<<"${certificate_pem}" >/dev/null 2>&1; then
+      printf '%s\n' \
+        'Vault admin CA contains a CERTIFICATE block that is not valid X.509' >&2
+      exit 1
+    fi
+    certificate_pem=""
+  done <<<"${ADMIN_ROOT_CERT_PEM}"
 }
 
 apply_local_issuer() {
@@ -393,6 +579,112 @@ data:
 EOF
 }
 
+apply_rest_ca() {
+  local ca_crt_b64=""
+  local ca_key_b64=""
+
+  if [[ "${INSTALL_REST_PREREQS}" != "1" ]]; then
+    return
+  fi
+
+  ca_crt_b64="$(kubectl get secret nico-local-ca -n "${NAMESPACE}" -o jsonpath='{.data.tls\.crt}')"
+  ca_key_b64="$(kubectl get secret nico-local-ca -n "${NAMESPACE}" -o jsonpath='{.data.tls\.key}')"
+  if [[ -z "${ca_crt_b64}" || -z "${ca_key_b64}" ]]; then
+    printf 'missing local Core CA secret in namespace %s\n' "${NAMESPACE}" >&2
+    exit 1
+  fi
+
+  log "Sharing the local Core CA with REST services"
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${REST_NAMESPACE}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ca-signing-secret
+  namespace: ${CERT_MANAGER_NAMESPACE}
+type: kubernetes.io/tls
+data:
+  tls.crt: ${ca_crt_b64}
+  tls.key: ${ca_key_b64}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ca-signing-secret
+  namespace: ${REST_NAMESPACE}
+type: kubernetes.io/tls
+data:
+  tls.crt: ${ca_crt_b64}
+  tls.key: ${ca_key_b64}
+---
+EOF
+
+  if ! kubectl get secret site-registration -n "${REST_NAMESPACE}" >/dev/null 2>&1; then
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: site-registration
+  namespace: ${REST_NAMESPACE}
+type: Opaque
+data:
+  cacert: ${ca_crt_b64}
+stringData:
+  site-uuid: 00000000-0000-4000-8000-000000000001
+  otp: local-dev-otp-token
+  creds-url: https://nico-rest-site-manager:8100/v1/sitecreds
+EOF
+  fi
+
+  kubectl apply -k "${REPO_ROOT}/rest-api/deploy/kustomize/base/cert-manager-io"
+  kubectl wait --for=condition=Ready clusterissuer/nico-rest-ca-issuer --timeout=180s >/dev/null
+}
+
+install_temporal() {
+  if [[ "${INSTALL_REST_PREREQS}" != "1" || "${INSTALL_TEMPORAL}" != "1" ]]; then
+    return
+  fi
+
+  log "Installing Temporal"
+  kubectl create namespace "${TEMPORAL_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl apply -k "${REPO_ROOT}/rest-api/deploy/kustomize/base/temporal-helm" >/dev/null
+  kubectl wait --for=condition=Ready certificate/server-interservice-cert \
+    -n "${TEMPORAL_NAMESPACE}" --timeout=240s >/dev/null
+  kubectl wait --for=condition=Ready certificate/server-cloud-cert \
+    -n "${TEMPORAL_NAMESPACE}" --timeout=240s >/dev/null
+  kubectl wait --for=condition=Ready certificate/server-site-cert \
+    -n "${TEMPORAL_NAMESPACE}" --timeout=240s >/dev/null
+
+  helm upgrade --install temporal "${REPO_ROOT}/rest-api/temporal-helm/temporal" \
+    --namespace "${TEMPORAL_NAMESPACE}" \
+    --values "${REPO_ROOT}/rest-api/temporal-helm/temporal/values-kind.yaml" \
+    --wait \
+    --timeout 16m >/dev/null
+
+  kubectl rollout status deployment/temporal-frontend -n "${TEMPORAL_NAMESPACE}" --timeout=360s >/dev/null
+  kubectl rollout status deployment/temporal-history -n "${TEMPORAL_NAMESPACE}" --timeout=360s >/dev/null
+  kubectl rollout status deployment/temporal-matching -n "${TEMPORAL_NAMESPACE}" --timeout=360s >/dev/null
+  kubectl rollout status deployment/temporal-worker -n "${TEMPORAL_NAMESPACE}" --timeout=360s >/dev/null
+
+  for temporal_namespace in cloud site; do
+    "${REPO_ROOT}/rest-api/scripts/setup-local.sh" temporal-namespace "${temporal_namespace}"
+  done
+}
+
+install_keycloak() {
+  if [[ "${INSTALL_REST_PREREQS}" != "1" || "${INSTALL_KEYCLOAK}" != "1" ]]; then
+    return
+  fi
+
+  log "Installing Keycloak"
+  kubectl apply -k "${REPO_ROOT}/rest-api/deploy/kustomize/base/keycloak" >/dev/null
+  kubectl rollout status deployment/keycloak -n "${REST_NAMESPACE}" --timeout=240s >/dev/null
+}
+
 write_generated_values() {
   local disable_tls_enforcement=""
   local automount="true"
@@ -406,7 +698,8 @@ write_generated_values() {
   fi
 
   mkdir -p "$(dirname -- "${VALUES_FILE}")"
-  cat > "${VALUES_FILE}" <<EOF
+  {
+    cat <<EOF
 global:
   certificate:
     issuerRef:
@@ -415,6 +708,14 @@ global:
       group: ${CERT_ISSUER_GROUP}
 
 nico-api:
+EOF
+    if [[ -n "${ADMIN_ROOT_CERT_PEM}" ]]; then
+      printf '%s\n' \
+        '  siteConfig:' \
+        '    adminRootCertPem: |'
+      printf '%s\n' "${ADMIN_ROOT_CERT_PEM}" | sed 's/^/      /'
+    fi
+    cat <<EOF
   automountServiceAccountToken: ${automount}
   migrationJob:
     enabled: true
@@ -435,6 +736,7 @@ nico-bmc-proxy:
   databaseConfig: {}
 ${disable_tls_enforcement}
 EOF
+  } > "${VALUES_FILE}"
 }
 
 print_summary() {
@@ -447,6 +749,7 @@ Generated values: ${VALUES_FILE}
 Postgres endpoint: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
 Vault address: ${VAULT_ADDR}
 Cert issuer: ${CERT_ISSUER_KIND}/${CERT_ISSUER_NAME}
+REST prerequisites: ${INSTALL_REST_PREREQS}
 
 Next step:
   cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE}
@@ -462,8 +765,12 @@ main() {
   apply_core_objects
   apply_local_postgres
   apply_local_vault
+  load_admin_root_cert_pem
   apply_local_issuer
   sync_nico_roots_secret
+  apply_rest_ca
+  install_temporal
+  install_keycloak
   write_generated_values
   print_summary
 }

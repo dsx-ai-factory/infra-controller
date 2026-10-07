@@ -17,16 +17,33 @@ spec:
     metadata:
       labels:
         {{- include "nico-rest-site-manager.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "nico-rest-site-manager.name" . }}
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
         - name: site-manager
           image: "{{ include "nico-rest-site-manager.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args:
             - --listen-port={{ .Values.args.listenPort }}
             - --creds-manager-url={{ .Values.args.credsManagerUrl }}
@@ -39,10 +56,19 @@ spec:
           ports:
             - containerPort: {{ .Values.service.port }}
               name: https
+          {{- with .Values.extraEnv }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
           volumeMounts:
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
@@ -63,3 +89,9 @@ spec:
         - name: tls-certs
           secret:
             secretName: {{ .Values.certificate.secretName }}
+        # sitemgr skips its own cert issuance while `args.tlsCertPath` and
+        # `args.tlsKeyPath` are set. Clearing either one sends it back to
+        # writing /tmp/mgr.cert, so keep this writable alongside the read-only
+        # root filesystem.
+        - name: tmp
+          emptyDir: {}

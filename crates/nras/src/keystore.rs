@@ -17,6 +17,7 @@
 
 use std::collections as stdcol;
 
+use carbide_instrument::red;
 use jsonwebtoken as jst;
 
 use crate::NrasError;
@@ -24,8 +25,6 @@ use crate::NrasError;
 #[derive(Debug, serde::Deserialize)]
 struct Jwk {
     kty: String,
-    #[allow(dead_code)]
-    crv: Option<String>,
     kid: String,
     x: Option<String>,
     y: Option<String>,
@@ -54,17 +53,25 @@ impl KeyStore for NrasKeyStore {
 
 impl NrasKeyStore {
     pub async fn new_with_config(config: &crate::Config) -> Result<NrasKeyStore, crate::NrasError> {
-        let jwks_response = reqwest::get(&config.nras_jwks_url).await?;
-
-        let status_code = jwks_response.status();
-        let response_text = jwks_response.text().await?;
-
-        if status_code != reqwest::StatusCode::OK {
-            return Err(NrasError::Communication(format!(
-                "NRAS KeyStore returned status code {} and message {}",
-                status_code, response_text
-            )));
-        }
+        // The JWKS fetch is a required NRAS call on the attestation path; wrap the
+        // GET and its status check in the RED triad so it is no longer dark and a
+        // non-success status records outcome = error. Reuses the
+        // carbide_external_call_duration_milliseconds family (operation="fetch_jwks").
+        let response_text = red::instrumented("nras", "fetch_jwks", async {
+            let jwks_response = reqwest::get(&config.nras_jwks_url).await?;
+            let status_code = jwks_response.status();
+            if status_code != reqwest::StatusCode::OK {
+                // Status only: the response body can carry sensitive material, so it is
+                // never placed in the error or its log.
+                return Err(NrasError::Communication(format!(
+                    "NRAS KeyStore returned status code {}",
+                    status_code
+                )));
+            }
+            // Read the body only after confirming success.
+            Ok(jwks_response.text().await?)
+        })
+        .await?;
 
         // parse JWKS and find matching JWK
         let jwks: Jwks = serde_json::from_str(&response_text)

@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Common networking code for Forge components."
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_network"

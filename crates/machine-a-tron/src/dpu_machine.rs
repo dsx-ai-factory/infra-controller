@@ -15,13 +15,16 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use bmc_mock::injection::InjectionStore;
+use bmc_mock::mac_address_pool::MacAddressPool;
 use bmc_mock::{
-    BmcCommand, DpuMachineInfo, DpuSettings, HostHardwareType, MachineInfo, SetSystemPowerResult,
-    SystemPowerControl,
+    ActionError, DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, ResourceResetType,
 };
+use carbide_uuid::machine::MachineId;
 use eyre::Context;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -29,14 +32,15 @@ use tokio::time::Interval;
 use tracing::instrument;
 use uuid::Uuid;
 
+use crate::bmc_mock_wrapper::BmcCommand;
 use crate::config::{MachineATronContext, PersistedDpuMachine};
 use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay, DpuDhcpRelayServer};
 use crate::host_machine::HandleMessageResult;
 use crate::machine_state_machine::{LiveState, MachineStateMachine, OsImage, PersistedMachine};
-use crate::tui::HostDetails;
+use crate::status::{BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus};
 use crate::{MachineConfig, saturating_add_duration_to_instant};
 
-pub struct DpuMachine {
+pub(super) struct DpuMachine {
     mat_id: Uuid,
     // The mat_id of the host that owns this DPU
     host_id: Uuid,
@@ -57,7 +61,7 @@ pub struct DpuMachine {
 }
 
 impl DpuMachine {
-    pub fn from_persisted(
+    pub(super) fn from_persisted(
         persisted_dpu_machine: PersistedDpuMachine,
         mat_host: Uuid,
         app_context: Arc<MachineATronContext>,
@@ -71,7 +75,7 @@ impl DpuMachine {
         let (bmc_control_tx, bmc_control_rx) = mpsc::unbounded_channel();
 
         let dpu_info = DpuMachineInfo {
-            hw_type: persisted_dpu_machine.hw_type.unwrap_or_default(),
+            hw_type: persisted_dpu_machine.hw_type,
             bmc_mac_address: persisted_dpu_machine.bmc_mac_address,
             host_mac_address: persisted_dpu_machine.host_mac_address,
             oob_mac_address: persisted_dpu_machine.oob_mac_address,
@@ -80,6 +84,7 @@ impl DpuMachine {
         };
         let state_machine = MachineStateMachine::from_persisted(
             PersistedMachine::Dpu(persisted_dpu_machine),
+            MachineInfo::Dpu(dpu_info.clone()),
             config,
             app_context.clone(),
             bmc_control_tx,
@@ -106,12 +111,13 @@ impl DpuMachine {
         }
     }
 
-    pub fn new(
-        hw_type: HostHardwareType,
+    pub(super) fn new(
+        hw_type: HardwareType,
         mat_host: Uuid,
         dpu_index: u8,
         app_context: Arc<MachineATronContext>,
         config: Arc<MachineConfig>,
+        mac_addr_pool: &mut MacAddressPool,
         host_dhcp_request_rx: Option<
             mpsc::UnboundedReceiver<oneshot::Sender<DhcpRelayResult<DhcpResponseInfo>>>,
         >,
@@ -125,10 +131,13 @@ impl DpuMachine {
             .dpu_firmware_versions
             .clone()
             .unwrap_or_default()
-            .fill_missing_from_desired_firmware(&app_context.desired_firmware_versions);
+            .fill_missing_from_desired_firmware(
+                &app_context.desired_firmware_versions.read().unwrap(),
+            );
 
         let dpu_info = DpuMachineInfo::new(
             hw_type,
+            mac_addr_pool,
             DpuSettings {
                 nic_mode: config.dpus_in_nic_mode,
                 firmware_versions: firmware_versions.into(),
@@ -165,15 +174,14 @@ impl DpuMachine {
     }
 
     #[instrument(skip_all, fields(mat_host_id = %self.host_id, dpu_index = self.dpu_index))]
-    pub fn start(mut self, paused: bool) -> DpuMachineHandle {
+    pub(super) fn start(mut self, paused: bool) -> DpuMachineHandle {
         self.paused = paused;
         let (message_tx, mut message_rx) = mpsc::unbounded_channel();
         let mat_id = self.mat_id;
         let dpu_info = self.dpu_info.clone();
         let dpu_index = self.dpu_index;
-        let bmc_dhcp_id = self.state_machine.bmc_dhcp_id;
-        let machine_dhcp_id = self.state_machine.machine_dhcp_id;
         let live_state = self.state_machine.live_state.clone();
+        let bmc_injection = self.state_machine.bmc_injection_store();
         let join_handle = tokio::task::Builder::new()
             .name(&format!("DPU {}", self.mat_id))
             .spawn({
@@ -196,8 +204,7 @@ impl DpuMachine {
             mat_id,
             dpu_info,
             dpu_index,
-            bmc_dhcp_id,
-            machine_dhcp_id,
+            bmc_injection,
             join_handle: Mutex::new(Some(join_handle)),
         }))
     }
@@ -221,7 +228,7 @@ impl DpuMachine {
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {},
             _ = self.api_refresh_interval.tick() => {
-                // Wake up to refresh the API state and UI
+                // Wake up to refresh the API state
                 if let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id {
                     let actor_message_tx = actor_message_tx.clone();
                     self.app_context.api_throttler.get_machine(machine_id, move |machine| {
@@ -284,7 +291,8 @@ impl DpuMachine {
                 HandleMessageResult::ProcessStateNow
             }
             DpuMachineMessage::SetApiState(api_state) => {
-                self.api_state = api_state;
+                self.api_state = api_state.clone();
+                self.live_state.write().unwrap().api_state = api_state;
                 HandleMessageResult::ContinuePolling
             }
             DpuMachineMessage::WaitUntilMachineUpWithApiState(state, reply) => {
@@ -310,15 +318,15 @@ impl DpuMachine {
         result
     }
 
-    pub fn dpu_info(&self) -> &DpuMachineInfo {
+    pub(super) fn dpu_info(&self) -> &DpuMachineInfo {
         &self.dpu_info
     }
 }
 
 enum DpuMachineMessage {
     SetSystemPower {
-        request: SystemPowerControl,
-        reply: Option<oneshot::Sender<SetSystemPowerResult>>,
+        request: ResourceResetType,
+        reply: Option<oneshot::Sender<Result<(), ActionError>>>,
     },
     WaitUntilMachineUpWithApiState(String, oneshot::Sender<()>),
     SetPaused(bool),
@@ -340,8 +348,7 @@ struct DpuMachineActor {
     mat_id: Uuid,
     dpu_info: DpuMachineInfo,
     dpu_index: u8,
-    bmc_dhcp_id: Uuid,
-    machine_dhcp_id: Uuid,
+    bmc_injection: Arc<InjectionStore>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -349,7 +356,59 @@ struct DpuMachineActor {
 pub struct DpuMachineHandle(Arc<DpuMachineActor>);
 
 impl DpuMachineHandle {
-    pub fn set_system_power(&self, request: SystemPowerControl) -> eyre::Result<()> {
+    pub fn mat_id(&self) -> Uuid {
+        self.0.mat_id
+    }
+
+    pub fn bmc_ip(&self) -> Option<Ipv4Addr> {
+        self.0.live_state.read().unwrap().bmc_ip
+    }
+
+    pub fn machine_ip(&self) -> Option<Ipv4Addr> {
+        self.0.live_state.read().unwrap().machine_ip
+    }
+
+    pub fn observed_machine_id(&self) -> Option<MachineId> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .observed_machine_id
+            .as_ref()
+            .map(ToOwned::to_owned)
+    }
+
+    pub(crate) fn bmc_injection_store(&self) -> Arc<InjectionStore> {
+        self.0.bmc_injection.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_control_test(mat_id: Uuid, observed_machine_id: Option<MachineId>) -> Self {
+        let (message_tx, _message_rx) = mpsc::unbounded_channel();
+        let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 1]);
+        let live_state = LiveState {
+            observed_machine_id,
+            ..LiveState::default()
+        };
+        Self(Arc::new(DpuMachineActor {
+            message_tx,
+            live_state: Arc::new(RwLock::new(live_state)),
+            mat_id,
+            dpu_info: DpuMachineInfo {
+                hw_type: HardwareType::default(),
+                bmc_mac_address: mac,
+                host_mac_address: mac,
+                oob_mac_address: mac,
+                serial: "test-dpu".to_string(),
+                settings: DpuSettings::default(),
+            },
+            dpu_index: 0,
+            bmc_injection: Arc::new(InjectionStore::new()),
+            join_handle: Mutex::new(None),
+        }))
+    }
+
+    pub fn set_system_power(&self, request: ResourceResetType) -> eyre::Result<()> {
         Ok(self.0.message_tx.send(DpuMachineMessage::SetSystemPower {
             request,
             reply: None,
@@ -365,6 +424,13 @@ impl DpuMachineHandle {
                 || matches!(live_state.booted_os.0, Some(OsImage::DpuAgent)))
     }
 
+    /// Whether this DPU's BlueField has flipped to NIC mode (a `Mode.Set` applied
+    /// on a power cycle). The owning host polls this to converge -- detaching its
+    /// DPU DHCP relay -- once a managed DPU becomes a plain NIC.
+    pub fn flipped_to_nic_mode(&self) -> bool {
+        self.0.live_state.read().unwrap().dpu_flipped_to_nic_mode
+    }
+
     pub async fn wait_until_machine_up_with_api_state(
         &self,
         state: &str,
@@ -377,28 +443,41 @@ impl DpuMachineHandle {
                 state.to_owned(),
                 tx,
             ))?;
-        tokio::time::timeout(timeout, rx).await?.wrap_err(format!(
-            "timed out waiting for machine up with state {state}"
-        ))
+        tokio::time::timeout(timeout, rx)
+            .await
+            .wrap_err_with(|| format!("timed out waiting for machine up with state {state}"))?
+            .wrap_err_with(|| format!("machine stopped while waiting for state {state}"))?;
+        Ok(())
     }
 
-    pub fn host_details(&self) -> HostDetails {
-        let guard = self.0.live_state.read().unwrap();
-        HostDetails {
-            mat_id: self.0.mat_id,
-            hw_type: None,
-            machine_id: guard.observed_machine_id.as_ref().map(|m| m.to_string()),
-            mat_state: guard.state_string,
-            api_state: guard.api_state.clone(),
-            oob_ip: guard.bmc_ip.map(|ip| ip.to_string()).unwrap_or_default(),
-            machine_ip: guard
-                .machine_ip
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            dpus: Vec::default(),
-            booted_os: guard.booted_os.to_string(),
-            next_boot_kind: guard.ui_next_boot_kind().into(),
-            power_state: guard.power_state,
+    pub fn status(&self, config: &DeviceStatusConfig) -> DeviceStatus {
+        let live_state = self.0.live_state.read().unwrap();
+        DeviceStatus {
+            mat_id: self.0.mat_id.to_string(),
+            device_kind: DeviceKind::Dpu,
+            device_id: live_state
+                .observed_machine_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| self.0.mat_id.to_string()),
+            machine_id: live_state
+                .observed_machine_id
+                .as_ref()
+                .map(ToString::to_string),
+            hardware_type: None,
+            mat_state: live_state.state_string.map(ToOwned::to_owned),
+            api_state: live_state.api_state.clone(),
+            power_state: live_state.power_state.to_string(),
+            machine_ip: live_state.machine_ip.map(|ip| ip.to_string()),
+            nvos_ip: None,
+            infiniband_ports: None,
+            bmc: BmcStatus {
+                ip: live_state.bmc_ip.map(|ip| ip.to_string()),
+                redfish: EndpointStatus::redfish(config),
+                ipmi: live_state.ipmi_port.map(EndpointStatus::same_port),
+                ssh: live_state.ssh_endpoint_port.map(EndpointStatus::same_port),
+            },
+            dpus: Vec::new(),
         }
     }
 
@@ -415,24 +494,42 @@ impl DpuMachineHandle {
     }
 
     pub fn persisted(&self) -> PersistedDpuMachine {
+        let live_state = self.0.live_state.read().unwrap();
+        let installed_os = live_state.installed_os;
+        let bmc_accounts = live_state.bmc_accounts_for_snapshot();
+        drop(live_state);
         PersistedDpuMachine {
             mat_id: self.0.mat_id,
-            hw_type: Some(self.0.dpu_info.hw_type),
+            hw_type: self.0.dpu_info.hw_type,
             bmc_mac_address: self.0.dpu_info.bmc_mac_address,
             host_mac_address: self.0.dpu_info.host_mac_address,
             oob_mac_address: self.0.dpu_info.oob_mac_address,
             serial: self.0.dpu_info.serial.clone(),
             settings: self.0.dpu_info.settings.clone(),
-            installed_os: self.0.live_state.read().unwrap().installed_os,
+            installed_os,
             dpu_index: self.0.dpu_index,
-            bmc_dhcp_id: self.0.bmc_dhcp_id,
-            machine_dhcp_id: self.0.machine_dhcp_id,
+            bmc_accounts,
         }
     }
 
     pub fn abort(&self) {
-        if let Some(join_handle) = self.0.join_handle.lock().unwrap().take() {
-            join_handle.abort();
+        _ = self.abort_task();
+    }
+
+    pub(crate) fn abort_task(&self) -> Option<JoinHandle<()>> {
+        let join_handle = self.0.join_handle.lock().unwrap().take()?;
+        join_handle.abort();
+        Some(join_handle)
+    }
+
+    pub async fn abort_and_wait(&self) -> eyre::Result<()> {
+        if let Some(join_handle) = self.abort_task() {
+            match join_handle.await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Ok(())
     }
 }

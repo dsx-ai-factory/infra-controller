@@ -1,54 +1,76 @@
 # NICo Tracing
 
-How NICo components tracing work, what it covers, how to turn it on and off and what it
-costs.
+How NICo component tracing works, what it covers, how to turn it on and off and what it costs.
 
 ---
 
 ## TL;DR
 
 - **nico-api** (the `carbide-api` binary) is NICo's primary tracing source and the subject of this
-  document. **nico-dns** also emits traces, but with a separate simpler always-on setup.
-  No other NICo component emits traces.
+  document. **nico-dns** also emits traces, but with a separate simpler opt-in setup.
+  **nico-bmc-proxy** emits traces for each proxied BMC request when configured (see
+  [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)) and **nico-pxe** for each boot request it
+  serves (see [nico-pxe tracing](#nico-pxe-tracing)).
 - **nico-api traces are off by default**; two things must both be true before any spans are emitted:
   - An OTLP endpoint is configured at startup, either in the nico-api config TOML:
+
       ```toml
       [tracing]
       otlp_endpoint = "http://<otel_endpoint_host>:4317" # gRPC (default port 4317)
       ```
-      or with `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, which overrides the TOML value.
+
+    or with `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, which overrides the TOML value.
   - Tracing is enabled, either in the same config section with `enabled = true`, or at runtime
     with `nico-admin-cli set tracing-enabled true` when `tracing.allow_runtime_changes = true`.
 - Tracing is **resource-intensive when on**, so turn it on for a debugging session and then off after.
+
     ```bash
     # Once the endpoint is configured and runtime changes are allowed:
     nico-admin-cli set tracing-enabled true     # start capturing
+
     # ... reproduce the issue, examine traces in your backend ...
     nico-admin-cli set tracing-enabled false    # stop capturing traces
     ```
+
   Leaving the OTLP endpoint configured while tracing is disabled costs almost nothing.
 - Transport is **OTLP/gRPC, plaintext**; nico-api cannot do OTLP/HTTP or originate TLS
+- nico-api **propagates W3C trace context** at its network boundaries: it reads `traceparent`/
+  `tracestate` from inbound REST and gRPC requests and continues that trace, injecting the same
+  headers into its outbound requests. Propagation links traces across services, but does not by itself
+  enable recording (see [W3C trace-context propagation](#w3c-trace-context-propagation)).
+- **NICo REST API services** share one OpenTelemetry bootstrap configured through standard `OTEL_*`
+  variables. Unlike nico-api, they export over OTLP/HTTP by default and can use TLS. See
+  [REST service tracing](#7-rest-service-tracing).
 
 ---
 
 ## 1. How tracing works
 
-### 1.1 Which components emit traces
+### Which components emit traces
 
-Two binaries build an OTLP span exporter:
+The following binaries build an OTLP span exporter:
 
 - **nico-api** (`crates/api-core/src/logging/setup.rs`) - the rich, control-plane tracing this
   document is mostly about, off by default behind endpoint plus enabled-flag configuration
-- **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **always-on** setup.
+- **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **opt-in** setup.
+- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - one span per proxied BMC request, off by
+  default behind endpoint plus `[tracing] enabled` (see
+  [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
+- **nico-pxe** (`crates/pxe/src/main.rs`) - request spans, off by default unless an OTLP
+  endpoint is configured (see [nico-pxe tracing](#nico-pxe-tracing)).
+- **NICo REST API services** (`rest-api/common/pkg/otel`), off by default until an OTLP endpoint
+  variable is set, plus `tracing.enabled` on nico-rest-api and the workflow workers (see
+  [REST service tracing](#7-rest-service-tracing)).
 
-The other binaries (nico-pxe, nico-dhcp, nico-bmc-proxy, nico-hardware-health, nico-ssh-console-rs,
+The other binaries (nico-dhcp, nico-hardware-health, nico-ssh-console-rs, and
 nico-dsx-exchange-consumer) carry the OpenTelemetry crates in the workspace but do not build a span
-exporter, so they emit no traces.
+exporter, so they do not emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
-nico-dns differs as described in 1.5.
+nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
+NICo REST API services are described separately in [REST service tracing](#7-rest-service-tracing).
 
-### 1.2 What operations are covered
+### What operations are covered
 
 nico-api links many library crates in-process and the `#[tracing::instrument]` spans live in
 those crates. When tracing is enabled, the instrumented operations are:
@@ -69,42 +91,198 @@ provisioning/reconcile loops, power control and firmware updates against the BMC
 backends, plus the database work underneath them - which maps directly to the EPIC's
 "time on a given state of the machine, nodes stuck" need.
 
-### 1.3 How spans are selected (sampler)
+### How spans are selected (sampler)
 
-nico-api uses a custom `CarbideSpanSampler` wrapped as **`ParentBased`**:
+nico-api uses a custom `CarbideSpanSampler`:
 
 - A **root span** is recorded only if both are true:
   - the in-process `tracing_enabled` flag is on, from `[tracing] enabled = true` at startup or
     from the dynamic `tracing-enabled` setting
-  - the span's `code.namespace` begins with `carbide::`
-- **Child spans inherit the root's decision** (that's what `ParentBased` means), so once a
-  trace is sampled the whole call tree beneath it is captured - **except tokio spans, which are
-  always dropped** (they leak and would exhaust memory).
+  - the span carries the `carbide.trace_root` marker attribute, set explicitly on the request span and a few
+    deliberate roots (the state-controller reconcile loops and site-explorer)
+- **In-process child spans inherit the root's decision**, so once a trace is sampled the whole call tree beneath
+  it is captured - **except tokio spans, which are always dropped** (they leak and would exhaust memory).
+- For a span parented to a **remote** (ingress-extracted) trace, the decision stays local: an inbound `sampled`
+  flag does not override `tracing_enabled` (see
+  [W3C trace-context propagation](#w3c-trace-context-propagation)).
 - The exporter resource is `service.name = carbide-api`; the tracer is named `carbide`.
 
-### 1.4 How traces leave nico-api
+### How traces leave nico-api
 
 nico-api pushes spans over **OTLP/gRPC** to a collector endpoint you configure. It does not
 discover or get injected with anything - it simply connects out to the endpoint from
 `[tracing] otlp_endpoint` or, if set, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The environment
 variable overrides the TOML value. The transport details: gRPC-only, plaintext.
 
-### 1.5 nico-dns tracing (separate and always-on)
+### nico-dns tracing (separate, opt-in)
 
 nico-dns has its own tracing setup (`crates/dns/src/main.rs`), independent of and simpler than
 nico-api's:
 
-- **Always on.** nico-dns builds the span exporter unconditionally at startup - there is no
-  endpoint env-var check and no `tracing-enabled` switch. If the process runs, it is exporting.
-- **Endpoint from config, with a default.** The target is the `otlp_endpoint` config field
-  (`crates/dns/src/config.rs`), which defaults to
-  `http://opentelemetry-collector.otel.svc.cluster.local:4317`. Because of that default, nico-dns
-  tries to export out of the box
+- **Off by default.** nico-dns builds the span exporter only when an OTLP endpoint is configured
+  - via `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, the `--otlp-endpoint` CLI flag, or the `otlp_endpoint`
+  config field (`crates/dns/src/config.rs`). With none of those set, no exporter is built and no
+  traces are sent. The env var takes precedence over the CLI flag/config file.
+- **No hardcoded default endpoint.** Earlier versions defaulted to
+  `http://opentelemetry-collector.otel.svc.cluster.local:4317` and exported unconditionally, which
+  meant every deployment silently exported traces to that address whether or not a collector was
+  listening there for OTLP/gRPC (see NVBUG 6717563). That default has been removed; set the
+  endpoint explicitly to enable tracing.
 - **Default sampler.** It uses the OpenTelemetry SDK's default sampler (no `CarbideSpanSampler`),
   so it records broadly, filtered only by the log-level directives in its `EnvFilter`. It
   instruments `retrieve_records`, among others.
-- **Resource / output:** `service.name = carbide-dns`; logs are JSON on stdout (not logfmt).
+- **Resource / output:** `service.name = nico-dns`; logs are logfmt on stdout, matching nico-api.
 - **Same transport constraints:** OTLP/gRPC, plaintext (`with_tonic`, no `tls` feature)
+
+### nico-bmc-proxy tracing
+
+nico-bmc-proxy traces each proxied Redfish request through the BMC credential proxy
+(`crates/bmc-proxy/src/proxy/`). It follows the same W3C propagation model as nico-api
+(issue [#2438](https://github.com/dsx-ai-factory/infra-controller/issues/2438)) so a call from nico-api or
+DPS stays one trace across the proxy hop (issue
+[#2355](https://github.com/dsx-ai-factory/infra-controller/issues/2355)).
+
+- **Off by default.** Spans are exported only when an OTLP endpoint is configured **and**
+  `[tracing] enabled = true` (or the process is started with `--debug`). There is no runtime
+  toggle on this binary.
+- **Environment variable override.** Tracing can be enabled via environment variable using the
+  `NICO_BMC_PROXY__TRACING__ENABLED=true`. The double underscore (`__`) maps to nested TOML sections,
+  so `NICO_BMC_PROXY__TRACING__ENABLED` overrides `[tracing] enabled`. This prefix takes precedence
+  over TOML configuration.
+- **Endpoint.** Set the standard `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or
+  `OTEL_EXPORTER_OTLP_ENDPOINT` to cover every signal at once; the trace-specific variable wins when
+  both are set. `[tracing] otlp_endpoint` in the proxy TOML is the fallback for when neither variable
+  is set. The remaining standard OTLP transport settings (`OTEL_EXPORTER_OTLP_TIMEOUT`,
+  `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_HEADERS`, ...) are read by the exporter
+  itself and apply as well. A malformed endpoint is rejected when the
+  exporter is built; the proxy logs a warning and serves BMC traffic without tracing rather than
+  refusing to start.
+- **Ingress.** Each proxied request opens a `bmc_proxy_request` span and adopts any inbound
+  `traceparent`/`tracestate` via `trace_propagation::set_span_parent_from_headers`.
+- **Egress to BMC.** Upstream Redfish calls use a `reqwest-tracing` client so the active proxy
+  span's W3C context is injected on the BMC leg. The inbound headers are dropped before the upstream
+  request is assembled — `trace_propagation::is_propagated_header` asks the configured propagator
+  which headers are its own — so the BMC parents under the proxy's span rather than the caller's.
+- **Egress to nico-api (gRPC).** Credential lookup uses the shared `ForgeApiClient`, which already
+  wraps the transport with `TraceInjectService`.
+- **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
+- **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
+  the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
+  a Prometheus label), and, once the request passes its ACL, its request class
+  (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  A `429` the proxy answers for want of a slot at the BMC leaves the span ok as well;
+  `carbide_bmc_proxy_admission_refused_total` counts those.
+
+Example config:
+
+```toml
+[tracing]
+enabled = true
+otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4317"
+```
+
+Point this at the same collector nico-api uses: spans only join into one trace if every
+hop's exporter reaches the same backend. The components stay distinguishable by their
+`service.name`.
+
+### nico-pxe tracing
+
+`nico-pxe` traces each HTTP request it serves, including the iPXE script, cloud-init and TLS bootstrap
+routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled by that crate's
+`otlp-tracing` feature.
+
+- **Off by default.** `nico-pxe` exports spans only when an OTLP endpoint is configured. It has no
+  separate enabled flag and no runtime toggle.
+- **Endpoint.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (`otlpEndpoint` Helm value) or `OTEL_EXPORTER_OTLP_ENDPOINT`, which
+  also applies to metrics and logs. The `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` var takes precedence when both are set.
+  If no endpoint is set, span export stays off and `nico-pxe` logs at `debug`. If the exporter
+  rejects the endpoint, it logs a warning and disables span export.
+- **Span level, separate from the log level.** `NICO_TRACES_SPAN_LEVEL` sets the most verbose span
+  level exported, defaulting to `info`. A span's level is set by the macro that creates it, such as
+  `info_span!` or `#[instrument(level = "debug")]`, and decides only whether the exporter receives
+  the span. It accepts `off`, `error`, `warn`, `info`, `debug`, `trace`, or `0`-`5`. It is
+  independent of `RUST_LOG`: set it to `debug` or `trace` to export more spans without adding lines
+  to stdout, and changing `RUST_LOG` does not change which spans are exported. If the value is
+  invalid, `nico-pxe` logs a warning and keeps the default level.
+- **Inbound requests.** Each request opens a `request` span (`crates/pxe/src/middleware/logging.rs`)
+  and uses any inbound `traceparent` or `tracestate` header as its parent.
+  - A booting node cannot send those headers, so most requests span starts a new trace.
+  - A request from another traced service continues that service's trace.
+- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+  with `TraceInjectService` and sends the trace context on every request. No per-call code is
+  needed.
+- **Resource / tracer:** `service.name = nico-pxe`, tracer name `nico-pxe`.
+- **Span fields:** the same fields the request log line carries - `span_id`, client IP and port,
+  method, path, query, the Host, Content-Length and User-Agent headers when present and the
+  response status.
+- **Sampling.** The standard `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` variables are used to configure a sampler.
+  Prefer `parentbased_traceidratio` over `traceidratio`. A parent-based sampler applies the ratio only at
+  the service that starts a trace and later services reuse it.
+  The `nico-api` has a different tracing support approach. It does **not**
+  read these variables, because it installs `CarbideSpanSampler` instead.
+- **Shutdown.** On SIGTERM, `nico-pxe` stops accepting connections, lets in-flight requests finish, then
+  sends the last batch of spans.
+
+### W3C trace-context propagation
+
+nico-api accepts and produces **W3C Trace Context** headers (`traceparent` and `tracestate`) at its
+network boundaries, so a request already traced by another service stays one trace as it passes
+through nico-api. The standard `TraceContextPropagator` is installed once at startup
+(`crates/api-core/src/logging/setup.rs`); there is no custom header parsing.
+
+- **Ingress (REST + gRPC).** The shared per-request layer (`crates/api-core/src/logging/api_logs.rs`)
+  extracts any inbound `traceparent` or `tracestate` and makes the upstream span the parent of nico-api's
+  request span. REST and gRPC flow through this single layer, so both are covered. A missing or
+  malformed `traceparent` leaves the request span a fresh root.
+- **Egress.** When nico-api makes an outbound call from within a traced request, it injects the
+  current `traceparent` and `tracestate` so the downstream service can continue the trace. Covered:
+  - **gRPC** - Forge and NMX-C (`crates/rpc`), the NSM and power-shelf (PSM) backends
+    (`crates/component-manager`), and the NMX-C client pool (`crates/libnmxc`), through a shared tower
+    layer applied to every request.
+  - **HTTP** - the BMC/Redfish handler, machine-identity token exchange, admin-UI OAuth2, NRAS,
+    the MQTT OAuth2 token provider, and firmware downloads.
+- **Interaction with the enable flag.** `tracing-enabled` is the master switch for what nico-api
+  *records*: an inbound `sampled` flag never turns recording on here. When `tracing-enabled` is on, the inbound
+  `trace_id` is inherited, so nico-api's spans join the caller's trace.
+- **Forwarding vs. recording.** Forwarding the context is separate from recording it, but both currently
+  depend on the exporter being built:
+  - *Exporter built, tracing off:* records nothing, yet still forwards the inbound `trace_id` and `tracestate`
+    marked **not sampled** (`sampled=0`).
+  - *No endpoint configured (exporter not built):* does **not** forward at all, so the trace **breaks** at
+    this hop. **This is a known limitation.**
+- **Scope.** Trace context only (`traceparent` or `tracestate`).
+
+### Adding a new network client
+
+Propagation is automatic on ingress but opt-in on egress. Keep the following in mind when adding code:
+
+- **New ingress (a REST route or gRPC method): nothing to do.** Every inbound request flows through the
+  shared per-request layer (`crates/api-core/src/logging/api_logs.rs`), which extracts the inbound context
+  for you.
+- **New outbound gRPC client (tonic/hyper):** wrap its channel/service with
+  `trace_propagation::TraceInjectService` at construction. Better yet, build through an existing shared
+  client that already wraps the transport (see `crates/rpc/src/forge_tls_client.rs`).
+- **New outbound HTTP client (`reqwest`):** build it through the `reqwest-tracing` middleware instead of using a
+  bare `reqwest::Client`. The wrapped client injects the current `traceparent` and `tracestate` into every request
+  automatically, so there is no per-call code:
+
+  ```rust
+  let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
+      .with(reqwest_tracing::TracingMiddleware::default())
+      .build(); // -> reqwest_middleware::ClientWithMiddleware, a drop-in for request-building
+  let resp = client.get(url).send().await?;
+  ```
+
+  See `crates/nras/src/client.rs` for a real example.
+- **When another crate owns the HTTP call (manual fallback):** if the request is built and sent by code you
+  don't control (for example, the `oauth2` client (`crates/api-web/src/auth.rs`), which owns its own `reqwest`
+  request) inject into that request's headers directly:
+
+  ```rust
+  trace_propagation::inject_current_context(request.headers_mut());
+  ```
+
+Injection is always a no-op when no trace is active, so it is safe to add it unconditionally.
 
 ---
 
@@ -115,7 +293,7 @@ flag that can come from startup config or, when allowed, the runtime switch. An 
 enabled flag emits no traces. The enabled flag without an endpoint also emits no traces because no
 OTLP exporter is built.
 
-```
+```text
  Startup configuration                             Enable/disable policy
  ┌───────────────────────────────┐                  ┌─────────────────────────────────────┐
  │ a. a traces backend           │                  │ [tracing] enabled = true|false      │
@@ -126,7 +304,7 @@ OTLP exporter is built.
  └───────────────────────────────┘                  └─────────────────────────────────────┘
 ```
 
-### 2.1 Deploy-time configuration
+### Deploy-time configuration
 
 **(a) A traces backend.** Anything that accepts OTLP traces: e.g. Tempo, Jaeger, Grafana Cloud,
 Datadog, Elastic APM or another OTEL collector acting as a gateway.
@@ -237,7 +415,7 @@ Notes:
 - Configuring only the endpoint puts the plumbing in place but does **not** start emission on its
   own. `enabled` must also be true.
 
-### 2.2 Enable / Disable Policy
+### Enable / Disable Policy
 
 With the endpoint configured, emission is controlled by `[tracing] enabled`, which defaults
 **off**:
@@ -269,7 +447,7 @@ Leaving tracing **off** in steady state is the intended operating mode. If you n
 control, set `allow_runtime_changes = false` and change `[tracing] enabled` through the config file
 plus a pod roll.
 
-### 2.3 Do I need to restart nico-api?
+### Do I need to restart nico-api?
 
 It depends on which part you are changing:
 
@@ -293,7 +471,7 @@ the plumbing is cheap while tracing is toggled off. Keep `enabled = false` and
 `allow_runtime_changes = true` for debug-on-demand environments, or set
 `allow_runtime_changes = false` when the config file should be the only control plane for tracing.
 
-### 2.4 Verifying it works
+### Verifying it works
 
 1. `[tracing] otlp_endpoint` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set on nico-api and points
    at the collector's gRPC endpoint.
@@ -317,11 +495,11 @@ which of three states nico-api is in:
 | Endpoint **set**, tracing **disabled** | **Near-zero** (small per-span bookkeeping) | None | Layer is installed but the sampler drops everything; nothing is recorded or exported. |
 | Endpoint set, tracing **enabled** | **Significant** | Yes | Full recording + serialization + export. This is the "resource-intensive" mode. |
 
-### 3.1 When tracing is ON
+### When tracing is ON
 
 This is the expensive mode the dev team warns about:
 
-- Because the sampler is `ParentBased`, a sampled root span pulls in its **entire child subtree**
+- Because a span's in-process children inherit its sampling decision, a sampled root span pulls in its **entire child subtree**
   (the component-manager, controller, and DB spans beneath it). A single traced
   operation can therefore produce many spans.
 - Costs land in several places: extra **CPU and memory** on nico-api, added **latency** on
@@ -329,7 +507,7 @@ This is the expensive mode the dev team warns about:
 - Mitigate with `tail_sampling` at the collector (keep errors/slow traces, sample the rest) and -
   most importantly - **only enable it during an active investigation**, then turn it back off.
 
-### 3.2 When the endpoint is set but tracing is OFF
+### When the endpoint is set but tracing is OFF
 
 This is the common steady state if you follow the recommendation to leave the endpoint configured
 with `[tracing] enabled = false`, or after disabling tracing dynamically. The overhead here is
@@ -346,7 +524,7 @@ with `[tracing] enabled = false`, or after disabling tracing dynamically. The ov
 - Net: a small, roughly constant per-span CPU cost - negligible next to the "on" mode, but not
   the literal zero you get with the endpoint unset.
 
-### 3.3 Practical guidance
+### Practical guidance
 
 - Leave `[tracing] otlp_endpoint` configured and keep tracing **off** in steady state - cheap and
   avoids a pod roll when you need traces.
@@ -377,10 +555,260 @@ annotation involved for traces
 | Sidecar injected but still no traces | Endpoint not set, or points somewhere other than `localhost:4317` | Set `[tracing] otlp_endpoint = "http://localhost:4317"` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://localhost:4317` on nico-api |
 | Traces reach the collector but not the backend | Collector exporter endpoint/TLS wrong | Check the exporter config; for remote backends configure TLS/mTLS on the collector |
 | Sudden resource/latency spike on nico-api | Tracing left on | `nico-admin-cli set tracing-enabled false`, or set `[tracing] enabled = false` and roll nico-api if runtime changes are disabled |
-| Spans arrive but request trees look sparse | The `carbide::` root-span nuance | Verify where the root span originates on a live environment |
+| Spans arrive but request trees look sparse | Only spans marked with `carbide.trace_root` start a recorded trace (see [Span Sampler](#how-spans-are-selected-sampler)) | Confirm the operation starts at a marked root span |
 
 ---
 
-## 6. References
+## 6. DPU workload tracing
 
-- [NICo core metrics catalogue](https://docs.nvidia.com/infra-controller/documentation/operations/observability/core-metrics) - includes `carbide_api_tracing_spans_open`.
+DPU workloads (such as ovnkube-node) can emit OpenTelemetry tracing spans through the DPU's
+otelcol-contrib collector. The collector provides a localhost-only OTLP/gRPC receiver that
+forwards spans to the site-level OpenTelemetry receiver using the DPU's mTLS credentials.
+
+### Endpoint configuration
+
+| Setting | Value |
+|---------|-------|
+| Protocol | OTLP/gRPC |
+| Endpoint | `127.0.0.1:4317` |
+| TLS | Not required (loopback only) |
+
+### Workload configuration
+
+Configure your workload's OpenTelemetry exporter to send spans to the local collector:
+
+```bash
+# Environment variables (standard OTLP configuration)
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4317"
+export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
+```
+
+For Kubernetes workloads running on DPUs managed by DPF:
+
+```yaml
+# Pod spec environment variables
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://127.0.0.1:4317"
+  - name: OTEL_EXPORTER_OTLP_PROTOCOL
+    value: "grpc"
+```
+
+<Note>
+The nico-otelcol DaemonSet runs with `hostNetwork: true`, so the loopback endpoint
+`127.0.0.1:4317` is reachable only from the host network namespace. This works for
+workloads like ovnkube-node that also use `hostNetwork: true`. Workloads in pod
+network namespaces cannot reach this endpoint.
+</Note>
+
+### Security
+
+- The OTLP receiver binds only to loopback (`127.0.0.1`), preventing access from outside the node
+- Loopback does not authenticate callers - any process in the host network namespace can send spans
+- Workloads do not need access to DPU mTLS credentials
+- The collector authenticates to the site-level receiver using existing mTLS configuration
+
+### Resource attributes
+
+Spans exported through this pipeline include:
+
+| Attribute | Source | Description |
+|-----------|--------|-------------|
+| `host.name` | `resourcedetection` | DPU hostname |
+| `machine.id` | `fileresource` | NICo machine ID |
+| `host.machine.id` | `fileresource` | Host machine ID |
+| `component` | `resource/traces-workloads` | Set to `dpu-workloads` |
+
+---
+
+## 7. NICo REST API service tracing
+
+NICo REST API services share one OpenTelemetry bootstrap, `rest-api/common/pkg/otel`, which each
+service runs once at startup. It reads the standard `OTEL_*` environment variables, so changing any
+setting needs a pod restart. There is no runtime toggle like nico-api's `tracing-enabled`.
+
+### Which REST services export
+
+| Service (default `service.name`) | Exports spans when |
+|---|---|
+| `nico-rest-api` | `tracing.enabled` is `true` in its config and an OTLP endpoint variable is set |
+| `nico-rest-workflow`, for both the cloud and the site worker | `tracing.enabled` is `true` in the workflow config and an OTLP endpoint variable is set |
+| `nico-rest-site-agent`, `nico-rest-site-manager`, `nico-rest-cert-manager`, `nico-flow`, `nico-ipam`, `nico-nvswitch-manager`, `nico-powershelf-manager` | An OTLP endpoint variable is set |
+
+An OTLP endpoint variable is `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+with a non-empty value. No Helm chart or Kustomize base sets one, so nothing is exported until you
+add it.
+
+A service that does not export still reads an inbound `traceparent` and `tracestate`, and forwards
+them on its own HTTP, gRPC, and Temporal calls. So a hop that does not export leaves a gap in the
+trace rather than splitting it.
+
+### What each service traces
+
+Spans are recorded only while a service exports. Apart from the database query hook, the
+instrumentation stays installed either way, which is what carries trace context through a service
+that does not export.
+
+| Service | Spans |
+|---|---|
+| `nico-rest-api` | A server span for each request except `/healthz` and `/readyz`, a handler span such as `CreateVPCHandler`, DAO spans such as `IPBlockDAO.Create`, a span for each database query, Temporal client spans for the workflows it starts, and HTTP client spans for its Keycloak and JWKS calls |
+| `nico-rest-workflow` | Temporal worker spans for each workflow and activity, the DAO and database query spans beneath them, and Temporal client spans for the Site workflows it starts |
+| `nico-rest-site-agent` | Temporal client and worker spans for Site workflows, and gRPC client spans for its calls to Core and Flow |
+| `nico-flow` | gRPC server spans, gRPC client spans for its calls to Core, and Temporal client and worker spans |
+| `nico-nvswitch-manager`, `nico-powershelf-manager` | gRPC server spans |
+| `nico-ipam` | Connect RPC server spans |
+| `nico-rest-site-manager` | HTTP server spans, and HTTP client spans for its outbound calls |
+| `nico-rest-cert-manager` | HTTP server spans |
+
+A database query span records the SQL statement with `?` placeholders, so bound parameter values
+are never exported.
+
+### Configuration
+
+`nico-rest-api` and `nico-rest-workflow` read two tracing keys from their config file:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tracing.enabled` | `false` in the binaries and the Kustomize bases, `true` by default in the Helm charts | Export spans once an OTLP endpoint variable is set. Without one, the service logs `tracing enabled but no OTLP exporter endpoint configured` and runs without exporting. |
+| `tracing.serviceName` | `nico-rest-api` or `nico-rest-workflow` | `service.name` when the environment does not set one. |
+
+Every REST service reads these environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Collector base URL. Over OTLP/HTTP the exporter appends `/v1/traces`. An `http://` URL is plaintext, `https://` uses TLS. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Traces-only URL, which wins over the general one. Over OTLP/HTTP it is used as is, so include `/v1/traces`. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `http/protobuf` | Exactly `grpc` or `http/protobuf`, and the traces variable wins. Collectors usually take OTLP/gRPC on `4317` and OTLP/HTTP on `4318`. |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_INSECURE`, `OTEL_EXPORTER_OTLP_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` | Exporter defaults | Read by the OTLP exporter itself, as are their `OTEL_EXPORTER_OTLP_TRACES_*` forms. The certificate variables take file paths, for a private CA and for mTLS. |
+| `OTEL_SERVICE_NAME` | unset | `service.name`. It wins over `OTEL_RESOURCE_ATTRIBUTES`, `tracing.serviceName`, and the default names in the table above. |
+| `OTEL_RESOURCE_ATTRIBUTES` | unset | Extra resource attributes, for example `service.namespace=nico-rest,deployment.environment=prod`. |
+| `OTEL_PROPAGATORS` | `tracecontext,baggage` | Names from the OpenTelemetry Go `autoprop` package: `tracecontext`, `baggage`, `b3`, `b3multi`, `jaeger`, `xray`, `ottrace`, or `none`. A value replaces the default rather than adding to it. |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Read by the SDK. For example, `parentbased_traceidratio` with `0.1` keeps 10% of the traces a service starts, and follows the caller's decision for the rest. |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | `2048` | Finished spans waiting for export, from `1` to `16384`. A full queue drops new spans rather than blocking requests. |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | `512` | Spans per export request, from `1` to `2048` and no more than the queue size. |
+| `OTEL_BSP_SCHEDULE_DELAY` | `5000` | Milliseconds between exports, from `100` to `10000`. |
+| `OTEL_BSP_EXPORT_TIMEOUT` | `30000` | Milliseconds allowed for each export, from `1000` to `60000`. |
+
+An unknown `OTEL_PROPAGATORS` name is a bootstrap error. Once a service exports, so are an unknown
+protocol and an `OTEL_BSP_*` value outside its range. `nico-rest-api` and `nico-rest-workflow` exit
+with `failed to initialize tracing`. The other services log the error and run without tracing or
+trace propagation.
+
+### Trace context propagation
+
+The API's Echo middleware, the Temporal interceptor, and the gRPC client and server handlers stay
+installed whether or not a service exports. With `OTEL_PROPAGATORS=none`, a service that does not
+export drops them. A service that exports keeps recording its own spans, but neither reads nor
+sends trace context.
+
+The API reads OpenTracing `ot-tracer-*` headers only when `OTEL_PROPAGATORS` includes `ottrace`,
+for example `tracecontext,baggage,ottrace`.
+
+Baggage also crosses Temporal, where the Temporal SDK writes it into workflow headers. Those headers
+are kept in workflow history, so treat baggage as durable and keep sensitive values out of it.
+`OTEL_PROPAGATORS=tracecontext` propagates trace context without baggage. Changing the propagators
+while workflows are open is safe: a workflow header the new setting cannot read starts a new trace
+instead of failing the workflow task.
+
+### Finding a request's trace
+
+When `nico-rest-api` exports, it returns the trace ID in the `X-Nico-Trace-Id` response header on
+every request except `/healthz` and `/readyz`. When it does not export, the header only repeats the
+trace ID the caller sent.
+
+```bash
+curl -sS -D - -o /dev/null -H "Authorization: Bearer $TOKEN" \
+  "https://<api-host>/v2/org/<org>/nico/site" | grep -i x-nico-trace-id
+```
+
+### Helm and Kustomize
+
+The `nico-rest-api`, `nico-rest-workflow`, `nico-rest-cert-manager`, and `nico-rest-site-manager`
+charts take an `extraEnv` map of names to values and render it into the container environment. The
+workflow chart also takes `cloudWorker.extraEnv` and `siteWorker.extraEnv`, merged over the shared
+map with the worker's keys winning. `extraEnv` cannot override a variable the chart sets itself,
+which is `CONFIG_FILE_PATH` and, on the workers, `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE`.
+Rendering fails if it tries.
+
+```yaml
+nico-rest-api:
+  config:
+    tracing:
+      enabled: true
+      serviceName: nico-rest-api
+  extraEnv:
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4317
+    OTEL_RESOURCE_ATTRIBUTES: service.namespace=nico-rest,deployment.environment=prod
+
+nico-rest-workflow:
+  config:
+    tracing:
+      enabled: true
+      serviceName: nico-rest-workflow
+  extraEnv:
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4317
+    OTEL_RESOURCE_ATTRIBUTES: service.namespace=nico-rest,deployment.environment=prod
+  cloudWorker:
+    extraEnv:
+      OTEL_SERVICE_NAME: nico-rest-cloud-worker
+  siteWorker:
+    extraEnv:
+      OTEL_SERVICE_NAME: nico-rest-site-worker
+
+nico-rest-cert-manager:
+  extraEnv:
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4317
+
+nico-rest-site-manager:
+  extraEnv:
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4317
+```
+
+The other services take the same variables through their own charts or manifests:
+
+- `nico-rest-site-agent` takes them in its `envConfig` map.
+- `nico-flow` takes a list of `EnvVar` entries in `extraEnv.flow`.
+- `nico-ipam`, `nico-nvswitch-manager`, and `nico-powershelf-manager` read them from their container
+  environment.
+
+The Kustomize bases in `rest-api/deploy/kustomize/base/` set `tracing.enabled: false` in the API and
+workflow config maps, and add no `OTEL_*` variables. To trace a Kustomize deployment, set
+`tracing.enabled: true` in an overlay and add the variables to each workload's container `env`.
+
+### Cost
+
+With the default sampler, a service that exports records every request it handles, including a span
+for each database query. `OTEL_TRACES_SAMPLER=parentbased_traceidratio` keeps a fraction of new
+traces instead. A slow or unreachable collector costs spans rather than request latency, since a
+full queue drops new spans. On shutdown each service flushes the spans still queued.
+
+### Verifying REST tracing
+
+1. Point every service at the same collector. Spans only join one trace when every hop exports to
+   the same backend.
+2. Check each service's startup log. `tracing enabled, OTLP tracer provider installed` means it
+   exports, and the line also shows the resolved `serviceName` and `protocol`.
+3. Send an API request that starts a workflow. It should appear as one trace with the API server
+   span, the Temporal client and worker spans, and the database spans beneath them.
+4. Look a single request up by the `X-Nico-Trace-Id` value it returned.
+
+### Troubleshooting REST tracing
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Log shows `tracing disabled by config` | `tracing.enabled` is `false` on the API or workflow, or another service has no endpoint variable | Set `tracing.enabled: true` or the endpoint variable, then restart the pod |
+| Log shows `tracing enabled but no OTLP exporter endpoint configured` | The API or workflow has no endpoint variable | Set `OTEL_EXPORTER_OTLP_ENDPOINT` and restart the pod |
+| The API or workflow exits with `failed to initialize tracing` | An unknown protocol or propagator, or an `OTEL_BSP_*` value outside its range | Fix the variable the error names |
+| Export fails against a `4317` endpoint | The default protocol is `http/protobuf` | Set `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` |
+| OTLP/HTTP export gets `404` responses | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` has no `/v1/traces` path | Add the path, or set `OTEL_EXPORTER_OTLP_ENDPOINT` instead |
+| A caller's trace does not continue into the API | The caller sends only `ot-tracer-*` headers, or `OTEL_PROPAGATORS=none` is set | Add `ottrace` to `OTEL_PROPAGATORS`, or remove `none` |
+
+---
+
+## 8. References
+
+- [NICo core metrics catalogue](core_metrics.md) - includes `carbide_api_tracing_spans_open`.

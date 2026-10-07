@@ -1,0 +1,50 @@
+suite: NVSwitch NICo client certificate generation
+templates:
+  - nvswitch-nico-client-certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: is absent by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the NMX-C client identity when enabled
+    set:
+      nvSwitchTls:
+        nicoClient:
+          enabled: true
+          uris:
+            - spiffe://switch.local/nico-system/sa/nico-nmxc
+    asserts:
+      - equal:
+          path: spec.secretName
+          value: nvswitch-nico-client-certificate
+      - equal:
+          path: spec.usages
+          value:
+            - digital signature
+            - client auth
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://switch.local/nico-system/sa/nico-nmxc
+      - equal:
+          path: spec.privateKey
+          value:
+            algorithm: ECDSA
+            size: 384
+            rotationPolicy: Always
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: vault-nico-issuer
+            group: cert-manager.io
+
+  - it: rejects a missing client URI SAN
+    set:
+      nvSwitchTls.nicoClient.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: nvSwitchTls.nicoClient.uris must contain at least one URI SAN"

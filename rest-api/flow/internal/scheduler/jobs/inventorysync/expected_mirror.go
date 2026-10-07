@@ -28,9 +28,7 @@ type mirrorResult struct {
 	adopted          int
 	resurrected      int
 	softDeleted      int
-	legacyExempt     int
 	skippedNoIDOrKey int
-	skippedNameTaken int
 }
 
 func (r mirrorResult) log() {
@@ -42,9 +40,7 @@ func (r mirrorResult) log() {
 		Int("adopted", r.adopted).
 		Int("resurrected", r.resurrected).
 		Int("soft_deleted", r.softDeleted).
-		Int("legacy_exempt", r.legacyExempt).
 		Int("skipped_invalid", r.skippedNoIDOrKey).
-		Int("skipped_name_taken", r.skippedNameTaken).
 		Msgf("Expected-inventory mirror: %s", r.resource)
 }
 
@@ -139,12 +135,21 @@ func loadRackIDByExternalID(ctx context.Context, idb bun.IDB) (map[string]uuid.U
 	return out, nil
 }
 
-// rackNaturalKey joins manufacturer and serial number with a NUL byte. NUL
-// can't appear inside either component, so this is collision-free without
-// having to escape. Used by both the rack and component mirrors to key
-// "is this row already known" maps off the shared (manufacturer, serial)
-// pair, so it lives here next to the orchestrator rather than in either
-// type-specific file.
-func rackNaturalKey(manufacturer, serialNumber string) string {
+// naturalKey joins manufacturer and serial number with a NUL byte, which can't
+// appear inside either half, so the result is collision-free without escaping.
+// Both mirrors key their "is this row already known" maps off it, so it lives
+// here next to the orchestrator rather than in either type-specific file.
+func naturalKey(manufacturer, serialNumber string) string {
 	return manufacturer + "\x00" + serialNumber
+}
+
+// naturalKeyOrEmpty returns the empty string unless both halves are populated.
+// A half-populated pair identifies nothing: every row missing the same half
+// shares one key, so a map built on it hands an arbitrary one of them back.
+// Callers skip such rows and match them by their real identity instead.
+func naturalKeyOrEmpty(manufacturer, serialNumber string) string {
+	if manufacturer == "" || serialNumber == "" {
+		return ""
+	}
+	return naturalKey(manufacturer, serialNumber)
 }

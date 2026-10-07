@@ -69,6 +69,10 @@ bootstrap:
   # this site with nico-rest-site-manager and creates the site-registration secret.
   # Requires envConfig.CLUSTER_ID to be set.
   enabled: false
+  # Set `repository` + `tag` to override (they win when both are set); otherwise the
+  # combined `image` below is used.
+  # repository: alpine/k8s
+  # tag: 1.29.4
   image: alpine/k8s:1.29.4
   siteManager:
     address: nico-rest-site-manager.nico-rest
@@ -80,8 +84,16 @@ envConfig:
   DEV_MODE: "true"
   ENABLE_DEBUG: "true"
   ENABLE_TLS: "true"
-  NICO_ADDRESS: ""
-  NICO_SEC_OPT: "0"
+  # Empty by default — callers must set the Core gRPC endpoint for their
+  # environment (kind local dev sets mock-core via rest-api/Makefile --set;
+  # helm-prereqs/values/nico-site-agent.yaml sets the production nico-api address).
+  CORE_GRPC_ADDRESS: ""
+  CORE_GRPC_SEC_OPT: ""
+  CORE_GRPC_CA_CERT_PATH: "/etc/core-grpc/ca.crt"
+  CORE_GRPC_CLIENT_CERT_PATH: "/etc/core-grpc/tls.crt"
+  CORE_GRPC_CLIENT_KEY_PATH: "/etc/core-grpc/tls.key"
+  FLOW_GRPC_ENABLED: "true"
+  FLOW_GRPC_SEC_OPT: "2"
   CLUSTER_ID: ""
   TEMPORAL_HOST: "temporal-frontend.temporal"
   TEMPORAL_PORT: "7233"

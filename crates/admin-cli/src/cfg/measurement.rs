@@ -22,7 +22,6 @@
 
 */
 
-use ::rpc::admin_cli::OutputFormat;
 use clap::Parser;
 use measured_boot::pcr::PcrRegisterValue;
 
@@ -32,12 +31,12 @@ use crate::attestation::measured_boot::{bundle, journal, machine, profile, repor
 // a key/value pair, and is used for parsing
 // k:v,... groupings via the CLI.
 #[derive(Clone, Debug)]
-pub struct KvPair {
-    pub key: String,
-    pub value: String,
+pub(crate) struct KvPair {
+    pub(crate) key: String,
+    pub(crate) value: String,
 }
 
-pub fn parse_colon_pairs(arg: &str) -> eyre::Result<KvPair> {
+pub(crate) fn parse_colon_pairs(arg: &str) -> eyre::Result<KvPair> {
     let pair: Vec<&str> = arg.split(':').collect();
     if pair.len() != 2 {
         return Err(eyre::eyre!("must be <first>:<second>"));
@@ -49,7 +48,7 @@ pub fn parse_colon_pairs(arg: &str) -> eyre::Result<KvPair> {
     })
 }
 
-pub fn parse_pcr_register_values(arg: &str) -> eyre::Result<PcrRegisterValue> {
+pub(crate) fn parse_pcr_register_values(arg: &str) -> eyre::Result<PcrRegisterValue> {
     let pair: Vec<&str> = arg.split(':').collect();
     if pair.len() != 2 {
         return Err(eyre::eyre!("must be <num>:<val>"));
@@ -65,16 +64,11 @@ pub fn parse_pcr_register_values(arg: &str) -> eyre::Result<PcrRegisterValue> {
     })
 }
 
-pub struct GlobalOptions {
-    pub format: OutputFormat,
-    pub extended: bool,
-}
-
 /// Cmd is the top-level subcommands enum, which contains mappings for all
 /// top-level commands (e.g. `bundle`, `journal`, etc).
 
 #[derive(Parser, Debug)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(
         subcommand,
         about = "Work with golden measurement bundles.",

@@ -17,9 +17,18 @@
 				<th>IB IFs #</th>
 				<th>Host Memory</th>
 			{% endif %}
+			<th>DPF Enabled</th>
+			<th>DPF Used For Ingestion</th>
 		<tr/>
 	</thead>
 	<tbody>
+	{% if hosts.is_empty() %}
+		{% if active_maintenance_filter == "maintenance" %}
+			<tr><td colspan="11">No machines match the selected filters.</td></tr>
+		{% else %}
+			<tr><td colspan="12">No machines match the selected filters.</td></tr>
+		{% endif %}
+	{% endif %}
 	{% for host in hosts %}
 		<tr>
 			<td>{{ host.machine_id|machine_id_link|safe }}</td>
@@ -41,7 +50,7 @@
 			</td>
 			<td>
 				<a href="/admin/machine/{{ host.machine_id }}/health">
-					{{ host.health_probe_alerts|health_alerts_fmt(false, false)|safe }}
+					{{ host.health_probe_alerts|health_alerts_fmt(true, true)|safe }}
 				</a>
 			</td>
 			<td><a href="/admin/machine/{{ host.machine_id }}/health">{{ host.health_sources.len() }}</a></td>
@@ -66,6 +75,8 @@
 				<td>{{ host.num_ib_ifs }}</td>
 				<td>{{ host.host_memory }}</td>
 			{% endif %}
+			<td>{{ host.dpf_enabled }}</td>
+			<td>{% if !host.dpf_used_for_ingestion %}<span class="bubble warning">false</span>{% else %}true{% endif %}</td>
 		</tr>
 	{% endfor %}
 		<tfoot>
@@ -86,6 +97,8 @@
 					<th></th>
 					<th></th>
 				{% endif %}
+				<th></th>
+				<th></th>
 			</tr>
 		</tfoot>
 	</tbody>

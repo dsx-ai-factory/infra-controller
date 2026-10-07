@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 )
 
@@ -61,7 +61,7 @@ type APIMachineValidationTest struct {
 	IsEnabled bool `json:"isEnabled"`
 }
 
-func NewAPIMachineValidationTest(proto *cwssaws.MachineValidationTest) *APIMachineValidationTest {
+func NewAPIMachineValidationTest(proto *corev1.MachineValidationTest) *APIMachineValidationTest {
 	return &APIMachineValidationTest{
 		TestID:             proto.GetTestId(),
 		Name:               proto.GetName(),
@@ -149,8 +149,8 @@ func (req APIMachineValidationTestCreateRequest) Validate() error {
 	return nil
 }
 
-func (req APIMachineValidationTestCreateRequest) ToProto() *cwssaws.MachineValidationTestAddRequest {
-	return &cwssaws.MachineValidationTestAddRequest{
+func (req APIMachineValidationTestCreateRequest) ToProto() *corev1.MachineValidationTestAddRequest {
+	return &corev1.MachineValidationTestAddRequest{
 		Name:               req.Name,
 		Command:            req.Command,
 		Args:               req.Args,
@@ -211,11 +211,11 @@ type APIMachineValidationTestUpdateRequest struct {
 	IsEnabled *bool `json:"isEnabled"`
 }
 
-func (req APIMachineValidationTestUpdateRequest) ToProto(testID string, testVersion string) *cwssaws.MachineValidationTestUpdateRequest {
-	return &cwssaws.MachineValidationTestUpdateRequest{
+func (req APIMachineValidationTestUpdateRequest) ToProto(testID string, testVersion string) *corev1.MachineValidationTestUpdateRequest {
+	return &corev1.MachineValidationTestUpdateRequest{
 		TestId:  testID,
 		Version: testVersion,
-		Payload: &cwssaws.MachineValidationTestUpdateRequest_Payload{
+		Payload: &corev1.MachineValidationTestUpdateRequest_Payload{
 			Name:               req.Name,
 			Command:            req.Command,
 			Args:               req.Args,
@@ -253,8 +253,8 @@ type APIMachineValidationTestsFilter struct {
 	IsVerified *bool `query:"isVerified"`
 }
 
-func (filter APIMachineValidationTestsFilter) ToProto() *cwssaws.MachineValidationTestsGetRequest {
-	return &cwssaws.MachineValidationTestsGetRequest{
+func (filter APIMachineValidationTestsFilter) ToProto() *corev1.MachineValidationTestsGetRequest {
+	return &corev1.MachineValidationTestsGetRequest{
 		SupportedPlatforms: filter.SupportedPlatforms,
 		Contexts:           filter.Contexts,
 		ReadOnly:           filter.IsReadOnly,
@@ -279,7 +279,7 @@ type APIMachineValidationResult struct {
 	TestID       string    `json:"testID"`
 }
 
-func NewAPIMachineValidationResult(proto *cwssaws.MachineValidationResult) *APIMachineValidationResult {
+func NewAPIMachineValidationResult(proto *corev1.MachineValidationResult) *APIMachineValidationResult {
 	apio := &APIMachineValidationResult{
 		Name:         proto.GetName(),
 		Description:  proto.GetDescription(),
@@ -309,7 +309,7 @@ type APIMachineValidationRun struct {
 	Name                   string                     `json:"name"`
 	Context                string                     `json:"context"`
 	Status                 APIMachineValidationStatus `json:"status"`
-	DurationToCompleteSecs int                        `json:"durationToCompleteSecs"`
+	DurationToCompleteSecs int64                      `json:"durationToCompleteSecs"`
 }
 
 type APIMachineValidationState string
@@ -324,11 +324,11 @@ const (
 
 type APIMachineValidationStatus struct {
 	State     APIMachineValidationState `json:"state"`
-	Total     int                       `json:"total"`
-	Completed int                       `json:"completed"`
+	Total     uint32                    `json:"total"`
+	Completed uint32                    `json:"completed"`
 }
 
-func NewAPIMachineValidationRun(proto *cwssaws.MachineValidationRun) *APIMachineValidationRun {
+func NewAPIMachineValidationRun(proto *corev1.MachineValidationRun) *APIMachineValidationRun {
 	apio := &APIMachineValidationRun{
 		ValidationID: proto.GetValidationId().GetValue(),
 		MachineID:    proto.GetMachineId().GetId(),
@@ -344,31 +344,72 @@ func NewAPIMachineValidationRun(proto *cwssaws.MachineValidationRun) *APIMachine
 	}
 	if protoStatus := proto.GetStatus(); protoStatus != nil {
 		apio.Status = APIMachineValidationStatus{
-			Total:     int(protoStatus.GetTotal()),
-			Completed: int(protoStatus.GetCompleted()),
+			Total:     protoStatus.GetTotal(),
+			Completed: protoStatus.GetCompletedTests(),
 		}
-		if sts, ok := protoStatus.GetMachineValidationState().(*cwssaws.MachineValidationStatus_Started); ok {
-			if sts.Started == cwssaws.MachineValidationStarted_Started {
+		if sts, ok := protoStatus.GetMachineValidationState().(*corev1.MachineValidationStatus_Started); ok {
+			if sts.Started == corev1.MachineValidationStarted_Started {
 				apio.Status.State = MachineValidationStarted
 			}
-		} else if sts, ok := protoStatus.GetMachineValidationState().(*cwssaws.MachineValidationStatus_InProgress); ok {
-			if sts.InProgress == cwssaws.MachineValidationInProgress_InProgress {
+		} else if sts, ok := protoStatus.GetMachineValidationState().(*corev1.MachineValidationStatus_InProgress); ok {
+			if sts.InProgress == corev1.MachineValidationInProgress_InProgress {
 				apio.Status.State = MachineValidationInProgress
 			}
-		} else if sts, ok := protoStatus.GetMachineValidationState().(*cwssaws.MachineValidationStatus_Completed); ok {
-			if sts.Completed == cwssaws.MachineValidationCompleted_Success {
+		} else if sts, ok := protoStatus.GetMachineValidationState().(*corev1.MachineValidationStatus_Completed); ok {
+			if sts.Completed == corev1.MachineValidationCompleted_Success {
 				apio.Status.State = MachineValidationSuccess
-			} else if sts.Completed == cwssaws.MachineValidationCompleted_Failed {
+			} else if sts.Completed == corev1.MachineValidationCompleted_Failed {
 				apio.Status.State = MachineValidationFailed
-			} else if sts.Completed == cwssaws.MachineValidationCompleted_Skipped {
+			} else if sts.Completed == corev1.MachineValidationCompleted_Skipped {
 				apio.Status.State = MachineValidationSkipped
 			}
 		}
 	}
 	if protoDuration := proto.GetDurationToComplete(); protoDuration != nil {
-		apio.DurationToCompleteSecs = int(protoDuration.GetSeconds())
+		apio.DurationToCompleteSecs = protoDuration.GetSeconds()
 	}
 	return apio
+}
+
+// APIMachineValidationRunCreateRequest contains optional filters for an
+// on-demand Machine validation run.
+type APIMachineValidationRunCreateRequest struct {
+	Tags               []string `json:"tags,omitempty"`
+	AllowedTests       []string `json:"allowedTests,omitempty"`
+	RunUnverifiedTests bool     `json:"runUnverifiedTests,omitempty"`
+	Contexts           []string `json:"contexts,omitempty"`
+}
+
+// Validate ensures the on-demand Machine validation filters are well-formed.
+func (r APIMachineValidationRunCreateRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Tags, validation.Each(validation.Required)),
+		validation.Field(&r.AllowedTests, validation.Each(validation.Required)),
+		validation.Field(&r.Contexts, validation.Each(validation.Required)),
+	)
+}
+
+// ToProto converts an on-demand Machine validation request to the Core API model.
+func (r APIMachineValidationRunCreateRequest) ToProto(machineID string) *corev1.MachineValidationOnDemandRequest {
+	return &corev1.MachineValidationOnDemandRequest{
+		MachineId:         &corev1.MachineId{Id: machineID},
+		Tags:              r.Tags,
+		Action:            corev1.MachineValidationOnDemandRequest_Start,
+		AllowedTests:      r.AllowedTests,
+		RunUnverfiedTests: r.RunUnverifiedTests,
+		Contexts:          r.Contexts,
+	}
+}
+
+// NewAPIMachineValidationRunFromOnDemandResponse converts the Core response to
+// the REST API model. The validation ID fallback supports older Core versions
+// that do not populate the run field.
+func NewAPIMachineValidationRunFromOnDemandResponse(response *corev1.MachineValidationOnDemandResponse) *APIMachineValidationRun {
+	run := response.GetRun()
+	if run == nil {
+		run = &corev1.MachineValidationRun{ValidationId: response.GetValidationId()}
+	}
+	return NewAPIMachineValidationRun(run)
 }
 
 type APIMachineValidationExternalConfig struct {
@@ -379,7 +420,7 @@ type APIMachineValidationExternalConfig struct {
 	Timestamp   time.Time `json:"timestamp"`
 }
 
-func NewAPIMachineValidationExternalConfig(proto *cwssaws.MachineValidationExternalConfig) *APIMachineValidationExternalConfig {
+func NewAPIMachineValidationExternalConfig(proto *corev1.MachineValidationExternalConfig) *APIMachineValidationExternalConfig {
 	apio := &APIMachineValidationExternalConfig{
 		Name:        proto.GetName(),
 		Description: proto.GetDescription(),
@@ -414,8 +455,8 @@ func (req APIMachineValidationExternalConfigCreateRequest) Validate() error {
 	return nil
 }
 
-func (req APIMachineValidationExternalConfigCreateRequest) ToProto() *cwssaws.AddUpdateMachineValidationExternalConfigRequest {
-	return &cwssaws.AddUpdateMachineValidationExternalConfigRequest{
+func (req APIMachineValidationExternalConfigCreateRequest) ToProto() *corev1.AddUpdateMachineValidationExternalConfigRequest {
+	return &corev1.AddUpdateMachineValidationExternalConfigRequest{
 		Name:        req.Name,
 		Description: req.Description,
 		Config:      req.Config,

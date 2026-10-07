@@ -20,7 +20,7 @@ use cargo_metadata::MetadataCommand;
 use eyre::{Context, ContextCompat, bail};
 
 /// Checks that every workspace package builds independently with default features.
-pub fn check() -> eyre::Result<()> {
+pub(super) fn check() -> eyre::Result<()> {
     let packages = workspace_packages()?;
     let mut failures = Vec::new();
 

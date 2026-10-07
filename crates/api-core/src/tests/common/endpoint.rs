@@ -27,7 +27,7 @@ use model::site_explorer::{
 };
 use sqlx::PgConnection;
 
-pub async fn insert_endpoint_version(
+pub(in crate::tests) async fn insert_endpoint_version(
     txn: &mut PgConnection,
     addr: &str,
     version: &str,
@@ -43,7 +43,7 @@ pub async fn insert_endpoint_version(
     .await
 }
 
-pub async fn insert_endpoint_with_firmware_versions(
+pub(in crate::tests) async fn insert_endpoint_with_firmware_versions(
     txn: &mut PgConnection,
     addr: &str,
     versions: HashMap<FirmwareComponentType, String>,
@@ -94,6 +94,9 @@ fn build_exploration_report(
     };
 
     EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,
@@ -114,6 +117,8 @@ fn build_exploration_report(
             power_state: PowerState::On,
             sku: None,
             boot_order: None,
+            bios_version: None,
+            serial_console_ssh_port: None,
         }],
         chassis: vec![Chassis {
             model: Some(model.to_string()),

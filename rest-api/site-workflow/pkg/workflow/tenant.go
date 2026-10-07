@@ -12,25 +12,26 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateTenant is a workflow to create a Tenant using CreateTenantOnSite activity
-func CreateTenant(ctx workflow.Context, request *cwssaws.CreateTenantRequest) error {
+func CreateTenant(ctx workflow.Context, request *corev1.CreateTenantRequest) error {
 	logger := log.With().Str("Workflow", "CreateTenant").Logger()
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -52,7 +53,7 @@ func CreateTenant(ctx workflow.Context, request *cwssaws.CreateTenantRequest) er
 }
 
 // UpdateTenant is a workflow to update a Tenant using UpdateTenantOnSite activity
-func UpdateTenant(ctx workflow.Context, request *cwssaws.UpdateTenantRequest) error {
+func UpdateTenant(ctx workflow.Context, request *corev1.UpdateTenantRequest) error {
 	logger := log.With().Str("Workflow", "UpdateTenant").Logger()
 
 	logger.Info().Msg("Starting workflow")

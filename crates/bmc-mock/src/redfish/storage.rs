@@ -18,7 +18,7 @@ use std::borrow::Cow;
 
 use crate::redfish;
 
-pub fn system_collection(system_id: &str) -> redfish::Collection<'static> {
+pub(super) fn system_collection(system_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Storage");
     redfish::Collection {
         odata_id: Cow::Owned(odata_id),
@@ -27,7 +27,7 @@ pub fn system_collection(system_id: &str) -> redfish::Collection<'static> {
     }
 }
 
-pub fn system_resource<'a>(system_id: &str, storage_id: &'a str) -> redfish::Resource<'a> {
+pub(super) fn system_resource<'a>(system_id: &str, storage_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Storage/{storage_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -37,7 +37,6 @@ pub fn system_resource<'a>(system_id: &str, storage_id: &'a str) -> redfish::Res
     }
 }
 
-pub struct Storage {
-    pub id: Cow<'static, str>,
-    pub value: serde_json::Value,
+pub(crate) struct Storage {
+    pub(crate) id: Cow<'static, str>,
 }

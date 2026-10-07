@@ -28,6 +28,8 @@ use std::pin::Pin;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+#[doc(hidden)]
+pub use const_format;
 use dns_record::DnsResourceRecordReply;
 use errors::RpcDataConversionError;
 use mac_address::{MacAddress, MacParseError};
@@ -37,6 +39,20 @@ use serde_json::{Value, json};
 use tokio_stream::Stream;
 
 use crate::forge_agent_control_response::LegacyAction;
+
+/// Returns the compile-time gRPC path for a Forge service method.
+#[macro_export]
+macro_rules! service_path {
+    ($method:literal) => {
+        $crate::const_format::concatcp!(
+            "/",
+            $crate::forge::forge_server::SERVICE_NAME,
+            "/",
+            $method
+        )
+    };
+}
+
 pub use crate::protos::common::{self, Uuid};
 pub use crate::protos::dns::{self};
 pub use crate::protos::forge::machine_credentials_update_request::CredentialPurpose;
@@ -58,15 +74,19 @@ pub use crate::protos::machine_discovery::{
     self, BlockDevice, Cpu, DiscoveryInfo, DmiData, NetworkInterface, NvmeDevice,
     PciDeviceProperties,
 };
-pub use crate::protos::{fmds, health, scout_firmware_upgrade, site_explorer};
+pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_explorer};
 
+pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;
 pub mod measured_boot;
 pub mod network;
+pub mod node_jwt;
+pub mod node_token_socket;
 pub mod protos;
 pub mod secrets;
+mod site_explorer_report;
 pub mod utils;
 
 #[cfg(feature = "model")]
@@ -82,11 +102,33 @@ pub mod nmx_c_client;
 pub const REFLECTION_API_SERVICE_DESCRIPTOR: &[u8] = tonic::include_file_descriptor_set!("forge");
 pub const MAX_ERR_MSG_SIZE: i32 = 1500;
 
+impl forge::BootInterfaceSelectionSource {
+    /// Returns the concise name shown in views for operators.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::ExpectedMachine => "ExpectedMachine",
+            Self::Operator => "Operator",
+            Self::RedfishUefiPci => "RedfishUefiPci",
+            Self::RedfishChassisId => "RedfishChassisId",
+            Self::RedfishSerialNumber => "RedfishSerialNumber",
+            Self::ScoutReportPci => "ScoutReportPci",
+            Self::LegacyUnknown => "LegacyUnknown",
+        }
+    }
+}
+
 // DynForge exists because, now that we have >= streaming interface,
 // simply passing around `dyn Forge` doesn't work anymore. As any additional
 // streaming interfaces are added, we just toss in type defs here, and
 // any users of DynForge don't need to worry about it.
 pub type DynForge = dyn forge::forge_server::Forge<
+        StreamConsoleLogsStream = Pin<
+            Box<
+                dyn Stream<Item = Result<protos::console_log::ConsoleLogLine, tonic::Status>>
+                    + Send,
+            >,
+        >,
         ScoutStreamStream = Pin<
             Box<
                 dyn Stream<Item = Result<forge::ScoutStreamScoutBoundMessage, tonic::Status>>
@@ -576,6 +618,149 @@ impl FromStr for forge::InstanceSpxConfig {
     }
 }
 
+/// JSON input accepted for prost's optional integer-backed interface role.
+///
+/// Admin clients may use the short enum name while protobuf-compatible clients
+/// may continue to send its integer value.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ExpectedInterfaceRoleInput {
+    Name(String),
+    Number(i32),
+}
+
+impl forge::ExpectedInterfaceRole {
+    /// Deserialize an optional role from its short name or protobuf integer.
+    ///
+    /// JSON `null` remains `None`. `unspecified` remains an explicit protobuf
+    /// value here and becomes the legacy Host role at the model boundary.
+    pub fn deserialize_optional<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value: Option<ExpectedInterfaceRoleInput> =
+            serde::Deserialize::deserialize(deserializer)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        let role = match value {
+            ExpectedInterfaceRoleInput::Number(value) => {
+                Self::try_from(value).map_err(serde::de::Error::custom)?
+            }
+            ExpectedInterfaceRoleInput::Name(name) => {
+                match name.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+                    "unspecified" | "expected_interface_role_unspecified" => Self::Unspecified,
+                    "host" | "expected_interface_role_host" => Self::Host,
+                    "dpu_os" | "dpuos" | "expected_interface_role_dpu_os" => Self::DpuOs,
+                    "dpu_bmc" | "dpubmc" | "expected_interface_role_dpu_bmc" => Self::DpuBmc,
+                    "host_bmc" | "hostbmc" | "expected_interface_role_host_bmc" => Self::HostBmc,
+                    _ => {
+                        return Err(serde::de::Error::custom(format!(
+                            "unknown expected interface role {name:?}"
+                        )));
+                    }
+                }
+            }
+        };
+        Ok(Some(role as i32))
+    }
+
+    /// Serialize an optional prost role as its short JSON name.
+    ///
+    /// `None` stays absent so model conversion can preserve the representation
+    /// used by clients that predate interface roles.
+    pub fn serialize_optional<S>(value: &Option<i32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let Some(value) = value else {
+            return serializer.serialize_none();
+        };
+        let role = Self::try_from(*value).map_err(Error::custom)?;
+        serializer.serialize_str(match role {
+            Self::Unspecified => "unspecified",
+            Self::Host => "host",
+            Self::DpuOs => "dpu_os",
+            Self::DpuBmc => "dpu_bmc",
+            Self::HostBmc => "host_bmc",
+        })
+    }
+}
+
+/// JSON input accepted for prost's optional integer-backed IP allocation
+/// policy.
+///
+/// Admin clients may use the short enum name while protobuf-compatible clients
+/// may continue to send its integer value.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ExpectedInterfaceIpAllocationInput {
+    Name(String),
+    Number(i32),
+}
+
+impl forge::ExpectedInterfaceIpAllocation {
+    /// Deserialize an optional allocation policy from its short name or
+    /// protobuf integer.
+    ///
+    /// JSON `null` remains `None`. `unspecified` remains an explicit protobuf
+    /// value here and becomes an omitted policy at the model boundary, where
+    /// `fixed_ip` determines the legacy policy.
+    pub fn deserialize_optional<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value: Option<ExpectedInterfaceIpAllocationInput> =
+            serde::Deserialize::deserialize(deserializer)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        let policy = match value {
+            ExpectedInterfaceIpAllocationInput::Number(value) => {
+                Self::try_from(value).map_err(serde::de::Error::custom)?
+            }
+            ExpectedInterfaceIpAllocationInput::Name(name) => {
+                match name.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+                    "unspecified" | "expected_interface_ip_allocation_unspecified" => {
+                        Self::Unspecified
+                    }
+                    "dynamic" | "expected_interface_ip_allocation_dynamic" => Self::Dynamic,
+                    "fixed" | "expected_interface_ip_allocation_fixed" => Self::Fixed,
+                    "retained" | "expected_interface_ip_allocation_retained" => Self::Retained,
+                    _ => {
+                        return Err(serde::de::Error::custom(format!(
+                            "unknown expected interface IP allocation {name:?}"
+                        )));
+                    }
+                }
+            }
+        };
+        Ok(Some(policy as i32))
+    }
+
+    /// Serialize an optional prost allocation policy as its short JSON name.
+    ///
+    /// `None` stays absent; it must not become explicit `Dynamic`
+    /// because an omitted policy plus `fixed_ip` resolves to `Fixed`.
+    pub fn serialize_optional<S>(value: &Option<i32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let Some(value) = value else {
+            return serializer.serialize_none();
+        };
+        let policy = Self::try_from(*value).map_err(Error::custom)?;
+        serializer.serialize_str(match policy {
+            Self::Unspecified => "unspecified",
+            Self::Dynamic => "dynamic",
+            Self::Fixed => "fixed",
+            Self::Retained => "retained",
+        })
+    }
+}
+
 /*  ****************************************************** */
 // Serialization/deserialization helpers for network
 // security group enums to let admin CLI callers describe
@@ -752,6 +937,7 @@ impl forge::MachineCapabilityDeviceType {
 
         Ok(Some(match s.to_uppercase().as_str() {
             "DPU" => Self::Dpu as i32,
+            "SPECTRUMX" => Self::SpectrumX as i32,
             "UNKNOWN" => Self::Unknown as i32,
             _ => 0,
         }))
@@ -777,6 +963,7 @@ impl forge::MachineCapabilityDeviceType {
             forge::MachineCapabilityDeviceType::Dpu => "DPU".to_string(),
             forge::MachineCapabilityDeviceType::Unknown => "UNKNOWN".to_string(),
             forge::MachineCapabilityDeviceType::Nvlink => "NVLINK".to_string(),
+            forge::MachineCapabilityDeviceType::SpectrumX => "SpectrumX".to_string(),
         })
     }
 }
@@ -920,12 +1107,52 @@ impl clap::ValueEnum for forge::RouteServerSourceType {
 mod tests {
     use std::time::Duration;
 
+    use carbide_uuid::device::DeviceId;
     use carbide_uuid::machine::MachineId;
+    use carbide_uuid::switch::SwitchId;
 
     use self::forge::instance_operating_system_config::Variant;
     use self::forge::{InlineIpxe, InstanceOperatingSystemConfig};
     use super::*;
     use crate::protos::dns::{Domain, Metadata};
+
+    fn assert_serialize<T: serde::Serialize>() {}
+
+    fn assert_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+
+    #[test]
+    fn protobuf_codegen_annotations_apply_to_generated_type_kinds() {
+        assert_serialize::<forge::ClientSecretBasic>();
+        assert_deserialize::<forge::ClientSecretBasic>();
+        assert_serialize::<forge::DpuMode>();
+        assert_deserialize::<forge::DpuMode>();
+        assert_serialize::<forge::instance_interface_config::NetworkDetails>();
+        assert_serialize::<forge::get_machine_boot_interfaces_response::Reconciliation>();
+    }
+
+    #[test]
+    fn reflection_descriptor_contains_all_rpc_services() {
+        let descriptor_set =
+            prost_types::FileDescriptorSet::decode(REFLECTION_API_SERVICE_DESCRIPTOR)
+                .expect("reflection descriptor set decodes");
+        let mut service_names = descriptor_set
+            .file
+            .iter()
+            .flat_map(|file| &file.service)
+            .filter_map(|service| service.name.as_deref())
+            .collect::<Vec<_>>();
+        service_names.sort_unstable();
+
+        assert_eq!(
+            service_names,
+            [
+                "ConsoleLogService",
+                "FmdsConfigService",
+                "Forge",
+                "NMX_Controller",
+            ]
+        );
+    }
 
     #[test]
     fn test_serialize_timestamp() {
@@ -991,6 +1218,8 @@ mod tests {
         let domain = Domain {
             id: Some(uuid),
             name: "MyDomain".to_string(),
+            default_ttl: None,
+            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,
@@ -1009,5 +1238,48 @@ mod tests {
         assert_eq!(uuid, deserialized_uuid);
         assert_eq!(ts, created_system_time);
         assert_eq!(ts2, updated_system_time);
+    }
+
+    /// Verifies the additive DHCP discovery IPv6 fields survive protobuf encoding.
+    #[test]
+    fn dhcp_discovery_round_trips_with_ipv6_fields() {
+        let discovery = forge::DhcpDiscovery {
+            mac_address: "00:11:22:33:44:55".to_string(),
+            relay_address: "2001:db8::1".to_string(),
+            vendor_string: Some("vendor".to_string()),
+            link_address: Some("2001:db8::2".to_string()),
+            circuit_id: Some("circuit".to_string()),
+            remote_id: Some("remote".to_string()),
+            desired_address: Some("2001:db8::10".to_string()),
+            address_family: Some(2),
+            message_kind: Some(2),
+            duid: Some(vec![0, 1, 0, 1, 0xaa, 0xbb]),
+        };
+
+        // Encode then decode so prost field numbering is exercised directly.
+        let encoded = discovery.encode_to_vec();
+        let decoded = forge::DhcpDiscovery::decode(&encoded[..]).unwrap();
+
+        // Verify the newly-added IPv6 fields survive the protobuf round trip.
+        assert_eq!(decoded.address_family, Some(2));
+        assert_eq!(decoded.message_kind, Some(2));
+        assert_eq!(decoded.duid, Some(vec![0, 1, 0, 1, 0xaa, 0xbb]));
+    }
+
+    #[test]
+    fn bmc_rotation_request_round_trips_the_shared_device_id() {
+        let switch_id =
+            SwitchId::from_str("sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+                .unwrap();
+        let request = forge::BmcCredentialRotationRequest {
+            mode: forge::bmc_credential_rotation_request::Mode::Clear as i32,
+            bmc_mac: None,
+            device_id: Some(DeviceId::Switch(switch_id)),
+        };
+
+        let decoded =
+            forge::BmcCredentialRotationRequest::decode(request.encode_to_vec().as_slice())
+                .unwrap();
+        assert_eq!(decoded.device_id, Some(DeviceId::Switch(switch_id)));
     }
 }

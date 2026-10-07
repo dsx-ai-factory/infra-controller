@@ -87,6 +87,21 @@ impl TryFrom<rpc::forge::NetworkSegmentCreationRequest> for NewNetworkSegment {
             .map(NewNetworkPrefix::try_from)
             .collect::<Result<Vec<NewNetworkPrefix>, RpcDataConversionError>>()?;
 
+        let ipv4_prefix_count = prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv4())
+            .count();
+        let ipv6_prefix_count = prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv6())
+            .count();
+        if ipv4_prefix_count > 1 || ipv6_prefix_count > 1 {
+            return Err(RpcDataConversionError::InvalidArgument(
+                "Network segment cannot contain more than one prefix from the same address family."
+                    .to_string(),
+            ));
+        }
+
         let id = value.id.unwrap_or_else(|| uuid::Uuid::new_v4().into());
 
         let segment_type: NetworkSegmentType = value.segment_type.rpc_try_into()?;
@@ -121,6 +136,7 @@ impl TryFrom<rpc::forge::NetworkSegmentCreationRequest> for NewNetworkSegment {
             segment_type,
             can_stretch,
             allocation_strategy: AllocationStrategy::Dynamic,
+            infer_slaac_eui64_addresses: value.infer_slaac_eui64_addresses,
         })
     }
 }
@@ -129,10 +145,9 @@ impl TryFrom<rpc::forge::NetworkSegmentCreationRequest> for NewNetworkSegment {
 /// Marshal a Data Object (NetworkSegment) into an RPC NetworkSegment
 ///
 /// subdomain_id - Rust UUID -> ProtoBuf UUID(String) cannot fail, so convert it or return None
-#[allow(deprecated)]
 impl From<NetworkSegment> for rpc::NetworkSegment {
     fn from(src: NetworkSegment) -> Self {
-        // Deprecated TenantState mapping - kept to populate the backward-compat flat field.
+        // Coarse tenant-facing state derived from the full controller state.
         // Note that even though the segment might already be ready,
         // we only return `Ready` after the state machine also noticed that.
         // Otherwise we would need to allow address allocation before the
@@ -163,9 +178,6 @@ impl From<NetworkSegment> for rpc::NetworkSegment {
 
         let state_reason: Option<rpc::forge::ControllerStateReason> =
             src.status.controller_state_outcome.map(Into::into);
-
-        let history: Vec<rpc::forge::NetworkSegmentStateHistory> =
-            src.status.history.into_iter().map(Into::into).collect();
 
         let flags: Vec<i32> = {
             use crate::forge::NetworkSegmentFlag::*;
@@ -204,7 +216,6 @@ impl From<NetworkSegment> for rpc::NetworkSegment {
             updated: Some(src.updated.into()),
             deleted: src.deleted.map(|t| t.into()),
 
-            // New structured fields - internal clients use these.
             // Note: prefixes are placed under config in the proto even though they are top-level
             // in the Rust model. The Rust model keeps them top-level because each NetworkPrefix
             // contains mixed config fields (CIDR, gateway) and status fields (free_ip_count,
@@ -213,39 +224,25 @@ impl From<NetworkSegment> for rpc::NetworkSegment {
                 vpc_id: src.config.vpc_id,
                 subdomain_id: src.config.subdomain_id,
                 mtu: Some(src.config.mtu),
-                prefixes: prefixes.clone(),
+                prefixes,
                 segment_type: src.config.segment_type as i32,
+                infer_slaac_eui64_addresses: src.config.infer_slaac_eui64_addresses,
             }),
             status: Some(rpc::forge::NetworkSegmentStatus {
-                flags: flags.clone(),
+                flags,
                 lifecycle: Some(rpc::forge::LifecycleStatus {
                     state: lifecycle_state,
-                    version: version.clone(),
-                    state_reason: state_reason.clone(),
+                    version,
+                    state_reason,
                     sla: Some(sla),
                 }),
                 tenant_state: tenant_state as i32,
             }),
             metadata: Some(rpc::forge::Metadata {
-                name: src.config.name.clone(),
+                name: src.config.name,
                 description: String::new(),
                 labels: vec![],
             }),
-
-            // Deprecated flat fields - populated for external client compatibility.
-            // Remove after nico-rest migrates to config/status/metadata (Phase 3).
-            vpc_id: src.config.vpc_id,
-            name: src.config.name,
-            subdomain_id: src.config.subdomain_id,
-            mtu: Some(src.config.mtu),
-            prefixes,
-            segment_type: src.config.segment_type as i32,
-            flags,
-            version,
-            state: tenant_state as i32,
-            history,
-            state_reason,
-            state_sla: Some(sla),
         }
     }
 }
@@ -274,6 +271,7 @@ mod tests {
                 NetworkSegmentType::Underlay => rpc::forge::NetworkSegmentType::Underlay as i32,
                 NetworkSegmentType::HostInband => rpc::forge::NetworkSegmentType::HostInband as i32,
             },
+            infer_slaac_eui64_addresses: false,
         }
     }
 
@@ -285,6 +283,8 @@ mod tests {
             reserve_first: 1,
             free_ip_count: 0,
             svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
         }
     }
 
@@ -296,6 +296,8 @@ mod tests {
             reserve_first: 0,
             free_ip_count: 0,
             svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
         }
     }
 
@@ -330,6 +332,26 @@ mod tests {
                     ],
                     NetworkSegmentType::Admin,
                 ) => Yields((2, false)),
+            }
+
+            "two IPv4 prefixes rejected" {
+                make_test_creation_request(
+                    vec![
+                        ipv4_prefix("192.0.2.0/24", Some("192.0.2.1")),
+                        ipv4_prefix("198.51.100.0/24", Some("198.51.100.1")),
+                    ],
+                    NetworkSegmentType::Admin,
+                ) => Fails,
+            }
+
+            "two IPv6 prefixes rejected" {
+                make_test_creation_request(
+                    vec![
+                        ipv6_prefix("2001:db8:1::/64"),
+                        ipv6_prefix("2001:db8:2::/64"),
+                    ],
+                    NetworkSegmentType::Admin,
+                ) => Fails,
             }
 
             "tenant /64 IPv6 allowed" {

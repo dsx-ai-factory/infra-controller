@@ -158,6 +158,16 @@
           }
         }
       }
+    },
+    "restAddress": {
+      "description": "Optional primary tenant metadata listener address override",
+      "type": ["string", "null"],
+      "default": null
+    },
+    "compatibilityRestAddress": {
+      "description": "Optional additional tenant metadata listener address for compatibility",
+      "type": ["string", "null"],
+      "default": null
     }
   },
   "additionalProperties": true

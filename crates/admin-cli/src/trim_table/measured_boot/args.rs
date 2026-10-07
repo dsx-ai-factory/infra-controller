@@ -28,8 +28,8 @@ Trim down to the latest report only:
     $ nico-admin-cli trim-table measured-boot --keep-entries 1
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Number of entries to keep")]
     #[arg(long)]
-    pub keep_entries: u32,
+    pub(super) keep_entries: u32,
 }

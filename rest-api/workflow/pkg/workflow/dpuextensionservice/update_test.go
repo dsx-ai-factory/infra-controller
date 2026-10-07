@@ -13,7 +13,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
 )
@@ -37,8 +37,8 @@ func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionServiceInven
 	var dpuExtensionServiceManager dpuextensionservice.ManageDpuExtensionService
 
 	siteID := uuid.New()
-	DpuExtensionServiceInventory := &cwssaws.DpuExtensionServiceInventory{
-		DpuExtensionServices: []*cwssaws.DpuExtensionService{
+	DpuExtensionServiceInventory := &corev1.DpuExtensionServiceInventory{
+		DpuExtensionServices: []*corev1.DpuExtensionService{
 			{ServiceId: uuid.NewString()},
 			{ServiceId: uuid.NewString()},
 		},
@@ -58,8 +58,8 @@ func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionServiceInven
 	var dpuExtensionServiceManager dpuextensionservice.ManageDpuExtensionService
 
 	siteID := uuid.New()
-	DpuExtensionServiceInventory := &cwssaws.DpuExtensionServiceInventory{
-		DpuExtensionServices: []*cwssaws.DpuExtensionService{
+	DpuExtensionServiceInventory := &corev1.DpuExtensionServiceInventory{
+		DpuExtensionServices: []*corev1.DpuExtensionService{
 			{ServiceId: uuid.NewString()},
 			{ServiceId: uuid.NewString()},
 		},

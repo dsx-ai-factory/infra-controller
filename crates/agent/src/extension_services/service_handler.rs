@@ -98,7 +98,7 @@ pub trait ExtensionServiceHandler: Send + Sync {
 
     /// Get service status
     async fn get_service_status(
-        &self,
+        &mut self,
         service: &ServiceConfig,
     ) -> Result<rpc::DpuExtensionServiceStatusObservation>;
 }

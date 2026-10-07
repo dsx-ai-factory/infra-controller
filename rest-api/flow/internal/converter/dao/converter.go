@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
@@ -54,6 +55,10 @@ func powerStateFromDAO(ps *nicoapi.PowerState) string {
 		return "off"
 	case nicoapi.PowerStateDisabled:
 		return "disabled"
+	case nicoapi.PowerStateHibernating:
+		return "hibernating"
+	case nicoapi.PowerStateSleeping:
+		return "sleeping"
 	default:
 		return "unknown"
 	}
@@ -88,9 +93,18 @@ func ComponentFrom(dao model.Component) *component.Component {
 		bmcsByType[t] = append(bmcsByType[t], BMCFrom(bd))
 	}
 
-	var componentID string
-	if dao.ComponentID != nil {
-		componentID = *dao.ComponentID
+	var nvlDomainID uuid.UUID
+	var nvlDomainExternalID *string
+	if dao.Rack != nil && dao.Rack.NVLDomainID != uuid.Nil {
+		nvlDomainID = dao.Rack.NVLDomainID
+		if dao.Rack.NVLDomain != nil {
+			nvlDomainExternalID = dao.Rack.NVLDomain.ExternalID
+		}
+	}
+
+	rackExternalID := ""
+	if dao.Rack != nil && dao.Rack.ExternalID != nil {
+		rackExternalID = *dao.Rack.ExternalID
 	}
 
 	return &component.Component{
@@ -109,12 +123,16 @@ func ComponentFrom(dao model.Component) *component.Component {
 			TrayIndex: dao.TrayIndex,
 			HostID:    dao.HostID,
 		},
-		BmcsByType:  bmcsByType,
-		ComponentID: componentID,
-		RackID:      dao.RackID,
-		PowerState:  powerStateFromDAO(dao.PowerState),
-		Status:      dao.Status,
-		LeakStatus:  dao.LeakStatus,
+		BmcsByType:          bmcsByType,
+		ComponentID:         cutil.GetValueOrZero(dao.ComponentID),
+		RackID:              dao.RackID,
+		RackExternalID:      rackExternalID,
+		NVLDomainID:         nvlDomainID,
+		NVLDomainExternalID: nvlDomainExternalID,
+		PowerState:          powerStateFromDAO(dao.PowerState),
+		Status:              dao.Status,
+		Health:              dao.Health,
+		LeakStatus:          dao.LeakStatus,
 	}
 }
 
@@ -123,10 +141,21 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 	if dao == nil {
 		return nil
 	}
+	modelName, description := rackMetadataFromDescription(dao.Description)
+	var domainExternalID *string
+	if dao.NVLDomain != nil {
+		domainExternalID = dao.NVLDomain.ExternalID
+	}
 
 	components := make([]component.Component, 0, len(dao.Components))
 	for _, c := range dao.Components {
-		components = append(components, *ComponentFrom(c))
+		converted := ComponentFrom(c)
+		converted.RackExternalID = cutil.GetValueOrZero(dao.ExternalID)
+		converted.NVLDomainExternalID = domainExternalID
+		if dao.NVLDomainID != uuid.Nil {
+			converted.NVLDomainID = dao.NVLDomainID
+		}
+		components = append(components, *converted)
 	}
 
 	return &rack.Rack{
@@ -134,14 +163,48 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 			ID:           dao.ID,
 			Name:         dao.Name,
 			Manufacturer: dao.Manufacturer,
+			Model:        modelName,
 			SerialNumber: dao.SerialNumber,
-			Description:  utils.MapToJSONString(dao.Description),
+			Description:  description,
 		},
+		ExternalID:    cutil.GetValueOrZero(dao.ExternalID),
+		RackProfileID: dao.RackProfileID,
 		Loc: location.New(
 			[]byte(utils.MapToJSONString(dao.Location)),
 		),
-		Components: components,
+		Components:          components,
+		NVLDomainID:         dao.NVLDomainID,
+		NVLDomainExternalID: domainExternalID,
+		Health:              dao.Health,
 	}
+}
+
+// rackMetadataFromDescription separates the rack fields stored in the shared
+// description JSONB column. Model has a dedicated public field, while the
+// standard scalar description keys should be exposed as plain text rather than
+// leaking the database JSON representation. Unknown structured metadata stays
+// JSON so legacy values continue to round-trip.
+func rackMetadataFromDescription(stored map[string]any) (string, string) {
+	modelName, _ := stored["model"].(string)
+	publicDescription := make(map[string]any, len(stored))
+	for key, value := range stored {
+		if key != "model" {
+			publicDescription[key] = value
+		}
+	}
+	if len(publicDescription) == 0 {
+		return modelName, ""
+	}
+
+	if len(publicDescription) == 1 {
+		for _, key := range []string{"text", "description"} {
+			if value, ok := publicDescription[key].(string); ok {
+				return modelName, value
+			}
+		}
+	}
+
+	return modelName, utils.MapToJSONString(publicDescription)
 }
 
 // NVLDomainFrom converts a DAO NVLDomain model to its domain object.
@@ -151,13 +214,24 @@ func NVLDomainFrom(dao *model.NVLDomain) *nvldomain.NVLDomain {
 	}
 
 	return &nvldomain.NVLDomain{
-		Identifier: *identifier.New(dao.ID, dao.Name),
+		Identifier:    identifier.Identifier{ID: dao.ID, Name: dao.Name, ExternalID: cutil.GetValueOrZero(dao.ExternalID)},
+		NMXCClusterID: dao.NMXCClusterID,
 	}
 }
 
-func TaskFrom(dao *model.Task) *taskdef.Task {
+// TaskFrom converts a persisted task to its domain representation and rejects
+// invalid trigger metadata.
+func TaskFrom(dao *model.Task) (*taskdef.Task, error) {
 	if dao == nil {
-		return nil
+		return nil, nil
+	}
+
+	triggerType, err := operation.TriggerTypeFromString(dao.TriggerType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid persisted task trigger: %w", err)
+	}
+	if err := operation.ValidateTrigger(triggerType, dao.TriggerID); err != nil {
+		return nil, fmt.Errorf("invalid persisted task trigger: %w", err)
 	}
 
 	// Extract operation code from the serialized information
@@ -187,7 +261,10 @@ func TaskFrom(dao *model.Task) *taskdef.Task {
 		StartedAt:      dao.StartedAt,
 		FinishedAt:     dao.FinishedAt,
 		QueueExpiresAt: dao.QueueExpiresAt,
-	}
+		TriggerType:    triggerType,
+		TriggerID:      dao.TriggerID,
+		IdempotencyKey: dao.IdempotencyKey,
+	}, nil
 }
 
 // BMCTypeTo converts BMC type from internal model to DAO model
@@ -249,10 +326,8 @@ func ComponentTo(c *component.Component, rackID uuid.UUID) *model.Component {
 		TrayIndex:       c.Position.TrayIndex,
 		HostID:          c.Position.HostID,
 		RackID:          rackID,
-	}
-
-	if c.ComponentID != "" {
-		compDAO.ComponentID = &c.ComponentID
+		ComponentID:     cutil.GetPtrIfNotZero(c.ComponentID),
+		Health:          c.Health,
 	}
 
 	for _, t := range devicetypes.BMCTypes() {
@@ -276,14 +351,25 @@ func RackTo(r *rack.Rack) *model.Rack {
 		components = append(components, *ComponentTo(&c, r.Info.ID))
 	}
 
+	description := utils.JSONStringToMap("description", r.Info.Description)
+	if r.Info.Model != "" {
+		if description == nil {
+			description = make(map[string]any)
+		}
+		description["model"] = r.Info.Model
+	}
+
 	return &model.Rack{
 		ID:           r.Info.ID,
+		ExternalID:   cutil.GetPtrIfNotZero(r.ExternalID),
 		Name:         r.Info.Name,
 		Manufacturer: r.Info.Manufacturer,
 		SerialNumber: r.Info.SerialNumber,
-		Description:  utils.JSONStringToMap("description", r.Info.Description),
+		Description:  description,
 		Location:     r.Loc.ToMap(),
 		Components:   components,
+		NVLDomainID:  r.NVLDomainID,
+		Health:       r.Health,
 	}
 }
 
@@ -293,9 +379,15 @@ func NVLDomainTo(n *nvldomain.NVLDomain) *model.NVLDomain {
 		return nil
 	}
 
+	var externalID *string
+	if n.Identifier.ExternalID != "" {
+		externalID = &n.Identifier.ExternalID
+	}
 	return &model.NVLDomain{
-		ID:   n.Identifier.ID,
-		Name: n.Identifier.Name,
+		ID:            n.Identifier.ID,
+		Name:          n.Identifier.Name,
+		ExternalID:    externalID,
+		NMXCClusterID: n.NMXCClusterID,
 	}
 }
 
@@ -319,6 +411,9 @@ func TaskTo(task *taskdef.Task) *model.Task {
 		Report:         task.Report,
 		AppliedRuleID:  task.AppliedRuleID,
 		QueueExpiresAt: task.QueueExpiresAt,
+		TriggerType:    string(task.TriggerType),
+		TriggerID:      task.TriggerID,
+		IdempotencyKey: task.IdempotencyKey,
 	}
 }
 
@@ -335,6 +430,8 @@ func OperationRunFrom(dao *model.OperationRun) *operationrun.OperationRun {
 		Status:            dao.Status,
 		StatusReason:      dao.StatusReason,
 		StatusMessage:     dao.StatusMessage,
+		CurrentPhaseIndex: dao.CurrentPhaseIndex,
+		TotalPhases:       dao.TotalPhases,
 		Selector:          dao.Selector,
 		Options:           dao.Options,
 		OperationTemplate: dao.OperationTemplate,
@@ -360,6 +457,8 @@ func OperationRunTo(run *operationrun.OperationRun) *model.OperationRun {
 		Status:            run.Status,
 		StatusReason:      run.StatusReason,
 		StatusMessage:     run.StatusMessage,
+		CurrentPhaseIndex: run.CurrentPhaseIndex,
+		TotalPhases:       run.TotalPhases,
 		Selector:          run.Selector,
 		Options:           run.Options,
 		OperationTemplate: run.OperationTemplate,
@@ -380,19 +479,19 @@ func OperationRunTargetFrom(dao *model.OperationRunTarget) *operationrun.Operati
 	}
 
 	return &operationrun.OperationRunTarget{
-		ID:              dao.ID,
-		OperationRunID:  dao.OperationRunID,
-		RackID:          dao.RackID,
-		SequenceIndex:   dao.SequenceIndex,
-		PhaseIndex:      dao.PhaseIndex,
-		ComponentFilter: dao.ComponentFilter,
-		TaskID:          dao.TaskID,
-		Status:          dao.Status,
-		Message:         dao.Message,
-		RetryAfter:      dao.RetryAfter,
-		RetryState:      dao.RetryState,
-		CreatedAt:       dao.CreatedAt,
-		UpdatedAt:       dao.UpdatedAt,
+		ID:               dao.ID,
+		OperationRunID:   dao.OperationRunID,
+		RackID:           dao.RackID,
+		SequenceIndex:    dao.SequenceIndex,
+		PhaseIndex:       dao.PhaseIndex,
+		ComponentsByType: dao.ComponentsByType.Clone(),
+		TaskID:           dao.TaskID,
+		Status:           dao.Status,
+		Message:          dao.Message,
+		RetryAfter:       dao.RetryAfter,
+		RetryState:       dao.RetryState,
+		CreatedAt:        dao.CreatedAt,
+		UpdatedAt:        dao.UpdatedAt,
 	}
 }
 
@@ -404,19 +503,19 @@ func OperationRunTargetTo(target *operationrun.OperationRunTarget) *model.Operat
 	}
 
 	return &model.OperationRunTarget{
-		ID:              target.ID,
-		OperationRunID:  target.OperationRunID,
-		RackID:          target.RackID,
-		SequenceIndex:   target.SequenceIndex,
-		PhaseIndex:      target.PhaseIndex,
-		ComponentFilter: target.ComponentFilter,
-		TaskID:          target.TaskID,
-		Status:          target.Status,
-		Message:         target.Message,
-		RetryAfter:      target.RetryAfter,
-		RetryState:      target.RetryState,
-		CreatedAt:       target.CreatedAt,
-		UpdatedAt:       target.UpdatedAt,
+		ID:               target.ID,
+		OperationRunID:   target.OperationRunID,
+		RackID:           target.RackID,
+		SequenceIndex:    target.SequenceIndex,
+		PhaseIndex:       target.PhaseIndex,
+		ComponentsByType: target.ComponentsByType.Clone(),
+		TaskID:           target.TaskID,
+		Status:           target.Status,
+		Message:          target.Message,
+		RetryAfter:       target.RetryAfter,
+		RetryState:       target.RetryState,
+		CreatedAt:        target.CreatedAt,
+		UpdatedAt:        target.UpdatedAt,
 	}
 }
 

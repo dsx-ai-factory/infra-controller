@@ -36,7 +36,7 @@ struct IpFindOutput {
     errors: Vec<String>,
 }
 
-pub async fn find(
+pub(super) async fn find(
     args: Args,
     format: OutputFormat,
     api_client: &ApiClient,

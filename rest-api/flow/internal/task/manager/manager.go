@@ -5,7 +5,10 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,12 +27,25 @@ import (
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	flowerrors "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
 const (
-	defaultMaxWaitingPerRack = 5
-	defaultQueueTimeout      = time.Hour
+	defaultMaxWaitingPerRack     = 5
+	defaultQueueTimeout          = time.Hour
+	schedulingCleanupTimeout     = 5 * time.Second
+	schedulingPersistenceFailure = "Task scheduling metadata could not be persisted"
+)
+
+var (
+	// ErrRackConflict marks a rejected task submission caused by an active
+	// conflicting task on the target rack.
+	ErrRackConflict = errors.New("rack conflict")
+
+	// ErrTaskNotCancellable marks a cancellation rejected because the task has
+	// already reached a terminal state other than Terminated.
+	ErrTaskNotCancellable = errors.New("task cannot be cancelled")
 )
 
 // Config holds the configuration for the task manager.
@@ -201,6 +217,24 @@ func (m *ManagerImpl) SubmitTask(
 		return nil, err
 	}
 
+	// A caller may retry after task submission succeeded but persisting the
+	// returned task ID failed. Once the task is scheduled, its idempotency key
+	// owns the outcome; mutable inventory and rule state must not turn that
+	// retry into a failure.
+	if req.HasIdempotencyKey() {
+		existing, err := m.taskStore.GetTaskByIdempotencyKey(ctx, req.IdempotencyKey)
+		if err != nil {
+			return nil, fmt.Errorf("look up idempotent task: %w", err)
+		}
+		if err := validateIdempotentTaskRack(req, existing); err != nil {
+			return nil, err
+		}
+		if existing != nil && (existing.IsScheduled() ||
+			existing.Status == taskcommon.TaskStatusWaiting) {
+			return []uuid.UUID{existing.ID}, nil
+		}
+	}
+
 	// Fail-fast: verify the requested rule exists before creating any tasks.
 	// The resolver will check again at execution time (defense-in-depth for
 	// queued tasks whose rule may be deleted while waiting).
@@ -243,6 +277,11 @@ func (m *ManagerImpl) SubmitTask(
 		}
 	}
 
+	err = m.validateSubmissionRackTargets(ctx, req.Operation, rackMap)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
@@ -271,78 +310,233 @@ func (m *ManagerImpl) SubmitTask(
 	return taskIDs, nil
 }
 
+// validateSubmissionRackTargets resolves the effective rule for each rack and
+// verifies both inventory safety and target applicability before task rows are
+// created.
+func (m *ManagerImpl) validateSubmissionRackTargets(
+	ctx context.Context,
+	op operation.Wrapper,
+	rackMap map[uuid.UUID]*rack.Rack,
+) error {
+	if !requiresRuleTargetApplicability(op.Type) {
+		if err := validateResolvedRackTargets(op, nil, rackMap); err != nil {
+			return fmt.Errorf("operation cannot be submitted: %w", err)
+		}
+		return nil
+	}
+
+	rackIDs := make([]uuid.UUID, 0, len(rackMap))
+	for rackID := range rackMap {
+		rackIDs = append(rackIDs, rackID)
+	}
+	slices.SortFunc(rackIDs, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+
+	for _, rackID := range rackIDs {
+		rule, err := m.resolveOperationRule(ctx, op, rackID)
+		if err != nil {
+			return err
+		}
+		if rule == nil {
+			return fmt.Errorf("resolver returned nil rule (should never happen)")
+		}
+
+		ruleDef := &rule.RuleDefinition
+		if op.Type != taskcommon.TaskTypeBringUp || op.Code != taskcommon.OpCodeIngest {
+			ruleDef = nil
+		}
+		if err := validateResolvedRackTargets(
+			op,
+			ruleDef,
+			map[uuid.UUID]*rack.Rack{rackID: rackMap[rackID]},
+		); err != nil {
+			return fmt.Errorf("operation cannot be submitted: %w", err)
+		}
+		if err := validateRuleTargetApplicability(rule, rackMap[rackID]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateRuleTargetApplicability(
+	rule *operationrules.OperationRule,
+	targetRack *rack.Rack,
+) error {
+	if rule == nil {
+		return fmt.Errorf("operation rule is nil")
+	}
+
+	seen := make(map[devicetypes.ComponentType]struct{})
+	if targetRack != nil {
+		for _, component := range targetRack.Components {
+			seen[component.Type] = struct{}{}
+		}
+	}
+
+	if rule.RuleDefinition.HasApplicableStep(seen) {
+		return nil
+	}
+
+	targetTypes := make([]devicetypes.ComponentType, 0, len(seen))
+	for componentType := range seen {
+		targetTypes = append(targetTypes, componentType)
+	}
+	slices.SortFunc(targetTypes, func(a, b devicetypes.ComponentType) int {
+		return strings.Compare(
+			devicetypes.ComponentTypeToString(a),
+			devicetypes.ComponentTypeToString(b),
+		)
+	})
+
+	typeNames := make([]string, len(targetTypes))
+	for i, componentType := range targetTypes {
+		typeNames[i] = devicetypes.ComponentTypeToString(componentType)
+	}
+	ruleIdentity := fmt.Sprintf("%q", rule.Name)
+	if rule.ID != uuid.Nil {
+		ruleIdentity = fmt.Sprintf("%q (%s)", rule.Name, rule.ID)
+	}
+
+	return flowerrors.GRPCErrorPreconditionFailed(fmt.Sprintf(
+		"operation rule %s has no step applicable to targeted component types [%s]",
+		ruleIdentity,
+		strings.Join(typeNames, ", "),
+	))
+}
+
+// requiresRuleTargetApplicability reports whether the resolved operation rule
+// must contain a step for at least one targeted component type. The
+// InjectExpectation workflow executes directly without consuming rule steps.
+func requiresRuleTargetApplicability(taskType taskcommon.TaskType) bool {
+	switch taskType {
+	case taskcommon.TaskTypeInjectExpectation:
+		return false
+	default:
+		return true
+	}
+}
+
+// validateResolvedRackTargets enforces the boundary between expected
+// inventory and actionable actual devices. Expectation-only operations are
+// the exception: they intentionally operate on expected components that may
+// not have an external ID yet.
+func validateResolvedRackTargets(
+	op operation.Wrapper,
+	ruleDef *operationrules.RuleDefinition,
+	rackMap map[uuid.UUID]*rack.Rack,
+) error {
+	var emptyRacks []string
+	var unlinkedComponents []string
+	expectationOnly := (op.Type == taskcommon.TaskTypeInjectExpectation &&
+		op.Code == taskcommon.OpCodeInjectExpectation) ||
+		(op.Type == taskcommon.TaskTypeBringUp &&
+			op.Code == taskcommon.OpCodeIngest &&
+			ruleUsesOnlyExpectedInventory(ruleDef))
+	macTargetSupported := op.Type == taskcommon.TaskTypePowerControl ||
+		op.Type == taskcommon.TaskTypeFirmwareControl
+
+	for rackID, resolvedRack := range rackMap {
+		if resolvedRack == nil || len(resolvedRack.Components) == 0 {
+			emptyRacks = append(emptyRacks, rackID.String())
+			continue
+		}
+		if expectationOnly {
+			continue
+		}
+		for _, comp := range resolvedRack.Components {
+			if comp.ComponentID == "" &&
+				(!macTargetSupported || comp.ManagementMAC() == "") {
+				unlinkedComponents = append(
+					unlinkedComponents,
+					fmt.Sprintf(
+						"rack %s %s/%s",
+						rackID,
+						devicetypes.ComponentTypeToString(comp.Type),
+						comp.Info.ID,
+					),
+				)
+			}
+		}
+	}
+
+	if len(emptyRacks) > 0 {
+		slices.Sort(emptyRacks)
+		return fmt.Errorf(
+			"racks have no selected components: %s",
+			strings.Join(emptyRacks, ", "),
+		)
+	}
+	if len(unlinkedComponents) > 0 {
+		slices.Sort(unlinkedComponents)
+		return &unlinkedTargetsError{components: unlinkedComponents}
+	}
+
+	return nil
+}
+
+type unlinkedTargetsError struct {
+	components []string
+}
+
+func (e *unlinkedTargetsError) Error() string {
+	return fmt.Sprintf(
+		"selected components not linked to actual inventory (%d): %s",
+		len(e.components),
+		strings.Join(e.components, ", "),
+	)
+}
+
+func ruleUsesOnlyExpectedInventory(ruleDef *operationrules.RuleDefinition) bool {
+	if ruleDef == nil {
+		return false
+	}
+
+	foundInjectExpectation := false
+	for _, step := range ruleDef.Steps {
+		for _, action := range step.OrderedActions() {
+			switch action.Name {
+			case operationrules.ActionInjectExpectation:
+				foundInjectExpectation = true
+			case operationrules.ActionSleep:
+				// Sleep has no inventory target side effect.
+			default:
+				return false
+			}
+		}
+	}
+
+	return foundInjectExpectation
+}
+
 // createAndExecuteTask creates a task for a single rack and executes it.
 func (m *ManagerImpl) createAndExecuteTask(
 	ctx context.Context,
 	req *operation.Request,
 	targetRack *rack.Rack,
 ) (uuid.UUID, error) {
-	// Build component map by type for fine-grained conflict detection.
-	compsByType := make(
-		map[devicetypes.ComponentType][]uuid.UUID,
-		len(targetRack.Components),
-	)
-	for _, c := range targetRack.Components {
-		compsByType[c.Type] = append(compsByType[c.Type], c.Info.ID)
+	if req.HasIdempotencyKey() {
+		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
 	}
 
-	// Build the task record (status and rule are determined below).
-	task := taskdef.Task{
-		ID:        uuid.New(),
-		Operation: req.Operation,
-		RackID:    targetRack.Info.ID,
-		Attributes: taskcommon.TaskAttributes{
-			ComponentsByType: compsByType,
-		},
-		Description:  req.Description,
-		ExecutorType: taskcommon.ExecutorTypeUnknown,
-		ExecutionID:  "",
-	}
+	task := newTaskForRack(req, targetRack)
 
 	// Check for conflicts inside a transaction to avoid a race between the
 	// check and the creation.
 	txErr := m.taskStore.RunInTransaction(
 		ctx,
 		func(txCtx context.Context) error {
-			hasConflict, err := m.conflictResolver.HasConflict(
-				txCtx, &task,
-			)
+			err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task)
 			if err != nil {
 				return err
-			}
-
-			if hasConflict {
-				if req.ConflictStrategy != operation.ConflictStrategyQueue {
-					return fmt.Errorf(
-						"rack %s already has a conflicting task",
-						targetRack.Info.ID,
-					)
-				}
-
-				count, err := m.taskStore.CountWaitingTasksForRack(
-					txCtx, targetRack.Info.ID,
-				)
-				if err != nil {
-					return err
-				}
-				if count >= m.maxWaitingPerRack {
-					return fmt.Errorf(
-						"rack %s waiting queue is full (%d/%d tasks)",
-						targetRack.Info.ID, count, m.maxWaitingPerRack,
-					)
-				}
-
-				task.Status = taskcommon.TaskStatusWaiting
-				task.Message = message.ForStatus(taskcommon.TaskStatusWaiting)
-				task.QueueExpiresAt = m.getReqExpiresAt(req)
-			} else {
-				task.Status = taskcommon.TaskStatusPending
-				task.Message = message.ForStatus(taskcommon.TaskStatusPending)
 			}
 
 			return m.taskStore.CreateTask(txCtx, &task)
 		},
 	)
+
 	if txErr != nil {
 		return uuid.Nil, txErr
 	}
@@ -361,6 +555,188 @@ func (m *ManagerImpl) createAndExecuteTask(
 	}
 
 	return task.ID, nil
+}
+
+func (m *ManagerImpl) createAndExecuteIdempotentTask(
+	ctx context.Context,
+	req *operation.Request,
+	targetRack *rack.Rack,
+) (uuid.UUID, error) {
+	var task taskdef.Task
+	taskAlreadyPersisted := false
+	executionStarted := false
+	txErr := m.taskStore.RunInTransaction(
+		ctx,
+		func(txCtx context.Context) error {
+			if err := m.taskStore.LockIdempotencyKey(txCtx, req.IdempotencyKey); err != nil {
+				return err
+			}
+
+			persistedTask, err := m.taskStore.GetTaskByIdempotencyKey(
+				txCtx,
+				req.IdempotencyKey,
+			)
+			if err != nil {
+				return err
+			}
+
+			if persistedTask != nil {
+				taskAlreadyPersisted = true
+				if err := validateIdempotentTaskRack(req, persistedTask); err != nil {
+					return err
+				}
+				// There are existing tasks with this idempotency key, reuse it.
+				task = *persistedTask
+
+			} else {
+				// No existing tasks with this idempotency key, create a new one.
+				task = newTaskForRack(req, targetRack)
+				if err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task); err != nil {
+					return err
+				}
+
+				if err := m.taskStore.CreateTask(txCtx, &task); err != nil {
+					return err
+				}
+			}
+
+			if task.IsScheduled() {
+				log.Info().
+					Str("task_id", task.ID.String()).
+					Str("idempotency_key", task.IdempotencyKey).
+					Msg("idempotent duplicate: returning existing scheduled task")
+				return nil
+			}
+			if task.Status == taskcommon.TaskStatusWaiting {
+				log.Info().
+					Str("task_id", task.ID.String()).
+					Str("rack_id", targetRack.Info.ID.String()).
+					Msg("task queued: waiting for rack to become available")
+				return nil
+			}
+
+			// Keep the idempotency lock until the execution ID or deferred
+			// status is persisted so a concurrent retry cannot execute the
+			// same pending task.
+			err = m.resolveAndExecuteTaskInTransaction(txCtx, &task, targetRack)
+			if err == nil {
+				executionStarted = true
+			}
+			return err
+		},
+	)
+
+	if txErr != nil {
+		var persistErr *scheduledTaskPersistenceError
+		if executionStarted && !errors.As(txErr, &persistErr) {
+			txErr = &scheduledTaskPersistenceError{
+				taskID:      task.ID,
+				executionID: task.ExecutionID,
+				cause:       txErr,
+			}
+		}
+		return uuid.Nil, m.handleSchedulingPersistenceFailure(
+			ctx,
+			txErr,
+			taskAlreadyPersisted,
+		)
+	}
+	return task.ID, nil
+}
+
+func validateIdempotentTaskRack(req *operation.Request, existing *taskdef.Task) error {
+	if existing == nil || existing.RackID == req.RequiredRackID {
+		return nil
+	}
+	return fmt.Errorf(
+		"idempotency key %q belongs to rack %s, not requested rack %s",
+		req.IdempotencyKey,
+		existing.RackID,
+		req.RequiredRackID,
+	)
+}
+
+func newTaskForRack(req *operation.Request, targetRack *rack.Rack) taskdef.Task {
+	compsByType := make(
+		map[devicetypes.ComponentType][]uuid.UUID,
+		len(targetRack.Components),
+	)
+	for _, c := range targetRack.Components {
+		compsByType[c.Type] = append(compsByType[c.Type], c.Info.ID)
+	}
+
+	return taskdef.Task{
+		ID:        uuid.New(),
+		Operation: req.Operation,
+		RackID:    targetRack.Info.ID,
+		Attributes: taskcommon.TaskAttributes{
+			ComponentsByType: compsByType,
+		},
+		Description:    req.Description,
+		ExecutorType:   taskcommon.ExecutorTypeUnknown,
+		ExecutionID:    "",
+		IdempotencyKey: req.IdempotencyKey,
+		TriggerType:    req.TriggerType,
+		TriggerID:      req.TriggerID,
+	}
+}
+
+// lockRackAndResolveConflict must be called inside RunInTransaction.
+func (m *ManagerImpl) lockRackAndResolveConflict(
+	ctx context.Context,
+	req *operation.Request,
+	targetRack *rack.Rack,
+	task *taskdef.Task,
+) error {
+	// Serialize rack-level admission so concurrent submissions cannot both
+	// observe an empty active set and create conflicting pending tasks.
+	if err := m.taskStore.LockRack(ctx, targetRack.Info.ID); err != nil {
+		return err
+	}
+
+	hasConflict, err := m.conflictResolver.HasConflict(ctx, task)
+	if err != nil {
+		return err
+	}
+
+	if !hasConflict {
+		// No active task blocks this operation, so it can be scheduled
+		// immediately after the transaction commits.
+		task.Status = taskcommon.TaskStatusPending
+		task.Message = message.ForStatus(taskcommon.TaskStatusPending)
+		return nil
+	}
+
+	if req.ConflictStrategy != operation.ConflictStrategyQueue {
+		// The caller chose rejection over queueing, so surface the conflict
+		// without creating a task row.
+		return fmt.Errorf(
+			"rack %s already has a conflicting task: %w",
+			targetRack.Info.ID, ErrRackConflict,
+		)
+	}
+
+	count, err := m.taskStore.CountWaitingTasksForRack(ctx, targetRack.Info.ID)
+	if err != nil {
+		return err
+	}
+
+	if count >= m.maxWaitingPerRack {
+		// Preserve a bounded per-rack queue; otherwise a stuck rack could
+		// accumulate unbounded waiting work.
+		return fmt.Errorf(
+			"rack %s waiting queue is full (%d/%d tasks)",
+			targetRack.Info.ID, count, m.maxWaitingPerRack,
+		)
+	}
+
+	// Queue the task behind the currently active rack work. The promoter will
+	// move it to pending once the rack no longer has a conflicting active task.
+	task.Status = taskcommon.TaskStatusWaiting
+	task.Message = message.ForStatus(taskcommon.TaskStatusWaiting)
+	task.QueueExpiresAt = m.getReqExpiresAt(req)
+
+	return nil
 }
 
 // promoteTask is invoked by the Promoter to execute a previously waiting task
@@ -388,11 +764,25 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 	task *taskdef.Task,
 	targetRack *rack.Rack,
 ) error {
-	ruleID := operations.ExtractRuleID(task.Operation.Info)
+	err := m.resolveAndExecuteTaskWithTransaction(ctx, task, targetRack, false)
+	return m.handleSchedulingPersistenceFailure(ctx, err, true)
+}
 
-	rule, err := m.ruleResolver.ResolveRule(
-		ctx, task.Operation.Type, task.Operation.Code, task.RackID, ruleID,
-	)
+func (m *ManagerImpl) resolveAndExecuteTaskInTransaction(
+	ctx context.Context,
+	task *taskdef.Task,
+	targetRack *rack.Rack,
+) error {
+	return m.resolveAndExecuteTaskWithTransaction(ctx, task, targetRack, true)
+}
+
+func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
+	ctx context.Context,
+	task *taskdef.Task,
+	targetRack *rack.Rack,
+	transactionActive bool,
+) error {
+	rule, err := m.resolveOperationRule(ctx, task.Operation, task.RackID)
 	if err != nil {
 		return fmt.Errorf("failed to resolve operation rule: %w", err)
 	}
@@ -410,6 +800,7 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 			Str("rack_id", task.RackID.String()).
 			Msg("Resolved operation rule for task")
 	} else {
+		task.AppliedRuleID = nil
 		log.Info().
 			Str("rule_name", rule.Name).
 			Str("operation_type", string(task.Operation.Type)).
@@ -418,8 +809,12 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 			Msg("Using hardcoded default rule for task")
 	}
 
-	resp, err := m.executeTask(ctx, task, targetRack, &rule.RuleDefinition)
+	resp, err := m.executeTask(ctx, task, targetRack, rule)
 	if err != nil {
+		deferred, deferErr := m.deferUnlinkedTask(ctx, task, err, transactionActive)
+		if deferred {
+			return deferErr
+		}
 		if uerr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  taskcommon.TaskStatusFailed,
@@ -434,10 +829,184 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 	task.ExecutionID = resp.ExecutionID
 	task.ExecutorType = m.executor.Type()
 	if err := m.taskStore.UpdateScheduledTask(ctx, task); err != nil {
-		log.Error().Err(err).
-			Msgf("failed to update scheduled task %s", task.ID)
+		return &scheduledTaskPersistenceError{
+			taskID:      task.ID,
+			executionID: resp.ExecutionID,
+			cause:       err,
+		}
 	}
 	return nil
+}
+
+type scheduledTaskPersistenceError struct {
+	taskID      uuid.UUID
+	executionID string
+	cause       error
+}
+
+func (e *scheduledTaskPersistenceError) Error() string {
+	return fmt.Sprintf("failed to persist scheduled task %s: %v", e.taskID, e.cause)
+}
+
+func (e *scheduledTaskPersistenceError) Unwrap() error {
+	return e.cause
+}
+
+// handleSchedulingPersistenceFailure compensates for an execution whose
+// scheduling metadata could not be made durable. Callers invoke it only after
+// any surrounding database transaction has unwound.
+func (m *ManagerImpl) handleSchedulingPersistenceFailure(
+	ctx context.Context,
+	executionErr error,
+	taskAlreadyPersisted bool,
+) error {
+	var persistErr *scheduledTaskPersistenceError
+	if !errors.As(executionErr, &persistErr) {
+		return executionErr
+	}
+
+	terminateCtx, cancelTerminate := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		schedulingCleanupTimeout,
+	)
+	terminateErr := m.executor.TerminateTask(
+		terminateCtx,
+		persistErr.executionID,
+		schedulingPersistenceFailure,
+	)
+	cancelTerminate()
+	if terminateErr != nil {
+		log.Error().Err(terminateErr).
+			Str("task_id", persistErr.taskID.String()).
+			Str("execution_id", persistErr.executionID).
+			Msg("failed to terminate execution after scheduling metadata persistence failed")
+		return executionErr
+	}
+
+	if !taskAlreadyPersisted {
+		return executionErr
+	}
+
+	statusCtx, cancelStatus := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		schedulingCleanupTimeout,
+	)
+	statusErr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
+		ID:      persistErr.taskID,
+		Status:  taskcommon.TaskStatusFailed,
+		Message: message.ForFailure(persistErr),
+	})
+	cancelStatus()
+	if statusErr != nil {
+		log.Error().Err(statusErr).
+			Str("task_id", persistErr.taskID.String()).
+			Msg("failed to mark task failed after terminating unpersisted execution")
+	}
+
+	return executionErr
+}
+
+func (m *ManagerImpl) deferUnlinkedTask(
+	ctx context.Context,
+	task *taskdef.Task,
+	executionErr error,
+	transactionActive bool,
+) (bool, error) {
+	var unlinkedErr *unlinkedTargetsError
+	if !errors.As(executionErr, &unlinkedErr) {
+		return false, nil
+	}
+
+	deadline := task.QueueExpiresAt
+	if deadline == nil {
+		timeout := m.defaultQueueTimeout
+		if timeout <= 0 {
+			timeout = defaultQueueTimeout
+		}
+		fallback := time.Now().Add(timeout)
+		deadline = &fallback
+	}
+
+	status := taskcommon.TaskStatusWaiting
+	statusMessage := fmt.Sprintf("Waiting for target linkage: %v", unlinkedErr)
+	if !time.Now().Before(*deadline) {
+		status = taskcommon.TaskStatusTerminated
+		statusMessage = fmt.Sprintf(
+			"Expired: target linkage unavailable before queue timeout: %v",
+			unlinkedErr,
+		)
+		if err := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+			ID:      task.ID,
+			Status:  status,
+			Message: statusMessage,
+		}); err != nil {
+			return true, fmt.Errorf("expire task awaiting target linkage: %w", err)
+		}
+	} else {
+		limit := m.maxWaitingPerRack
+		if limit <= 0 {
+			limit = defaultMaxWaitingPerRack
+		}
+		persistWaiting := func(txCtx context.Context) error {
+			if err := m.taskStore.LockRack(txCtx, task.RackID); err != nil {
+				return err
+			}
+			count, err := m.taskStore.CountWaitingTasksForRack(txCtx, task.RackID)
+			if err != nil {
+				return err
+			}
+			if count >= limit {
+				status = taskcommon.TaskStatusTerminated
+				statusMessage = fmt.Sprintf(
+					"Terminated: rack waiting queue is full while target linkage is unavailable (%d/%d tasks): %v",
+					count,
+					limit,
+					unlinkedErr,
+				)
+			}
+
+			update := &taskdef.TaskStatusUpdate{
+				ID:      task.ID,
+				Status:  status,
+				Message: statusMessage,
+			}
+			if status == taskcommon.TaskStatusWaiting {
+				update.QueueExpiresAt = deadline
+			}
+			return m.taskStore.UpdateTaskStatus(txCtx, update)
+		}
+
+		var err error
+		if transactionActive {
+			err = persistWaiting(ctx)
+		} else {
+			err = m.taskStore.RunInTransaction(ctx, persistWaiting)
+		}
+		if err != nil {
+			return true, fmt.Errorf("defer task awaiting target linkage: %w", err)
+		}
+	}
+
+	task.Status = status
+	task.Message = statusMessage
+	if status == taskcommon.TaskStatusWaiting {
+		task.QueueExpiresAt = deadline
+	} else {
+		task.QueueExpiresAt = nil
+	}
+	return true, nil
+}
+
+func (m *ManagerImpl) resolveOperationRule(
+	ctx context.Context,
+	op operation.Wrapper,
+	rackID uuid.UUID,
+) (*operationrules.OperationRule, error) {
+	ruleID, err := operations.ExtractRuleID(op.Info)
+	if err != nil {
+		return nil, fmt.Errorf("extract operation rule ID: %w", err)
+	}
+	return m.ruleResolver.ResolveRule(ctx, op.Type, op.Code, rackID, ruleID)
 }
 
 // CancelTask cancels a task by its ID.
@@ -457,13 +1026,13 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 
 	if task.Status.IsFinished() {
 		return fmt.Errorf(
-			"task %s cannot be cancelled (status: %s)", taskID, task.Status,
+			"%w: task %s has status %s", ErrTaskNotCancellable, taskID, task.Status,
 		)
 	}
 
 	// Terminate the Temporal workflow if one was scheduled (pending/running).
 	// Waiting tasks have no workflow (ExecutionID is empty) so this is skipped.
-	if task.ExecutionID != "" {
+	if task.IsScheduled() {
 		if err := m.executor.TerminateTask(
 			ctx, task.ExecutionID, "Cancelled by user",
 		); err != nil {
@@ -526,6 +1095,7 @@ func workflowComponentsFrom(
 		comps[i] = taskdef.WorkflowComponent{
 			Type:        c.Type,
 			ComponentID: c.ComponentID,
+			MACAddress:  c.ManagementMAC(),
 		}
 	}
 
@@ -536,17 +1106,34 @@ func (m *ManagerImpl) executeTask(
 	ctx context.Context,
 	task *taskdef.Task,
 	targetRack *rack.Rack,
-	ruleDef *operationrules.RuleDefinition,
+	rule *operationrules.OperationRule,
 ) (*taskdef.ExecutionResponse, error) {
 	if task == nil {
 		return nil, fmt.Errorf("task is nil")
+	}
+	if rule == nil {
+		return nil, fmt.Errorf("operation rule is nil")
+	}
+
+	err := validateResolvedRackTargets(
+		task.Operation,
+		&rule.RuleDefinition,
+		map[uuid.UUID]*rack.Rack{task.RackID: targetRack},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("operation cannot be executed: %w", err)
+	}
+	if requiresRuleTargetApplicability(task.Operation.Type) {
+		if err := validateRuleTargetApplicability(rule, targetRack); err != nil {
+			return nil, err
+		}
 	}
 
 	req := taskdef.ExecutionRequest{
 		Info: taskdef.ExecutionInfo{
 			TaskID:         task.ID,
 			Components:     workflowComponentsFrom(targetRack),
-			RuleDefinition: ruleDef,
+			RuleDefinition: &rule.RuleDefinition,
 			OperationType:  task.Operation.Type,
 			OperationInfo:  task.Operation.Info, // already json.RawMessage from the DB
 		},

@@ -52,9 +52,9 @@ pub fn from_hardware_info(
 
 #[derive(Debug, Copy, Clone, PartialEq, thiserror::Error)]
 pub enum MissingHardwareInfo {
-    #[error("The TPM certificate has no bytes")]
+    #[error("the TPM certificate has no bytes")]
     TPMCertEmpty,
-    #[error("Serial number missing (product, board and chassis)")]
+    #[error("serial number missing (product, board and chassis)")]
     Serial,
     #[error("TPM and DMI data are both missing")]
     All,

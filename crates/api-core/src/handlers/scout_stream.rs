@@ -15,7 +15,10 @@
  * limitations under the License.
  */
 
-use ::rpc::protos::forge as rpc;
+use std::future::Future;
+use std::time::Duration;
+
+use ::rpc::protos::{forge as rpc, mlx_device};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -23,6 +26,13 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::CarbideError;
 use crate::api::{Api, ScoutStreamType, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
+
+// Keep this hard-coded unless an operational need for tuning is demonstrated.
+// Scout sends Init immediately after opening the RPC, so ten seconds is generous
+// for a healthy connection and serves as a protocol safety bound rather than a
+// deployment-specific policy. Making it configurable prematurely would add
+// configuration surface and allow this resource-leak protection to be weakened.
+const SCOUT_STREAM_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // scout_stream handles the bidirectional streaming connection from scout agents.
 // scout agents call scout_stream and send an Init message, and then carbide-api
@@ -35,12 +45,10 @@ pub(crate) async fn scout_stream(
 ) -> Result<Response<ScoutStreamType>, Status> {
     log_request_data(&request);
 
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
     let mut stream = request.into_inner();
 
-    let init_message = stream
-        .message()
-        .await?
-        .ok_or_else(|| CarbideError::InvalidArgument("invalid message received".to_string()))?;
+    let init_message = receive_initial_message(stream.message(), SCOUT_STREAM_INIT_TIMEOUT).await?;
 
     // As part of "constructing" the new scout stream, we expect
     // an Init message as the first thing from the client (in this
@@ -51,13 +59,23 @@ pub(crate) async fn scout_stream(
         }
         _ => {
             return Err(CarbideError::InvalidArgument(
-                "first ScoutStream client message must be an Init message".into(),
+                "first ScoutStream client message must be an init message".into(),
             )
             .into());
         }
     };
 
-    tracing::info!("scout agent connected for machine: {machine_id}");
+    if authenticated_machine_id.is_some_and(|authenticated| authenticated != machine_id) {
+        return Err(CarbideError::PermissionDeniedError(
+            "ScoutStream init machine ID does not match the authenticated source".into(),
+        )
+        .into());
+    }
+
+    tracing::info!(
+        machine_id = %machine_id,
+        "Scout agent connected",
+    );
 
     // Now we create channels for bidirectional communication. The API
     // will receive on one side, process whatever is packed into the oneof field
@@ -74,8 +92,33 @@ pub(crate) async fn scout_stream(
     // And now spawn a task to forward agent messages through
     // the connection registry.
     let registry_clone = api.scout_stream_registry.clone();
+    let pool = api.database_connection.clone();
     tokio::spawn(async move {
         while let Ok(Some(message)) = stream.message().await {
+            // This is an observation from the authenticated host, not proof
+            // that an outstanding request or firmware operation completed.
+            // Unbound simulator connections retain their existing behavior.
+            if let Some(authenticated) = authenticated_machine_id
+                && let Some(
+                    rpc::scout_stream_api_bound_message::Payload::MlxDeviceInfoReportResponse(
+                        mlx_device::MlxDeviceInfoReportResponse {
+                            reply:
+                                Some(mlx_device::mlx_device_info_report_response::Reply::DeviceReport(
+                                    report,
+                                )),
+                        },
+                    ),
+                ) = message.payload.as_ref()
+                && let Err(error) =
+                    super::mlx_device_report::persist(&pool, authenticated, report).await
+            {
+                tracing::warn!(
+                    machine_id = %authenticated,
+                    observed_at = ?report.timestamp,
+                    error = %error,
+                    "Failed to retain MLX observation; forwarding Scout response"
+                );
+            }
             if agent_tx.send(message).await.is_err() {
                 tracing::error!("failed to forward message received from scout agent");
                 break;
@@ -84,7 +127,10 @@ pub(crate) async fn scout_stream(
 
         // If/when the connection breaks, unregister the scout
         // agent connection from the connection registry.
-        tracing::info!("scout agent disconnected for machine: {machine_id}");
+        tracing::info!(
+            machine_id = %machine_id,
+            "Scout agent disconnected",
+        );
         registry_clone.unregister(machine_id).await;
     });
 
@@ -92,7 +138,24 @@ pub(crate) async fn scout_stream(
     Ok(Response::new(Box::pin(ReceiverStream::new(server_rx))))
 }
 
-pub async fn show_connections(
+async fn receive_initial_message<F>(
+    message: F,
+    timeout: Duration,
+) -> Result<rpc::ScoutStreamApiBoundMessage, Status>
+where
+    F: Future<Output = Result<Option<rpc::ScoutStreamApiBoundMessage>, Status>>,
+{
+    match tokio::time::timeout(timeout, message).await {
+        Ok(result) => result?.ok_or_else(|| {
+            CarbideError::InvalidArgument("invalid message received".to_string()).into()
+        }),
+        Err(_) => Err(Status::deadline_exceeded(
+            "timed out waiting for initial ScoutStream init message",
+        )),
+    }
+}
+
+pub(crate) async fn show_connections(
     api: &Api,
     request: Request<rpc::ScoutStreamShowConnectionsRequest>,
 ) -> Result<Response<rpc::ScoutStreamShowConnectionsResponse>, Status> {
@@ -119,7 +182,7 @@ pub async fn show_connections(
         scout_stream_connections: connection_list,
     }))
 }
-pub async fn disconnect(
+pub(crate) async fn disconnect(
     api: &Api,
     request: Request<rpc::ScoutStreamDisconnectRequest>,
 ) -> Result<Response<rpc::ScoutStreamDisconnectResponse>, Status> {
@@ -133,7 +196,7 @@ pub async fn disconnect(
     }))
 }
 
-pub async fn ping(
+pub(crate) async fn ping(
     api: &Api,
     request: Request<rpc::ScoutStreamAdminPingRequest>,
 ) -> Result<Response<rpc::ScoutStreamAdminPingResponse>, Status> {
@@ -209,5 +272,140 @@ fn format_system_time(time: std::time::SystemTime) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         }
         Err(_) => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+
+    use ::rpc::forge::forge_server::ForgeServer;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request as AxumRequest;
+    use axum::routing::post;
+    use futures::stream;
+    use tokio::sync::Notify;
+    use tokio::task::JoinSet;
+    use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::admission::{ApiAdmissionControl, enforce as enforce_admission};
+    use crate::cfg::file::ApiAdmissionControlConfig;
+    use crate::tests::create_test_env;
+
+    #[test]
+    fn stalled_initial_message_times_out_and_releases_admission_capacity() {
+        let mut args = sqlx::testing::TestArgs::new(concat!(
+            module_path!(),
+            "::stalled_initial_message_times_out_and_releases_admission_capacity"
+        ));
+        args.fixtures(Box::leak(Box::new(vec![])));
+        let test_fn: fn(sqlx::PgPool) -> _ = stalled_initial_message_test_body;
+        // The unoptimized generated Forge dispatcher alone consumes nearly 2 MiB
+        // of stack as RPCs are added. Keep the real router test on a dedicated
+        // stack without changing production runtime settings or test assertions.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+            .expect("spawn scout stream router test")
+            .join()
+            .expect("scout stream router test panicked");
+    }
+
+    async fn stalled_initial_message_test_body(pool: sqlx::PgPool) {
+        let env = create_test_env(pool).await;
+        let mut join_set = JoinSet::new();
+        let controller = ApiAdmissionControl::from_config(
+            &ApiAdmissionControlConfig {
+                enabled: true,
+                max_work_in_flight: 1,
+                max_pending: 1,
+                max_work_in_flight_per_client: 1,
+                max_pending_per_client: 1,
+                pending_timeout: SCOUT_STREAM_INIT_TIMEOUT + Duration::from_secs(1),
+                client_idle_timeout: Duration::from_secs(60),
+                service_limits: Default::default(),
+            },
+            &opentelemetry::global::meter("scout-stream-init-timeout-test"),
+            CancellationToken::new(),
+            &mut join_set,
+        )
+        .expect("test admission config is valid")
+        .expect("test admission is enabled");
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let probe_handler = {
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                let probe_calls = Arc::clone(&probe_calls);
+                async move {
+                    probe_calls.fetch_add(1, Ordering::SeqCst);
+                    "probe response"
+                }
+            }
+        };
+        let router = Router::new()
+            .route_service(
+                ::rpc::service_path!("{*rpc}"),
+                ForgeServer::from_arc(Arc::clone(&env.api)),
+            )
+            .route("/admin/probe", post(probe_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                controller,
+                enforce_admission,
+            ));
+
+        tokio::time::pause();
+        let stalled_message_polled = Arc::new(Notify::new());
+        let pending_body = {
+            let stalled_message_polled = Arc::clone(&stalled_message_polled);
+            Body::from_stream(stream::poll_fn(move |_| {
+                stalled_message_polled.notify_one();
+                Poll::<Option<Result<String, Infallible>>>::Pending
+            }))
+        };
+        let stalled_router = router.clone();
+        let stalled_request = tokio::spawn(async move {
+            stalled_router
+                .oneshot(
+                    AxumRequest::post(::rpc::service_path!("ScoutStream"))
+                        .header(axum::http::header::CONTENT_TYPE, "application/grpc")
+                        .header("te", "trailers")
+                        .body(pending_body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        stalled_message_polled.notified().await;
+
+        let probe_router = router.clone();
+        let probe_request = tokio::spawn(async move {
+            probe_router
+                .oneshot(
+                    AxumRequest::post("/admin/probe")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(SCOUT_STREAM_INIT_TIMEOUT + Duration::from_millis(1)).await;
+
+        let stalled_response = stalled_request.await.unwrap();
+        assert_eq!(stalled_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(stalled_response.headers().get("grpc-status").unwrap(), "4");
+
+        let probe_response = probe_request.await.unwrap();
+        assert_eq!(probe_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
+        tokio::time::resume();
     }
 }

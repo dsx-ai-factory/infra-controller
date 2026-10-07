@@ -19,7 +19,7 @@ use super::args::OnDemandOptions;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn on_demand_machine_validation(
+pub(super) async fn on_demand_machine_validation(
     api_client: &ApiClient,
     args: OnDemandOptions,
 ) -> CarbideCliResult<()> {

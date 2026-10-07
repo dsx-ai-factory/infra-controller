@@ -1,4 +1,4 @@
-From 9cab06c155d0fd881a5f01773a8a90b02958610b Mon Sep 17 00:00:00 2001
+From 85217244da5eb01b6bf99741767d310f116c258f Mon Sep 17 00:00:00 2001
 From: Vishnu Rangayyan <vrangayyan@nvidia.com>
 Date: Fri, 1 Dec 2023 12:15:29 -0800
 Subject: [PATCH] fix: update to allow iPXE to boot on BlueField NICs
@@ -9,10 +9,10 @@ Subject: [PATCH] fix: update to allow iPXE to boot on BlueField NICs
  2 files changed, 1 insertion(+), 8 deletions(-)
 
 diff --git a/src/drivers/net/efi/snpnet.c b/src/drivers/net/efi/snpnet.c
-index 3b09d491..de60d8b3 100644
+index 6046f0a1e..48155057b 100644
 --- a/src/drivers/net/efi/snpnet.c
 +++ b/src/drivers/net/efi/snpnet.c
-@@ -311,12 +311,6 @@ static int snpnet_rx_filters ( struct net_device *netdev ) {
+@@ -341,12 +341,6 @@ static int snpnet_rx_filters ( struct net_device *netdev ) {
  	struct snp_nic *snp = netdev->priv;
  	UINT32 filters[] = {
  		snp->snp->Mode->ReceiveFilterMask,
@@ -25,7 +25,7 @@ index 3b09d491..de60d8b3 100644
  		( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
  		  EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST ),
  		( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST ),
-@@ -328,7 +322,7 @@ static int snpnet_rx_filters ( struct net_device *netdev ) {
+@@ -358,7 +352,7 @@ static int snpnet_rx_filters ( struct net_device *netdev ) {
  	/* Try possible receive filters in turn */
  	for ( i = 0; i < ( sizeof ( filters ) / sizeof ( filters[0] ) ); i++ ) {
  		efirc = snp->snp->ReceiveFilters ( snp->snp, filters[i],
@@ -35,10 +35,10 @@ index 3b09d491..de60d8b3 100644
  		if ( efirc == 0 )
  			return 0;
 diff --git a/src/interface/efi/efi_snp.c b/src/interface/efi/efi_snp.c
-index 8443be99..3c51dd51 100644
+index dad8b33df..89a466c9f 100644
 --- a/src/interface/efi/efi_snp.c
 +++ b/src/interface/efi/efi_snp.c
-@@ -127,7 +127,6 @@ static void efi_snp_set_mode ( struct efi_snp_device *snpdev ) {
+@@ -128,7 +128,6 @@ static void efi_snp_set_mode ( struct efi_snp_device *snpdev ) {
  	mode->MediaHeaderSize = ll_protocol->ll_header_len;
  	mode->MaxPacketSize = netdev->mtu;
  	mode->ReceiveFilterMask = ( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
@@ -46,6 +46,6 @@ index 8443be99..3c51dd51 100644
  				    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST );
  	assert ( ll_addr_len <= sizeof ( mode->CurrentAddress ) );
  	memcpy ( &mode->CurrentAddress, netdev->ll_addr, ll_addr_len );
---
-2.39.3 (Apple Git-145)
+-- 
+2.39.5
 

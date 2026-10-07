@@ -16,7 +16,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // A helper only for tests.  Ignores potential conversion errors.
@@ -32,9 +32,9 @@ func getIntPtrToUint32Ptr(i *int) *uint32 {
 
 func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 
-	directionEnumLimit := len(cwssaws.NetworkSecurityGroupRuleDirection_value)
-	protocolEnumLimit := len(cwssaws.NetworkSecurityGroupRuleProtocol_value)
-	actionEnumLimit := len(cwssaws.NetworkSecurityGroupRuleAction_value)
+	directionEnumLimit := len(corev1.NetworkSecurityGroupRuleDirection_value)
+	protocolEnumLimit := len(corev1.NetworkSecurityGroupRuleProtocol_value)
+	actionEnumLimit := len(corev1.NetworkSecurityGroupRuleAction_value)
 
 	srcPortStarts := []*uint32{
 		nil,
@@ -69,41 +69,43 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 						for _, dps := range dstPortStarts {
 							for _, dpe := range dstPortEnds {
 
-								d := cwssaws.NetworkSecurityGroupRuleDirection(uint32(dI))
-								p := cwssaws.NetworkSecurityGroupRuleProtocol(uint32(pI))
-								a := cwssaws.NetworkSecurityGroupRuleAction(uint32(aI))
+								d := corev1.NetworkSecurityGroupRuleDirection(uint32(dI))
+								p := corev1.NetworkSecurityGroupRuleProtocol(uint32(pI))
+								a := corev1.NetworkSecurityGroupRuleAction(uint32(aI))
 
 								newRule := &cdbm.NetworkSecurityGroupRule{
-									NetworkSecurityGroupRuleAttributes: &cwssaws.NetworkSecurityGroupRuleAttributes{
+									NetworkSecurityGroupRuleAttributes: &corev1.NetworkSecurityGroupRuleAttributes{
 										Id:             cutil.GetPtr(uuid.NewString()),
 										Direction:      d,
 										Protocol:       p,
 										Action:         a,
 										Priority:       55,
-										Ipv6:           false, // We have support for it in ACLs but pretty much nowhere else, so we hide this for now.
+										Ipv6:           false,
 										SrcPortStart:   sps,
 										SrcPortEnd:     spe,
 										DstPortStart:   dps,
 										DstPortEnd:     dpe,
-										SourceNet:      &cwssaws.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
-										DestinationNet: &cwssaws.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "1.1.1.1/0"},
+										SourceNet:      &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
+										DestinationNet: &corev1.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "1.1.1.1/0"},
 									},
 								}
 
 								allRules = append(allRules, newRule)
 
-								if d != cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INVALID &&
-									p != cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_INVALID &&
-									a != cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_INVALID &&
+								if d != corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INVALID &&
+									p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_INVALID &&
+									// These fixture prefixes are IPv4, so ICMP6 is invalid.
+									p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP6 &&
+									a != corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_INVALID &&
 									// src/dst start and end pairs are mutually required.
 									// Either start and end or both nil or neither is allowed to be nil.
 									((sps == nil) == (spe == nil)) &&
 									((dps == nil) == (dpe == nil)) &&
 									// Exclude rules that have invalid port + protocol combinations.
 									!((sps != nil || dps != nil) &&
-										(p == cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY ||
-											p == cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP ||
-											p == cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP6)) {
+										(p == corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY ||
+											p == corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP ||
+											p == corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP6)) {
 
 									validRules = append(validRules, newRule)
 									continue
@@ -130,6 +132,7 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 		apiRule := NewAPINetworkSecurityGroupRule(rule.NetworkSecurityGroupRuleAttributes)
 
 		assert.NotNil(t, apiRule, "expected non-nil API rule for valid proto attrs")
+		require.NoError(t, apiRule.Validate())
 
 		newAttrs := apiRule.ToProto()
 
@@ -211,6 +214,46 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 	}
 }
 
+func TestAPINetworkSecurityGroupRule_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		source      string
+		destination string
+		protocol    string
+		wantIPv6    bool
+		wantError   string
+	}{
+		{name: "IPv6 TCP", source: "2001:db8:1::/64", destination: "2001:db8:2::/64", protocol: "TCP", wantIPv6: true},
+		{name: "IPv6 ICMP6 with normalized casing", source: "::/0", destination: "2001:db8::/64", protocol: "icmp6", wantIPv6: true},
+		{name: "IPv4-mapped IPv6 stays IPv6", source: "::ffff:192.0.2.0/120", destination: "::ffff:198.51.100.0/120", protocol: "TCP", wantIPv6: true},
+		{name: "mixed prefix families", source: "192.0.2.0/24", destination: "2001:db8::/64", protocol: "TCP", wantError: "rules: source and destination prefixes must use the same IP version."},
+		{name: "ICMP with IPv6", source: "::/0", destination: "2001:db8::/64", protocol: "ICMP", wantError: "rules: protocol `ICMP` cannot be used with IPv6 prefixes."},
+		{name: "ICMP6 with IPv4", source: "0.0.0.0/0", destination: "192.0.2.0/24", protocol: "ICMP6", wantError: "rules: protocol `ICMP6` cannot be used with IPv4 prefixes."},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := APINetworkSecurityGroupRule{
+				Direction:         APINetworkSecurityGroupRuleDirectionIngress,
+				Action:            APINetworkSecurityGroupRuleActionPermit,
+				Protocol:          test.protocol,
+				SourcePrefix:      &test.source,
+				DestinationPrefix: &test.destination,
+			}
+			err := rule.Validate()
+			if test.wantError != "" {
+				require.EqualError(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+			attrs := rule.ToProto()
+			assert.Equal(t, test.wantIPv6, attrs.Ipv6)
+			assert.Equal(t, test.source, attrs.GetSrcPrefix())
+			assert.Equal(t, test.destination, attrs.GetDstPrefix())
+			assert.Equal(t, rule, *NewAPINetworkSecurityGroupRule(attrs))
+		})
+	}
+}
+
 func TestAPINetworkSecurityGroupCreateRequest_Validate(t *testing.T) {
 
 	// Rule-level validation now runs inside the parent Validate, so
@@ -240,7 +283,7 @@ func TestAPINetworkSecurityGroupCreateRequest_Validate(t *testing.T) {
 		},
 		{
 			desc:      "ok when all fields are provided",
-			obj:       APINetworkSecurityGroupCreateRequest{Name: "test", Description: cutil.GetPtr("test"), SiteID: uuid.New().String(), StatefulEgress: true, Rules: rules},
+			obj:       APINetworkSecurityGroupCreateRequest{ID: cutil.GetPtr(uuid.New()), Name: "test", Description: cutil.GetPtr("test"), SiteID: uuid.New().String(), StatefulEgress: true, Rules: rules},
 			expectErr: false,
 		},
 		{
@@ -319,14 +362,14 @@ func TestAPINetworkSecurityGroupUpdateRequest_Validate(t *testing.T) {
 func TestAPINetworkSecurityGroupNew(t *testing.T) {
 	rules := []*cdbm.NetworkSecurityGroupRule{
 		{
-			NetworkSecurityGroupRuleAttributes: &cwssaws.NetworkSecurityGroupRuleAttributes{
-				Action:         cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
-				Direction:      cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
+			NetworkSecurityGroupRuleAttributes: &corev1.NetworkSecurityGroupRuleAttributes{
+				Action:         corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
+				Direction:      corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
 				SrcPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(0)),
 				SrcPortEnd:     getIntPtrToUint32Ptr(cutil.GetPtr(100)),
-				Protocol:       cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
-				SourceNet:      &cwssaws.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
-				DestinationNet: &cwssaws.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "0.0.0.0/0"},
+				Protocol:       corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
+				SourceNet:      &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
+				DestinationNet: &corev1.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "0.0.0.0/0"},
 			},
 		},
 	}
@@ -375,14 +418,14 @@ func TestAPINetworkSecurityGroupNew(t *testing.T) {
 func TestAPINetworkSecurityGroupNewSummary(t *testing.T) {
 	rules := []*cdbm.NetworkSecurityGroupRule{
 		{
-			NetworkSecurityGroupRuleAttributes: &cwssaws.NetworkSecurityGroupRuleAttributes{
-				Action:         cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
-				Direction:      cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
+			NetworkSecurityGroupRuleAttributes: &corev1.NetworkSecurityGroupRuleAttributes{
+				Action:         corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
+				Direction:      corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
 				SrcPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(0)),
 				SrcPortEnd:     getIntPtrToUint32Ptr(cutil.GetPtr(100)),
-				Protocol:       cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
-				SourceNet:      &cwssaws.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
-				DestinationNet: &cwssaws.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "0.0.0.0/0"},
+				Protocol:       corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
+				SourceNet:      &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
+				DestinationNet: &corev1.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "0.0.0.0/0"},
 			},
 		},
 	}
@@ -431,8 +474,8 @@ func TestNewAPINetworkSecurityGroupRule(t *testing.T) {
 		// leaves the corresponding API field empty rather than
 		// erroring. Any stricter handling belongs in a DB-integrity
 		// check, not in the conversion layer.
-		attrs := &cwssaws.NetworkSecurityGroupRuleAttributes{
-			Direction: cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INVALID,
+		attrs := &corev1.NetworkSecurityGroupRuleAttributes{
+			Direction: corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INVALID,
 		}
 		rule := NewAPINetworkSecurityGroupRule(attrs)
 		assert.NotNil(t, rule)
@@ -441,14 +484,14 @@ func TestNewAPINetworkSecurityGroupRule(t *testing.T) {
 
 	t.Run("valid attrs produce a populated rule", func(t *testing.T) {
 		ruleID := cutil.GetPtr("rule-id")
-		attrs := &cwssaws.NetworkSecurityGroupRuleAttributes{
+		attrs := &corev1.NetworkSecurityGroupRuleAttributes{
 			Id:             ruleID,
-			Direction:      cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
-			Action:         cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
-			Protocol:       cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
+			Direction:      corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
+			Action:         corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
+			Protocol:       corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
 			Priority:       55,
-			SourceNet:      &cwssaws.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
-			DestinationNet: &cwssaws.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "1.1.1.1/0"},
+			SourceNet:      &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "0.0.0.0/0"},
+			DestinationNet: &corev1.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "1.1.1.1/0"},
 		}
 		rule := NewAPINetworkSecurityGroupRule(attrs)
 		assert.NotNil(t, rule)
@@ -474,11 +517,13 @@ func TestAPINetworkSecurityGroupCreateRequest_Validate_RuleErrors(t *testing.T) 
 func TestAPINetworkSecurityGroupCreateRequest_ToProto(t *testing.T) {
 	// Build a request and the corresponding (just-persisted) DB
 	// record. The DB record provides the canonical Metadata; the
-	// request-shape ToProto sources rules / statefulEgress / id from
-	// the request and the wire envelope (Metadata) from the entity.
+	// request-shape ToProto sources rules / statefulEgress from the
+	// request and the wire envelope (ID / Metadata) from the entity.
 	siteID := uuid.New()
 	tenantID := uuid.New()
+	requestedID := uuid.New()
 	req := APINetworkSecurityGroupCreateRequest{
+		ID:             &requestedID,
 		Name:           "test-nsg",
 		Description:    cutil.GetPtr("desc"),
 		SiteID:         siteID.String(),
@@ -491,6 +536,13 @@ func TestAPINetworkSecurityGroupCreateRequest_ToProto(t *testing.T) {
 				SourcePrefix:      cutil.GetPtr("0.0.0.0/0"),
 				DestinationPrefix: cutil.GetPtr("1.1.1.1/0"),
 			},
+			{
+				Direction:         APINetworkSecurityGroupRuleDirectionIngress,
+				Protocol:          APINetworkSecurityGroupRuleProtocolTcp,
+				Action:            APINetworkSecurityGroupRuleActionPermit,
+				SourcePrefix:      cutil.GetPtr("2001:db8:1::/64"),
+				DestinationPrefix: cutil.GetPtr("2001:db8:2::/64"),
+			},
 		},
 		Labels: map[string]string{"env": "test"},
 	}
@@ -498,7 +550,7 @@ func TestAPINetworkSecurityGroupCreateRequest_ToProto(t *testing.T) {
 	require.NoError(t, req.Validate(nil))
 
 	nsg := &cdbm.NetworkSecurityGroup{
-		ID:             uuid.NewString(),
+		ID:             requestedID.String(),
 		Name:           req.Name,
 		Description:    req.Description,
 		SiteID:         siteID,
@@ -510,14 +562,16 @@ func TestAPINetworkSecurityGroupCreateRequest_ToProto(t *testing.T) {
 
 	got := req.ToProto(nsg)
 	require.NotNil(t, got)
-	assert.Equal(t, nsg.ID, *got.Id)
+	assert.Equal(t, requestedID.String(), *got.Id)
 	assert.Equal(t, "tenant-org", got.TenantOrganizationId)
 	require.NotNil(t, got.Metadata)
 	assert.Equal(t, req.Name, got.Metadata.Name)
 	assert.Equal(t, *req.Description, got.Metadata.Description)
 	require.NotNil(t, got.NetworkSecurityGroupAttributes)
 	assert.Equal(t, req.StatefulEgress, got.NetworkSecurityGroupAttributes.StatefulEgress)
-	assert.Equal(t, 1, len(got.NetworkSecurityGroupAttributes.Rules))
+	require.Len(t, got.NetworkSecurityGroupAttributes.Rules, 2)
+	assert.False(t, got.NetworkSecurityGroupAttributes.Rules[0].Ipv6)
+	assert.True(t, got.NetworkSecurityGroupAttributes.Rules[1].Ipv6)
 }
 
 func TestAPINetworkSecurityGroupUpdateRequest_ToProto(t *testing.T) {
@@ -539,10 +593,10 @@ func TestAPINetworkSecurityGroupUpdateRequest_ToProto(t *testing.T) {
 		StatefulEgress: true,
 		Rules: []*cdbm.NetworkSecurityGroupRule{
 			{
-				NetworkSecurityGroupRuleAttributes: &cwssaws.NetworkSecurityGroupRuleAttributes{
-					Direction: cwssaws.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
-					Action:    cwssaws.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
-					Protocol:  cwssaws.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
+				NetworkSecurityGroupRuleAttributes: &corev1.NetworkSecurityGroupRuleAttributes{
+					Direction: corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INGRESS,
+					Action:    corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_PERMIT,
+					Protocol:  corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_TCP,
 				},
 			},
 		},

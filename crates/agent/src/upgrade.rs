@@ -69,7 +69,10 @@ pub async fn upgrade(
         Err(err) => match err.downcast_ref::<tonic::Status>() {
             Some(grpc_status) if grpc_status.code() == tonic::Code::Internal => {
                 // If something is wrong on the server wait for that to be fixed
-                tracing::error!("Internal server error, will not upgrade. {err:#}");
+                tracing::error!(
+                    error = ?err,
+                    "Internal server error, will not upgrade."
+                );
                 UpgradeCheckResult {
                     should_upgrade: false,
                     ..Default::default()
@@ -77,7 +80,10 @@ pub async fn upgrade(
             }
             _ => {
                 // If something is broken in dpu-agent we need to replace it
-                tracing::error!("Failed upgrade check, forcing upgrade: {err:#}");
+                tracing::error!(
+                    error = ?err,
+                    "Failed upgrade check, forcing upgrade"
+                );
                 UpgradeCheckResult {
                     should_upgrade: true,
                     ..Default::default()
@@ -107,9 +113,10 @@ pub async fn upgrade(
         && let Err(err) = fs::rename(&binary_path, &backup)
     {
         tracing::warn!(
-            "Failed backing up current binary: 'mv {} {}', {err}",
-            binary_path.display(),
-            backup.display()
+            source = %binary_path.display(),
+            destination = %backup.display(),
+            error = %err,
+            "Failed backing up current binary"
         );
         // keep going - if the rename fails we still want the upgrade
     }
@@ -121,12 +128,12 @@ pub async fn upgrade(
         local_build = carbide_version::v!(build_version),
         remote_build = resp.server_version,
         to_package_version = resp.package_version,
-        upgrade_cmd,
+        command = upgrade_cmd,
         version = carbide_version::v!(build_version),
         "Upgrading myself, goodbye.",
     );
     if let Err(err) = clear_apt_metadata_cache() {
-        tracing::warn!(%err, "Failed clearing apt metadata cache");
+        tracing::warn!(error = %err, "Failed clearing apt metadata cache");
         // try the upgrade anyway
     }
     match run_upgrade_cmd(&upgrade_cmd).await {
@@ -136,7 +143,7 @@ pub async fn upgrade(
             Ok(true)
         }
         Err(err) => {
-            tracing::error!(upgrade_cmd, err = format!("{err:#}"), "Upgrade failed");
+            tracing::error!(command = upgrade_cmd, error = ?err, "Upgrade failed");
             if override_upgrade_cmd.is_none() {
                 fs::rename(backup, binary_path)?;
             }
@@ -164,10 +171,10 @@ async fn upgrade_check(
 }
 
 fn mtime(p: &Path) -> eyre::Result<SystemTime> {
-    let stat = fs::metadata(p).wrap_err_with(|| format!("Failed stat of '{}'", p.display()))?;
+    let stat = fs::metadata(p).wrap_err_with(|| format!("failed stat of '{}'", p.display()))?;
     let Ok(binary_mtime) = stat.modified() else {
         eyre::bail!(
-            "Failed reading mtime of forge-dpu-agent binary at '{}'",
+            "failed reading mtime of forge-dpu-agent binary at '{}'",
             p.display()
         );
     };
@@ -241,12 +248,18 @@ async fn run_upgrade_cmd(upgrade_cmd: &str) -> eyre::Result<()> {
     // This can easily take 60 seconds. systemd watchdog gives us 5 mins, so take 3.
     let out = timeout(Duration::from_secs(180), cmd.output())
         .await
-        .wrap_err("Timeout")?
-        .wrap_err("Error running command")?;
+        .wrap_err("timeout")?
+        .wrap_err("error running command")?;
     if !out.status.success() {
-        tracing::error!(" STDOUT: {}", String::from_utf8_lossy(&out.stdout));
-        tracing::error!(" STDERR: {}", String::from_utf8_lossy(&out.stderr));
-        eyre::bail!("Failed running upgrade command. Check logs for stdout/stderr.");
+        tracing::error!(
+            stdout = %String::from_utf8_lossy(&out.stdout),
+            "Upgrade command stdout"
+        );
+        tracing::error!(
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "Upgrade command stderr"
+        );
+        eyre::bail!("failed running upgrade command. check logs for stdout/stderr");
     }
     Ok(())
 }
@@ -254,7 +267,7 @@ async fn run_upgrade_cmd(upgrade_cmd: &str) -> eyre::Result<()> {
 /// There are rare but real situations, as yet undetermined, where `apt update` will not download
 /// the `Packages` file from our repo. This fixes it.
 /// It's possibly something about the `Release` file that doesn't match it's expectation.
-/// See https://nvbugspro.nvidia.com/bug/4870691
+/// See https://github.com/NVIDIA/infra-controller/issues/5556
 fn clear_apt_metadata_cache() -> eyre::Result<()> {
     const MC: [&str; 2] = [
         "/var/lib/apt/lists/carbide-pxe.forge_public_blobs_internal_apt_dists_focal_Release",

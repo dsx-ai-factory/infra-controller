@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateInstanceTestSuite struct {
@@ -41,8 +41,8 @@ func (s *UpdateInstanceTestSuite) Test_UpdateInstanceInventory_Success() {
 
 	siteID := uuid.New()
 
-	instanceInventory := &cwssaws.InstanceInventory{
-		Instances: []*cwssaws.Instance{},
+	instanceInventory := &corev1.InstanceInventory{
+		Instances: []*corev1.Instance{},
 		Timestamp: timestamppb.Now(),
 	}
 
@@ -69,8 +69,8 @@ func (s *UpdateInstanceTestSuite) Test_UpdateInstanceInventory_ActivityFails() {
 
 	siteID := uuid.New()
 
-	instanceInventory := &cwssaws.InstanceInventory{
-		Instances: []*cwssaws.Instance{},
+	instanceInventory := &corev1.InstanceInventory{
+		Instances: []*corev1.Instance{},
 		Timestamp: timestamppb.Now(),
 	}
 

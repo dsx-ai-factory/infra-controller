@@ -7,14 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
 
@@ -31,7 +34,7 @@ var (
 	ProjectRoot = filepath.Join(filepath.Dir(cur), "../..")
 )
 
-const defaultSitePhoneHomeUrl = "http://169.254.169.254:7777/latest/meta-data/phone_home"
+const DefaultSitePhoneHomeUrl = "http://169.254.169.254/latest/meta-data/phone_home"
 
 const (
 	// ConfigFilePath specifies the path to the config file, this contains the default path
@@ -46,6 +49,8 @@ const (
 
 	// ConfigAPIName specifies the name of the API
 	ConfigAPIName = "api.name"
+	// ConfigAPIPort specifies the port the API server listens on
+	ConfigAPIPort = "api.port"
 	// ConfigAPIRouteVersion specifies the version of the API
 	ConfigAPIRouteVersion = "api.route.version"
 
@@ -103,11 +108,16 @@ const (
 	ConfigMetricsEnabled = "metrics.enabled"
 	// ConfigMetricsPort specifies the port for Prometheus metrics
 	ConfigMetricsPort = "metrics.port"
+	// ConfigMetricsNamespace specifies the prefix for every exposed metric name
+	ConfigMetricsNamespace = "metrics.namespace"
 
 	// ConfigTracingEnabled is a feature flag for tracing
 	ConfigTracingEnabled = "tracing.enabled"
 	// ConfigTracingServiceName is the name of the tracing service
 	ConfigTracingServiceName = "tracing.serviceName"
+	// DefaultTracingServiceName is the service.name used when neither the
+	// config nor the OTEL environment supplies one
+	DefaultTracingServiceName = "nico-rest-api"
 
 	// ConfigKeycloakEnabled is a feature flag for Keycloak authentication
 	ConfigKeycloakEnabled = "keycloak.enabled"
@@ -134,13 +144,26 @@ const (
 	ConfigRateLimiterBurst = "rateLimiter.burst"
 	// ConfigRateLimiterExpiresIn specifies the expiration time in seconds
 	ConfigRateLimiterExpiresIn = "rateLimiter.expiresIn"
+
+	// ConfigDPSEnabled controls whether NICo makes direct DPS calls.
+	ConfigDPSEnabled = "powerProvisioning.dps.enabled"
+	// ConfigDPSEndpoint is the remote DPS gRPC endpoint.
+	ConfigDPSEndpoint = "powerProvisioning.dps.endpoint"
+	// ConfigDPSRequestTimeout bounds each direct DPS operation.
+	ConfigDPSRequestTimeout = "powerProvisioning.dps.requestTimeout"
+	// ConfigDPSTokenPath specifies the bearer-token secret file.
+	ConfigDPSTokenPath = "powerProvisioning.dps.tokenPath"
+	// ConfigDPSCAPath specifies the CA bundle used to authenticate DPS.
+	ConfigDPSCAPath = "powerProvisioning.dps.tls.caPath"
+	// ConfigDPSServerName optionally overrides TLS server-name verification.
+	ConfigDPSServerName = "powerProvisioning.dps.tls.serverName"
 )
 
 // IssuerConfig represents a single issuer configuration entry
 // This is the preferred configuration format that supports claim mappings
 type IssuerConfig struct {
 	Name                         string               `mapstructure:"name"`
-	Origin                       string               `mapstructure:"origin"` // String: "kas-legacy", "kas-ssa", "keycloak", "custom"
+	Origin                       string               `mapstructure:"origin"` // String: "kas-legacy", "kas-ssa", "keycloak", "custom", "kas"
 	JWKS                         string               `mapstructure:"jwks"`
 	Issuer                       string               `mapstructure:"issuer"`
 	ServiceAccount               bool                 `mapstructure:"serviceAccount"`
@@ -196,12 +219,12 @@ var config *Config
 // Config represents configurations for the service
 type Config struct {
 	sync.RWMutex
-	v               *viper.Viper
-	db              *cconfig.DBConfig
-	temporal        *cconfig.TemporalConfig
-	JwtOriginConfig *cauth.JWTOriginConfig
-	SiteConfig      *SiteConfig
-	KeycloakConfig  *cauth.KeycloakConfig
+	v                 *viper.Viper
+	db                *cconfig.DBConfig
+	temporal          *cconfig.TemporalConfig
+	TokenOriginConfig *cauth.TokenOriginConfig
+	SiteConfig        *SiteConfig
+	KeycloakConfig    *cauth.KeycloakConfig
 }
 
 // NewConfig creates a new config object
@@ -221,6 +244,7 @@ func NewConfig() *Config {
 
 	// Set API name
 	c.v.SetDefault(ConfigAPIName, "nico")
+	c.v.SetDefault(ConfigAPIPort, 8388)
 	c.v.SetDefault(ConfigAPIRouteVersion, "v1")
 
 	// Set config file
@@ -241,11 +265,12 @@ func NewConfig() *Config {
 
 	c.v.SetDefault(ConfigMetricsEnabled, true)
 	c.v.SetDefault(ConfigMetricsPort, 9360)
+	c.v.SetDefault(ConfigMetricsNamespace, DefaultMetricsNamespace)
 
 	c.v.SetDefault(ConfigTracingEnabled, false)
 
 	// SiteConfig default phone home url
-	c.v.SetDefault(ConfigSitePhoneHomeUrl, defaultSitePhoneHomeUrl)
+	c.v.SetDefault(ConfigSitePhoneHomeUrl, DefaultSitePhoneHomeUrl)
 
 	// Keycloak needs to be explicitly enabled via config
 	c.v.SetDefault(ConfigKeycloakEnabled, false)
@@ -257,6 +282,9 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigRateLimiterRate, 10.0)     // 10 requests per second
 	c.v.SetDefault(ConfigRateLimiterBurst, 30)      // burst of 30 requests
 	c.v.SetDefault(ConfigRateLimiterExpiresIn, 180) // 180 seconds (3 minutes)
+
+	c.v.SetDefault(ConfigDPSEnabled, false)
+	c.v.SetDefault(ConfigDPSRequestTimeout, 15*time.Second)
 
 	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
@@ -351,10 +379,14 @@ func (c *Config) Validate() {
 		log.Panic().Err(err).Msg("SiteConfig must be specified")
 	}
 
-	// Validate that at least one auth method is configured
-	issuersConfig := c.GetIssuersConfig()
+	// Parse and validate the configured issuers before the auth mode checks below
+	issuersConfig, err := c.GetIssuersConfig()
+	if err != nil {
+		log.Panic().Err(err).Msg("Invalid issuers configuration")
+	}
 	if len(issuersConfig) > 0 {
-		if err := c.ValidateIssuersConfig(issuersConfig); err != nil {
+		err = c.ValidateIssuersConfig(issuersConfig)
+		if err != nil {
 			log.Panic().Err(err).Msg("Invalid issuers configuration")
 		}
 	}
@@ -363,6 +395,11 @@ func (c *Config) Validate() {
 	// Keycloak validations
 	if err := c.ValidateKeycloakConfig(); err != nil {
 		log.Panic().Err(err).Msg("Keycloak config must be specified")
+	}
+
+	err = c.ValidatePowerProvisioningConfig()
+	if err != nil {
+		log.Panic().Err(err).Msg("Power provisioning config is invalid")
 	}
 
 	if len(issuersConfig) == 0 && !keycloakEnabled {
@@ -419,14 +456,17 @@ func (c *Config) GetTemporalConfig() (*cconfig.TemporalConfig, error) {
 	return c.temporal, err
 }
 
-// GetOrInitJWTOrigin returns the JWT origin config with all configured auth providers
-func (c *Config) GetOrInitJWTOriginConfig() *cauth.JWTOriginConfig {
-	if c.JwtOriginConfig == nil {
-		c.JwtOriginConfig = cauth.NewJWTOriginConfig()
+// GetOrInitTokenOriginConfig returns the token origin config with all configured auth providers
+func (c *Config) GetOrInitTokenOriginConfig() *cauth.TokenOriginConfig {
+	if c.TokenOriginConfig == nil {
+		c.TokenOriginConfig = cauth.NewTokenOriginConfig()
+		if c.GetMetricsEnabled() {
+			c.TokenOriginConfig.MetricsNamespace = c.GetMetricsNamespace()
+		}
 
-		// Load and validate issuers config
-		issuersConfig := c.GetIssuersConfig()
-		if err := c.ValidateIssuersConfig(issuersConfig); err != nil {
+		// Issuers were already validated when the config was loaded
+		issuersConfig, err := c.GetIssuersConfig()
+		if err != nil {
 			log.Panic().Err(err).Msg("Invalid issuers configuration")
 		}
 
@@ -475,7 +515,7 @@ func (c *Config) GetOrInitJWTOriginConfig() *cauth.JWTOriginConfig {
 				jwksCfg.ReservedOrgNames = reservedOrgNames
 			}
 
-			c.JwtOriginConfig.AddJwksConfig(jwksCfg)
+			c.TokenOriginConfig.AddJwksConfig(jwksCfg)
 		}
 
 		// Add Keycloak configuration if enabled
@@ -486,23 +526,23 @@ func (c *Config) GetOrInitJWTOriginConfig() *cauth.JWTOriginConfig {
 			} else {
 				jwksConfig, err := keycloakConfig.GetJwksConfig()
 				if err != nil {
-					log.Warn().Err(err).Msg("Failed to get Keycloak JWKS config, skipping Keycloak JWT origin")
-				} else {
-					c.JwtOriginConfig.AddJwksConfig(jwksConfig)
+					log.Warn().Err(err).Msg("Failed to initialize Keycloak JWKS; continuing with an empty key cache")
+				}
+				if jwksConfig != nil {
+					c.TokenOriginConfig.AddJwksConfig(jwksConfig)
 				}
 			}
 		}
 
 		// Initialize JWKS data
-		if err := c.JwtOriginConfig.UpdateAllJWKS(); err != nil {
+		if err := c.TokenOriginConfig.UpdateAllJWKS(); err != nil {
 			log.Warn().Err(err).Msg("Failed to update JWKS data")
-			return nil
 		} else {
 			log.Info().Msg("Successfully updated JWKS data")
 		}
 	}
 
-	return c.JwtOriginConfig
+	return c.TokenOriginConfig
 }
 
 // GetSiteConfig returns the Site config
@@ -516,12 +556,68 @@ func (c *Config) GetSiteConfig() *SiteConfig {
 
 // GetMetricsConfig returns the Metrics config
 func (c *Config) GetMetricsConfig() *MetricsConfig {
-	return NewMetricsConfig(c.GetMetricsEnabled(), c.GetMetricsPort())
+	return NewMetricsConfig(c.GetMetricsEnabled(), c.GetMetricsPort(), c.GetMetricsNamespace())
 }
 
 // GetRateLimiterConfig returns the rate limiter config
 func (c *Config) GetRateLimiterConfig() *RateLimiterConfig {
 	return NewRateLimiterConfig(c.GetRateLimiterEnabled(), c.GetRateLimiterRate(), c.GetRateLimiterBurst(), c.GetRateLimiterExpiresIn())
+}
+
+// GetDPSConfig returns connection settings for direct DPS calls.
+func (c *Config) GetDPSConfig() dpsclient.Config {
+	return dpsclient.Config{
+		Endpoint:       c.v.GetString(ConfigDPSEndpoint),
+		RequestTimeout: c.v.GetDuration(ConfigDPSRequestTimeout),
+		TokenPath:      c.v.GetString(ConfigDPSTokenPath),
+		CAPath:         c.v.GetString(ConfigDPSCAPath),
+		ServerName:     c.v.GetString(ConfigDPSServerName),
+	}
+}
+
+// ValidatePowerProvisioningConfig validates settings required for direct DPS
+// integration. DPS connection fields are ignored when integration is disabled.
+func (c *Config) ValidatePowerProvisioningConfig() error {
+	enabled, err := c.validateDPSEnabled()
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return nil
+	}
+
+	dpsConfig := c.GetDPSConfig()
+	if strings.TrimSpace(dpsConfig.Endpoint) == "" {
+		return fmt.Errorf("powerProvisioning.dps.endpoint is required when DPS integration is enabled")
+	}
+	if strings.TrimSpace(dpsConfig.TokenPath) == "" {
+		return fmt.Errorf("powerProvisioning.dps.tokenPath is required when DPS integration is enabled")
+	}
+	if strings.TrimSpace(dpsConfig.CAPath) == "" {
+		return fmt.Errorf("powerProvisioning.dps.tls.caPath is required when DPS integration is enabled")
+	}
+	if dpsConfig.RequestTimeout <= 0 {
+		return fmt.Errorf("powerProvisioning.dps.requestTimeout must be greater than zero")
+	}
+
+	return nil
+}
+
+func (c *Config) validateDPSEnabled() (bool, error) {
+	value := c.v.Get(ConfigDPSEnabled)
+	switch typed := value.(type) {
+	case nil:
+		return false, nil
+	case bool:
+		return typed, nil
+	case string:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(typed))
+		if err == nil {
+			return enabled, nil
+		}
+	}
+
+	return false, fmt.Errorf("powerProvisioning.dps.enabled must be a boolean")
 }
 
 // NewRateLimiterConfig initializes and returns a configuration object for rate limiting
@@ -535,13 +631,13 @@ func NewRateLimiterConfig(enabled bool, rate float64, burst int, expiresIn int) 
 }
 
 // GetIssuersConfig returns the issuer configurations from the config file
-func (c *Config) GetIssuersConfig() []IssuerConfig {
+func (c *Config) GetIssuersConfig() ([]IssuerConfig, error) {
 	var issuersConfig []IssuerConfig
-	if err := c.v.UnmarshalKey("issuers", &issuersConfig); err != nil {
-		log.Warn().Err(err).Msg("Failed to unmarshal issuer configurations, using empty list")
-		return []IssuerConfig{}
+	err := c.v.UnmarshalKey("issuers", &issuersConfig)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal issuers configuration: %w", err)
 	}
-	return issuersConfig
+	return issuersConfig, nil
 }
 
 // ValidateIssuersConfig validates the issuer configurations
@@ -550,11 +646,30 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 	seenURLs := make(map[string]bool)
 	seenStaticOrgs := make(map[string]bool)
 	seenDynamicOrg := false
+	originCounts := make(map[string]int)
 
 	for i, issuer := range issuers {
 		// Validate required fields
 		if issuer.Name == "" {
 			return fmt.Errorf("issuer %d: name is required", i)
+		}
+
+		if seenNames[issuer.Name] {
+			return fmt.Errorf("duplicate issuer name: %s", issuer.Name)
+		}
+		seenNames[issuer.Name] = true
+
+		origin, err := issuer.GetOrigin()
+		if err != nil {
+			return fmt.Errorf("issuer %s: %w", issuer.Name, err)
+		}
+		originCounts[origin]++
+
+		if origin == cauth.TokenOriginKas {
+			if err := issuer.ValidateKasOrigin(); err != nil {
+				return err
+			}
+			continue
 		}
 
 		if issuer.JWKS == "" {
@@ -565,23 +680,11 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 			return fmt.Errorf("issuer %s: issuer is required", issuer.Name)
 		}
 
-		// Check for duplicate names
-		if seenNames[issuer.Name] {
-			return fmt.Errorf("duplicate issuer name: %s", issuer.Name)
-		}
-		seenNames[issuer.Name] = true
-
 		// Check for duplicate JWKS URLs
 		if seenURLs[issuer.JWKS] {
 			return fmt.Errorf("duplicate JWKS URL: %s (issuer: %s)", issuer.JWKS, issuer.Name)
 		}
 		seenURLs[issuer.JWKS] = true
-
-		// Validate origin
-		origin, err := issuer.GetOrigin()
-		if err != nil {
-			return fmt.Errorf("issuer %s: %w", issuer.Name, err)
-		}
 
 		// ClaimMappings are only allowed for custom origin issuers
 		// keycloak, kas-ssa, and kas-legacy have their own predefined claim extraction logic
@@ -668,6 +771,64 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 			}
 		}
 	}
+	err := validateOriginCombination(originCounts)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateOriginCombination accepts one or more custom issuers on their own, or a
+// kas or kas-ssa issuer optionally paired with kas-legacy. Keycloak is configured
+// through its own keycloak block rather than the issuers array.
+func validateOriginCombination(originCounts map[string]int) error {
+	if originCounts[cauth.TokenOriginKeycloak] > 0 {
+		return fmt.Errorf("origin: %s is configured through the keycloak settings, not the issuers list", cauth.TokenOriginKeycloak)
+	}
+
+	if originCounts[cauth.TokenOriginCustom] > 0 && len(originCounts) > 1 {
+		return fmt.Errorf("origin: %s cannot be configured with any other origin", cauth.TokenOriginCustom)
+	}
+
+	if originCounts[cauth.TokenOriginKas] > 0 && originCounts[cauth.TokenOriginKasSsa] > 0 {
+		return fmt.Errorf("origin: %s and %s cannot be configured together", cauth.TokenOriginKas, cauth.TokenOriginKasSsa)
+	}
+
+	// Each kas origin names a single upstream KAS deployment, so it cannot repeat.
+	// Only custom, which covers arbitrary third-party issuers, may appear more than once.
+	for _, origin := range []string{cauth.TokenOriginKas, cauth.TokenOriginKasLegacy, cauth.TokenOriginKasSsa} {
+		if originCounts[origin] > 1 {
+			return fmt.Errorf("only one issuer with origin: %s is allowed", origin)
+		}
+	}
+
+	return nil
+}
+
+// ValidateKasOrigin validates a KAS issuer configuration. The issuer carries the
+// NGC API base URL the processor calls, so it is required rather than defaulted.
+func (ic *IssuerConfig) ValidateKasOrigin() error {
+	if ic.JWKS != "" {
+		return fmt.Errorf("issuer %s: jwks URL is not supported for origin: %s", ic.Name, cauth.TokenOriginKas)
+	}
+
+	baseURL, err := url.Parse(ic.Issuer)
+	if err != nil || baseURL.Host == "" || baseURL.Scheme != "https" {
+		return fmt.Errorf("issuer %s: issuer must be an absolute HTTPS NGC API URL for origin: %s", ic.Name, cauth.TokenOriginKas)
+	}
+
+	if baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return fmt.Errorf("issuer %s: issuer must not contain user info, query, or fragment for origin: %s", ic.Name, cauth.TokenOriginKas)
+	}
+
+	if len(ic.ClaimMappings) > 0 {
+		return fmt.Errorf("issuer %s: claimMappings are not supported for origin: %s", ic.Name, cauth.TokenOriginKas)
+	}
+
+	if ic.ServiceAccount {
+		return fmt.Errorf("issuer %s: serviceAccount is not supported for origin: %s", ic.Name, cauth.TokenOriginKas)
+	}
 
 	return nil
 }
@@ -695,6 +856,11 @@ func (c *Config) GetAPIName() string {
 	return c.v.GetString(ConfigAPIName)
 }
 
+// GetAPIPort returns the port the API server listens on
+func (c *Config) GetAPIPort() int {
+	return c.v.GetInt(ConfigAPIPort)
+}
+
 // GetAPIRouteVersion returns the version of the API
 func (c *Config) GetAPIRouteVersion() string {
 	return c.v.GetString(ConfigAPIRouteVersion)
@@ -708,6 +874,11 @@ func (c *Config) GetLogLevel() string {
 // GetSentryDSN returns the DSN for Sentry
 func (c *Config) GetSentryDSN() string {
 	return c.v.GetString(ConfigSentryDSN)
+}
+
+// GetDPSEnabled reports whether NICo makes direct DPS calls.
+func (c *Config) GetDPSEnabled() bool {
+	return c.v.GetBool(ConfigDPSEnabled)
 }
 
 // GetDBHost returns the host of the database
@@ -884,14 +1055,30 @@ func (c *Config) GetMetricsPort() int {
 	return c.v.GetInt(ConfigMetricsPort)
 }
 
+// GetMetricsNamespace gets the prefix applied to every exposed metric name.
+// An explicitly empty value falls back to the default, since echoprometheus
+// substitutes its own "echo" prefix for an empty one.
+func (c *Config) GetMetricsNamespace() string {
+	namespace := c.v.GetString(ConfigMetricsNamespace)
+	if namespace == "" {
+		return DefaultMetricsNamespace
+	}
+	return namespace
+}
+
 // GetTracingEnabled gets the enabled field for tracing
 func (c *Config) GetTracingEnabled() bool {
 	return c.v.GetBool(ConfigTracingEnabled)
 }
 
-// GetTracingServiceName gets the service name for tracing
+// GetTracingServiceName gets the service name for tracing, falling back to
+// the binary's default when the config omits it or leaves it empty. The OTEL
+// environment variables still take precedence over either value.
 func (c *Config) GetTracingServiceName() string {
-	return c.v.GetString(ConfigTracingServiceName)
+	if name := c.v.GetString(ConfigTracingServiceName); name != "" {
+		return name
+	}
+	return DefaultTracingServiceName
 }
 
 // Keycloak configuration methods

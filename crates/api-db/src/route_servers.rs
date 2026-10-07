@@ -67,7 +67,7 @@ pub async fn replace(
 // get returns all RouteServer entries, which include the
 // IP address and source_type of the entry.
 pub async fn get(txn: impl DbReader<'_>) -> DatabaseResult<Vec<RouteServer>> {
-    let query = r#"SELECT * FROM route_servers;"#;
+    let query = r#"SELECT address, source_type FROM route_servers;"#;
     sqlx::query_as(query)
         .fetch_all(txn)
         .await
@@ -80,7 +80,7 @@ pub async fn find_by_address(
     txn: impl DbReader<'_>,
     address: IpAddr,
 ) -> DatabaseResult<Option<RouteServer>> {
-    let query = r#"SELECT * FROM route_servers where address=$1;"#;
+    let query = r#"SELECT address, source_type FROM route_servers where address=$1;"#;
     sqlx::query_as(query)
         .bind(address)
         .fetch_optional(txn)
@@ -122,11 +122,12 @@ pub async fn add(
 
 // remove deletes route server addresses matching the input
 // list of IP addresses for the given input source_type.
+// Returns the number of rows deleted.
 pub async fn remove(
     txn: &mut PgConnection,
-    addresses: &Vec<IpAddr>,
+    addresses: &[IpAddr],
     source_type: RouteServerSourceType,
-) -> DatabaseResult<()> {
+) -> DatabaseResult<u64> {
     // len + 1 since we're going to be binding all addresses
     // plus the source_type when we do the delete below.
     if addresses.len() + 1 > BIND_LIMIT {
@@ -137,19 +138,22 @@ pub async fn remove(
         )));
     } else if !addresses.is_empty() {
         let query = r#"DELETE FROM route_servers WHERE address = ANY($1) AND source_type = $2;"#;
-        sqlx::query(query)
+        let result = sqlx::query(query)
             .bind(addresses)
             .bind(source_type)
             .execute(txn)
             .await
             .map_err(|e| DatabaseError::new("super::remove", e))?;
+        return Ok(result.rows_affected());
     }
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+
+    use sqlx::Connection;
 
     use super::*;
 
@@ -402,32 +406,31 @@ mod tests {
         Ok(())
     }
 
-    // test_sync_with_duplicate_addresses_in_input tests to
-    // make sure sync handles gracefully when the input array
-    // contains duplicate addresses.
+    // test_sync_with_duplicate_addresses_in_input pins the contract that
+    // `replace` does not de-duplicate its input: addresses are handed straight
+    // to a single batched INSERT, so a repeated address trips the
+    // `address inet NOT NULL UNIQUE` constraint and the whole call is rejected.
+    // Callers are responsible for passing a unique address set.
     #[crate::sqlx_test]
     async fn test_sync_with_duplicate_addresses_in_input(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
 
-        // Create input with duplicates
+        // Input carrying the same address twice.
         let mut addresses = test_ips(3);
-        addresses.push(addresses[0]); // Add duplicate
+        addresses.push(addresses[0]);
 
-        // Should handle gracefully (database constraint will handle uniqueness)
         let result = super::replace(&mut txn, &addresses, RouteServerSourceType::ConfigFile).await;
 
-        // This might succeed (if database handles duplicates) or fail - both are acceptable
-        // The important thing is that it doesn't panic
+        // The duplicate must trip the UNIQUE constraint specifically, not merely
+        // fail for some unrelated reason.
         match result {
-            Ok(_) => {
-                let entries = super::get(txn.as_mut()).await?;
-                assert_eq!(entries.len(), 3); // Should only have unique entries
-            }
-            Err(_) => {
-                // Also acceptable if database rejects duplicates
-            }
+            Err(DatabaseError::Sqlx(e)) if matches!(&e.source, sqlx::Error::Database(db) if db.is_unique_violation()) =>
+                {}
+            other => panic!(
+                "replace should reject a duplicate address with a unique-violation error, got: {other:?}"
+            ),
         }
 
         Ok(())
@@ -535,13 +538,16 @@ mod tests {
 
         // Try to remove an AdminApi address using ConfigFile source type - should not remove anything
         let to_remove = vec![admin_addresses[0]];
-        super::remove(&mut txn, &to_remove, RouteServerSourceType::ConfigFile).await?;
+        let deleted =
+            super::remove(&mut txn, &to_remove, RouteServerSourceType::ConfigFile).await?;
+        assert_eq!(deleted, 0);
 
         let remaining = super::get(txn.as_mut()).await?;
         assert_eq!(remaining.len(), 5); // All entries should remain
 
         // Now remove with correct source type
-        super::remove(&mut txn, &to_remove, RouteServerSourceType::AdminApi).await?;
+        let deleted = super::remove(&mut txn, &to_remove, RouteServerSourceType::AdminApi).await?;
+        assert_eq!(deleted, 1);
 
         let remaining = super::get(txn.as_mut()).await?;
         assert_eq!(remaining.len(), 4); // One entry should be removed
@@ -600,6 +606,57 @@ mod tests {
         assert!(config_final.contains(&initial_config[0]));
         assert!(config_final.contains(&IpAddr::from_str("172.16.0.1")?));
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn route_server_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        let entries = [
+            ("192.0.2.78".parse()?, RouteServerSourceType::ConfigFile),
+            ("2001:db8::78".parse()?, RouteServerSourceType::AdminApi),
+        ];
+        let mut txn = api_connection.begin().await?;
+        for (address, source_type) in entries {
+            add(txn.as_mut(), &[address], source_type).await?;
+        }
+        txn.commit().await?;
+
+        assert_route_server_queries(&mut api_connection, &entries).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the prepared readers alive while an unrelated column is added.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE route_servers ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        assert_route_server_queries(&mut api_connection, &entries).await?;
+        Ok(())
+    }
+
+    async fn assert_route_server_queries(
+        connection: &mut PgConnection,
+        expected: &[(IpAddr, RouteServerSourceType)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let found = get(&mut *connection).await?;
+        assert_eq!(found.len(), expected.len());
+        for entry in found {
+            assert!(expected.contains(&(entry.address, entry.source_type)));
+        }
+        for (address, source_type) in expected {
+            let found = find_by_address(&mut *connection, *address)
+                .await?
+                .expect("the committed route server is found");
+            assert_eq!(found.address, *address);
+            assert_eq!(found.source_type, *source_type);
+        }
         Ok(())
     }
 }

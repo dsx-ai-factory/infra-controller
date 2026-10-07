@@ -193,6 +193,6 @@ func (osm OperatingSystemManager) Delete(ctx context.Context, id string) *ApiErr
 	ctx = WithLogger(ctx, osm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, osm.client.Config.Token)
 
-	resp, err := osm.client.apiClient.OperatingSystemAPI.DeleteOperatingSystem(ctx, osm.client.apiMetadata.Organization, id).Execute()
+	_, resp, err := osm.client.apiClient.OperatingSystemAPI.DeleteOperatingSystem(ctx, osm.client.apiMetadata.Organization, id).Execute()
 	return HandleResponseError(resp, err)
 }

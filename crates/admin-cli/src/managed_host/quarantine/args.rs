@@ -15,13 +15,13 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 use rpc::forge as forgerpc;
 
 /// Enable or disable quarantine mode on a managed host.
 #[derive(Parser, Debug)]
-pub enum Args {
+pub(crate) enum Args {
     /// Put this machine into quarantine. Prevents any network access on the host machine.
     On(QuarantineOn),
     /// Take this machine out of quarantine
@@ -37,9 +37,9 @@ Quarantine a host (blocks all host network traffic):
     --reason \"suspected compromise\"
 
 ")]
-pub struct QuarantineOn {
+pub(crate) struct QuarantineOn {
     #[clap(long, required(true), help = "Managed Host ID")]
-    pub host: MachineId,
+    pub(super) host: HostMachineId,
 
     #[clap(
         long,
@@ -47,7 +47,7 @@ pub struct QuarantineOn {
         required(true),
         help = "Reason for quarantining this host"
     )]
-    pub reason: String,
+    reason: String,
 }
 
 impl From<QuarantineOn> for forgerpc::SetManagedHostQuarantineStateRequest {
@@ -70,9 +70,9 @@ Take a host out of quarantine:
     $ nico-admin-cli managed-host quarantine off --host 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct QuarantineOff {
+pub(crate) struct QuarantineOff {
     #[clap(long, required(true), help = "Managed Host ID")]
-    pub host: MachineId,
+    pub(super) host: HostMachineId,
 }
 
 impl From<QuarantineOff> for forgerpc::ClearManagedHostQuarantineStateRequest {

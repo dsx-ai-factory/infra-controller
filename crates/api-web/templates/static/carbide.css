@@ -695,6 +695,80 @@ input[type="submit"]:hover:not(.disabled) {
   font-size: 0.9rem;
 }
 
+.site-explorer-run-status {
+  margin: 0 0 20px 0;
+  padding: 14px 18px;
+  background-color: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--border-color);
+  border-left: 6px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+}
+
+.site-explorer-run-status.success {
+  border-left-color: var(--success);
+}
+
+.site-explorer-run-status.warning {
+  border-left-color: var(--warning);
+}
+
+.site-explorer-run-status.error {
+  border-left-color: var(--error);
+}
+
+.site-explorer-run-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.site-explorer-run-status-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--text-primary);
+}
+
+.site-explorer-run-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.site-explorer-run-status-grid div {
+  min-width: 0;
+}
+
+.site-explorer-run-status-grid dt {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.site-explorer-run-status-grid dd {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.site-explorer-run-error {
+  margin-top: 0.75rem;
+}
+
+.site-explorer-run-error pre {
+  max-height: 130px;
+  margin: 0;
+  border-radius: 8px;
+}
+
+.site-explorer-run-empty {
+  color: var(--text-muted);
+  margin: 0;
+}
+
 /* Search button icon */
 .search-container input[type="submit"] {
   width: 40px;
@@ -1207,6 +1281,7 @@ details > *:not(summary) {
   grid-template-columns: repeat(auto-fill, 260px);
   gap: 1rem;
   width: 100%;
+  overflow: visible;
 }
 
 /* Individual configuration card */
@@ -1228,6 +1303,7 @@ details > *:not(summary) {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  min-height: 2.8rem;
 }
 
 .config-card .bubble {
@@ -1255,6 +1331,51 @@ details > *:not(summary) {
   color: var(--text-muted);
   font-size: 0.9rem;
   white-space: nowrap;
+}
+
+/* Circular question-mark help marker next to a config card title */
+.config-card-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-left: 0.4rem;
+  border-radius: 50%;
+  border: 1px solid var(--text-muted);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 400;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+}
+
+.config-card-tooltip {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: 240px;
+  padding: 0.6rem 0.75rem;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  white-space: normal;
+  transition: opacity 0.15s ease-in-out;
+}
+
+.config-card-help:hover .config-card-tooltip,
+.config-card-help:focus-within .config-card-tooltip {
+  visibility: visible;
+  opacity: 1;
 }
 
 /* Full width button in card */
@@ -1818,4 +1939,346 @@ span.page-link.disabled {
   border: 1px solid var(--border-color);
   opacity: 0.5;
   cursor: default;
+}
+
+/* ------------------------------------------------------------------------
+   Per-table client-side filter (search box injected by table_filter.js)
+   ------------------------------------------------------------------------ */
+.table-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+}
+
+.table-filter-input {
+  flex: 0 1 22rem;
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+  box-shadow: var(--shadow-sm);
+  height: 40px;
+  box-sizing: border-box;
+}
+
+.table-filter-input:focus {
+  outline: none;
+  border-color: var(--accent-green);
+  background-color: var(--bg-primary);
+  box-shadow: 0 0 0 3px rgba(118, 185, 0, 0.1);
+}
+
+.table-filter-input::placeholder {
+  color: var(--text-muted);
+}
+
+.table-filter-count {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.table-filter-count.table-filter-empty {
+  color: var(--accent-red, #e5484d);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------------
+   CONFIGURATION PAGE (/admin)
+
+   Generated option catalog: one tab per group, plain sections of option
+   tables. Overridden options carry a green accent bar and a source tag.
+   While the filter is active, all tabs with matches are shown at once.
+   ------------------------------------------------------------------------ */
+
+.config-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin: 1.25rem 0 0;
+}
+
+.config-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  align-self: stretch;
+  padding-right: 1.25rem;
+  border-right: 1px solid var(--border-color);
+}
+
+.config-version-label {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.config-version code {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.config-toolbar input[type="search"] {
+  flex: 1;
+  min-width: 240px;
+  max-width: 32rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.config-toolbar input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent-green);
+  box-shadow: 0 0 0 2px var(--accent-green-light);
+}
+
+.config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: stretch;
+  padding-left: 1.25rem;
+  border-left: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.config-toggle input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--accent-green);
+}
+
+/* Tighten the tab nav toward the toolbar so the header reads as one unit,
+   and slim the buttons so the descriptive tab names fit on one row. */
+.config-page .tab-nav {
+  margin-top: 1rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.config-page .tab-button {
+  padding: 0.75rem 1.1rem;
+  font-size: 0.9rem;
+}
+
+.config-section {
+  margin-bottom: 2.5rem;
+}
+
+.config-section h3 {
+  margin: 0 0 0.5rem;
+}
+
+.config-section-path {
+  font-size: 0.85rem;
+  font-weight: normal;
+  color: var(--text-muted);
+  margin-left: 0.5rem;
+}
+
+/* Tables and the sticky detail panel sit side by side; the panel scales
+   with the viewport so wide screens get a roomier reading pane. */
+.config-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+}
+
+.config-tables {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-panel {
+  width: clamp(20rem, 28vw, 38rem);
+  flex-shrink: 0;
+  position: sticky;
+  top: 1rem;
+  /* Line up with the top of the first table, not its section heading
+     (h3: 1.25rem x 1.6 line-height + 0.5rem margin). */
+  margin-top: 2.5rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1.5rem 1.75rem;
+}
+
+.config-panel h4 {
+  margin: 0 0 1rem;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 1.05rem;
+  word-break: break-word;
+}
+
+.config-panel #config-panel-body {
+  line-height: 1.7;
+}
+
+.config-panel dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.75rem 1.5rem;
+  margin: 1.5rem 0 0;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border-color);
+  font-size: 0.9rem;
+}
+
+.config-panel dt {
+  color: var(--text-muted);
+}
+
+.config-panel dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+@media (max-width: 1100px) {
+  .config-body {
+    flex-direction: column;
+  }
+
+  .config-panel {
+    order: -1;
+    width: 100%;
+    max-height: 40vh;
+    margin-top: 0;
+  }
+}
+
+table.config-options {
+  width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+table.config-options th:nth-child(1) {
+  width: 45%;
+}
+
+table.config-options th {
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+table.config-options td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: top;
+}
+
+tr.config-row {
+  cursor: pointer;
+}
+
+tr.config-row.selected td {
+  background-color: rgba(118, 185, 0, 0.08);
+}
+
+tr.config-row.selected code {
+  background-color: var(--bg-primary);
+}
+
+tr.config-row.overridden td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-green);
+}
+
+tr.config-row.unset .config-value,
+.config-unset {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+td.config-name code {
+  word-break: break-word;
+}
+
+td.config-value {
+  word-break: break-word;
+}
+
+td.config-value details,
+td.config-value summary {
+  margin: 0;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+td.config-value pre {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  max-height: 20rem;
+  overflow: auto;
+  background-color: var(--bg-tertiary);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+
+.config-runtime {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  color: var(--info);
+  background-color: rgba(49, 130, 206, 0.12);
+}
+
+.config-source {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  color: var(--accent-green-hover);
+  background-color: var(--accent-green-light);
+}
+
+.config-desc {
+  color: var(--text-secondary);
+}
+
+/* Filtering mode: bypass the tab system and show every group with matches,
+   labeled so rows from different tabs stay attributable. */
+.config-group-label {
+  display: none;
+}
+
+.config-filtering .config-group-label {
+  display: block;
+  margin: 1.5rem 0 1rem;
+}
+
+.config-filtering .tab-nav {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.config-filtering .tab-content {
+  display: block;
+}
+
+.config-filtering .tab-content:not(.config-has-matches) {
+  display: none;
+}
+
+.config-empty {
+  margin: 2rem 0;
+  color: var(--text-muted);
+  text-align: center;
 }

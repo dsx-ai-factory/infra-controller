@@ -23,7 +23,7 @@ helm install cert-manager jetstack/cert-manager \
 
 ### HashiCorp Vault
 
-Required for PKI (certificate signing) and secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components.
+Required for PKI (certificate signing) and, by default, secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components. NICo can keep the credentials it manages in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
 
 - Vault must be deployed and unsealed.
 - A PKI secrets engine must be configured for certificate signing.
@@ -40,6 +40,21 @@ If you want Prometheus metrics collection, install the [Prometheus Operator](htt
 - Service monitors are **disabled by default**. To enable them, set `serviceMonitor.enabled: true` in each subchart's values (or in the umbrella chart).
 - **nico-hardware-health** also exposes an optional `telemetryServiceMonitor` (disabled by default) that scrapes `/telemetry` for per-machine sensor gauge data (temperature, power, fans, etc.) from the Prometheus sink. Use `serviceMonitor` for `/metrics` operational metrics only.
 - NICo functions normally without the Prometheus Operator installed.
+
+### Grafana Dashboard Sidecar (Optional)
+
+The umbrella chart can install its packaged Grafana dashboards as a ConfigMap
+when `grafanaDashboards.enabled=true`. This requires an existing Grafana
+installation with a dashboard sidecar watching the ConfigMap namespace and
+labels. The default `grafana_dashboard: "1"` label matches the common
+`kube-prometheus-stack` selector. To place dashboards in the configured NICo
+folder, the sidecar must read the `grafana_folder` annotation (or both sides
+must be configured with another annotation key).
+
+Grafana is not installed by the NICo chart. If `grafanaDashboards.namespace`
+targets a namespace other than the NICo release namespace, create that
+namespace first and configure the sidecar to search it. See
+[`README.md`](./README.md#grafana-dashboards) for values and namespace examples.
 
 ---
 
@@ -153,17 +168,21 @@ global:
 
 Provides Vault connection information to NICo services.
 
-**Required keys:** `VAULT_SERVICE`, `FORGE_VAULT_MOUNT`, `FORGE_VAULT_PKI_MOUNT`
+**Required keys:** `VAULT_SERVICE`, `NICO_VAULT_MOUNT`, `NICO_VAULT_PKI_MOUNT`
+
+**Optional key:** `VAULT_NAMESPACE` selects a HashiCorp Vault Enterprise or HCP Vault Dedicated namespace. This is distinct from the Kubernetes namespace and from NICo's SPIFFE configuration. When present, NICo sends it as `X-Vault-Namespace` on every Vault request. Runtime configuration takes precedence over this environment value.
+
+> **Migration:** Vault namespaces isolate auth methods, secret engines, policies, and secrets. Before enabling `VAULT_NAMESPACE` for an existing NICo deployment, migrate or recreate the NICo KV and PKI mounts, their data, and the authentication configuration in the target namespace. See HashiCorp's [Vault namespace documentation](https://docs.hashicorp.com/vault/docs/enterprise/namespaces).
 
 ```bash
 kubectl create configmap vault-cluster-info \
   --namespace forge-system \
   --from-literal=VAULT_SERVICE='https://vault.example.com' \
-  --from-literal=FORGE_VAULT_MOUNT='secrets' \
-  --from-literal=FORGE_VAULT_PKI_MOUNT='forgeca'
+  --from-literal=NICO_VAULT_MOUNT='secrets' \
+  --from-literal=NICO_VAULT_PKI_MOUNT='forgeca'
 ```
 
-**Note:** Alternatively, populate `nico-api.vaultClusterInfo` in your `values.yaml` to have the chart create this ConfigMap for you.
+**Note:** Alternatively, set `vault.namespace` in the prerequisites chart values to have it add `VAULT_NAMESPACE` to this ConfigMap, or populate `nico-api.vaultClusterInfo` in your `values.yaml` to have the chart create it.
 
 ### `forge-system-nico-database-config`
 
@@ -218,7 +237,100 @@ global:
 
 ---
 
-## 6. Network Requirements
+## 6. Site Configuration
+
+`nico-api` **exits at startup** if resource pools are not defined. You must set `nico-api.siteConfig.enabled: true` and provide a `nicoApiSiteConfig` TOML value that includes at minimum the four required pool definitions.
+
+```yaml
+nico-api:
+  siteConfig:
+    enabled: true
+    nicoApiSiteConfig: |
+      dhcp_servers = ["nico-dhcp.nico-system.svc.cluster.local:67"]
+      enable_route_servers = true
+      initial_domain_name = "site.example.com"
+      sitename = "site"
+
+      # All four pools are required.
+      [pools.lo-ip]
+      type = "ipv4"
+      ranges = [{ start = "10.0.0.0", end = "10.0.1.0" }]
+
+      [pools.vlan-id]
+      type = "integer"
+      ranges = [{ start = "100", end = "501" }]
+
+      [pools.vni]
+      type = "integer"
+      ranges = [{ start = "1024500", end = "1024800" }]
+
+      [pools.vpc-vni]
+      type = "integer"
+      ranges = [{ start = "0", end = "100" }]
+```
+
+Adjust pool ranges to match your site's address plan. A fully annotated example with all available options is at [`deploy/files/nico-api/nico-api-site-config.toml`](../deploy/files/nico-api/nico-api-site-config.toml).
+
+### Admin client certificates
+
+To authenticate admin clients whose certificates are issued by an external PKI,
+provide the public CA certificate (or rotation bundle) and configure the client
+leaf certificate's Issuer DN CN as an external user issuer:
+
+```yaml
+nico-api:
+  auth:
+    additionalIssuerCns:
+      - "admin-user-intermediate"
+  siteConfig:
+    enabled: true
+    adminRootCertPem: |
+      -----BEGIN CERTIFICATE-----
+      <PEM-encoded public CA certificate>
+      -----END CERTIFICATE-----
+```
+
+`adminRootCertPem` is materialized as `admin_root_cert_pem` in the site
+ConfigMap, which is mounted at
+`/etc/forge/carbide-api/site/admin_root_cert_pem` and
+`/etc/nico/nico-api/site/admin_root_cert_pem`. The default
+`nico-api.auth.adminRootCafilePath` already selects the first path. If you
+override it, select one of these two mounted paths.
+
+The value may contain root or intermediate CA certificates, but never private
+keys. Helm performs an envelope-only check: the value must consist solely of
+bare `BEGIN/END CERTIFICATE` blocks separated by whitespace. Strip OpenSSL
+`subject=`/`issuer=` lines, comments, and other PEM object types before setting
+the value. Helm cannot validate X.509 DER, CA constraints, validity, or chain
+placement; verify those properties with X.509 tooling before deployment.
+
+Adding a CA to this bundle expands the TLS client trust store. Every presented
+client certificate successfully validated against it is also recorded as a
+`TrustedCertificate` and therefore passes the chart's default Casbin `forge/*`
+rule. With internal RBAC enabled (the default), that Casbin decision alone does
+not grant admin CLI access: the internal `ForgeAdminCLI` principal is
+represented as an `ExternalUser`, and methods granting that principal access
+require this mapping.
+
+`additionalIssuerCns` is a CN-only classifier applied to presented peer
+certificates across the combined TLS trust store; it is not cryptographically
+bound to a particular certificate in `adminRootCertPem`. Configure only the
+globally unique Subject CN of the dedicated intermediate that issues the client
+leaf certificates, never a shared or root CA CN. The current classifier expects
+the issuer CN to be encoded as an ASN.1 `PrintableString`.
+
+Do not set `bypass_rbac = true` in production: it removes the internal RBAC
+gate, leaving the Casbin decision as the effective authorization result. Trust
+only a dedicated admin-client intermediate and issuance profile whose entire
+issuance population is intended to cross this admin trust boundary.
+
+For client-certificate issuance and installation, protected CLI verification,
+renewal, CA overlap, recovery, and the existing revocation support boundary,
+see [NICo mTLS and authorization](../docs/manuals/nico-api-auth.md).
+
+---
+
+## 7. Network Requirements
 
 Several NICo services require direct network connectivity to bare metal hosts. Ensure the following network conditions are met before installation:
 
@@ -242,7 +354,7 @@ Ensure that firewall rules and network policies allow traffic between NICo servi
 
 ---
 
-## 7. Loki (Optional — for SSH Console Log Shipping)
+## 8. Loki (Optional — for SSH Console Log Shipping)
 
 The `nico-ssh-console-rs` subchart includes an optional OpenTelemetry Collector Contrib sidecar that ships SSH console logs to Loki. This sidecar is **disabled by default** (`lokiLogCollector.enabled: false`).
 

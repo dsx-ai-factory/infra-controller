@@ -21,22 +21,43 @@ use std::fmt::Write;
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
 use carbide_uuid::machine::MachineId;
-use prettytable::{Table, row};
+use carbide_uuid::vpc::VpcId;
+use prettytable::{Cell, Row, Table};
 use rpc::Machine;
+use tracing::warn;
 
 use super::args::Args;
 use crate::cfg::cli_options::SortField;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
+use crate::table_utils::{ColumnSelection, ColumnWidths};
 use crate::{async_write, async_write_table_as_csv, async_writeln};
+
+const HEADERS: [&str; 13] = [
+    "",
+    "Id",
+    "State",
+    "State Version",
+    "Attached DPUs",
+    "Primary Interface",
+    "IP Address",
+    "MAC Address",
+    "Type",
+    "Vendor",
+    "Slot",
+    "Tray",
+    "Labels",
+];
 
 fn convert_machine_to_nice_format(
     machine: forgerpc::Machine,
     history_count: u32,
 ) -> CarbideCliResult<String> {
     let mut lines = String::new();
-    let sku = machine.hw_sku.unwrap_or_default();
-    let sku_device_type = machine.hw_sku_device_type.unwrap_or_default();
+    let status = machine.status.unwrap_or_default();
+    let config = machine.config.unwrap_or_default();
+    let sku = config.hw_sku.unwrap_or_default();
+    let sku_device_type = status.hw_sku_device_type.unwrap_or_default();
 
     let mut data = vec![
         (
@@ -52,7 +73,7 @@ fn convert_machine_to_nice_format(
         ("MACHINE TYPE", get_machine_type(machine.id)),
         (
             "FAILURE",
-            machine.failure_details.unwrap_or("None".to_string()),
+            status.failure_details.unwrap_or("None".to_string()),
         ),
         ("VERSION", machine.version),
         ("SKU", sku),
@@ -76,7 +97,7 @@ fn convert_machine_to_nice_format(
                 .unwrap_or_else(|| "N/A".to_string()),
         ),
     ];
-    if let Some(di) = machine.discovery_info
+    if let Some(di) = status.discovery_info
         && let Some(dmi) = di.dmi_data
     {
         data.push(("VENDOR", dmi.sys_vendor));
@@ -87,7 +108,7 @@ fn convert_machine_to_nice_format(
         data.push(("BIOS VERSION", dmi.bios_version));
         data.push(("BOARD VERSION", dmi.board_version));
     }
-    let autoupdate = if let Some(autoupdate) = machine.firmware_autoupdate {
+    let autoupdate = if let Some(autoupdate) = config.firmware_autoupdate {
         autoupdate.to_string()
     } else {
         "Default".to_string()
@@ -148,10 +169,10 @@ fn convert_machine_to_nice_format(
     }
 
     writeln!(&mut lines, "INTERFACES:")?;
-    if machine.interfaces.is_empty() {
+    if status.interfaces.is_empty() {
         writeln!(&mut lines, "\tEMPTY")?;
     } else {
-        for (i, interface) in machine.interfaces.into_iter().enumerate() {
+        for (i, interface) in status.interfaces.into_iter().enumerate() {
             let data = vec![
                 ("SN", i.to_string()),
                 ("ID", interface.id.unwrap_or_default().to_string()),
@@ -160,7 +181,7 @@ fn convert_machine_to_nice_format(
                     interface
                         .attached_dpu_machine_id
                         .as_ref()
-                        .map(MachineId::to_string)
+                        .map(ToString::to_string)
                         .unwrap_or_default(),
                 ),
                 (
@@ -198,7 +219,7 @@ fn convert_machine_to_nice_format(
         }
     }
 
-    if let Some(health) = machine.health
+    if let Some(health) = status.health
         && !health.alerts.is_empty()
     {
         writeln!(&mut lines, "ALERTS:")?;
@@ -216,28 +237,26 @@ fn get_machine_type(machine_id: Option<MachineId>) -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
-fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table> {
+fn convert_machines_to_nice_table(
+    machines: forgerpc::MachineList,
+    widths: Option<&ColumnWidths>,
+    columns: &ColumnSelection,
+) -> Box<Table> {
     let mut table = Box::new(Table::new());
 
-    table.set_titles(row![
-        "",
-        "Id",
-        "State",
-        "State Version",
-        "Attached DPUs",
-        "Primary Interface",
-        "IP Address",
-        "MAC Address",
-        "Type",
-        "Vendor",
-        "Slot",
-        "Tray",
-        "Labels",
-    ]);
+    let ordered_headers = columns.ordered_headers(&HEADERS);
+
+    table.set_titles(Row::new(
+        ordered_headers
+            .iter()
+            .map(|h| Cell::new(h))
+            .collect::<Vec<Cell>>(),
+    ));
 
     for machine in machines.machines {
         let machine_id_string = machine.id.map(|id| id.to_string()).unwrap_or_default();
-        let mut machine_interfaces = machine
+        let status = machine.status.unwrap_or_default();
+        let mut machine_interfaces = status
             .interfaces
             .into_iter()
             .filter(|x| x.primary_interface)
@@ -253,8 +272,8 @@ fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table>
             )
         } else {
             let mi = machine_interfaces.remove(0);
-            let dpu_ids = if !machine.associated_dpu_machine_ids.is_empty() {
-                machine
+            let dpu_ids = if !status.associated_dpu_machine_ids.is_empty() {
+                status
                     .associated_dpu_machine_ids
                     .iter()
                     .map(|i| i.to_string())
@@ -276,7 +295,7 @@ fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table>
             )
         };
         let mut vendor = String::new();
-        if let Some(di) = machine.discovery_info
+        if let Some(di) = status.discovery_info
             && let Some(dmi) = di.dmi_data
         {
             vendor = dmi.sys_vendor;
@@ -297,12 +316,12 @@ fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table>
             .map(|t| t.to_string())
             .unwrap_or_default();
 
-        let is_unhealthy = machine
+        let is_unhealthy = status
             .health
             .map(|x| !x.alerts.is_empty())
             .unwrap_or_default();
 
-        table.add_row(row![
+        let row_data = vec![
             String::from(if is_unhealthy { "U" } else { "H" }),
             machine_id_string,
             machine.state.to_uppercase(),
@@ -315,11 +334,46 @@ fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table>
             vendor,
             slot_number,
             tray_index,
-            labels.join(", ")
-        ]);
+            labels.join(", "),
+        ];
+
+        let values_by_header: std::collections::HashMap<&str, String> =
+            HEADERS.into_iter().zip(row_data).collect();
+
+        table.add_row(Row::new(
+            ordered_headers
+                .iter()
+                .map(|header| {
+                    let v = values_by_header.get(header).cloned().unwrap_or_default();
+                    let v = match widths {
+                        Some(widths) => widths.truncate(header, &v),
+                        None => v,
+                    };
+                    Cell::new(&v)
+                })
+                .collect(),
+        ));
     }
 
     table
+}
+/// `memory_device_groups` didn't exist before condensing was introduced; rehydrate and clear
+/// `status.discovery_info` so a raw JSON dump of `machine` stays true to the pre-condensing output
+///  which only ever had `memory_devices`.
+fn rehydrate_machine_memory_devices(machine: &mut rpc::Machine) -> CarbideCliResult<()> {
+    if let Some(discovery_info) = machine
+        .status
+        .as_mut()
+        .and_then(|s| s.discovery_info.as_mut())
+    {
+        discovery_info.rehydrate_memory_devices()?;
+    }
+    Ok(())
+}
+
+struct TableDisplayOptions<'a> {
+    widths: &'a ColumnWidths,
+    columns: &'a ColumnSelection,
 }
 
 async fn show_all_machines(
@@ -329,6 +383,7 @@ async fn show_all_machines(
     search_config: rpc::forge::MachineSearchConfig,
     page_size: usize,
     sort_by: &SortField,
+    display: &TableDisplayOptions<'_>,
 ) -> CarbideCliResult<()> {
     let mut machines = api_client
         .get_all_machines(search_config, page_size)
@@ -341,14 +396,33 @@ async fn show_all_machines(
 
     match output_format {
         OutputFormat::Json => {
+            for machine in machines.machines.iter_mut() {
+                if let Err(e) = rehydrate_machine_memory_devices(machine) {
+                    // we log the error but continue the iteration, so one machine with
+                    // malformed memory_device_groups doesn't blank out the whole listing.
+                    // rehydrate_memory_devices() leaves memory_device_groups uncleared on
+                    // error, so this machine's JSON keeps the grouped shape instead of the
+                    // legacy memory_devices shape other machines get. That's intentional:
+                    // clearing the groups here would force us to either fabricate a
+                    // memory_devices list from data we just rejected, or emit an empty one
+                    // that looks like "no memory" — both are misleading. Surfacing the raw,
+                    // ungrouped-but-unconverted data is more honest than a plausible-looking
+                    // but wrong legacy-shaped record.
+                    eprintln!(
+                        "Could not rehydrate memory devices for machine {}: {e}",
+                        machine.id.map(|id| id.to_string()).unwrap_or_default()
+                    );
+                }
+            }
             async_writeln!(output_file, "{}", serde_json::to_string_pretty(&machines)?)?;
         }
         OutputFormat::AsciiTable => {
-            let table = convert_machines_to_nice_table(machines);
+            let table =
+                convert_machines_to_nice_table(machines, Some(display.widths), display.columns);
             async_write!(output_file, "{}", table)?;
         }
         OutputFormat::Csv => {
-            let table = convert_machines_to_nice_table(machines);
+            let table = convert_machines_to_nice_table(machines, None, display.columns);
             async_write_table_as_csv!(output_file, table)?;
         }
         OutputFormat::Yaml => {
@@ -365,9 +439,10 @@ async fn show_machine_information(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
-    let machine = api_client.get_machine(machine_id).await?;
+    let mut machine = api_client.get_machine(machine_id).await?;
     match output_format {
         OutputFormat::Json => {
+            rehydrate_machine_memory_devices(&mut machine)?;
             async_write!(output_file, "{}", serde_json::to_string_pretty(&machine)?)?
         }
         OutputFormat::AsciiTable => async_write!(
@@ -390,7 +465,7 @@ async fn show_machine_information(
     Ok(())
 }
 
-pub async fn handle_show(
+pub(crate) async fn handle_show(
     args: Args,
     output_format: &OutputFormat,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -410,6 +485,14 @@ pub async fn handle_show(
             include_predicted_host: args.hosts || show_all_types,
             ..Default::default()
         };
+        let widths = args.width.widths();
+        if let Some(message) = widths.describe_unmatched_columns(&HEADERS) {
+            warn!("{message}");
+        }
+        let columns = args.columns.selection();
+        if let Some(message) = columns.describe_unmatched_columns(&HEADERS) {
+            warn!("{message}");
+        }
         show_all_machines(
             output_file,
             output_format,
@@ -417,6 +500,10 @@ pub async fn handle_show(
             search_config,
             page_size,
             sort_by,
+            &TableDisplayOptions {
+                widths: &widths,
+                columns: &columns,
+            },
         )
         .await?;
     }
@@ -424,23 +511,84 @@ pub async fn handle_show(
     Ok(())
 }
 
-pub async fn get_next_free_machine(
+pub(crate) async fn get_next_free_machine(
     api_client: &ApiClient,
     machine_ids: &mut VecDeque<MachineId>,
     min_interface_count: usize,
-    zero_dpu: bool,
+    flat_vpc_id: Option<VpcId>,
+) -> Option<Machine> {
+    get_next_free_machine_inner(
+        api_client,
+        machine_ids,
+        min_interface_count,
+        flat_vpc_id,
+        None,
+    )
+    .await
+}
+
+/// Same selection logic as [`get_next_free_machine`], but reads from a
+/// caller-provided `prefetched` lookup instead of issuing a single-machine
+/// `get_machine` RPC per candidate. Callers that already know the full
+/// candidate set (e.g. an explicit `--machine-id` list) should batch-resolve
+/// it once via a chunked `find_machines_by_ids` call and pass the result
+/// here, rather than looping this once per machine -- a few thousand
+/// individual lookups is exactly the pattern that trips per-client admission
+/// control at fleet scale.
+pub(crate) async fn get_next_free_machine_prefetched(
+    api_client: &ApiClient,
+    machine_ids: &mut VecDeque<MachineId>,
+    min_interface_count: usize,
+    flat_vpc_id: Option<VpcId>,
+    prefetched: &std::collections::HashMap<MachineId, Machine>,
+) -> Option<Machine> {
+    get_next_free_machine_inner(
+        api_client,
+        machine_ids,
+        min_interface_count,
+        flat_vpc_id,
+        Some(prefetched),
+    )
+    .await
+}
+
+async fn get_next_free_machine_inner(
+    api_client: &ApiClient,
+    machine_ids: &mut VecDeque<MachineId>,
+    min_interface_count: usize,
+    flat_vpc_id: Option<VpcId>,
+    prefetched: Option<&std::collections::HashMap<MachineId, Machine>>,
 ) -> Option<Machine> {
     while let Some(id) = machine_ids.pop_front() {
-        tracing::debug!("Checking {}", id);
-        if let Ok(machine) = api_client.get_machine(id).await {
+        tracing::debug!(
+            machine_id = %id,
+            "Checking machine",
+        );
+        let looked_up = match prefetched {
+            Some(cache) => cache.get(&id).cloned().ok_or(()),
+            None => api_client.get_machine(id).await.map_err(|_| ()),
+        };
+        if let Ok(machine) = looked_up {
             if machine.state != "Ready" {
                 tracing::debug!("Machine is not ready");
                 continue;
             }
-            if zero_dpu {
-                return Some(machine);
+            let status = machine.status.as_ref();
+            if flat_vpc_id.is_some() {
+                if status
+                    .and_then(|status| status.instance_network_restrictions.as_ref())
+                    .is_some_and(|r| {
+                        r.network_segment_membership_type()
+                            == forgerpc::InstanceNetworkSegmentMembershipType::Static
+                    })
+                {
+                    return Some(machine);
+                } else {
+                    tracing::debug!(machine_id = %id, "machine does not support flat VPC auto allocation");
+                    continue;
+                }
             }
-            if let Some(discovery_info) = &machine.discovery_info {
+            if let Some(discovery_info) = status.and_then(|status| status.discovery_info.as_ref()) {
                 let dpu_interfaces = discovery_info
                     .network_interfaces
                     .iter()
@@ -461,4 +609,163 @@ pub async fn get_next_free_machine(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use rpc::DiscoveryInfo;
+    use rpc::errors::RpcDataConversionError;
+    use rpc::machine_discovery::{MemoryDevice, MemoryDeviceGroup};
+
+    use super::*;
+
+    fn group(size_mb: u32, mem_type: &str, count: u32) -> MemoryDeviceGroup {
+        MemoryDeviceGroup {
+            size_mb: Some(size_mb),
+            mem_type: Some(mem_type.to_string()),
+            count,
+        }
+    }
+
+    fn machine_with_discovery_info(status: Option<DiscoveryInfo>) -> Machine {
+        Machine {
+            status: Some(forgerpc::MachineStatus {
+                discovery_info: status,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn rehydrates_grouped_records() {
+        let mut machine = machine_with_discovery_info(Some(DiscoveryInfo {
+            memory_device_groups: vec![group(8192, "DDR4", 3)],
+            ..Default::default()
+        }));
+
+        rehydrate_machine_memory_devices(&mut machine).unwrap();
+
+        let status = machine
+            .status
+            .as_ref()
+            .unwrap()
+            .discovery_info
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            status.memory_devices,
+            vec![
+                MemoryDevice {
+                    size_mb: Some(8192),
+                    mem_type: Some("DDR4".to_string()),
+                };
+                3
+            ]
+        );
+        assert!(status.memory_device_groups.is_empty());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn zero_count_groups_leave_legacy_memory_devices_untouched() {
+        let legacy = vec![MemoryDevice {
+            size_mb: Some(8192),
+            mem_type: Some("DDR4".to_string()),
+        }];
+        let mut machine = machine_with_discovery_info(Some(DiscoveryInfo {
+            memory_device_groups: vec![group(16384, "DDR5", 0)],
+            memory_devices: legacy.clone(),
+            ..Default::default()
+        }));
+
+        rehydrate_machine_memory_devices(&mut machine).unwrap();
+
+        let status = machine
+            .status
+            .as_ref()
+            .unwrap()
+            .discovery_info
+            .as_ref()
+            .unwrap();
+        assert_eq!(status.memory_devices, legacy);
+        assert!(status.memory_device_groups.is_empty());
+    }
+
+    #[test]
+    fn aggregate_count_above_max_is_rejected() {
+        let max = MemoryDeviceGroup::MAX_REHYDRATE_COUNT;
+        let big_group = group(8192, "DDR4", max / 2 + 1);
+        let big_discovery_info = || DiscoveryInfo {
+            memory_device_groups: vec![big_group.clone(), big_group.clone()],
+            ..Default::default()
+        };
+
+        let mut machine = machine_with_discovery_info(Some(big_discovery_info()));
+
+        let err = rehydrate_machine_memory_devices(&mut machine).unwrap_err();
+        assert!(matches!(
+            err,
+            CarbideCliError::RpcDataConversionError(
+                RpcDataConversionError::MemoryDeviceCountExceeded(_, m)
+            ) if m == max
+        ));
+    }
+
+    #[test]
+    fn json_dump_contains_memory_devices_and_omits_memory_device_groups() {
+        let mut machine = machine_with_discovery_info(Some(DiscoveryInfo {
+            memory_device_groups: vec![group(8192, "DDR4", 1)],
+            ..Default::default()
+        }));
+
+        rehydrate_machine_memory_devices(&mut machine).unwrap();
+
+        let json = serde_json::to_string(&machine).unwrap();
+        assert!(json.contains("memory_devices"));
+        assert!(json.contains("DDR4"));
+        assert!(!json.contains("memory_device_groups"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn max_width_narrower_than_header_floors_at_header_length() {
+        let machines = forgerpc::MachineList {
+            machines: vec![forgerpc::Machine {
+                state: "a very long error message".to_string(),
+                ..Default::default()
+            }],
+        };
+        // "State" is 5 characters; requesting width 1 must not truncate
+        // values below what's already needed to fit the header, since the
+        // column can't render narrower than its header anyway.
+        let widths = ColumnWidths::new(&[crate::table_utils::MaxWidthSpec::Column(
+            "State".to_string(),
+            1,
+        )]);
+        let columns = ColumnSelection::default();
+
+        let table = convert_machines_to_nice_table(machines, Some(&widths), &columns);
+
+        assert!(
+            table.to_string().contains("State"),
+            "header should render in full"
+        );
+
+        let row = table.get_row(0).expect("one data row");
+        let state_idx = HEADERS.iter().position(|h| *h == "State").unwrap();
+        let vendor_idx = HEADERS.iter().position(|h| *h == "Vendor").unwrap();
+
+        assert_eq!(
+            row.get_cell(state_idx).unwrap().get_content(),
+            "A ...",
+            "populated value should truncate to the header's length (5), not the requested width (1)"
+        );
+        assert_eq!(
+            row.get_cell(vendor_idx).unwrap().get_content(),
+            "",
+            "a column with no data should render as an empty cell"
+        );
+    }
 }

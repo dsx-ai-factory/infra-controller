@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -28,6 +28,7 @@ pub(crate) const CT_MAC_2: &str = "AA:BB:CC:DD:CC:02";
 pub(crate) const CT_IP_1: &str = "10.0.1.1";
 pub(crate) const CT_IP_2: &str = "10.0.1.2";
 pub(crate) const UNKNOWN_MAC: &str = "FF:FF:FF:FF:FF:FF";
+pub(crate) const TEST_RACK_PROFILE_ID: &str = "NVL72";
 
 pub(crate) fn test_power_shelf_id(label: &str) -> PowerShelfId {
     let mut hash = [0u8; 32];
@@ -67,9 +68,16 @@ pub(crate) async fn seed_test_data(
     let mut txn = pool.begin().await.unwrap();
 
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-    let rack = db::rack::create(&mut txn, &rack_id, None, &RackConfig::default(), None)
-        .await
-        .expect("failed to create rack");
+    let rack_profile_id = RackProfileId::new(TEST_RACK_PROFILE_ID);
+    let rack = db::rack::create(
+        &mut txn,
+        &rack_id,
+        Some(&rack_profile_id),
+        &RackConfig::default(),
+        None,
+    )
+    .await
+    .expect("failed to create rack");
 
     let ps1 = seed_power_shelf(&mut txn, PS_MAC_1, "PS-001", &rack_id).await;
     let ps2 = seed_power_shelf(&mut txn, PS_MAC_2, "PS-002", &rack_id).await;
@@ -88,7 +96,11 @@ pub(crate) async fn seed_test_data(
     )
     .await
     .expect("failed to advance rack to Ready");
-    assert!(advanced, "rack controller_state version mismatch");
+    assert_eq!(
+        advanced,
+        db::ConditionalWrite::Applied(()),
+        "rack controller_state version mismatch"
+    );
 
     txn.commit().await.unwrap();
     (rack_id, ps1, ps2, sw1, sw2)

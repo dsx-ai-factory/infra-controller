@@ -10,25 +10,36 @@ set white ${esc:string}[37m
 #cpair --foreground 7 --background 9 0
 
 :start
-echo ${bold}${white}Carbide${boldoff} - ${version}
-prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open carbide menu... && goto carbide_menu || goto carbide
+echo ${bold}${white}NICo${boldoff} - ${version}
+prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open NICo menu... && goto nico_menu || goto nico
 
 :whoami
 ifconf -c dhcp
-# carbide-pxe identifies the booting machine by its client IP (read from
+# nico-pxe identifies the booting machine by its client IP (read from
 # X-Forwarded-For when proxied, TCP socket peer otherwise) and resolves
 # to a machine_interface_id via find_by_ip. iPXE doesn't need to encode
 # anything identity-related in the URL -- the network layer carries it.
-time chain --autofree http://${next-server}:8080/api/v0/pxe/whoami
-goto carbide_menu
+# next-server is an IPv4 address from DHCP, so use the standard HTTP port
+# exposed by the PXE service instead of the container's internal port.
+time chain --autofree http://${next-server}/api/v0/pxe/whoami
+goto nico_menu
 
-:carbide
+:nico
 ifconf -c dhcp
-time chain --autofree http://${next-server}:8080/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto error_handler
+imgfree nico-boot ||
+set nico-retry-provisioning 0
+time chain --name nico-boot http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot
 
-:carbide_menu
-menu Carbide - ${hostname}
-item carbide Boot according to Carbide workflow
+# Core sets this flag to 1 when the response consumes a one-time custom PXE request.
+:retry_nico_boot
+iseq ${nico-retry-provisioning} 1 || goto error_handler
+imgstat nico-boot || goto error_handler
+prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||
+time imgexec nico-boot && exit 1 || goto retry_nico_boot
+
+:nico_menu
+menu NICo - ${hostname}
+item nico Boot according to NICo workflow
 item whoami Print information about this machine
 item localboot Boot to local drive
 #item netconfig Manual network configuration
@@ -36,9 +47,9 @@ item localboot Boot to local drive
 item retry Retry boot
 item debug iPXE Debug Shell
 item reboot Reboot System
-choose --default carbide --timeout 5000 target && goto ${target}
-prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open carbide menu...
-goto carbide_menu
+choose --default nico --timeout 5000 target && goto ${target}
+prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open NICo menu...
+goto nico_menu
 
 :localboot
 exit
@@ -48,12 +59,12 @@ goto start
 
 :error_handler
 prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to continue (4 seconds timeout)...
-goto carbide_menu
+goto nico_menu
 
 :debug
 echo Type "exit" to return to menu
 shell
-goto carbide_menu
+goto nico_menu
 
 :reboot
 reboot

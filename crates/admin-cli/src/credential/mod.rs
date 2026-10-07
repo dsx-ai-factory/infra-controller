@@ -27,7 +27,13 @@ mod common;
 mod delete_bmc;
 mod delete_nmxm;
 mod delete_ufm;
+mod firmware_access_token;
+mod force_bmc;
+mod force_uefi;
 mod generate_ufm_cert;
+mod registry;
+mod rotate;
+mod rotation_status;
 
 #[cfg(test)]
 mod tests;
@@ -36,9 +42,12 @@ use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
+pub(crate) const NMX_M_UNSUPPORTED_MESSAGE: &str =
+    "NMX-M is no longer supported; use NMX-C for NVLink partition management";
+
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Add UFM credential")]
     AddUFM(add_ufm::Args),
     #[clap(about = "Delete UFM credential")]
@@ -59,10 +68,28 @@ pub enum Cmd {
     AddHostFactoryDefault(add_host_factory_default::Args),
     #[clap(about = "Add manufacturer factory default BMC user/pass for the DPUs")]
     AddDpuFactoryDefault(add_dpu_factory_default::Args),
-    #[clap(about = "Add NmxM credentials")]
+    #[clap(about = "Deprecated compatibility command; NMX-M is no longer supported")]
     AddNmxM(add_nmxm::Args),
-    #[clap(about = "Delete NmxM credentials")]
+    #[clap(about = "Deprecated compatibility command; NMX-M is no longer supported")]
     DeleteNmxM(delete_nmxm::Args),
     #[clap(about = "Manage leaf BGP passwords", subcommand)]
     Bgp(bgp::Cmd),
+    #[clap(about = "Manage container registry credentials", subcommand)]
+    Registry(registry::Args),
+    #[clap(about = "Manage firmware artifact access tokens", subcommand)]
+    FirmwareAccessToken(firmware_access_token::Args),
+    #[clap(about = "Stage a site-wide credential rotation (auto-generate or explicit password)")]
+    Rotate(rotate::Args),
+    #[clap(about = "Show convergence status of a site-wide credential rotation")]
+    RotationStatus(rotation_status::Args),
+    #[clap(
+        about = "Force-converge credentials for a single BMC now (operator escape hatch)",
+        subcommand
+    )]
+    ForceBmc(force_bmc::Args),
+    #[clap(
+        about = "Force-converge the UEFI credential for a single machine now (operator escape hatch)",
+        subcommand
+    )]
+    ForceUefi(force_uefi::Args),
 }

@@ -1,0 +1,250 @@
+suite: configmap tests
+templates:
+  - configmap.yaml
+tests:
+  - it: should create configmap with default machine config
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: nico-machine-a-tron-mat-0-config-files
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: "host_count = 10"
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'log_format = "logfmt"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'discovery_retry_interval = "60s"'
+
+  - it: should allow compact log output
+    set:
+      machineATron:
+        logFormat: compact
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'log_format = "compact"'
+
+  - it: should configure custom host count via pods structure
+    set:
+      pods:
+        mat-0:
+          machines:
+            dell-hosts:
+              hwType: dell_poweredge_r750
+              hostCount: 20
+              dpuPerHostCount: 2
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: "host_count = 20"
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: "dpu_per_host_count = 2"
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'hw_type = "dell_poweredge_r750"'
+
+  - it: should allow full config override via matConfigs
+    set:
+      configFiles:
+        matConfigs:
+          mat-0: |
+            carbide_api_url = "https://custom-api:443"
+            [machines.custom]
+            host_count = 5
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: "custom-api"
+
+  - it: should create per-pod configmaps in multi-pod mode
+    set:
+      pods:
+        mat-0:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 10
+        mat-1:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 20
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: should render an atomic rack
+    set:
+      pods:
+        mat-0:
+          machines:
+            rack-machines: null
+          racks:
+            gb200:
+              type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
+              ids:
+                - rack-001
+              dpu_reboot_delay: 20
+              host_reboot_delay: 10
+              acceleration_factor: 0.03
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[racks\.gb200\]'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'rack_profile_id = "NVL72"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'acceleration_factor = 0\.03'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\]'
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\.rack-machines\]'
+
+  - it: should render the machines table for a second pod with racks and a null machines group
+    set:
+      pods:
+        mat-1:
+          machines:
+            rack-machines: null
+          racks:
+            gb200:
+              type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
+              ids:
+                - rack-002
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
+    asserts:
+      - hasDocuments:
+          count: 2
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: nico-machine-a-tron-mat-1-config-files
+      - documentIndex: 1
+        matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[racks\.gb200\]'
+      - documentIndex: 1
+        matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\]'
+      - documentIndex: 1
+        notMatchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\.rack-machines\]'
+
+  - it: should render racks and machines together
+    set:
+      pods:
+        mat-0:
+          racks:
+            gb200:
+              type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
+              ids:
+                - rack-001
+              dpu_reboot_delay: 20
+              host_reboot_delay: 10
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[racks\.gb200\]'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\.rack-machines\]'
+
+  - it: should use machineDefaults for all machine groups
+    set:
+      machineDefaults:
+        runIntervalIdle: "30s"
+        scoutRunInterval: "120s"
+        discoveryRetryInterval: "7s"
+        accelerationFactor: 0.02
+      pods:
+        mat-0:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 5
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'run_interval_idle = "30s"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'scout_run_interval = "120s"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'discovery_retry_interval = "7s"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'acceleration_factor = 0\.02'
+
+  - it: should not include enable_ipmi_simulation by default
+    asserts:
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: "enable_ipmi_simulation"
+
+  - it: should include enable_ipmi_simulation when enabled
+    set:
+      machineATron:
+        enableIpmiSimulation: true
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: "enable_ipmi_simulation = true"
+
+  - it: should render the DHCP relay values under the machine-a-tron key names
+    set:
+      pods:
+        mat-0:
+          machines:
+            dell-hosts:
+              hostCount: 2
+              dpuPerHostCount: 2
+              bmcDhcpRelayAddress: "10.96.64.1"
+              underlayDhcpRelayAddress: "10.201.0.1"
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'bmc_dhcp_relay_address = "10.96.64.1"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'underlay_dhcp_relay_address = "10.201.0.1"'
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: '(oob|admin)_dhcp_relay_address'
+
+  - it: should still accept the deprecated oobDhcpRelayAddress and adminDhcpRelayAddress names
+    set:
+      pods:
+        mat-0:
+          machines:
+            dell-hosts:
+              hostCount: 2
+              dpuPerHostCount: 2
+              oobDhcpRelayAddress: "10.96.64.1"
+              adminDhcpRelayAddress: "10.201.0.1"
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'bmc_dhcp_relay_address = "10.96.64.1"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'underlay_dhcp_relay_address = "10.201.0.1"'

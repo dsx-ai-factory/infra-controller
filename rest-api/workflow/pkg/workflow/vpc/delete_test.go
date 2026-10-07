@@ -14,8 +14,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	vpcActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 type DeleteVpcTestSuite struct {
@@ -37,8 +37,8 @@ func (s *DeleteVpcTestSuite) Test_DeleteVPCWorkflow_Success() {
 	var vpcManager vpcActivity.ManageVPC
 
 	vpcID := uuid.New()
-	request := &cwssaws.VpcDeletionRequest{
-		Id: &cwssaws.VpcId{Value: vpcID.String()},
+	request := &corev1.VpcDeletionRequest{
+		Id: &corev1.VpcId{Value: vpcID.String()},
 	}
 
 	// Mock DeleteVpcOnSite activity
@@ -55,8 +55,8 @@ func (s *DeleteVpcTestSuite) Test_DeleteVPCWorkflow_ActivityFails() {
 	var vpcManager vpcActivity.ManageVPC
 
 	vpcID := uuid.New()
-	request := &cwssaws.VpcDeletionRequest{
-		Id: &cwssaws.VpcId{Value: vpcID.String()},
+	request := &corev1.VpcDeletionRequest{
+		Id: &corev1.VpcId{Value: vpcID.String()},
 	}
 
 	// Mock DeleteVpcOnSite activity failure

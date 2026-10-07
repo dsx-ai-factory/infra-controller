@@ -19,6 +19,7 @@
 
 pub mod configuring;
 pub mod context;
+mod decommissioning;
 pub mod deleting;
 pub mod error_state;
 pub mod fetching_data;
@@ -28,3 +29,6 @@ pub mod io;
 pub mod maintenance;
 pub mod metrics;
 pub mod ready;
+pub mod reprovisioning;
+pub mod rotating_bmc;
+pub mod write_ops;

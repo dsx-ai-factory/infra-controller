@@ -23,7 +23,7 @@ use super::TestEnv;
 use crate::tests::common::api_fixtures::instance::default_tenant_config;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
-pub async fn create_vpc(
+pub(in crate::tests) async fn create_vpc(
     env: &TestEnv,
     name: String,
     tenant_org_id: Option<String>,
@@ -53,7 +53,7 @@ pub async fn create_vpc(
 }
 
 /// Creates a Flat VPC for the given (or default) tenant.
-pub async fn create_flat_vpc(
+pub(in crate::tests) async fn create_flat_vpc(
     env: &TestEnv,
     name: String,
     tenant_org_id: Option<String>,

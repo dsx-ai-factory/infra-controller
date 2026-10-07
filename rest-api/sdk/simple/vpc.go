@@ -186,6 +186,6 @@ func (vm VpcManager) DeleteVpc(ctx context.Context, id string) *ApiError {
 	ctx = WithLogger(ctx, vm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, vm.client.Config.Token)
 
-	resp, err := vm.client.apiClient.VPCAPI.DeleteVpc(ctx, vm.client.apiMetadata.Organization, id).Execute()
+	_, resp, err := vm.client.apiClient.VPCAPI.DeleteVpc(ctx, vm.client.apiMetadata.Organization, id).Execute()
 	return HandleResponseError(resp, err)
 }

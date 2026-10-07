@@ -72,7 +72,10 @@ impl DynamicSettings {
                     }
 
                     if let Err(err) = log_filter.reset_if_expired() {
-                        tracing::error!("Failed resetting log level: {err}");
+                        tracing::error!(
+                            error = %err,
+                            "Failed resetting log level",
+                        );
                     }
                 }
             })

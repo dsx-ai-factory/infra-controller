@@ -39,14 +39,14 @@ pub async fn assign_address(name: &str, cidr: IpNetwork) -> eyre::Result<()> {
     let index = wait_for_link(&handle, name).await?;
 
     if address_already_present(&handle, index, cidr).await? {
-        tracing::info!(interface = name, %cidr, "address already assigned; skipping add");
+        tracing::info!(interface_name = name, %cidr, "address already assigned; skipping add");
     } else {
         handle
             .address()
             .add(index, cidr.ip(), cidr.prefix())
             .execute()
             .await?;
-        tracing::info!(interface = name, %cidr, "assigned address");
+        tracing::info!(interface_name = name, %cidr, "assigned address");
     }
 
     handle
@@ -77,7 +77,7 @@ pub async fn setup_metadata_routing(interface_name: &str, cidr: IpNetwork) -> ey
             eyre::bail!("ip rule add failed: {stderr}");
         }
     }
-    tracing::info!(src = %src_ip, "policy rule: from {src_ip} lookup 100");
+    tracing::info!(source_ip_address = %src_ip, table = 100, "policy rule configured");
 
     let route = TokioCommand::new("ip")
         .args([
@@ -99,7 +99,12 @@ pub async fn setup_metadata_routing(interface_name: &str, cidr: IpNetwork) -> ey
             eyre::bail!("ip route add failed: {stderr}");
         }
     }
-    tracing::info!(gateway = %gateway, interface = interface_name, "policy route: default via {gateway} dev {interface_name} table 100");
+    tracing::info!(
+        gateway = %gateway,
+        interface_name,
+        table = 100,
+        "default policy route configured",
+    );
 
     Ok(())
 }
@@ -111,7 +116,7 @@ async fn wait_for_link(handle: &Handle, name: &str) -> eyre::Result<u32> {
             Ok(Some(link)) => return Ok(link.header.index),
             Ok(None) | Err(rtnetlink::Error::NetlinkError(_)) => {
                 tracing::debug!(
-                    interface = name,
+                    interface_name = name,
                     attempt,
                     "interface not yet present, retrying"
                 );

@@ -38,7 +38,9 @@ pub(crate) async fn create(
 
     for sku in sku_list.skus {
         let sku: Sku = sku.into();
-        db::sku::create(&mut txn, &sku).await?;
+        db::sku::create(&mut txn, &sku)
+            .await
+            .map_err(CarbideError::from)?;
         sku_ids.ids.push(sku.id);
     }
 
@@ -56,7 +58,7 @@ pub(crate) async fn delete(api: &Api, request: Request<SkuIdList>) -> Result<Res
 
     let Some(sku) = skus.pop() else {
         return Err(CarbideError::InvalidArgument(format!(
-            "The SKU {} does not exist",
+            "the SKU {} does not exist",
             sku_id_list
                 .first()
                 .map(|id| id.to_string())
@@ -76,7 +78,7 @@ pub(crate) async fn delete(api: &Api, request: Request<SkuIdList>) -> Result<Res
         .unwrap_or(0);
     if machines_using_sku > 0 {
         return Err(CarbideError::InvalidArgument(format!(
-            "The SKU is in use by {machines_using_sku} machines"
+            "the SKU is in use by {machines_using_sku} machines"
         ))
         .into());
     }
@@ -108,7 +110,7 @@ pub(crate) async fn assign_to_machine(
     let mut txn = api.txn_begin().await?;
 
     let sku_machine_pair = request.into_inner();
-    let machine_id = convert_and_log_machine_id(sku_machine_pair.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(sku_machine_pair.machine_id.as_ref())?;
 
     let machine =
         db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?;
@@ -119,9 +121,9 @@ pub(crate) async fn assign_to_machine(
     })?;
 
     if !sku_machine_pair.force {
-        if let Some(assigned_sku) = machine.hw_sku {
+        if let Some(assigned_sku) = machine.config.hw_sku {
             return Err(CarbideError::FailedPrecondition(format!(
-                "The specified machine already has a SKU assigned ({assigned_sku})"
+                "the specified machine already has a SKU assigned ({assigned_sku})"
             ))
             .into());
         }
@@ -139,7 +141,7 @@ pub(crate) async fn assign_to_machine(
             | ManagedHostState::Ready => {}
             _ => {
                 return Err(CarbideError::FailedPrecondition(
-                    "Specified machine is not in a valid state for assigning a SKU".to_string(),
+                    "specified machine is not in a valid state for assigning a SKU".to_string(),
                 )
                 .into());
             }
@@ -155,7 +157,7 @@ pub(crate) async fn assign_to_machine(
 
     if !skus.is_empty() {
         return Err(CarbideError::internal(format!(
-            "Unexpected additional SKUs found for ID: {}",
+            "unexpected additional SKUs found for ID: {}",
             sku_machine_pair.sku_id.clone()
         ))
         .into());
@@ -175,7 +177,7 @@ pub(crate) async fn verify_for_machine(
     request: Request<MachineId>,
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
-    let machine_id = convert_and_log_machine_id(Some(&request.into_inner()))?;
+    let machine_id: MachineId = convert_and_log_machine_id(Some(&request.into_inner()))?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -194,7 +196,7 @@ pub(crate) async fn verify_for_machine(
         } => {}
         _ => {
             return Err(CarbideError::FailedPrecondition(
-                "Specified machine is not in a valid state for machine SKU verification"
+                "specified machine is not in a valid state for machine SKU verification"
                     .to_string(),
             )
             .into());
@@ -214,7 +216,7 @@ pub(crate) async fn remove_sku_association(
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
     let request = request.into_inner();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -234,7 +236,7 @@ pub(crate) async fn remove_sku_association(
             } => {}
             _ => {
                 return Err(CarbideError::FailedPrecondition(
-                    "Specified machine is not in a valid state for removing SKU association"
+                    "specified machine is not in a valid state for removing SKU association"
                         .to_string(),
                 )
                 .into());

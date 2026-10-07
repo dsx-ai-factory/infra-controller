@@ -14,7 +14,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -80,7 +79,7 @@ func TestCreateInfrastructureProviderHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -134,7 +133,6 @@ func TestCreateInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ciph.Handle(ec)
@@ -185,7 +183,7 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                       string
@@ -270,7 +268,6 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gciph.Handle(ec)
@@ -355,6 +352,9 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "test2", site1, ip1, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.2.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu2)
 	assert.NotNil(t, ipb2)
+	// This private Tenant SitePrefix belongs to the provider but must not change
+	// its generic IPBlock total.
+	testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site1, ip1, tn1, "192.168.3.0", 24, cdbm.IPBlockStatusReady, ipu1)
 
 	// Build Machine
 	m1 := testMachineBuildMachine(t, dbSession, ip1.ID, site1.ID, nil, cutil.GetPtr("mcType"), false, false, cdbm.MachineStatusInitializing)
@@ -368,7 +368,7 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 	assert.NotNil(t, ta11)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -434,7 +434,6 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 		ec.SetParamValues(tt.args.org)
 		ec.Set("user", tt.reqCurrentUser)
 
-		ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 		ec.SetRequest(ec.Request().WithContext(ctx))
 
 		gctnsh := GetCurrentInfrastructureProviderStatsHandler{
@@ -511,7 +510,7 @@ func TestUpdateInfrastructureProviderHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -565,7 +564,6 @@ func TestUpdateInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(tt.args.org)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := uciph.Handle(ec)

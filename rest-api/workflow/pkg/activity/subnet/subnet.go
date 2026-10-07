@@ -6,6 +6,9 @@ package subnet
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -22,8 +25,9 @@ import (
 
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
-	cwsv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -46,7 +50,7 @@ type ManageSubnet struct {
 // Activity functions
 
 // UpdateSubnetsInDB is a Temporal activity that takes a collection of Subnet/Network Segment data pushed by Site Agent and updates the DB
-func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, subnetInventory *cwsv1.SubnetInventory) ([]cwm.InventoryObjectLifecycleEvent, error) {
+func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, subnetInventory *corev1.SubnetInventory) ([]cwm.InventoryObjectLifecycleEvent, error) {
 	logger := log.With().Str("Activity", "UpdateSubnetsInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -66,7 +70,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 		return nil, err
 	}
 
-	if subnetInventory.InventoryStatus == cwsv1.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if subnetInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil, nil
 	}
@@ -82,7 +86,6 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 
 	if total == 0 {
 		logger.Info().Msg("No Subnets found for Site")
-		return nil, nil
 	}
 
 	// Construct a map of Controller Segment ID to Subnet
@@ -116,22 +119,45 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 
 	// Iterate through Subnet Inventory and update DB
 	for _, controllerSegment := range subnetInventory.Segments {
-		slogger := logger.With().Str("Controller Segment ID", controllerSegment.Id.Value).Logger()
+		if controllerSegment == nil || controllerSegment.GetId().GetValue() == "" {
+			logger.Error().Msg("received Subnet inventory entry with missing controller ID, skipping")
+			continue
+		}
 
-		subnet, ok := existingSubnetCtrlIDMap[controllerSegment.Id.Value]
+		controllerSegmentIDStr := controllerSegment.GetId().GetValue()
+		slogger := logger.With().Str("Controller Segment ID", controllerSegmentIDStr).Logger()
+
+		subnet, ok := existingSubnetCtrlIDMap[controllerSegmentIDStr]
 		if !ok {
-			// Check if the Subnet is found by ID (controllerSegment.Name == cloudSubnet.ID)
-			subnet, ok = existingSubnetIDMap[controllerSegment.Name]
+			// Check if the Subnet is found by ID (segment name == cloudSubnet.ID)
+			subnet, ok = existingSubnetIDMap[controllerSegment.GetMetadata().GetName()]
 			if ok {
-				existingSubnetCtrlIDMap[controllerSegment.Id.Value] = subnet
+				existingSubnetCtrlIDMap[controllerSegmentIDStr] = subnet
 			}
 		}
 
 		if subnet == nil {
-			if controllerSegment.SegmentType == cwsv1.NetworkSegmentType_TENANT {
-				logger.Error().Str("Controller Segment ID", controllerSegment.Id.Value).Msg("Network Segment does not have a Subnet record in DB, possibly created directly on Site")
+			if controllerSegment.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT {
+				continue
 			}
-			continue
+
+			reportedStatus, _ := getControllerSubnetStatus(controllerSegment.GetStatus())
+			if reportedStatus == cdbm.SubnetStatusDeleting || reportedStatus == cdbm.SubnetStatusDeleted {
+				slogger.Info().Msgf("skipping create or undelete of Subnet from Site inventory: Site reports status %s", reportedStatus)
+				continue
+			}
+
+			subnet = ms.createOrUpdateSubnetFromSite(ctx, site, controllerSegment)
+			if subnet == nil {
+				continue
+			}
+
+			// Keep in-memory maps in sync so later inventory entries and missing-on-Site detection see this Subnet.
+			existingSubnetIDMap[subnet.ID.String()] = subnet
+			if subnet.ControllerNetworkSegmentID != nil {
+				existingSubnetCtrlIDMap[subnet.ControllerNetworkSegmentID.String()] = subnet
+			}
+			slogger.Info().Str("Subnet ID", subnet.ID.String()).Msg("created or undeleted Subnet from Site inventory")
 		}
 
 		reportedSubnetIDMap[subnet.ID] = true
@@ -154,8 +180,9 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 		}
 
 		var mtu *int
-		if controllerSegment.Mtu != nil {
-			mtuVal := int(*controllerSegment.Mtu)
+		cfg := controllerSegment.GetConfig()
+		if cfg != nil && cfg.Mtu != nil {
+			mtuVal := int(*cfg.Mtu)
 			mtu = &mtuVal
 		}
 
@@ -168,9 +195,10 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 		}
 
 		// Update Subnet in DB
-		status, statusMessage := getNICoSubnetStatus(controllerSegment.State)
+		status, statusMessage := getControllerSubnetStatus(controllerSegment.GetStatus())
 
-		// If Subnet is already in Deleting state then no need to update status
+		// Preserve Deleting until the Subnet disappears from inventory and the
+		// cleanup path releases IPAM and soft-deletes the DB row.
 		if subnet.Status == cdbm.SubnetStatusDeleting {
 			continue
 		}
@@ -183,10 +211,10 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 		} else {
 			// Check if the latest status detail message is different from the current status message
 			// Leave orderBy nil since the result is sorted by create timestamp by default
-			latestsd, _, serr := sdDAO.GetAllByEntityID(ctx, nil, subnet.ID.String(), nil, cwutil.GetPtr(1), nil)
+			latestsd, _, serr := sdDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{subnet.ID.String()}}, cdbp.PageInput{Limit: cwutil.GetPtr(1)})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to retrieve latest Status Detail for Subnet")
-			} else if len(latestsd) == 0 || (latestsd[0].Message != nil && *latestsd[0].Message != statusMessage) {
+			} else if len(latestsd) == 0 || latestsd[0].Message == nil || *latestsd[0].Message != statusMessage {
 				updateStatusInDB = true
 			}
 		}
@@ -209,7 +237,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 	subnetsToDelete := []*cdbm.Subnet{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if subnetInventory.InventoryPage == nil || subnetInventory.InventoryPage.TotalPages == 0 || (subnetInventory.InventoryPage.CurrentPage == subnetInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(subnetInventory.GetInventoryPage()) {
 		for _, subnet := range existingSubnetIDMap {
 			found := false
 
@@ -265,7 +293,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 			}
 		} else if subnet.ControllerNetworkSegmentID != nil {
 			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if time.Since(subnet.Created) < cwutil.InventoryReceiptInterval {
+			if site.IsTimeWithinStaleInventoryThreshold(subnet.Created) {
 				continue
 			}
 
@@ -274,7 +302,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 
 			// Leave orderBy as nil as the result is sorted by created timestamp by default
 			if status == subnet.Status {
-				latestsd, _, serr := sdDAO.GetAllByEntityID(ctx, nil, subnet.ID.String(), nil, cwutil.GetPtr(1), nil)
+				latestsd, _, serr := sdDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{subnet.ID.String()}}, cdbp.PageInput{Limit: cwutil.GetPtr(1)})
 				if serr != nil {
 					slogger.Error().Err(serr).Msg("failed to retrieve latest Status Detail for Subnet")
 					continue
@@ -303,6 +331,314 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 	return subnetLifecycleEvents, nil
 }
 
+// createOrUpdateSubnetFromSite creates a REST Subnet from Site inventory, or undeletes
+// a matching soft-deleted row (and resets Status from Site inventory on undelete).
+// Returns nil when skipped or on failure.
+func (ms ManageSubnet) createOrUpdateSubnetFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	controllerSegment *corev1.NetworkSegment,
+) *cdbm.Subnet {
+	logger := log.With().
+		Str("Activity", "UpdateSubnetsInDB").
+		Str("Site ID", site.ID.String()).
+		Str("Controller Segment ID", controllerSegment.GetId().GetValue()).
+		Logger()
+
+	// Get the Controller Segment ID from the Site inventory
+	controllerSegmentID, err := uuid.Parse(controllerSegment.GetId().GetValue())
+	if err != nil {
+		logger.Warn().Msgf("unable to create Subnet found on Site: failed to parse Controller Segment ID, not a valid UUID %s", controllerSegment.GetId().GetValue())
+		return nil
+	}
+
+	// Get the reported Subnet from the Site inventory
+	reportedSubnet := new(cdbm.Subnet)
+	reportedSubnet.FromProto(controllerSegment)
+	if reportedSubnet.Name == "" {
+		reportedSubnet.Name = fmt.Sprintf("recovered-%s", controllerSegmentID.String()[:8])
+	}
+	if reportedSubnet.IPv4Prefix == nil {
+		logger.Warn().Msg("unable to create Subnet found on Site: Subnet on Site is reporting empty IPv4 Prefix")
+		return nil
+	}
+	reportedPrefixCIDR := ipam.GetCidrForIPBlock(ctx, *reportedSubnet.IPv4Prefix, reportedSubnet.PrefixLength)
+	reportedPrefix, err := netip.ParsePrefix(reportedPrefixCIDR)
+	if err != nil {
+		logger.Warn().Msgf("unable to create Subnet found on Site: failed to parse Prefix CIDR %s", reportedPrefixCIDR)
+		return nil
+	}
+	// netip.ParsePrefix accepts host bits (e.g. 10.20.0.1/16). Reject those before any
+	// IPAM mutation; otherwise the equal-length full-grant path can persist FullGrant
+	// with no Subnet when a later soft-skip commits the transaction.
+	maskedPrefixCIDR := reportedPrefix.Masked().String()
+	if reportedPrefix.String() != maskedPrefixCIDR {
+		logger.Warn().Msgf("unable to create Subnet found on Site: Prefix CIDR %s is not in canonical masked form %s", reportedPrefixCIDR, maskedPrefixCIDR)
+		return nil
+	}
+	reportedPrefixAddress := reportedPrefix.Masked().Addr().String()
+	reportedSubnet.IPv4Prefix = &reportedPrefixAddress
+	reportedSubnet.PrefixLength = reportedPrefix.Bits()
+	if reportedSubnet.VpcID == uuid.Nil {
+		logger.Warn().Msg("unable to create Subnet found on Site: Subnet on Site is reporting empty VPC ID")
+		return nil
+	}
+	parentVpcID := reportedSubnet.VpcID
+
+	subnet, err := cdb.WithTxResult(ctx, ms.dbSession, func(tx *cdb.Tx) (*cdbm.Subnet, error) {
+		subnetDAO := cdbm.NewSubnetDAO(ms.dbSession)
+		vpcDAO := cdbm.NewVpcDAO(ms.dbSession)
+		sdDAO := cdbm.NewStatusDetailDAO(ms.dbSession)
+
+		// Parent VPC must already exist in REST; inventory VpcId is the Site-facing VPC ID.
+		vpcMatches, _, vpcErr := vpcDAO.GetAll(ctx, tx, cdbm.VpcFilterInput{
+			VpcIDs: []uuid.UUID{parentVpcID}, SiteIDs: []uuid.UUID{site.ID},
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if vpcErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to retrieve parent VPC by ID, DB error: %w", vpcErr)
+		}
+		if len(vpcMatches) == 0 {
+			// The VPC inventory activity will create a missing parent VPC, so retry this
+			// Subnet on the next inventory iteration.
+			logger.Warn().Msgf("unable to create Subnet found on Site: no VPC was found for ID: %s", parentVpcID)
+			return nil, nil
+		}
+		vpc := &vpcMatches[0]
+
+		// Lookup by primary key globally (not scoped to site.ID). A same-UUID row under
+		// another Site would otherwise be invisible here and Create would unique-constraint
+		// fail every inventory cycle.
+		matches, _, reloadErr := subnetDAO.GetAll(ctx, tx, cdbm.SubnetFilterInput{
+			SubnetIDs:      []uuid.UUID{reportedSubnet.ID},
+			IncludeDeleted: true,
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to retrieve Subnet by Controller Segment ID, DB error: %w", reloadErr)
+		}
+
+		// Non-nil from here on means this inventory entry is an undelete, not a create.
+		var existingSubnet *cdbm.Subnet
+		if len(matches) > 0 {
+			existingSubnet = &matches[0]
+		}
+
+		// If the Subnet was found in the DB, check that it is valid before restoring it.
+		if existingSubnet != nil {
+			if existingSubnet.SiteID != site.ID {
+				logger.Warn().Msgf("unable to create Subnet found on Site: Subnet ID already exists under a different Site for Subnet %s", controllerSegmentID)
+				return nil, nil
+			}
+			if existingSubnet.Deleted == nil {
+				return existingSubnet, nil
+			}
+			if existingSubnet.VpcID != vpc.ID {
+				logger.Warn().Msgf("unable to create Subnet found on Site: VPC differs in REST cache and Site record for Subnet %s", controllerSegmentID)
+				return nil, nil
+			}
+			if existingSubnet.Org != vpc.Org {
+				logger.Warn().Msgf("unable to create Subnet found on Site: tenant organization differs in REST cache and Site record %s", vpc.Org)
+				return nil, nil
+			}
+			// Clear restores the row as stored; do not acquire a Site CIDR that disagrees with
+			// the cached Prefix/VpcID or DB and IPAM will permanently diverge.
+			if existingSubnet.IPv4Prefix == nil {
+				logger.Warn().Msgf("unable to create Subnet found on Site: stored IPv4 Prefix is missing for Subnet %s", controllerSegmentID)
+				return nil, nil
+			}
+			existingPrefixCIDR := ipam.GetCidrForIPBlock(ctx, *existingSubnet.IPv4Prefix, existingSubnet.PrefixLength)
+			existingPrefix, parseErr := netip.ParsePrefix(existingPrefixCIDR)
+			if parseErr != nil || existingPrefix.Masked().String() != maskedPrefixCIDR {
+				logger.Warn().Msgf("unable to create Subnet found on Site: Prefix differs in REST cache and Site record for Subnet %s", controllerSegmentID)
+				return nil, nil
+			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. Undeleting then would revive a Subnet the snapshot
+			// never saw removed. Skip before the IPAM work below rather than after, so there is
+			// no allocation to unwind. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingSubnet.Deleted) {
+				logger.Info().Msgf("not undeleting Subnet %s yet because it was deleted more recently than the inventory interval", controllerSegmentID)
+				return nil, nil
+			}
+		}
+
+		// If the Subnet is being undeleted, use its stored IPv4 Block. Otherwise
+		// find the most specific Ready tenant IPv4 Block created through Allocation
+		// that contains its Prefix.
+		ipBlockDAO := cdbm.NewIPBlockDAO(ms.dbSession)
+		var ipBlock *cdbm.IPBlock
+		if existingSubnet != nil {
+			if existingSubnet.IPv4BlockID == nil {
+				logger.Warn().Msgf("unable to create Subnet found on Site: stored IPv4 Block ID is missing for Subnet %s", existingSubnet.ID)
+				return nil, nil
+			}
+
+			ipBlock, reloadErr = ipBlockDAO.GetByID(ctx, tx, *existingSubnet.IPv4BlockID, nil)
+			if reloadErr != nil {
+				if errors.Is(reloadErr, cdb.ErrDoesNotExist) {
+					logger.Warn().Msgf("unable to create Subnet found on Site: stored IPv4 Block %s was not found for Subnet %s", existingSubnet.IPv4BlockID, existingSubnet.ID)
+					return nil, nil
+				}
+				return nil, fmt.Errorf("unable to create Subnet found on Site: failed to retrieve stored IPv4 Block, DB error: %w", reloadErr)
+			}
+			if ipBlock.SiteID != site.ID {
+				logger.Warn().Msgf("unable to create Subnet found on Site: stored IPv4 Block belongs to a different Site for Subnet %s", existingSubnet.ID)
+				return nil, nil
+			}
+			if ipBlock.TenantID == nil || *ipBlock.TenantID != vpc.TenantID {
+				logger.Warn().Msgf("unable to create Subnet found on Site: stored IPv4 Block belongs to a different Tenant for Subnet %s", existingSubnet.ID)
+				return nil, nil
+			}
+			if !ipBlock.ContainsPrefix(reportedPrefix) {
+				logger.Warn().Msgf("unable to create Subnet found on Site: stored IPv4 Block does not contain Prefix %s for Subnet %s", reportedPrefix, existingSubnet.ID)
+				return nil, nil
+			}
+		} else {
+			filter := cdbm.IPBlockFilterInput{
+				SiteIDs:  []uuid.UUID{site.ID},
+				Statuses: []string{cdbm.IPBlockStatusReady},
+			}
+			filter.TenantAllocated(vpc.TenantID)
+			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(
+				ctx,
+				tx,
+				filter,
+				cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				nil,
+			)
+			if ipBlockErr != nil {
+				return nil, fmt.Errorf("unable to create Subnet found on Site: failed to retrieve IPv4 Blocks, DB error: %w", ipBlockErr)
+			}
+
+			for i := range ipBlocks {
+				candidateIPBlock := &ipBlocks[i]
+				if candidateIPBlock.FullGrant || !candidateIPBlock.ContainsPrefix(reportedPrefix) {
+					continue
+				}
+				if ipBlock == nil || candidateIPBlock.PrefixLength > ipBlock.PrefixLength {
+					ipBlock = candidateIPBlock
+				}
+			}
+			if ipBlock == nil {
+				logger.Warn().Msgf("unable to create Subnet found on Site: no containing IPv4 Block was found for Prefix: %s", reportedPrefix)
+				return nil, nil
+			}
+		}
+
+		// Claim the exact Site-reported CIDR in REST IPAM while holding the same
+		// tenant/IPBlock lock used by the normal REST create path.
+		lockErr := tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", vpc.TenantID.String(), ipBlock.ID.String())), false)
+		if lockErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to acquire advisory lock on IPv4 Block, DB error: %w", lockErr)
+		}
+
+		// Refresh FullGrant under the lock because the candidate scan read it before
+		// the lock and a concurrent create may have changed it.
+		freshIPBlock, reloadIPBlockErr := cdbm.NewIPBlockDAO(ms.dbSession).GetByID(ctx, tx, ipBlock.ID, nil)
+		if reloadIPBlockErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to reload IPv4 Block under advisory lock, DB error: %w", reloadIPBlockErr)
+		}
+		ipBlock = freshIPBlock
+		if ipBlock.Status != cdbm.IPBlockStatusReady {
+			logger.Warn().Msgf("unable to create Subnet found on Site: IPv4 Block %s is no longer Ready", ipBlock.ID)
+			return nil, nil
+		}
+		if ipBlock.FullGrant {
+			logger.Warn().Msgf("unable to create Subnet found on Site: IPv4 Block %s was fully granted concurrently", ipBlock.ID)
+			return nil, nil
+		}
+
+		ipamStorage := ipam.NewIpamStorage(ms.dbSession.DB, tx.GetBunTx())
+		reportedPrefixLength := reportedPrefix.Bits()
+
+		var allocateErr error
+		if ipBlock.PrefixLength == reportedPrefixLength {
+			_, allocateErr = ipam.CreateChildIpamEntryForIPBlock(
+				ctx, tx, ms.dbSession, ipamStorage, ipBlock, reportedPrefixLength,
+			)
+		} else {
+			_, allocateErr = ipam.AcquireSpecificChildIpamEntryForIPBlock(
+				ctx, tx, ms.dbSession, ipamStorage, ipBlock, maskedPrefixCIDR,
+			)
+		}
+		if allocateErr != nil {
+			return nil, fmt.Errorf(
+				"unable to create Subnet found on Site: failed to create IPAM entry for Subnet: %w",
+				allocateErr,
+			)
+		}
+
+		// If the Subnet was soft-deleted, undelete it and reset Status from Site inventory.
+		if existingSubnet != nil {
+			restored, clearErr := subnetDAO.Clear(ctx, tx, cdbm.SubnetClearInput{SubnetId: existingSubnet.ID, Deleted: true})
+			if clearErr != nil {
+				return nil, fmt.Errorf("unable to create Subnet found on Site: failed to clear soft-delete timestamp for Subnet, DB error: %w", clearErr)
+			}
+			status, statusMessage := getControllerSubnetStatus(controllerSegment.GetStatus())
+			updated, updateErr := subnetDAO.Update(ctx, tx, cdbm.SubnetUpdateInput{
+				SubnetId: restored.ID,
+				Status:   &status,
+			})
+			if updateErr != nil {
+				return nil, fmt.Errorf("unable to create Subnet found on Site: failed to update Subnet status after undelete, DB error: %w", updateErr)
+			}
+			_, statusErr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
+				EntityID: updated.ID.String(), Status: status, Message: &statusMessage,
+			})
+			if statusErr != nil {
+				return nil, fmt.Errorf("unable to create Subnet found on Site: failed to create Status Detail after undelete, DB error: %w", statusErr)
+			}
+			return updated, nil
+		}
+
+		// If an active Subnet already uses this name for the Tenant/Site, append a recovered suffix.
+		nameConflictSubnets, _, nameErr := subnetDAO.GetAll(ctx, tx, cdbm.SubnetFilterInput{
+			Names: []string{reportedSubnet.Name}, TenantIDs: []uuid.UUID{vpc.TenantID}, SiteIDs: []uuid.UUID{site.ID},
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if nameErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to retrieve Subnet by name, DB error: %w", nameErr)
+		}
+		if len(nameConflictSubnets) > 0 {
+			reportedSubnet.Name = fmt.Sprintf("%s-recovered-%s", reportedSubnet.Name, reportedSubnet.ID.String()[:8])
+		}
+
+		readyMsg := "Subnet was found on Site, Ready for use"
+		created, createErr := subnetDAO.Create(ctx, tx, cdbm.SubnetCreateInput{
+			SubnetID:                   &controllerSegmentID,
+			Name:                       reportedSubnet.Name,
+			Description:                reportedSubnet.Description,
+			Org:                        vpc.Org,
+			SiteID:                     site.ID,
+			VpcID:                      vpc.ID,
+			DomainID:                   reportedSubnet.DomainID,
+			TenantID:                   vpc.TenantID,
+			ControllerNetworkSegmentID: &controllerSegmentID,
+			RoutingType:                &ipBlock.RoutingType,
+			IPv4Prefix:                 reportedSubnet.IPv4Prefix,
+			IPv4Gateway:                reportedSubnet.IPv4Gateway,
+			IPv4BlockID:                &ipBlock.ID,
+			PrefixLength:               reportedPrefixLength,
+			Mtu:                        reportedSubnet.MTU,
+			Status:                     cdbm.SubnetStatusReady,
+			CreatedBy:                  vpc.CreatedBy,
+		})
+		if createErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to create Subnet, DB error: %w", createErr)
+		}
+		_, statusErr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: created.ID.String(), Status: cdbm.SubnetStatusReady, Message: &readyMsg,
+		})
+		if statusErr != nil {
+			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to create Status Detail, DB error: %w", statusErr)
+		}
+		return created, nil
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to recover Subnet from Site inventory")
+		return nil
+	}
+	return subnet
+}
+
 // updateSubnetStatusInDB is helper function to write Subnet status updates to DB
 func (ms ManageSubnet) updateSubnetStatusInDB(ctx context.Context, tx *cdb.Tx, subnetID uuid.UUID, status *string, statusMessage *string) error {
 	if status != nil {
@@ -314,7 +650,7 @@ func (ms ManageSubnet) updateSubnetStatusInDB(ctx context.Context, tx *cdb.Tx, s
 		}
 
 		statusDetailDAO := cdbm.NewStatusDetailDAO(ms.dbSession)
-		_, err = statusDetailDAO.CreateFromParams(ctx, tx, subnetID.String(), *status, statusMessage)
+		_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: subnetID.String(), Status: *status, Message: statusMessage})
 		if err != nil {
 			return err
 		}
@@ -367,20 +703,25 @@ func (ms ManageSubnet) deleteSubnetFromDB(ctx context.Context, tx *cdb.Tx, subne
 	return nil
 }
 
-// Utility function to get NICo Subent status from Controller Segment state
-func getNICoSubnetStatus(controllerNetworkSegmentTenantState cwsv1.TenantState) (string, string) {
-	switch controllerNetworkSegmentTenantState {
-	case cwsv1.TenantState_PROVISIONING:
-		return cdbm.SubnetStatusProvisioning, "Subnet is being provisioned on Site"
-	case cwsv1.TenantState_READY:
+// getControllerSubnetStatus maps Controller Network Segment tenant state into REST status and status-detail text.
+func getControllerSubnetStatus(status *corev1.NetworkSegmentStatus) (string, string) {
+	// Older Controller builds did not report status; inventory presence meant ready.
+	if status == nil {
 		return cdbm.SubnetStatusReady, "Subnet is ready for use"
-	case cwsv1.TenantState_CONFIGURING:
+	}
+
+	switch status.GetTenantState() {
+	case corev1.TenantState_PROVISIONING:
+		return cdbm.SubnetStatusProvisioning, "Subnet is being provisioned on Site"
+	case corev1.TenantState_READY:
+		return cdbm.SubnetStatusReady, "Subnet is ready for use"
+	case corev1.TenantState_CONFIGURING:
 		return cdbm.SubnetStatusProvisioning, "Subnet is being configured on Site"
-	case cwsv1.TenantState_TERMINATING:
+	case corev1.TenantState_TERMINATING:
 		return cdbm.SubnetStatusDeleting, "Subnet is being deleted on Site"
-	case cwsv1.TenantState_TERMINATED:
+	case corev1.TenantState_TERMINATED:
 		return cdbm.SubnetStatusDeleted, "Subnet has been deleted on Site"
-	case cwsv1.TenantState_FAILED:
+	case corev1.TenantState_FAILED:
 		return cdbm.SubnetStatusError, "Subnet is in error state"
 	default:
 		return cdbm.SubnetStatusError, "Subnet status is unknown"
@@ -400,7 +741,7 @@ func NewManageSubnet(dbSession *cdb.Session, siteClientPool *sc.ClientPool, tc c
 type ManageSubnetLifecycleMetrics struct {
 	dbSession            *cdb.Session
 	statusTransitionTime *prometheus.GaugeVec
-	siteIDNameMap        map[uuid.UUID]string
+	siteNames            *cwm.SiteNameCache
 }
 
 // RecordSubnetStatusTransitionMetrics is a Temporal activity that records duration of important status transitions for Subnets
@@ -409,17 +750,10 @@ func (mslm ManageSubnetLifecycleMetrics) RecordSubnetStatusTransitionMetrics(ctx
 
 	logger.Info().Msg("starting activity")
 
-	// Cache site name to avoid repeated DB call
-	siteName, ok := mslm.siteIDNameMap[siteID]
-	if !ok {
-		siteDAO := cdbm.NewSiteDAO(mslm.dbSession)
-		site, err := siteDAO.GetByID(context.Background(), nil, siteID, nil, false)
-		if err != nil {
-			logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
-			return err
-		}
-		siteName = site.Name
-		mslm.siteIDNameMap[siteID] = siteName
+	siteName, err := mslm.siteNames.Get(ctx, mslm.dbSession, siteID)
+	if err != nil {
+		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		return err
 	}
 
 	logger.Info().Int("EventCount", len(subnetLifecycleEvents)).Str("Site Name", siteName).Msg("processing subnet lifecycle events")
@@ -429,7 +763,7 @@ func (mslm ManageSubnetLifecycleMetrics) RecordSubnetStatusTransitionMetrics(ctx
 	metricsRecorded := 0
 
 	for _, event := range subnetLifecycleEvents {
-		statusDetails, _, err := sdDAO.GetAllByEntityID(ctx, nil, event.ObjectID.String(), nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+		statusDetails, _, err := sdDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{event.ObjectID.String()}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)})
 		if err != nil {
 			logger.Error().Err(err).Str("Subnet ID", event.ObjectID.String()).Msg("failed to retrieve Status Details for Subnet")
 			return err
@@ -461,7 +795,7 @@ func (mslm ManageSubnetLifecycleMetrics) RecordSubnetStatusTransitionMetrics(ctx
 			// Only emit metric if we have exactly 1 Ready and at least 1 Pending
 			if readySD != nil && pendingSD != nil && readyStatusCount == 1 {
 				dur := readySD.Created.Sub(pendingSD.Created)
-				mslm.statusTransitionTime.WithLabelValues(siteName, cwm.InventoryOperationTypeCreate, cdbm.SubnetStatusPending, cdbm.SubnetStatusReady).Set(dur.Seconds())
+				mslm.statusTransitionTime.WithLabelValues(siteName, siteID.String(), cwm.InventoryOperationTypeCreate, cdbm.SubnetStatusPending, cdbm.SubnetStatusReady).Set(dur.Seconds())
 				metricsRecorded++
 				logger.Info().
 					Str("Subnet ID", event.ObjectID.String()).
@@ -487,7 +821,7 @@ func (mslm ManageSubnetLifecycleMetrics) RecordSubnetStatusTransitionMetrics(ctx
 			if deletingSD != nil {
 				// Calculate duration from Deleting status to deletion time
 				dur := event.Deleted.Sub(deletingSD.Created)
-				mslm.statusTransitionTime.WithLabelValues(siteName, cwm.InventoryOperationTypeDelete, cdbm.SubnetStatusDeleting, cdbm.SubnetStatusDeleted).Set(dur.Seconds())
+				mslm.statusTransitionTime.WithLabelValues(siteName, siteID.String(), cwm.InventoryOperationTypeDelete, cdbm.SubnetStatusDeleting, cdbm.SubnetStatusDeleted).Set(dur.Seconds())
 				metricsRecorded++
 				logger.Info().
 					Str("Subnet ID", event.ObjectID.String()).
@@ -507,18 +841,18 @@ func (mslm ManageSubnetLifecycleMetrics) RecordSubnetStatusTransitionMetrics(ctx
 }
 
 // NewManageSubnetLifecycleMetrics returns a new ManageSubnetLifecycleMetrics activity
-func NewManageSubnetLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Session) ManageSubnetLifecycleMetrics {
+func NewManageSubnetLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Session, namespace string) ManageSubnetLifecycleMetrics {
 	lifecycleMetrics := ManageSubnetLifecycleMetrics{
 		dbSession: dbSession,
 		statusTransitionTime: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: cwm.MetricsNamespace,
+				Namespace: namespace,
 				Name:      "subnet_operation_latency_seconds",
 				Help:      "Current latency of subnet operations",
 			},
-			[]string{"site", "operation_type", "from_status", "to_status"}),
+			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 
-		siteIDNameMap: map[uuid.UUID]string{},
+		siteNames: cwm.NewSiteNameCache(),
 	}
 	reg.MustRegister(lifecycleMetrics.statusTransitionTime)
 

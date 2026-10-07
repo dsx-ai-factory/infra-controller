@@ -16,13 +16,15 @@
  */
 use std::str::FromStr;
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use model::machine_validation::{
-    MachineValidation, MachineValidationExternalConfig, MachineValidationResult,
-    MachineValidationState, MachineValidationTest, MachineValidationTestAddRequest,
-    MachineValidationTestUpdatePayload, MachineValidationTestUpdateRequest,
-    MachineValidationTestsGetRequest,
+    MachineValidation, MachineValidationAttempt, MachineValidationAttemptLogChunk,
+    MachineValidationAttemptLogStream, MachineValidationExternalConfig, MachineValidationPlugin,
+    MachineValidationResult, MachineValidationRunItem, MachineValidationState,
+    MachineValidationTest, MachineValidationTestAddRequest, MachineValidationTestUpdatePayload,
+    MachineValidationTestUpdateRequest, MachineValidationTestsGetRequest,
 };
 
 use crate as rpc;
@@ -49,6 +51,7 @@ impl From<rpc::forge::MachineValidationTestAddRequest> for MachineValidationTest
             custom_tags: req.custom_tags,
             components: req.components,
             is_enabled: req.is_enabled,
+            plugin: req.plugin.map(Into::into),
         }
     }
 }
@@ -76,6 +79,7 @@ impl From<rpc::forge::machine_validation_test_update_request::Payload>
             custom_tags: p.custom_tags,
             components: p.components,
             is_enabled: p.is_enabled,
+            plugin: p.plugin.map(Into::into),
         }
     }
 }
@@ -161,6 +165,87 @@ impl From<MachineValidation> for rpc::forge::MachineValidationRun {
             duration_to_complete: Some(rpc::Duration::from(std::time::Duration::from_secs(
                 value.duration_to_complete.try_into().unwrap_or(0),
             ))),
+            last_heartbeat_at: value.last_heartbeat_at.map(Into::into),
+        }
+    }
+}
+
+impl From<MachineValidationRunItem> for rpc::forge::MachineValidationRunItem {
+    fn from(value: MachineValidationRunItem) -> Self {
+        rpc::forge::MachineValidationRunItem {
+            run_item_id: Some(rpc::common::Uuid {
+                value: value.id.to_string(),
+            }),
+            current_attempt_id: value.current_attempt_id.map(|id| rpc::common::Uuid {
+                value: id.to_string(),
+            }),
+            validation_id: Some(value.run_id),
+            test_id: value.test_id,
+            test_version: value.test_version,
+            display_name: value.display_name,
+            context: value.context,
+            component: value.component,
+            state: value.state.to_string(),
+            order_index: value.order_index.try_into().unwrap_or(0),
+            attempt: value.attempt.try_into().unwrap_or(0),
+            max_attempts: value.max_attempts.try_into().unwrap_or(0),
+            timeout: Some(rpc::Duration::from(std::time::Duration::from_secs(
+                value.timeout_seconds.try_into().unwrap_or(0),
+            ))),
+            started_at: value.started_at.map(Into::into),
+            ended_at: value.ended_at.map(Into::into),
+            last_heartbeat_at: value.last_heartbeat_at.map(Into::into),
+            skip_reason: value.skip_reason,
+            failure_reason: value.failure_reason,
+            plugin: value.plugin.map(Into::into),
+            plugin_full_host_approved: value.plugin_full_host_approved,
+        }
+    }
+}
+
+impl From<MachineValidationAttempt> for rpc::forge::MachineValidationAttempt {
+    fn from(value: MachineValidationAttempt) -> Self {
+        rpc::forge::MachineValidationAttempt {
+            attempt_id: Some(rpc::common::Uuid {
+                value: value.id.to_string(),
+            }),
+            run_item_id: Some(rpc::common::Uuid {
+                value: value.run_item_id.to_string(),
+            }),
+            attempt_number: value.attempt_number.try_into().unwrap_or(0),
+            state: value.state.to_string(),
+            command: value.command,
+            args: value.args,
+            container_image: value.container_image,
+            execute_in_host: value.execute_in_host,
+            exit_code: value.exit_code,
+            failure_classification: value.failure_classification,
+            started_at: value.started_at.map(Into::into),
+            ended_at: value.ended_at.map(Into::into),
+            last_heartbeat_at: value.last_heartbeat_at.map(Into::into),
+            stdout_summary: value.stdout_summary,
+            stderr_summary: value.stderr_summary,
+        }
+    }
+}
+
+impl From<MachineValidationAttemptLogChunk> for rpc::forge::MachineValidationAttemptLogChunk {
+    fn from(value: MachineValidationAttemptLogChunk) -> Self {
+        rpc::forge::MachineValidationAttemptLogChunk {
+            attempt_id: Some(rpc::common::Uuid {
+                value: value.attempt_id.to_string(),
+            }),
+            sequence: value.sequence.try_into().unwrap_or(0),
+            stream: match value.stream {
+                MachineValidationAttemptLogStream::Stdout => {
+                    rpc::forge::MachineValidationAttemptLogStream::Stdout as i32
+                }
+                MachineValidationAttemptLogStream::Stderr => {
+                    rpc::forge::MachineValidationAttemptLogStream::Stderr as i32
+                }
+            },
+            created_at: Some(value.created_at.into()),
+            content: value.content,
         }
     }
 }
@@ -216,6 +301,8 @@ impl From<MachineValidationTest> for rpc::forge::MachineValidationTest {
             components: value.components,
             last_modified_at: value.last_modified_at.to_string(),
             is_enabled: value.is_enabled,
+            plugin: value.plugin.map(Into::into),
+            full_host_approved: value.full_host_approved,
         }
     }
 }
@@ -244,15 +331,43 @@ impl TryFrom<rpc::forge::MachineValidationTest> for MachineValidationTest {
             modified_by: value.modified_by,
             verified: value.verified,
             read_only: value.read_only,
-            custom_tags: if value.custom_tags.is_empty() {
-                None
-            } else {
-                Some(value.custom_tags)
-            },
+            custom_tags: value.custom_tags.none_if_empty(),
             components: value.components,
             last_modified_at: Utc::now(),
             is_enabled: value.is_enabled,
+            plugin: value.plugin.map(Into::into),
+            full_host_approved: value.full_host_approved,
         })
+    }
+}
+
+impl From<rpc::forge::MachineValidationPlugin> for MachineValidationPlugin {
+    fn from(value: rpc::forge::MachineValidationPlugin) -> Self {
+        Self {
+            plugin_type: if value.r#type.is_empty() {
+                MachineValidationPlugin::CONTAINER_TYPE.to_string()
+            } else {
+                value.r#type
+            },
+            image: value.image,
+            entrypoint: value.entrypoint,
+            parameters_json: value.parameters_json,
+            privileged: value.privileged,
+            host_access_full: value.host_access_full,
+        }
+    }
+}
+
+impl From<MachineValidationPlugin> for rpc::forge::MachineValidationPlugin {
+    fn from(value: MachineValidationPlugin) -> Self {
+        Self {
+            r#type: value.plugin_type,
+            image: value.image,
+            entrypoint: value.entrypoint,
+            parameters_json: value.parameters_json,
+            privileged: value.privileged,
+            host_access_full: value.host_access_full,
+        }
     }
 }
 
@@ -312,6 +427,7 @@ impl TryFrom<rpc::forge::MachineValidationResult> for MachineValidationResult {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

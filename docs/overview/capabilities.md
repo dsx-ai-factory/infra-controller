@@ -26,7 +26,7 @@ NICo enforces workload isolation across all network planes without reconfiguring
 |---|---|
 | Ethernet (N/S) | BlueField HBN — L3 VXLAN/EVPN, VRFs, Network Security Groups |
 | InfiniBand (E/W) | UFM-based P_Key partition assignment per tenant |
-| NVLink | NMX-M API partition management |
+| NVLink | NMX-C gRPC partition management |
 | Spectrum-X (E/W) | SP-X partitioning for high-performance East-West traffic |
 
 VPC and subnet configuration are API-driven. Tenant transitions fully clear and re-establish isolation boundaries.

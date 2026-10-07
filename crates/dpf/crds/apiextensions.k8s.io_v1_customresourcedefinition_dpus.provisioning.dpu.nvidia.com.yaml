@@ -66,12 +66,20 @@ spec:
           spec:
             description: DPUSpec defines the desired state of DPU
             properties:
+              astraEnabled:
+                description: AstraEnabled indicates whether E/W NIC configuration
+                  (Astra) is enabled
+                type: boolean
               bfb:
                 description: Specifies name of the bfb CR to use for this DPU
+                maxLength: 253
+                minLength: 1
                 type: string
               blueFieldSoftware:
                 description: Specifies the name of the BlueFieldSoftware CR to use
                   for this DPU
+                maxLength: 253
+                minLength: 1
                 type: string
               bmcIP:
                 description: |-
@@ -95,6 +103,12 @@ spec:
                     x-kubernetes-validations:
                     - message: Value is immutable
                       rule: self==oldSelf
+                  nodeAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: NodeAnnotations specifies the annotations to be added
+                      to the node.
+                    type: object
                   nodeLabels:
                     additionalProperties:
                       type: string
@@ -242,12 +256,13 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: only one of taint, noEffect, drain, customLabel, customAction,
-                    hold can be set
-                  rule: '(has(self.taint) ? 1 : 0) + (has(self.noEffect) ? 1 : 0)
-                    + (has(self.customLabel) ? 1 : 0) + (has(self.drain) ? 1 : 0)
-                    + (has(self.customAction) ? 1 : 0) + (has(self.hold) ? 1 : 0)
-                    == 1'
+                - message: exactly one of taint, noEffect=true, drain=true, non-empty
+                    customLabel, non-empty customAction, hold=true must be set
+                  rule: '(has(self.taint) ? 1 : 0) + ((has(self.noEffect) && self.noEffect)
+                    ? 1 : 0) + ((has(self.customLabel) && size(self.customLabel) >
+                    0) ? 1 : 0) + ((has(self.drain) && self.drain) ? 1 : 0) + ((has(self.customAction)
+                    && size(self.customAction) > 0) ? 1 : 0) + ((has(self.hold) &&
+                    self.hold) ? 1 : 0) == 1'
               pciAddress:
                 description: |-
                   The PCI device related DPU
@@ -269,13 +284,15 @@ spec:
                 - message: Value is immutable
                   rule: self == oldSelf
             required:
-            - bfb
             - dpuDeviceName
             - dpuFlavor
             - dpuNodeName
             - nodeEffect
             - serialNumber
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of bfb or blueFieldSoftware must be set
+              rule: has(self.bfb) != has(self.blueFieldSoftware)
           status:
             default:
               phase: Initializing
@@ -307,6 +324,28 @@ spec:
                 description: AgentStatus contains the information reported from inside
                   the DPU
                 properties:
+                  clock:
+                    description: |-
+                      Clock is the DPU clock compared against the host clock, recorded while the DPU agent was
+                      acquiring its identity. A DPU whose clock is skewed cannot verify the API server certificate,
+                      so it never obtains the identity it would need to report this itself. Set by the host agent,
+                      in trusted-host mode only.
+                    properties:
+                      dpuTime:
+                        description: dpuTime is the DPU clock as reported by the DPU
+                          agent.
+                        format: date-time
+                        type: string
+                      hostTime:
+                        description: |-
+                          hostTime is the host clock when that report arrived. The host is the trusted side of the
+                          comparison, so a difference is attributed to the DPU.
+                        format: date-time
+                        type: string
+                    required:
+                    - dpuTime
+                    - hostTime
+                    type: object
                   conditions:
                     description: Conditions contains the conditions reported from
                       inside the DPU
@@ -366,6 +405,39 @@ spec:
                       - type
                       type: object
                     type: array
+                  hostOSInit:
+                    description: |-
+                      hostOSInit reports terminal host OS init release status from the DPU agent.
+                      Unset while the agent is polling or has not reached ReleaseHostOSInit.
+                    properties:
+                      skipped:
+                        description: skipped indicates release was not required for
+                          this DPU.
+                        properties:
+                          message:
+                            description: message is a human-readable explanation.
+                            type: string
+                          reason:
+                            description: reason is a stable machine-readable outcome
+                              code.
+                            type: string
+                        type: object
+                      succeeded:
+                        description: succeeded indicates host OS init was released
+                          or was already cleared.
+                        properties:
+                          gate:
+                            description: gate echoes the effective gate used for release.
+                            enum:
+                            - DPUServiceCriticalPodsReady
+                            - OperationalReady
+                            type: string
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of skipped or succeeded must be set
+                      rule: '(has(self.skipped) ? 1 : 0) + (has(self.succeeded) ?
+                        1 : 0) == 1'
                   initialBootID:
                     description: InitialBootID is the boot ID of the DPU OS during
                       the first boot
@@ -413,6 +485,78 @@ spec:
                       started
                     format: date-time
                     type: string
+                  preInstall:
+                    description: PreInstall holds agent-reported status for work done
+                      before OS install in the reprovisioning process.
+                    properties:
+                      agentReported:
+                        description: AgentReported is set with a timestamp when dpu-agent
+                          detects a new DPU CR is created for reprovisioning.
+                        format: date-time
+                        type: string
+                      conditions:
+                        description: Conditions contains pre-install conditions (e.g.
+                          NVConfigApplied for reprovisioning).
+                        items:
+                          description: Condition contains details for one aspect of
+                            the current state of this API Resource.
+                          properties:
+                            lastTransitionTime:
+                              description: |-
+                                lastTransitionTime is the last time the condition transitioned from one status to another.
+                                This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                              format: date-time
+                              type: string
+                            message:
+                              description: |-
+                                message is a human readable message indicating details about the transition.
+                                This may be an empty string.
+                              maxLength: 32768
+                              type: string
+                            observedGeneration:
+                              description: |-
+                                observedGeneration represents the .metadata.generation that the condition was set based upon.
+                                For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                                with respect to the current state of the instance.
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            reason:
+                              description: |-
+                                reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                                Producers of specific condition types may define expected values and meanings for this field,
+                                and whether the values are considered a guaranteed API.
+                                The value should be a CamelCase string.
+                                This field may not be empty.
+                              maxLength: 1024
+                              minLength: 1
+                              pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                              type: string
+                            status:
+                              description: status of the condition, one of True, False,
+                                Unknown.
+                              enum:
+                              - "True"
+                              - "False"
+                              - Unknown
+                              type: string
+                            type:
+                              description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                              maxLength: 316
+                              pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                              type: string
+                          required:
+                          - lastTransitionTime
+                          - message
+                          - reason
+                          - status
+                          - type
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - type
+                        x-kubernetes-list-type: map
+                    type: object
                   rebootMethod:
                     description: |-
                       RebootMethod is the type of reset/reboot set by the DPU agent
@@ -437,6 +581,34 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  spiffe:
+                    description: |-
+                      Spiffe contains the SPIFFE heartbeat status reported by the DPU Agent when running in
+                      SPIFFE identity mode.
+                    properties:
+                      lastProbeMessage:
+                        description: |-
+                          LastProbeMessage is a structured one-line diagnostic for the most recent self-probe. Unset in
+                          the steady-state happy path. Bounded to 256 chars (truncated agent-side).
+                        maxLength: 256
+                        type: string
+                      lastProbeTime:
+                        description: |-
+                          LastProbeTime is the wall-clock timestamp the DPU Agent recorded on its most recent successful
+                          status report. It is informational and subject to DPU clock skew, so it is not a precise
+                          liveness signal on its own.
+                        format: date-time
+                        type: string
+                    type: object
+                  trustBundleHash:
+                    description: TrustBundleHash is the bundle-hash value last applied
+                      by the DPU agent.
+                    type: string
+                  trustBundleLastUpdateTime:
+                    description: TrustBundleLastUpdateTime is when the trust bundle
+                      was last updated by the DPU agent.
+                    format: date-time
+                    type: string
                 type: object
               bfCFGFile:
                 description: BFCFGFile is the path to the bf.cfg
@@ -504,6 +676,18 @@ spec:
                   - type
                   type: object
                 type: array
+              deploymentMode:
+                allOf:
+                - enum:
+                  - zero-trust
+                  - host-trusted
+                - enum:
+                  - zero-trust
+                  - host-trusted
+                description: |-
+                  DeploymentMode is copied from DPFOperatorConfig.spec.deploymentMode by the controller.
+                  This field is read-only for users.
+                type: string
               dpfVersion:
                 description: DPF version used to install this DPU
                 type: string
@@ -553,6 +737,21 @@ spec:
                     description: UEFI is the used UEFI firmware version
                     type: string
                 type: object
+              hostless:
+                description: |-
+                  Hostless indicates that the DPU is attached to a system-managed synthetic
+                  DPUNode rather than a physical host.
+                type: boolean
+              identityMode:
+                description: |-
+                  IdentityMode records which authentication mechanism the DPU Agent uses to reach the
+                  management-cluster kube-apiserver. Stamped exactly once by the DPU controller during phase
+                  Initializing (nil guard); immutable thereafter. Pre-SPIFFE legacy DPUs have IdentityMode
+                  unset (nil) which consumers MUST treat semantically as bootstrap-token.
+                enum:
+                - spiffe
+                - bootstrap-token
+                type: string
               observedGeneration:
                 description: ObservedGeneration records the Generation observed on
                   the object the last time it was patched.
@@ -621,6 +820,34 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              outdated:
+                description: |-
+                  Outdated, when present, indicates the DPU has drifted from its owning
+                  DPUSet's DPUTemplate and needs to be reprovisioned. Set by the DPUSet
+                  controller; absent when the DPU matches the template.
+                properties:
+                  message:
+                    description: |-
+                      Message is a human-readable summary that lists every drifted field,
+                      e.g. "DPU template has changed (BFB: bfb-v1 -> bfb-v2, DPUFlavor: ...)".
+                    type: string
+                  reason:
+                    description: |-
+                      Reason is the machine-readable drift code (e.g. OutdatedBFB). When more
+                      than one template field has drifted, Reason reports the first in fixed
+                      precedence order: BFB -> DPUFlavor -> SecureBoot -> BlueFieldSoftware.
+                    type: string
+                  timeStamp:
+                    description: |-
+                      TimeStamp records when this drift was first observed for the current Reason.
+                      It is preserved across reconciles as long as Reason is unchanged.
+                    format: date-time
+                    type: string
+                required:
+                - message
+                - reason
+                - timeStamp
+                type: object
               pciDevice:
                 description: pci device information of this DPU
                 type: string
@@ -631,12 +858,14 @@ spec:
                 - Initializing
                 - Node Effect
                 - Pending
+                - Update Firmware
                 - Config FW Parameters
                 - Prepare BFB
                 - OS Installing
                 - DPU Config
                 - DPU Cluster Config
                 - Host Network Configuration
+                - Service Readiness
                 - Ready
                 - Error
                 - Deleting
@@ -659,12 +888,14 @@ spec:
                 - Initializing
                 - Node Effect
                 - Pending
+                - Update Firmware
                 - Config FW Parameters
                 - Prepare BFB
                 - OS Installing
                 - DPU Config
                 - DPU Cluster Config
                 - Host Network Configuration
+                - Service Readiness
                 - Ready
                 - Error
                 - Deleting
@@ -674,6 +905,45 @@ spec:
                 - Node Effect Removal
                 - Checking Host Reboot Required
                 type: string
+              rebootStatus:
+                description: |-
+                  RebootStatus contains host reboot progress.
+                  DPU controller derives user-facing DPUCondRebooted from this status.
+                properties:
+                  lastTransitionTime:
+                    description: LastTransitionTime is the last update time for reboot
+                      status.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message provides human-readable details for current
+                      phase.
+                    type: string
+                  method:
+                    description: Method is the recommended reboot method.
+                    enum:
+                    - Unknown
+                    - NoAction
+                    - PowerCycle
+                    - SystemReboot
+                    - SystemLevelReset
+                    - FirmwareReset
+                    - DPUWarmReboot
+                    type: string
+                  phase:
+                    description: Phase is the current host reboot progress.
+                    enum:
+                    - WaitForShutdown
+                    - Pending
+                    - Succeeded
+                    - Failed
+                    - Unknown
+                    type: string
+                  reason:
+                    description: Reason indicates machine-readable reason for current
+                      phase.
+                    type: string
+                type: object
               redfishTaskId:
                 description: The task ID of the last task performed on the DPU BMC
                 type: string
@@ -691,6 +961,11 @@ spec:
             required:
             - phase
             type: object
+            x-kubernetes-validations:
+            - message: 'identityMode is immutable once set: can only transition from
+                unset to a value'
+              rule: '!has(oldSelf.identityMode) || (has(self.identityMode) && self.identityMode
+                == oldSelf.identityMode)'
         type: object
     served: true
     storage: true

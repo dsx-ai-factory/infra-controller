@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-pub mod common;
+mod common;
 mod create;
 mod delete;
-pub mod show;
+mod show;
 
 #[cfg(test)]
 mod tests;
@@ -28,7 +28,7 @@ use clap::Parser;
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(hide = true)]
     Create(create::Args),
     Show(show::Args),

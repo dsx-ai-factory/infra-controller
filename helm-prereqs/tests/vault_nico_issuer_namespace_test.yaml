@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Vault issuer namespace propagation
+templates:
+  - templates/vault-nico-issuer.yaml
+tests:
+  - it: configures the issuer namespace when set
+    set:
+      vault.namespace: admin/nico
+    asserts:
+      - equal:
+          path: spec.vault.namespace
+          value: admin/nico
+
+  - it: omits the optional namespace by default
+    asserts:
+      - notExists:
+          path: spec.vault.namespace

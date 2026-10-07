@@ -10,6 +10,7 @@
 <h1>{{ filter_name }} Explored Endpoints{% if is_errors_only %} - Errors{% endif %} ({{ page.total_items() }})</h1>
 
 {% include "missing_credentials_warning.html" %}
+{% include "site_explorer_run_status.html" %}
 
 <details {% if active_vendor_filter != "all" || is_errors_only %}open{% endif %}>
 	<summary>Show filters</summary>
@@ -72,7 +73,7 @@
 			<td>
 				{% if ep.has_exploration_error %}
 				<div style="max-width: 400px; max-height: 100px; overflow: auto; border: 1px solid var(--border-color); border-radius: 4px; padding: 0.5rem;">
-					<pre style="margin: 0; white-space: pre-wrap; font-size: 0.8rem;"><code class="prettyjson">{{ ep.last_exploration_error }}</code></pre>
+					<pre style="margin: 0; white-space: pre-wrap; font-size: 0.8rem;"><code>{{ ep.last_exploration_error|pretty_json }}</code></pre>
 				</div>
 				<form id="clearlasterror_action" method="POST" action="/admin/explored-endpoint/{{ ep.address }}/clear-last-error">
 					<button type="submit">Clear</button>

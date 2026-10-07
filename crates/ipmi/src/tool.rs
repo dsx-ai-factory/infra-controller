@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,22 +25,40 @@ use carbide_uuid::machine::MachineId;
 use eyre::eyre;
 
 use crate::IPMITool;
+use crate::metrics::{IpmiCommand, count_ipmi_command};
 
-pub struct IPMIToolImpl {
+pub(super) struct IPMIToolImpl {
     credential_reader: Arc<dyn CredentialReader>,
     attempts: u32,
 }
 
 impl IPMIToolImpl {
-    const IPMITOOL_COMMAND_ARGS: &'static str = "-I lanplus -C 17 chassis power reset";
-    const IPMITOOL_BMC_RESET_COMMAND_ARGS: &'static str = "-I lanplus -C 17 bmc reset cold";
-    const DPU_LEGACY_IPMITOOL_COMMAND_ARGS: &'static str = "-I lanplus -C 17 raw 0x32 0xA1 0x01";
-
-    pub fn new(credential_reader: Arc<dyn CredentialReader>, attempts: Option<u32>) -> Self {
+    pub(super) fn new(credential_reader: Arc<dyn CredentialReader>, attempts: Option<u32>) -> Self {
         IPMIToolImpl {
             credential_reader,
             attempts: attempts.unwrap_or(3),
         }
+    }
+
+    /// The `ipmitool` argument tail that runs `command`.
+    fn command_args(command: IpmiCommand) -> &'static str {
+        match command {
+            IpmiCommand::ChassisPowerReset => "-I lanplus -C 17 chassis power reset",
+            IpmiCommand::DpuLegacyPowerReset => "-I lanplus -C 17 raw 0x32 0xA1 0x01",
+            IpmiCommand::BmcColdReset => "-I lanplus -C 17 bmc reset cold",
+        }
+    }
+
+    fn connection_args(bmc_address: SocketAddr, username: &str) -> [String; 7] {
+        [
+            "-H".to_string(),
+            bmc_address.ip().to_string(),
+            "-p".to_string(),
+            bmc_address.port().to_string(),
+            "-U".to_string(),
+            username.to_string(),
+            "-E".to_string(),
+        ]
     }
 }
 
@@ -48,7 +66,7 @@ impl IPMIToolImpl {
 impl IPMITool for IPMIToolImpl {
     async fn bmc_cold_reset(
         &self,
-        bmc_ip: IpAddr,
+        bmc_address: SocketAddr,
         credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report> {
         let credentials = self
@@ -56,12 +74,12 @@ impl IPMITool for IPMIToolImpl {
             .get_credentials(credential_key)
             .await
             .map_err(|e| {
-                eyre!("Secret engine getting credentilas for key {credential_key:#?}: {e:#?}")
+                eyre!("secret engine getting credentilas for key {credential_key:#?}: {e:#?}")
             })?
-            .ok_or_else(|| eyre!("No credentials for key {credential_key:#?} found"))?;
+            .ok_or_else(|| eyre!("no credentials for key {credential_key:#?} found"))?;
 
         match self
-            .execute_ipmitool_command(Self::IPMITOOL_BMC_RESET_COMMAND_ARGS, bmc_ip, &credentials)
+            .execute_ipmitool_command(IpmiCommand::BmcColdReset, bmc_address, &credentials)
             .await
         {
             Ok(_) => Ok(()),
@@ -72,7 +90,7 @@ impl IPMITool for IPMIToolImpl {
     async fn restart(
         &self,
         machine_id: &MachineId,
-        bmc_ip: IpAddr,
+        bmc_address: SocketAddr,
         legacy_boot: bool,
         credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report> {
@@ -82,19 +100,19 @@ impl IPMITool for IPMIToolImpl {
             .await
             .map_err(|e| {
                 eyre!(
-                    "Secret engine error for machine {}: {e}",
+                    "secret engine error for machine {}: {e}",
                     machine_id.clone(),
                 )
             })?
-            .ok_or_else(|| eyre!("No credentials for machine {} found", machine_id.clone()))?;
+            .ok_or_else(|| eyre!("no credentials for machine {} found", machine_id.clone()))?;
 
         let mut errors: Vec<CmdError> = Vec::default();
 
         if legacy_boot {
             match self
                 .execute_ipmitool_command(
-                    Self::DPU_LEGACY_IPMITOOL_COMMAND_ARGS,
-                    bmc_ip,
+                    IpmiCommand::DpuLegacyPowerReset,
+                    bmc_address,
                     &credentials,
                 )
                 .await
@@ -104,24 +122,21 @@ impl IPMITool for IPMIToolImpl {
             }
         }
         match self
-            .execute_ipmitool_command(Self::IPMITOOL_COMMAND_ARGS, bmc_ip, &credentials)
+            .execute_ipmitool_command(IpmiCommand::ChassisPowerReset, bmc_address, &credentials)
             .await
         {
             Ok(_) => return Ok(()),   // return early if we get a successful response
             Err(e) => errors.push(e), // add error and move on if not
         }
 
+        // Only the last error survives as the returned failure; the earlier
+        // attempts' failures have already been counted where they happened.
         let result = errors.pop();
-        /*
-        for e in errors.iter() {
-            tracing::warn!("ipmitool error restarting machine {machine_id}: {e}");
-        }
-        */
 
         Err(match result {
             None => {
                 // This should be impossible, right? We always call execute_ipmitool_command.
-                eyre::eyre!("No commands were successful and no error reported")
+                eyre::eyre!("no commands were successful and no error reported")
             }
             Some(err) => err.into(),
         })
@@ -131,8 +146,8 @@ impl IPMITool for IPMIToolImpl {
 impl IPMIToolImpl {
     async fn execute_ipmitool_command(
         &self,
-        command: &str,
-        bmc_ip: IpAddr,
+        command: IpmiCommand,
+        bmc_address: SocketAddr,
         credentials: &Credentials,
     ) -> CmdResult<String> {
         let (username, password) = match credentials {
@@ -140,32 +155,29 @@ impl IPMIToolImpl {
         };
 
         // cmd line args that are filled in from the db
-        let prefix_args: Vec<String> =
-            vec!["-H", bmc_ip.to_string().as_str(), "-U", username, "-E"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-
-        let mut args = prefix_args.to_owned();
-        args.extend(command.split(' ').map(str::to_owned));
+        let mut args = Self::connection_args(bmc_address, username).to_vec();
+        args.extend(Self::command_args(command).split(' ').map(str::to_owned));
         let cmd = TokioCmd::new("/usr/bin/ipmitool")
             .args(&args)
             .attempts(self.attempts);
 
-        tracing::info!("Running command: {:?}", cmd);
-        cmd.env("IPMITOOL_PASSWORD", password).output().await
+        tracing::info!(command = ?cmd, "Running IPMI command");
+        let result = cmd.env("IPMITOOL_PASSWORD", password).output().await;
+        count_ipmi_command(command, &result);
+        result
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::net::SocketAddr;
     use std::sync::Arc;
 
     use carbide_secrets::credentials::Credentials;
     use carbide_secrets::test_support::credentials::TestCredentialManager;
 
     #[test]
-    pub fn test_ipmitool_new() {
+    fn test_ipmitool_new() {
         let cp = Arc::new(TestCredentialManager::new(Credentials::UsernamePassword {
             username: "user".to_string(),
             password: "password".to_string(),
@@ -173,5 +185,16 @@ mod test {
         let tool = super::IPMIToolImpl::new(cp, Some(1));
 
         assert_eq!(tool.attempts, 1);
+    }
+
+    #[test]
+    fn connection_args_include_non_default_port() {
+        assert_eq!(
+            super::IPMIToolImpl::connection_args(
+                "[2001:db8::1]:1623".parse::<SocketAddr>().unwrap(),
+                "admin",
+            ),
+            ["-H", "2001:db8::1", "-p", "1623", "-U", "admin", "-E"]
+        );
     }
 }

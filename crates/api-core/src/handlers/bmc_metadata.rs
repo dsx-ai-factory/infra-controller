@@ -44,7 +44,7 @@ pub(crate) async fn get(
 
 /// This is a separate function so it can be called from redfish_apply_action to build a custom BMC
 /// client.
-pub(crate) async fn get_inner(
+pub(super) async fn get_inner(
     request: rpc::BmcMetaDataGetRequest,
     pool: &PgPool,
     credential_reader: &dyn CredentialReader,
@@ -83,7 +83,7 @@ pub(crate) async fn get_inner(
                     .unwrap_or_default(),
                 bmc_endpoint_request.ip_address
             );
-            tracing::error!(e);
+            tracing::error!(error = %e, "Invalid BMC MAC address");
             CarbideError::internal(e)
         })?;
 
@@ -96,9 +96,10 @@ pub(crate) async fn get_inner(
         .ok_or_else(|| CarbideError::internal("missing credentials".to_string()))?;
 
     let ip_address = bmc_endpoint_request.ip_address.parse().map_err(|_| {
-        CarbideError::internal("Internal error: Stored IP address is invalid".to_string())
+        CarbideError::internal("internal error: stored IP address is invalid".to_string())
     })?;
-    let vendor = db::explored_endpoints::lookup_vendor_by_ip(ip_address, pool).await?;
+    let explored_metadata =
+        db::explored_endpoints::lookup_bmc_metadata_by_ip(ip_address, pool).await?;
 
     let (username, password) = match credentials {
         Credentials::UsernamePassword { username, password } => (username, password),
@@ -108,10 +109,11 @@ pub(crate) async fn get_inner(
         ip: bmc_endpoint_request.ip_address,
         port: None,
         ssh_port: None,
-        ipmi_port: None,
+        serial_console_ssh_port: explored_metadata.serial_console_ssh_port.map(u32::from),
+        ipmi_port: explored_metadata.ipmi_port.map(u32::from),
         mac: bmc_mac_address.to_string(),
         user: username,
         password,
-        vendor,
+        vendor: explored_metadata.vendor,
     })
 }

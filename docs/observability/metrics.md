@@ -1,0 +1,624 @@
+# NICo Metrics
+
+NICo components expose metrics in Prometheus format. This document describes how metrics
+are exposed, what they measure and how to collect them using an OpenTelemetry Collector
+DaemonSet or Prometheus ServiceMonitors.
+
+For alerting thresholds, KPIs and PrometheusRule examples, see [alerts.md](alerts.md).
+
+## 1. How metrics are exposed
+
+Each NICo component runs an HTTP server exposing a `/metrics` endpoint in Prometheus text
+format. The OpenTelemetry SDK creates metrics using the Meter API, then the
+`opentelemetry-prometheus` exporter bridges them to a Prometheus registry served over HTTP.
+
+Components also expose `/health` (liveness) and `/ready` (readiness) endpoints on the same
+metrics port for each component:
+
+| Component | Port | Primary metrics |
+|-----------|------|-----------------|
+| nico-api | 1080 | State lifecycle, capacity, health, API performance |
+| nico-api (per-object) | 9091 | Per-object state progress (disabled by default, high cardinality) |
+| nico-hardware-health | 9009 | Hardware telemetry, sensor readings |
+| nico-bmc-proxy | 1080 | BMC connection stats |
+| nico-dhcp | 1089 | IPv4 lease counts, request handling |
+| nico-dhcp6 (opt-in) | 1089 | IPv6 request, drop, and reply counts |
+| nico-dns | 8053 | Query rates, resolution latency |
+| nico-pxe | 8080 | Boot request counts |
+| nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
+
+Metrics in the [generated Core catalogue](core_metrics.md) use the `carbide_` prefix. A small
+number of legacy Core metrics (such as `site_explorer_create_switches_latency_seconds` and
+`site_explorer_create_power_shelves_latency_seconds`) predate this convention. Metric types
+are indicated by the `# TYPE` comment in Prometheus exposition format. Some Core gauges, such
+as `carbide_hosts_usable_count` and
+`carbide_dpus_healthy_count`, use `_count` as a suffix; check the `# TYPE` metadata to
+determine the actual metric type.
+
+### Metrics Services and IPv6
+
+Metrics-only Services use `ipFamilyPolicy: PreferDualStack`, which requests both Service address families when the cluster supports them and permits single-stack clusters. This includes the separate DHCPv4 and opt-in DHCPv6 targets, API metrics, hardware-health metrics and telemetry, DSX, BMC proxy, PXE, SSH console, and the telemetry collector. ServiceMonitor discovery still depends on reachable pod endpoints. A dual-stack Service does not configure IPv6 on the pods.
+
+The combined `nico-unbound` Service preserves DNS on UDP/TCP 53 and exporter metrics on TCP 9167. It defaults to IPv4. `unbound.ipv6.enabled` optionally requests dual-stack exposure after you configure and verify the selected images. The Unbound ServiceMonitor selects its metrics label and named exporter port. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes the image/configuration contract and enablement checks.
+
+The BlueField `nico-otelcol` chart defaults the Boolean `prometheusRemoteAccess` to `false`, binding its Prometheus exporter to `127.0.0.1:<prometheusPort>`. The `prometheusPort` chart value defaults to 9999 and accepts integers from 1 through 65535. For direct Service scraping over IPv4 or IPv6, explicitly set `prometheusRemoteAccess: true` in the chart values. The exporter then binds `:<prometheusPort>`, matching the Service's target port. DOCA Platform Framework (DPF) deployments accept this chart value through `dpf.services.otel.extra_helm_values`.
+
+The collector uses `hostNetwork: true`, so enabling remote access exposes unauthenticated metrics on DPU host interfaces. Inbound routing and firewall rules determine reachability. Its existing OpenTelemetry Protocol (OTLP) export to the site gateway remains enabled and does not require `prometheusRemoteAccess`. The separate gateway scrape procedure uses this OTLP path.
+
+The DSX and hardware-health binaries default to `[::]:9009`, and PXE defaults to `[::]:8080`. These defaults live in the binaries, so chart-only upgrades with `--reuse-values` retain an older pinned image's IPv4 defaults. Explicit `CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT`, `CARBIDE_HEALTH__METRICS__ENDPOINT`, and `PXE_BIND_ADDRESS` entries in `env` take precedence. For DSX and hardware-health, environment settings override the optional TOML file, which overrides binary defaults. PXE uses its bind address for both HTTP boot traffic and metrics. `PXE_BIND_PORT` overrides port 8080.
+
+The shared TCP listener explicitly enables IPv4-mapped connections for an IPv6 wildcard, including on nodes with `net.ipv6.bindv6only=1`. If IPv6 socket creation or dual-stack configuration fails, it logs the cause and binds the IPv4 wildcard on the same port. Explicit addresses retain their family. Bind and listen errors propagate. Refer to [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md) for the opt-in workload and metrics port contract.
+
+### Opt-in IPv6 Scrape Discovery
+
+Legacy Kubernetes `Endpoints` discovery exposes only a Service's primary address family. To discover IPv6 pod targets from dual-stack Services, use `EndpointSlice` discovery as well as reachable IPv6 pod addresses. `PreferDualStack` alone does not change the discovered targets.
+
+For the bundled kube-prometheus-stack 59.1.0 installation, apply the optional [IPv6 scrape overlay](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/values-nico-ipv6-scraping.yaml). It uses Prometheus 2.52's `additionalScrapeConfigs` and grants its service account read access to EndpointSlices. The pinned Operator 0.74.0 and existing custom resource definitions (CRDs) do not need an upgrade.
+
+Upgrade the NICo chart first: its primary ServiceMonitors must carry `app.kubernetes.io/metrics`. The overlay excludes those labeled monitors from this Prometheus and replaces them with one IPv6-only primary-metrics job. Other collectors can continue selecting the same monitor objects. Optional hardware-health `/telemetry` and API per-object monitors retain their existing discovery. This recipe does not migrate those optional paths to IPv6.
+
+If the optional DPU gateway is installed (`WITH_DPU=true`), first configure its wildcard metrics listener and apply the [metrics-only Service](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/otel-collector-gateway-metrics.yaml). The [bundled gateway values](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/values-otel-collector-gateway.yaml) bind the exporter on all pod interfaces using `ports.prometheus.containerPort` (bundled default 9999). Existing installations that bind only the primary pod address need an endpoint update. The gateway pod must have a reachable IPv6 address in addition to its primary IPv4 address. The separate Service requests `PreferDualStack`, exposes TCP 9999, and targets the named `prometheus` pod port. The existing OTLP LoadBalancer and receiver retain their configuration.
+
+For an existing gateway, update only the exporter endpoint and then apply the metrics Service:
+
+```bash
+helm upgrade otel-collector-gateway open-telemetry/opentelemetry-collector \
+    --version 0.106.0 -n otel --reuse-values \
+    --set-string 'config.exporters.prometheus/site.endpoint=:{{ .Values.ports.prometheus.containerPort }}' \
+    --wait --timeout 300s
+kubectl apply -f helm-prereqs/observability/otel-collector-gateway-metrics.yaml
+```
+
+The quoted `--set-string` value follows the installed `ports.prometheus.containerPort` override. `--reuse-values` retains the installed image, certificates, site label, ports, and LoadBalancer settings. If you use the upstream chart's `alternateConfig`, apply the same endpoint change there because it replaces `config` entirely. If you use a custom gateway release, namespace, or `nameOverride`, also adjust the metrics Service selector and scrape discovery. The IPv6 scrape overlay replaces the gateway's static DNS target with IPv6 EndpointSlices from this metrics-only Service. It discovers no gateway targets until that Service has IPv6 endpoints.
+
+Before switching Prometheus, verify that every selected pod has a reachable IPv6 address and that its `/metrics` endpoint responds through that address from the collector's network. Upgrade or configure DSX, hardware-health, and PXE to accept IPv6 metrics connections. A chart-only upgrade preserves an older pinned image's IPv4 listener defaults. Unbound additionally requires `unbound.ipv6.enabled=true`. Keep the existing collection until these checks pass.
+
+After verifying the NICo endpoints and configuring any installed gateway, switch Prometheus:
+
+```bash
+helm upgrade obs prometheus-community/kube-prometheus-stack \
+    --version 59.1.0 -n monitoring --reuse-values \
+    -f helm-prereqs/observability/values-nico-ipv6-scraping.yaml
+```
+
+Unbound's exporter remains on `nico-unbound:9167`, while the scrape job excludes DNS ports. The job discovers both independent DHCP metrics targets and selects only IPv6 EndpointSlices, preventing duplicate IPv4/IPv6 scrapes.
+
+The overlay covers built-in component names. Custom `nameOverride` values require corresponding changes to both Service selection and ServiceMonitor exclusions. Preserve site-specific scrape jobs, role-based access control (RBAC) rules, and selector expressions when merging the overlay: Helm replaces lists. Retain the wildcard exporter endpoint on subsequent gateway upgrades, and reapply the Prometheus overlay after rerunning the observability installer.
+
+For an existing hand-written Prometheus or OpenTelemetry (OTel) scrape job, replace its legacy NICo job with the overlay's `nico-ipv6` job and grant that collector's service account the same EndpointSlice permissions. If it also scrapes the DPU gateway, configure the gateway as above and replace its gateway job with the overlay's `otel-collector-gateway` job. Keep the EndpointSlice metadata names in the relabel rules. The old `__meta_kubernetes_endpoint_port_name` label is unavailable with this discovery role.
+
+## 2. What the metrics tell you
+
+NICo metrics fall into several categories, each answering different operational questions.
+
+### State lifecycle: "Are machines progressing normally?"
+
+The state controller is the heart of NICo's lifecycle management. It tracks machines,
+network segments, IB partitions and other objects through their lifecycle states. For
+each object type, you get metrics showing current distribution across states, SLA
+violations, time-in-state histograms and transition counts.
+
+The most important metric pattern is `carbide_<object>_per_state_above_sla`. This counts
+objects stuck longer than the configured threshold for that state. Any non-zero value
+means something is blocking normal lifecycle progression and warrants investigation.
+Common causes include BMC connectivity issues, PXE boot failures or external service
+timeouts.
+
+Related metrics include `carbide_<object>_per_state` (current count per state),
+`carbide_<object>_state_time_in_state_seconds` (histogram of time spent) and
+`carbide_<object>_state_handler_errors_total` (processing failures).
+
+### Capacity: "How much headroom do we have?"
+
+Capacity metrics answer whether you can accept new workloads. The machine controller
+exposes `carbide_hosts_usable_count` and `carbide_gpus_usable_count` showing hosts and
+GPUs available for allocation. The `carbide_available_ips_count` metric tracks IP
+address pool exhaustion.
+
+For multi-tenant deployments, `carbide_resource_pool_*` metrics break down capacity by
+resource pool. Watch for pools approaching zero availability before tenants start seeing
+allocation failures.
+
+### Health: "What's broken right now?"
+
+Health metrics reveal infrastructure problems. The machine controller exposes
+`carbide_hosts_health_status_count` and `carbide_dpus_healthy_count` / `carbide_dpus_up_count`
+showing aggregate health across the fleet.
+
+For detailed breakdowns, `carbide_hosts_unhealthy_by_probe_id_count` and
+`carbide_hosts_unhealthy_by_classification_count` label unhealthy hosts by probe type
+and classification. This tells you not just how many hosts are unhealthy but why - sensor
+warnings, agent connectivity failures, validation errors, etc.
+
+DPU health is tracked separately with `carbide_dpus_*` metrics showing total, online and
+healthy counts. A gap between online and healthy indicates DPUs that are reachable but
+failing health checks.
+
+### Discovery: "Is site explorer finding everything?"
+
+Site explorer continuously discovers infrastructure. The `carbide_site_explorer_*` metrics
+show discovery status, result counts and any mismatches between expected and actual
+inventory. Rising error counts or stale discovery timestamps indicate connectivity issues
+with BMCs or switches.
+
+### Firmware management
+
+Firmware update metrics track the upgrade queue and active operations.
+`carbide_firmware_queue_length` shows pending updates while
+`carbide_firmware_active_updates` shows concurrent operations. The pre-ingestion manager
+metrics (`carbide_preingestion_*`) track firmware image preparation.
+
+### API performance
+
+The nico-api exposes detailed request metrics. `carbide_api_grpc_server_duration_milliseconds`
+is a histogram of request latency by method. Watch p95 and p99 for SLO monitoring.
+
+Database performance appears in `carbide_db_pool_*` metrics showing connection pool
+utilization. Low idle connections or high wait times indicate database contention.
+
+Vault metrics (`carbide_api_vault_requests_*`) track secret management operations. Failures
+here cascade to certificate issuance and machine provisioning.
+
+### Hardware health service
+
+The nico-hardware-health component has two separate endpoints. The `/metrics` endpoint
+exposes service-level metrics (probe success rates, scrape latency). The `/telemetry`
+endpoint exposes raw sensor readings (temperatures, power, fan speeds) collected via
+Redfish from BMCs.
+
+<Tip>
+The telemetry endpoint is high-cardinality due to per-sensor labels. Enable it only when
+your metrics backend can handle the volume and you need sensor-level visibility.
+</Tip>
+
+For power-shelf endpoints, the telemetry endpoint also publishes controller and chassis
+power evidence. Status series are informational gauges with a fixed value of `1`; the
+state lives in the labels. The state and health label values listed below are Redfish
+enums rendered in snake case, so they stay bounded. Identity labels such as `manager_id`
+and `firmware_version` are strings, one value per controller.
+
+Series names are exported as `carbide_hardware_health_hw_<series>_<unit>`, for example
+`carbide_hardware_health_hw_manager_status_state`. Every series also carries the
+endpoint labels shared by all telemetry: `endpoint_key` always, plus `serial_number`,
+`rack_id`, and `power_shelf_id` when each is known for the endpoint.
+
+| Series | Unit | Labels | Source |
+|---|---|---|---|
+| `powersupply_capacity` | watts | | `PowerSupply.PowerCapacityWatts`, else the LiteOn OEM `CapacityWatts` string |
+| `powersupply_status` | state | `powersupply_state`, `powersupply_health` | `PowerSupply.Status` |
+| `powersupply_output_enabled` | bool | | Delta OEM `Oem.deltaenergysystems.Power`, `1` when the supply is outputting power |
+| `powersupply_fan_speed_target` | percentage | | Delta OEM `Oem.deltaenergysystems.FanSpeedTarget`, where `0` means the supply controls its own fan |
+| `chassis_max_power` | watts | | `Chassis.MaxPowerWatts` |
+| `chassis_status` | state | `chassis_state`, `chassis_health`, `chassis_power_state` | `Chassis.Status`, `Chassis.PowerState` |
+| `power_subsystem_status` | state | `power_subsystem_state`, `power_subsystem_health` | `Chassis.PowerSubsystem.Status` |
+| `manager_status` | state | `manager_id`, `manager_state`, `manager_health`, `manager_power_state`, `firmware_version` | `Manager.Status`, `Manager.PowerState`, `Manager.FirmwareVersion` |
+| `manager_last_reset` | seconds | `manager_id` | `Manager.LastResetTime`, as seconds since the Unix epoch |
+
+Absent Redfish fields are omitted rather than defaulted: a status gauge is emitted when
+any of its source fields is present, and each label appears only when its own field does.
+`powersupply_capacity` and `powersupply_status` are emitted for every endpoint that exposes
+power supplies; the chassis and manager series are emitted for power-shelf endpoints only.
+`powersupply_output_enabled` and `powersupply_fan_speed_target` have no standard Redfish
+source, so they are emitted only for supplies carrying the Delta OEM schema.
+The manager series come from the `[collectors.manager]` section, which is enabled by
+default with a five-minute `poll_interval`.
+LiteOn PF-1333-7R firmware r1.3.8 omits `PowerCapacityWatts` and reports the capacity as the
+string `CapacityWatts` in its OEM schema; the collector uses that string only when the
+standard field is absent, and omits the series when the string is not a finite positive
+number. A vendor value
+outside the Redfish enum is rendered as `unsupported_value`; for example, LiteOn
+PF-1333-7R firmware r1.3.8 reports `Status.State` as `Standby`, which is not a Redfish
+`State` member.
+
+Sensor series carry the `upper_critical_threshold` and `lower_critical_threshold` labels
+only when the BMC reports that threshold. An absent threshold is omitted rather than
+written as `0`.
+
+The chassis `PowerSubsystem` on LiteOn PF-1333-7R firmware r1.3.8 exposes `Status` only
+and no `PowerSupplyRedundancy` group, so no redundancy series is published. Consumers
+derive redundancy from `power_subsystem_health` and the per-supply series.
+
+Power-shelf health reports exported over OTLP carry per-alert detail only when the target
+sets `include_alert_details = true` on its `[[sinks.otlp.targets]]` entry. A shelf reports
+far fewer than the 64-alert serialization bound, so `health_report.alerts.dropped` is not
+expected. See the
+[OTLP health-report log contract](../architecture/health_aggregation.md#otlp-health-report-log-contract).
+
+Log records whose Redfish `MessageId` is null or empty carry up to two extra attributes
+derived from the OpenBMC `Family` or `Family ( component ... )` message shape:
+`message_family` (for example `PowerDevicePresence`) and, when the parenthesised form is
+present, `redfish.component` (for example `powerdevice1`). Free-text messages yield
+neither. Records with a `MessageId` keep it unchanged and do not carry these attributes.
+The periodic log collector and the SSE collector derive the attributes the same way.
+
+LiteOn PF-1333-7R firmware r1.3.8 leaves `MessageId` null on every event log entry. The
+message families below were observed across four shelves, 400 retained entries each, on
+2026-09-14, with the listed Redfish `Severity`. The trailing token of the parenthesised
+detail is the IPMI event direction: `Assert` means the family's condition began and
+`Deassert` means it ended. The firmware names most transitions as separate asserted
+families, so `Deassert` appeared only on `PowerDeviceAbsence`, where it records a power
+device becoming present again. `Severity` follows the family, not the direction. The
+collector forwards every entry unchanged; the direction stays in the message text.
+
+| `message_family` | Observed form | Observed `Severity` |
+|---|---|---|
+| `BmcFirmwareUpdateCompleted` | Assert | OK |
+| `BmcFirmwareUpdateFailure` | Assert | Critical |
+| `BmcSystemBootComplete` | Assert | OK |
+| `BmcUnsupportedChassis` | Assert | Warning |
+| `PowerDeviceAbsence` | Deassert | OK |
+| `PowerDeviceFirmwareUpdate` | Assert | OK |
+| `PowerDeviceInputUnderVoltageFault` | Assert | Critical |
+| `PowerDeviceInsufficientInputVoltageOff` | Assert | OK |
+| `PowerDeviceOff` | Assert | OK |
+| `PowerDeviceOn` | Assert | OK |
+| `PowerDevicePowerNotGood` | Assert | OK |
+| `PowerDevicePresence` | Assert | OK |
+
+### Network services
+
+Supporting services expose their own metrics. nico-dhcp tracks lease operations and
+request handling. nico-dns exposes query rates and resolution latency.
+
+### Console services
+
+nico-ssh-console-rs exposes `carbide_ssh_console_*` metrics for BMC connection counts,
+session durations and error rates. This is useful for debugging console access issues.
+
+## 3. Collection architecture
+
+```mermaid
+flowchart LR
+    subgraph Node
+        A[nico-api :1080]
+        B[nico-bmc-proxy :1080]
+        C[other components]
+    end
+    D[otel-collector DaemonSet]
+    E["OTLP Backend<br/>(VictoriaMetrics, Mimir, etc.)"]
+
+    A --> D
+    B --> D
+    C --> D
+    D -->|OTLP/HTTP| E
+```
+
+### ServiceMonitor configuration
+
+NICo Helm charts include ServiceMonitor resources for Prometheus Operator environments.
+This requires Prometheus Operator CRDs to be installed in the cluster. Enable ServiceMonitors
+in Helm values:
+
+```yaml
+serviceMonitor:
+  enabled: true
+  interval: 30s
+```
+
+For nico-hardware-health, there are separate ServiceMonitors for service metrics and
+hardware telemetry. Enable telemetry scraping only when storage allows:
+
+```yaml
+serviceMonitor:
+  enabled: true        # /metrics endpoint
+telemetryServiceMonitor:
+  enabled: false       # /telemetry endpoint (high cardinality)
+```
+
+### OTel Collector configuration
+
+Configure the prometheus receiver for Kubernetes service discovery. This example scrapes
+only the `/metrics` endpoint. For nico-hardware-health `/telemetry` (high-cardinality
+sensor data), add a separate scrape job targeting the `metrics` port name with its
+metrics path set to `/telemetry`.
+
+<Note>
+If running as a DaemonSet, each replica will independently discover and scrape
+all targets, duplicating samples. For DaemonSet deployments, implement target
+allocation/sharding via the [Target Allocator](https://opentelemetry.io/docs/kubernetes/operator/target-allocator/).
+</Note>
+
+```yaml
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'nico'
+          kubernetes_sd_configs:
+            - role: endpoints
+              namespaces:
+                names: [nico-system]
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+              action: keep
+              regex: true
+            - source_labels: [__meta_kubernetes_endpoint_port_name]
+              action: keep
+              regex: metrics
+
+processors:
+  batch: {}
+
+exporters:
+  # VictoriaMetrics single-node
+  otlphttp:
+    endpoint: http://victoriametrics:8428/opentelemetry/v1/metrics
+  # VictoriaMetrics cluster: http://vminsert:8480/insert/0/opentelemetry/v1/metrics
+  # Grafana Mimir: http://mimir:8080/otlp/v1/metrics
+
+service:
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [batch]
+      exporters: [otlphttp]
+```
+
+## 4. Per-object state metrics endpoint
+
+The nico-api state controller can expose per-object state progress metrics from a
+**dedicated listener** separate from the main `/metrics` endpoint. This feature is
+disabled by default because it produces O(fleet) cardinality - one series per object
+for each metric.
+
+While aggregate metrics like `carbide_machines_per_state_above_sla` tell you *how many*
+machines are stuck, per-object metrics tell you *which* - critical at 100k-machine scale
+for identifying individual stuck objects.
+
+### Metrics exposed
+
+| Metric | Type | Purpose |
+|--------|------|---------|
+| `carbide_object_state_entered_timestamp_seconds` | gauge | Current state as join key + exact state age (`time() - value`). One series per live object. |
+| `carbide_object_state_sla_seconds` | gauge | Resolved SLA for current state. Alerts never change when SLA policy does. |
+| `carbide_object_manual_intervention_required` | gauge | Value 1 when operator action needed; `reason` is a bounded token. |
+| `carbide_object_info` | gauge | Stable traits (rack, SKU, vendor, model) for joins, similar to `kube_node_info`. |
+| `carbide_machine_dpu_info` | gauge | Host-to-DPU associations (one series per DPU). |
+| `carbide_machine_instance_info` | gauge | Machine-to-instance and tenant associations. |
+
+The state metrics and `carbide_object_info` use labels `object_type` and `object_id`.
+State metrics add `state` and `substate` labels. The association metrics use their own
+labels instead: `carbide_machine_dpu_info` has `machine_id` and `dpu_id`, and
+`carbide_machine_instance_info` has `machine_id`, `instance_id`, and `tenant_org`.
+These series exist only while true: transitions replace entries, deletions clear them
+immediately.
+
+### Configuration
+
+Enable via TOML configuration:
+
+```toml
+[observability.per_object_state_metrics]
+enabled = true                    # default: false
+listen_address = "[::]:9091"      # dual-stack default
+# Defaults to all supported types; also valid: network_segment, vpc_prefix,
+# spdm_attestation, ib_partition
+object_types = ["machine", "switch", "power_shelf", "rack"]
+```
+
+The `object_types` field deserializes into an enum, so a mistyped token fails config
+parsing instead of silently emitting nothing.
+
+### Helm configuration
+
+Enable via Helm values:
+
+```yaml
+service:
+  perObjectStateMetrics:
+    enabled: true
+    port: 9091
+    objectTypes:
+      - machine
+      - switch
+      - power_shelf
+      - rack
+      - network_segment
+      - vpc_prefix
+      - spdm_attestation
+      - ib_partition
+
+perObjectStateMetricsServiceMonitor:
+  enabled: true
+  interval: 60s       # slow scrape is sufficient
+  scrapeTimeout: 25s
+```
+
+This creates:
+
+- The application listener and container port
+- A dedicated Kubernetes Service (`nico-api-object-metrics`)
+- An optional ServiceMonitor with a slower scrape interval
+
+If using `configFiles.nicoApiConfig` to replace the chart's bundled configuration, that
+custom TOML must include the `[observability.per_object_state_metrics]` section explicitly.
+
+### Scrape guidance
+
+- **Interval:** 60-120 seconds is sufficient. Series change only on state transitions.
+- **Same Prometheus:** Both endpoints must be scraped into the same Prometheus instance
+  for joins to work.
+- **Multi-replica caveat:** With `replicas > 1`, aggregate away the scrape instance before
+  joining:
+
+  ```text
+  max by (object_type, object_id, state, substate) (...)
+  ```
+
+### Example queries
+
+**Objects stuck beyond their SLA:**
+
+```text
+max by (object_type, object_id, state, substate)
+    (time() - carbide_object_state_entered_timestamp_seconds)
+  > on(object_type, object_id, state, substate) group_left()
+    max by (object_type, object_id, state, substate)
+        (carbide_object_state_sla_seconds)
+```
+
+**Objects requiring manual intervention:**
+
+```text
+max by (object_type, object_id, reason)
+    (carbide_object_manual_intervention_required == 1)
+```
+
+**Join stuck machines with rack info:**
+
+```text
+(
+  max by (object_type, object_id, state, substate)
+    (time() - carbide_object_state_entered_timestamp_seconds{object_type="machine"})
+    > 3600
+)
+  * on(object_type, object_id) group_left(rack, sku)
+    max by (object_type, object_id, rack, sku)
+        (carbide_object_info)
+```
+
+For alerting rules using these metrics, see [alerts.md](alerts.md#5-per-object-alerting).
+
+## 5. Dashboards
+
+NICo ships three Grafana dashboards in the Helm chart at `helm/observability/dashboards/`.
+Import these JSON files into your Grafana instance or enable the Helm chart's dashboard
+provisioning.
+
+### Site overview dashboard
+
+The site overview (`nico-overview.json`) is the main operational dashboard showing fleet status at a glance:
+
+**Service and site health** - API status indicator (READY/DOWN), running version with Git SHA,
+unhealthy host count, DPU online and healthy counts. These stat panels give immediate
+visibility into control plane and fleet health.
+
+**Capacity** - Host and GPU availability gauges, resource pool utilization. Shows how much
+headroom remains before new allocations fail.
+
+**Tenancy and inventory** - Tenant allocation breakdown, managed entity counts. Useful for
+capacity planning and understanding fleet composition.
+
+**Host lifecycle states** - Current distribution of hosts across lifecycle states. Highlights
+machines in transitional states that may need attention.
+
+**Health alerts** - Unhealthy hosts broken down by probe type and classification. Shows
+which health check is failing and what impact it has (PreventAllocations,
+PreventHostStateChanges, etc.).
+
+### Object lifecycle dashboard
+
+The object lifecycle board (`nico-lifecycle.json`) provides a deep dive
+into state machine behavior for any object type (machines, network segments,
+IB partitions). Uses an `$object_type` variable to switch between types.
+
+**Current state** - Object count, objects above SLA, current handling errors. The "above SLA"
+panel is key - any non-zero value indicates stuck objects.
+
+**Objects by state** - Stacked area chart showing distribution over time. Helps identify
+patterns (e.g., provisioning backlog during business hours).
+
+**Above SLA by state** - Which specific states have stuck objects. Narrows investigation to
+the failing transition.
+
+**State-handler errors** - Error counts from controllers processing state transitions.
+Indicates bugs or external service failures.
+
+**Transitions and latency** - State entry rate (throughput), handler latency p95, time in
+state before transition p95. Shows whether the system is keeping up with demand.
+
+**Controller work rate** - Iteration rate and latency for the state controller loop. High
+latency here suggests database or processing bottlenecks.
+
+### API performance dashboard
+
+The API performance dashboard (`nico-api-performance.json`) tracks
+control plane health and performance metrics:
+
+**Request summary** - API status, request rate, p95 latency, gRPC error rate. Top-level
+indicators for SLO monitoring.
+
+**Requests by method and status** - Heatmap of request latency by gRPC method. Identifies
+which endpoints are slow or failing.
+
+**Database** - Queries per second, time per request, connection pool utilization. Database
+contention is a common cause of API slowdowns.
+
+**Vault and transport** - Vault request rates, token refresh timing, TLS connection counts.
+Catches secret management issues before they cause auth failures.
+
+### Deploying dashboards
+
+**Option A: Helm provisioning (recommended)**
+
+Enable dashboard provisioning in your Helm values. The chart creates a ConfigMap that
+Grafana's sidecar picks up automatically:
+
+```yaml
+grafanaDashboards:
+  enabled: true
+  namespace: monitoring        # Where Grafana runs
+  folder: NICo                 # Grafana folder name
+  labels:
+    grafana_dashboard: "1"     # Matches kube-prometheus-stack default
+```
+
+The target namespace must exist and the Grafana sidecar must watch it. For kube-prometheus-stack,
+configure `grafana.sidecar.dashboards.searchNamespace` if Grafana is in a different namespace.
+
+**Option B: Manual import**
+
+Download the JSON files from `helm/observability/dashboards/` and import via Grafana UI
+(Dashboards -> Import -> Upload JSON file). Set the Prometheus datasource when prompted.
+
+Each dashboard provides variables for datasource selection and metric prefix customization.
+The prefix defaults to `carbide_` (NICo's current emission prefix). If your site uses
+`alt_metric_prefix`, update the dashboard variable accordingly.
+
+## 6. Troubleshooting
+
+### Missing metrics
+
+If a component's metrics aren't appearing in your backend, first verify the endpoint works:
+
+```bash
+kubectl port-forward -n nico-system svc/nico-api-metrics 1080:1080
+curl -s http://localhost:1080/metrics | head -20
+```
+
+If this fails, check pod status (`kubectl get pods -n nico-system`) and logs. If it succeeds,
+the issue is in collection - check OTel Collector logs for scrape errors or export failures:
+
+```bash
+kubectl logs -n monitoring -l app.kubernetes.io/name=opentelemetry-collector | grep -i error
+```
+
+Common causes: ServiceMonitor labels don't match, scrape config namespace wrong, network
+policy blocking scrape, exporter authentication failure.
+
+### High cardinality
+
+If your metrics backend is growing rapidly or queries are slow, you may have high-cardinality
+metrics. Hardware telemetry (`/telemetry` endpoint) is the most common culprit due to
+per-sensor labels.
+
+Solutions:
+
+- Disable telemetry scraping if not needed
+- Add recording rules to aggregate before storage
+- Filter high-cardinality labels in the collector
+
+### Stale metrics
+
+If metrics show old values, check that the scrape target is healthy and the endpoint isn't
+hanging. Use `kubectl describe servicemonitor` to verify scrape configuration. If endpoints
+are slow to respond, increase scrape timeout - but keep it at or below the scrape interval
+(e.g., `scrape_interval: 30s` with `scrape_timeout: 25s`).
+
+## 7. References
+
+- [NICo Helm charts](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/charts) - ServiceMonitor configs, metrics ports
+- [NICo Grafana dashboards](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/observability/dashboards) - JSON dashboard files
+- [Full metrics reference](core_metrics.md) - Auto-generated list
+- [OpenTelemetry Collector Helm chart](https://opentelemetry.io/docs/platforms/kubernetes/helm/collector/)
+- [Prometheus receiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)

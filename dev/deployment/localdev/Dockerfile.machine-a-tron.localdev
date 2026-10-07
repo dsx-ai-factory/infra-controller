@@ -20,7 +20,6 @@ FROM runtime-container-localdev:latest as carbide
 
 WORKDIR ./carbide
 COPY .skaffold/target/carbide-machine-a-tron/debug/machine-a-tron /opt/machine-a-tron/bin/
-COPY crates/machine-a-tron/templates /opt/machine-a-tron/templates
 
 # bmc-mock expects certs here
 COPY crates/bmc-mock/tls.crt /opt/carbide/

@@ -25,7 +25,7 @@ Replace all expected switches with the contents of a JSON file:
     $ nico-admin-cli expected-switch replace-all --filename ./switches.json
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long)]
-    pub filename: String,
+    pub(super) filename: String,
 }

@@ -21,45 +21,61 @@ description = "HTTP server that pretends to be a BMC / libredfish. For integrati
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 bmc-vendor = { path = "../bmc-vendor" }
-carbide-rpc = { path = "../rpc", default-features = false }
-carbide-utils = { path = "../utils", default-features = false }
-
-arc-swap = { workspace = true }
 axum = { workspace = true }
 axum-extra = { features = ["typed-header"], workspace = true }
 axum-server = { features = ["tls-rustls"], workspace = true }
 bytes = { workspace = true }
+carbide-axum-utils = { path = "../axum-utils" }
 chrono = { workspace = true }
 clap = { workspace = true }
-duration-str = { workspace = true }
 eyre = { workspace = true }
 flate2 = { workspace = true }
 form_urlencoded = { workspace = true }
 futures = { workspace = true }
-glob = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
+indexmap = { workspace = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 mac_address = { features = ["serde"], workspace = true }
-nv-redfish = { workspace = true, features = ["bmc-http"] }
+metrics-endpoint = { path = "../metrics-endpoint" }
+nv-redfish = { workspace = true, features = [
+  "bmc-http",
+  "computer-systems",
+  "event-service",
+] }
+nix = { features = ["fs"], workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+quick-xml = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tower = { workspace = true }
 tower-http = { features = ["normalize-path"], workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+libredfish = { workspace = true }
+carbide-test-support = { path = "../test-support" }
+carbide-tls = { path = "../tls" }
+hyper = { workspace = true, features = ["client", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls"] }
+tokio = { features = ["test-util"], workspace = true }
+tokio-rustls = { workspace = true }
 
 [lints]
 workspace = true

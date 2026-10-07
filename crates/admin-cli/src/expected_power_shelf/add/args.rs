@@ -43,33 +43,33 @@ Add an expected power shelf with a BMC IP address and metadata name:
     --bmc-ip-address 192.0.2.20 --meta-name shelf-01
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'a',
         long,
         help = "BMC MAC Address of the expected power shelf"
     )]
-    pub bmc_mac_address: MacAddress,
+    bmc_mac_address: MacAddress,
     #[clap(short = 'u', long, help = "BMC username of the expected power shelf")]
-    pub bmc_username: String,
+    bmc_username: String,
     #[clap(short = 'p', long, help = "BMC password of the expected power shelf")]
-    pub bmc_password: String,
+    bmc_password: String,
     #[clap(short = 's', long, help = "Serial number of the expected power shelf")]
-    pub shelf_serial_number: String,
+    shelf_serial_number: String,
 
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
         help = "The name that should be used as part of the Metadata for newly created Power Shelf. If empty, the Power Shelf Id will be used"
     )]
-    pub meta_name: Option<String>,
+    meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
         help = "The description that should be used as part of the Metadata for newly created Power Shelf"
     )]
-    pub meta_description: Option<String>,
+    meta_description: Option<String>,
 
     #[clap(
         long = "label",
@@ -77,7 +77,7 @@ pub struct Args {
         help = "A label that will be added as metadata for the newly created Power Shelf. The labels key and value must be separated by a : character. E.g. DATACENTER:XYZ",
         action = clap::ArgAction::Append
     )]
-    pub labels: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
 
     #[clap(
         long = "host_name",
@@ -85,7 +85,7 @@ pub struct Args {
         help = "Host name of the power shelf",
         action = clap::ArgAction::Append
     )]
-    pub host_name: Option<String>,
+    host_name: Option<String>,
 
     #[clap(
         long = "rack_id",
@@ -93,7 +93,7 @@ pub struct Args {
         help = "Rack ID for this machine",
         action = clap::ArgAction::Append
     )]
-    pub rack_id: Option<RackId>,
+    rack_id: Option<RackId>,
 
     #[clap(
         long = "bmc-ip-address",
@@ -101,14 +101,14 @@ pub struct Args {
         help = "BMC IP address of the power shelf",
         action = clap::ArgAction::Append
     )]
-    pub bmc_ip_address: Option<IpAddr>,
+    bmc_ip_address: Option<IpAddr>,
 
     #[clap(
         long = "bmc-retain-credentials",
         value_name = "BMC_RETAIN_CREDENTIALS",
         help = "When true, site-explorer skips BMC password rotation and stores factory-default credentials in Vault as-is"
     )]
-    pub bmc_retain_credentials: Option<bool>,
+    bmc_retain_credentials: Option<bool>,
 }
 
 impl From<Args> for rpc::forge::ExpectedPowerShelf {

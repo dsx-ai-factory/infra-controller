@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 # TODO: rename to carbide_host_support in source
 [lib]
@@ -28,6 +29,7 @@ name = "carbide_host_support"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 
 # [local-dependencies]
 carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
@@ -39,6 +41,7 @@ carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
 
+arc-swap = { workspace = true }
 base64 = { workspace = true }
 csv = { workspace = true }
 eyre = { workspace = true }
@@ -50,8 +53,10 @@ rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 smbios-lib = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -69,7 +74,6 @@ serde_with = { workspace = true }
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
 rcgen = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

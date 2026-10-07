@@ -16,7 +16,6 @@
  */
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use axum_client_ip::ClientIp;
 use forge_tls::client_config::ClientCert;
 use rpc::forge::CloudInitInstructionsRequest;
 use rpc::forge_tls_client;
@@ -44,9 +43,10 @@ impl FromRequestParts<AppState> for Machine {
         let mut client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
             .await
             .map_err(|err| {
-                eprintln!(
-                    "error connecting to forge api from pxe - {:?} - url: {:?}",
-                    err, state.runtime_config.internal_api_url
+                tracing::error!(
+                    error = ?err,
+                    url = ?state.runtime_config.internal_api_url,
+                    "error connecting to forge api from pxe"
                 );
                 PxeRequestError::MissingClientConfig
             })?;
@@ -55,10 +55,7 @@ impl FromRequestParts<AppState> for Machine {
         // don't currently have use cases for a proxy in front of carbide-pxe... if that changes
         // someday we will need to configure a request extractor that conditionally uses
         // X-Forwarded-For if it's present and falling back on ClientIp if it's not.
-        let client_ip = ClientIp::from_request_parts(parts, state)
-            .await
-            .map_err(PxeRequestError::MissingIp)?
-            .0;
+        let client_ip = super::client_ip(parts, state).await?;
 
         client
             .get_cloud_init_instructions(tonic::Request::new(CloudInitInstructionsRequest {

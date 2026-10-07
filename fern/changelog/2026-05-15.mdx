@@ -1,0 +1,40 @@
+---
+tags: ["EOL", "deployment", "gb200", "rack-level-administration"]
+---
+
+## NVIDIA Infra Controller v0.8 <Badge intent="error">EOL</Badge>
+
+NVIDIA Infra Controller v0.8 introduced a unified documentation site, simplified deployment, and expanded rack-level administration for GB200 systems.
+
+### Compatibility
+
+- NICo Core v0.8.0
+- NICo REST API v1.4.2
+- NICo REST Site Agent v1.4.2
+- BlueField-3 DPU NIC firmware 32.47.2682
+- HBN 3.2.2-doca3.2.2
+
+### Deployment and rack-level administration
+
+The `helm-prereqs` workflow uses Helm and Helmfile to install MetalLB, the Zalando PostgreSQL Operator, cert-manager, Vault, External Secrets, NICo Core, and NICo REST. Its `setup.sh`, `preflight.sh`, and `clean.sh` orchestration and validation scripts reduce the work required to install the complete stack.
+
+Rack-level REST APIs support listing, validation, power control, firmware updates, and bring-up for individual racks and batches. Lifecycle management now covers GB200 racks, NVLink switches, and power shelves, with rack-level operations and tray-level control for compute, NVSwitch, and power-shelf trays.
+
+### Networking, BMC, health, and observability
+
+- Managed-host DPUs support BGP session passwords, and instance creation and updates can select explicit IP addresses within a VPC prefix.
+- VPC peering VNI and prefix lists are returned in deterministic order, reserved IP addresses are rejected during interface updates, instance status can be filtered by power status, and unknown query parameters return HTTP 400.
+- BMCs support static IP assignment.
+- Health alerts support configurable severity thresholds, the REST API supports NVUE health checks, and NICo collects NMX-T switch metrics.
+
+### Identity, security, UI, and platform updates
+
+- Credential APIs manage BMC and UEFI credentials, SuperNIC lockdown key management is available, and Vault connections verify TLS certificates.
+- The Admin UI includes IPAM views for DHCP, DNS, and networks, plus expected-rack component details. A hardcoded debug UI credential was removed.
+- `libredfish` was updated from v0.39.2 to v0.43.10, and the x86 QCOW imager now uses Ubuntu 24.04.
+
+### Reliability and cleanup
+
+Expected Machine OpenAPI definitions now handle BMC default-user fields correctly. Error attribution, RLA validation, inventory synchronization, single and batch instance APIs, and `nvLinkLogicalPartitionId` validation were improved. IPAM and related services require TLS certificates by default, while deprecated IPAM server code and legacy database relationships were removed.
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>

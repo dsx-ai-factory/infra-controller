@@ -7,13 +7,22 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
+
+	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 )
 
-const maxSuggestions = 6
-const maxHistory = 100
+const (
+	maxSuggestions           = 6
+	maxHistory               = 100
+	autocompleteFetchTimeout = 2 * time.Second
+)
 
 // argResourceMap maps command names to the resource type whose names should
 // be offered as argument completions.
@@ -36,6 +45,7 @@ var argResourceMap = map[string]string{
 	"allocation delete":             "allocation",
 	"audit get":                     "audit",
 	"machine get":                   "machine",
+	"machine dpu get":               "machine",
 	"ip-block get":                  "ip-block",
 	"ip-block update":               "ip-block",
 	"ip-block delete":               "ip-block",
@@ -87,7 +97,6 @@ var argResourceMap = map[string]string{
 }
 
 var history []string
-var historyPos int
 
 // RunREPL starts the interactive REPL loop with inline autocomplete.
 func RunREPL(s *Session) error {
@@ -113,8 +122,11 @@ func RunREPL(s *Session) error {
 	for {
 		line, err := readLineWithSuggestions(s, cmdNames)
 		if err != nil {
-			fmt.Println("\nGoodbye.")
-			return nil
+			if err == io.EOF {
+				fmt.Println("\nGoodbye.")
+				return nil
+			}
+			return err
 		}
 
 		line = strings.TrimSpace(line)
@@ -122,8 +134,9 @@ func RunREPL(s *Session) error {
 			continue
 		}
 
-		if len(history) == 0 || history[len(history)-1] != line {
-			history = append(history, line)
+		historyLine := commandHistoryLine(line, cmdMap, commands)
+		if len(history) == 0 || history[len(history)-1] != historyLine {
+			history = append(history, historyLine)
 			if len(history) > maxHistory {
 				history = history[1:]
 			}
@@ -216,51 +229,148 @@ func RunREPL(s *Session) error {
 			continue
 		}
 
-		if cmd, ok := cmdMap[line]; ok {
-			if err := cmd.Run(s, nil); err != nil {
-				fmt.Fprintf(os.Stderr, "%s %v\n", Red("Error:"), err)
-			}
+		command, rest, matched := matchCommandLine(line, cmdMap, commands)
+		if !matched {
+			fmt.Fprintf(os.Stderr, "%s unknown command: %s\n", Red("Error:"), line)
 			fmt.Println()
 			continue
 		}
 
-		matched := false
-		for _, cmd := range commands {
-			if strings.HasPrefix(line, cmd.Name) {
-				rest := strings.TrimSpace(line[len(cmd.Name):])
-				var args []string
-				if rest != "" {
-					args = strings.Fields(rest)
-				}
-				if err := cmd.Run(s, args); err != nil {
-					fmt.Fprintf(os.Stderr, "%s %v\n", Red("Error:"), err)
-				}
-				fmt.Println()
-				matched = true
-				break
-			}
+		args, parseErr := splitCommandArguments(rest)
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "%s %v\n\n", Red("Error:"), parseErr)
+			continue
 		}
-
-		if !matched {
-			fmt.Fprintf(os.Stderr, "%s unknown command: %s\n", Red("Error:"), line)
-			fmt.Println()
+		if err := command.Run(s, args); err != nil {
+			fmt.Fprintf(os.Stderr, "%s %v\n", Red("Error:"), err)
 		}
+		fmt.Println()
 	}
 }
 
-func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
+func matchCommandLine(line string, commandMap map[string]Command, commands []Command) (Command, string, bool) {
+	if command, ok := commandMap[line]; ok {
+		return command, "", true
+	}
+
+	bestIndex := -1
+	for i, command := range commands {
+		if !strings.HasPrefix(line, command.Name+" ") {
+			continue
+		}
+		if bestIndex == -1 || len(command.Name) > len(commands[bestIndex].Name) {
+			bestIndex = i
+		}
+	}
+	if bestIndex == -1 {
+		return Command{}, "", false
+	}
+	command := commands[bestIndex]
+	return command, strings.TrimSpace(line[len(command.Name):]), true
+}
+
+func commandHistoryLine(line string, commandMap map[string]Command, commands []Command) string {
+	command, rest, matched := matchCommandLine(line, commandMap, commands)
+	if !matched || !command.Sensitive || rest == "" {
+		return line
+	}
+	return command.Name + " <redacted>"
+}
+
+func splitCommandArguments(input string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var quote byte
+	escaped := false
+	started := false
+
+	flush := func() {
+		if !started {
+			return
+		}
+		args = append(args, current.String())
+		current.Reset()
+		started = false
+	}
+
+	for i := 0; i < len(input); i++ {
+		char := input[i]
+		if escaped {
+			current.WriteByte(char)
+			started = true
+			escaped = false
+			continue
+		}
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+				started = true
+				continue
+			}
+			if char == '\\' && quote == '"' {
+				value, multibyte, tail, err := strconv.UnquoteChar(input[i:], quote)
+				if err != nil {
+					return nil, fmt.Errorf("invalid escape sequence: %w", err)
+				}
+				if multibyte {
+					current.WriteRune(value)
+				} else {
+					current.WriteByte(byte(value))
+				}
+				i += len(input[i:]) - len(tail) - 1
+				started = true
+				continue
+			}
+			current.WriteByte(char)
+			started = true
+			continue
+		}
+
+		switch char {
+		case '\'', '"':
+			quote = char
+			started = true
+		case '\\':
+			escaped = true
+			started = true
+		case ' ', '\t', '\r', '\n':
+			flush()
+		default:
+			current.WriteByte(char)
+			started = true
+		}
+	}
+	if escaped {
+		return nil, fmt.Errorf("unfinished escape sequence")
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %q quote", string(quote))
+	}
+	flush()
+	return args, nil
+}
+
+func readLineWithSuggestions(s *Session, cmdNames []string) (_ string, err error) {
 	restore, err := RawMode()
 	if err != nil {
 		return "", err
 	}
 	defer func() {
-		restore()
+		if restore != nil {
+			restoreErr := restore()
+			if restoreErr != nil {
+				if err == nil {
+					err = restoreErr
+				} else {
+					err = errors.Join(err, restoreErr)
+				}
+			}
+		}
 		ShowCursor()
 	}()
 
 	prompt := s.PromptString()
 	line := ""
-	historyPos = -1
 	selectedSuggestion := -1
 	prevSuggestionCount := 0
 
@@ -311,14 +421,13 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 		case key.Char == KeyCtrlC:
 			line = ""
 			selectedSuggestion = -1
-			historyPos = -1
 			clearSuggestionLines(prevSuggestionCount)
 			prevSuggestionCount = 0
 			renderInput()
 
 		case key.Char == KeyCtrlD:
 			clearSuggestionLines(prevSuggestionCount)
-			return "", fmt.Errorf("EOF")
+			return "", io.EOF
 
 		case key.Char == KeyEnter || key.Char == KeyNewline:
 			suggestions := allSuggestions()
@@ -328,7 +437,6 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 			if selectedSuggestion >= 0 && selectedSuggestion < len(suggestions) {
 				line = suggestions[selectedSuggestion]
 				selectedSuggestion = -1
-				historyPos = -1
 				clearSuggestionLines(prevSuggestionCount)
 				prevSuggestionCount = 0
 				renderInput()
@@ -337,7 +445,6 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 			clearSuggestionLines(prevSuggestionCount)
 			ClearLine()
 			fmt.Print("\r" + prompt + line + "\r\n")
-			historyPos = -1
 			return line, nil
 
 		case key.Char == '\t':
@@ -375,18 +482,23 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 				prevSuggestionCount = 0
 				ClearLine()
 				fmt.Print("\r" + prompt + line + "\r\n")
-				restore()
-				chosen := selectFromHistory()
-				var rawErr error
-				restore, rawErr = RawMode()
-				if rawErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to enter raw mode: %v\n", rawErr)
+				restoreErr := restore()
+				restore = nil
+				if restoreErr != nil {
+					return "", restoreErr
+				}
+				chosen, historyErr := selectFromHistory()
+				if historyErr != nil {
+					return "", historyErr
+				}
+				restore, err = RawMode()
+				if err != nil {
+					return "", err
 				}
 				if chosen != "" {
 					line = chosen
 				}
 				selectedSuggestion = -1
-				historyPos = -1
 			}
 			renderInput()
 
@@ -409,14 +521,12 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 			if len(line) > 0 {
 				line = line[:len(line)-1]
 				selectedSuggestion = -1
-				historyPos = -1
 			}
 			renderInput()
 
 		case key.Char >= 32 && key.Char < 127:
 			line += string(key.Char)
 			selectedSuggestion = -1
-			historyPos = -1
 			renderInput()
 
 		default:
@@ -429,14 +539,170 @@ func getAllSuggestions(s *Session, input string, cmdNames []string) []string {
 	if input == "" {
 		return nil
 	}
-	for cmdPrefix, resourceType := range argResourceMap {
-		withSpace := cmdPrefix + " "
-		if strings.HasPrefix(strings.ToLower(input), strings.ToLower(withSpace)) {
-			argPart := input[len(withSpace):]
-			return getResourceSuggestions(s, cmdPrefix, resourceType, argPart)
-		}
+
+	commandName, argPart, matched := matchAutocompleteCommand(input, cmdNames)
+	if !matched {
+		return getCommandSuggestions(input, cmdNames)
+	}
+	if info, ok := generatedAutocompleteInfo(commandName); ok && len(info.PathParameters) > 0 {
+		return getGeneratedResourceSuggestions(s, info, argPart)
+	}
+	if resourceType, ok := argResourceMap[commandName]; ok {
+		return getResourceSuggestions(s, commandName, resourceType, argPart)
 	}
 	return getCommandSuggestions(input, cmdNames)
+}
+
+func matchAutocompleteCommand(input string, cmdNames []string) (string, string, bool) {
+	lowerInput := strings.ToLower(input)
+	commandName := ""
+	for _, name := range cmdNames {
+		withSpace := strings.ToLower(name) + " "
+		if strings.HasPrefix(lowerInput, withSpace) && len(name) > len(commandName) {
+			commandName = name
+		}
+	}
+	if commandName == "" {
+		return "", "", false
+	}
+	return commandName, input[len(commandName)+1:], true
+}
+
+func generatedAutocompleteInfo(commandName string) (appcli.GeneratedCommandInfo, bool) {
+	for _, info := range embeddedGeneratedCommandInfos {
+		if info.Name == commandName {
+			return info, true
+		}
+	}
+	return appcli.GeneratedCommandInfo{}, false
+}
+
+func getGeneratedResourceSuggestions(
+	s *Session,
+	info appcli.GeneratedCommandInfo,
+	argPart string,
+) []string {
+	prefixArgs, completedPaths, argFilter, ok := generatedAutocompleteArguments(info, argPart)
+	if !ok || len(completedPaths) >= len(info.PathParameters) ||
+		strings.HasPrefix(argFilter, "-") {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), autocompleteFetchTimeout)
+	defer cancel()
+
+	resolvedValues := map[string]string{
+		"siteId": strings.TrimSpace(s.Scope.SiteID),
+		"vpcId":  strings.TrimSpace(s.Scope.VpcID),
+	}
+	for i, value := range completedPaths {
+		parameter := info.PathParameters[i]
+		descriptor := GeneratedPathResourceDescriptor(info.Name, parameter)
+		items, supported, err := s.GeneratedResourceItems(
+			ctx,
+			descriptor,
+			resolvedValues,
+		)
+		if err != nil {
+			return nil
+		}
+		if !supported {
+			resolvedValues[parameter] = value
+			continue
+		}
+		item, found := matchGeneratedAutocompleteItem(items, value)
+		if !found {
+			return nil
+		}
+		resolvedValues[parameter] = item.ID
+	}
+
+	parameter := info.PathParameters[len(completedPaths)]
+	descriptor := GeneratedPathResourceDescriptor(info.Name, parameter)
+	items, supported, err := s.GeneratedResourceItems(
+		ctx,
+		descriptor,
+		resolvedValues,
+	)
+	if err != nil || !supported {
+		return nil
+	}
+	return resourceItemSuggestions(info.Name, prefixArgs, items, argFilter)
+}
+
+// generatedAutocompleteArguments separates generated command flags from
+// positional path values. Generated CLI flags must precede positional values,
+// so autocomplete needs to retain complete flags in the suggested command
+// while resolving only the path values against resource fetchers.
+func generatedAutocompleteArguments(
+	info appcli.GeneratedCommandInfo,
+	input string,
+) (prefixArgs []string, pathArgs []string, filter string, ok bool) {
+	args, err := splitCommandArguments(input)
+	if err != nil {
+		return nil, nil, "", false
+	}
+	completed := args
+	if len(args) > 0 && !endsWithWhitespace(input) {
+		filter = args[len(args)-1]
+		completed = args[:len(args)-1]
+	}
+
+	flagTakesValue := make(map[string]bool, len(info.Flags))
+	for _, flag := range info.Flags {
+		flagTakesValue[flag.Name] = flag.TakesValue
+	}
+
+	positionalStarted := false
+	for i := 0; i < len(completed); i++ {
+		token := completed[i]
+		if isGeneratedFlagToken(token) {
+			if positionalStarted {
+				return nil, nil, "", false
+			}
+			name, inline := generatedFlagName(token)
+			takesValue, exists := flagTakesValue[name]
+			if !exists {
+				return nil, nil, "", false
+			}
+			prefixArgs = append(prefixArgs, token)
+			if takesValue && !inline {
+				if i+1 >= len(completed) {
+					// The current partial token is this flag's value, not a
+					// resource path filter.
+					return nil, nil, "", false
+				}
+				i++
+				prefixArgs = append(prefixArgs, completed[i])
+			}
+			continue
+		}
+
+		positionalStarted = true
+		prefixArgs = append(prefixArgs, token)
+		pathArgs = append(pathArgs, token)
+	}
+	return prefixArgs, pathArgs, filter, true
+}
+
+func endsWithWhitespace(input string) bool {
+	if input == "" {
+		return false
+	}
+	switch input[len(input)-1] {
+	case ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
+}
+
+func matchGeneratedAutocompleteItem(items []NamedItem, value string) (NamedItem, bool) {
+	matches := matchingGeneratedResourceItems(items, value)
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return NamedItem{}, false
 }
 
 func getResourceSuggestions(s *Session, cmdPrefix, resourceType, argFilter string) []string {
@@ -448,18 +714,43 @@ func getResourceSuggestions(s *Session, cmdPrefix, resourceType, argFilter strin
 		}
 		items = fetched
 	}
-	lowerFilter := strings.ToLower(argFilter)
+	return resourceItemSuggestions(cmdPrefix, nil, items, argFilter)
+}
+
+func resourceItemSuggestions(
+	cmdPrefix string,
+	completed []string,
+	items []NamedItem,
+	argFilter string,
+) []string {
+	lowerFilter := strings.ToLower(strings.TrimSpace(argFilter))
+	prefixParts := []string{cmdPrefix}
+	for _, argument := range completed {
+		prefixParts = append(prefixParts, quoteCommandArgument(argument))
+	}
+	prefix := strings.Join(prefixParts, " ") + " "
+
 	var matches []string
 	for _, item := range items {
 		name := item.Name
 		if name == "" {
 			name = item.ID
 		}
-		if lowerFilter == "" || strings.Contains(strings.ToLower(name), lowerFilter) {
-			matches = append(matches, cmdPrefix+" "+name)
+		if lowerFilter == "" ||
+			strings.Contains(strings.ToLower(name), lowerFilter) ||
+			strings.Contains(strings.ToLower(item.ID), lowerFilter) {
+			matches = append(matches, prefix+quoteCommandArgument(name))
 		}
 	}
 	return matches
+}
+
+func quoteCommandArgument(value string) string {
+	if !strings.ContainsAny(value, " \t\r\n'\"\\") &&
+		strings.IndexFunc(value, func(char rune) bool { return !strconv.IsPrint(char) }) == -1 {
+		return value
+	}
+	return strconv.Quote(value)
 }
 
 func getCommandSuggestions(input string, cmdNames []string) []string {
@@ -527,7 +818,7 @@ func runScopeSet(s *Session, resourceType, nameOrID string) {
 			return
 		}
 	} else {
-		item, err = s.Resolver.Resolve(context.Background(), resourceType, strings.Title(resourceType))
+		item, err = s.Resolver.Resolve(context.Background(), resourceType, generatedParameterLabel(resourceType))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s %v\n\n", Red("Error:"), err)
 			return
@@ -585,9 +876,9 @@ type jwtAccessClaim struct {
 
 // selectFromHistory opens a windowed Select picker with the command history.
 // Returns the chosen command, or empty string if cancelled.
-func selectFromHistory() string {
+func selectFromHistory() (string, error) {
 	if len(history) == 0 {
-		return ""
+		return "", nil
 	}
 	// Show most recent first.
 	items := make([]SelectItem, len(history))
@@ -595,10 +886,13 @@ func selectFromHistory() string {
 		items[len(history)-1-i] = SelectItem{Label: cmd, ID: cmd}
 	}
 	selected, err := Select("History", items)
-	if err != nil {
-		return ""
+	if err == errSelectionCancelled {
+		return "", nil
 	}
-	return selected.ID
+	if err != nil {
+		return "", err
+	}
+	return selected.ID, nil
 }
 
 func extractOrgsFromJWT(tokenStr string) []string {

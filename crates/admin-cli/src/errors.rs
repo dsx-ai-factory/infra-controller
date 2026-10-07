@@ -18,100 +18,103 @@
 use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineIdParseError};
+use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::switch::{SwitchId, SwitchIdParseError};
-use rpc::forge::MachineType;
 use rpc::forge_tls_client::ForgeTlsClientError;
 
 #[derive(thiserror::Error, Debug)]
-pub enum CarbideCliError {
-    #[error("Unable to connect to carbide API: {0}")]
+pub(crate) enum CarbideCliError {
+    #[error("unable to connect to carbide API: {0}")]
     ApiConnectFailed(#[from] ForgeTlsClientError),
 
-    #[error("The API call to the Forge API server returned {0}")]
+    #[error("the API call to the forge API server returned {0}")]
     ApiInvocationError(#[from] tonic::Status),
 
-    #[error("Error while writing into string: {0}")]
+    #[error("ufm credential command is unavailable: {0}")]
+    UfmCredentialCommandUnavailable(String),
+
+    #[error("error while writing into string: {0}")]
     StringWriteError(#[from] std::fmt::Error),
 
-    #[error("Generic Error: {0}")]
+    #[error("generic error: {0}")]
     GenericError(String),
 
-    #[error("Operation not allowed due to potential inconsistencies with cloud database.")]
+    #[error("operation not allowed due to potential inconsistencies with cloud database")]
     CloudUnsafeOp,
 
-    #[error("Cannot specify both {0} and {1}. Please provide only one.")]
+    #[error("cannot specify both {0} and {1}. please provide only one")]
     ChooseOneError(&'static str, &'static str),
 
-    #[error("Must specify either {0} or {1}.")]
+    #[error("must specify either {0} or {1}")]
     RequireOneError(&'static str, &'static str),
 
-    #[error("Invalid datetime format: {0}. Use 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'")]
+    #[error("invalid datetime format: {0}. use 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'")]
     InvalidDateTimeFromUserInput(String),
 
-    #[error("Segment not found.")]
+    #[error("segment not found")]
     SegmentNotFound,
 
-    #[error("Domain not found.")]
+    #[error("domain not found")]
     DomainNotFound,
 
-    #[error("Uuid not found.")]
+    #[error("uuid not found")]
     UuidNotFound,
 
-    #[error("MAC not found.")]
+    #[error("MAC not found")]
     MacAddressNotFound,
 
-    #[error("Serial number not found.")]
+    #[error("serial number not found")]
     SerialNumberNotFound,
 
-    #[error("Error while handling json: {0}")]
+    #[error("error while handling json: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    #[error("Error while handling yaml: {0}")]
+    #[error("error while handling yaml: {0}")]
     YamlError(#[from] serde_yaml::Error),
 
-    #[error("Error while handling csv: {0}")]
+    #[error("error while handling csv: {0}")]
     CsvError(#[from] csv::Error),
 
-    #[error("Unexpected machine type. Expected {0:?} but found {1:?}")]
-    UnexpectedMachineType(MachineType, MachineType),
-
-    #[error("Machine with id {0} not found")]
+    #[error("machine with id {0} not found")]
     MachineNotFound(MachineId),
 
-    #[error("Switch with id {0} not found")]
+    #[error("switch with id {0} not found")]
     SwitchNotFound(SwitchId),
 
-    #[error("Remediation with id {0} not found")]
+    #[error("remediation with id {0} not found")]
     RemediationNotFound(RemediationId),
 
-    #[error("Instance with id {0} not found")]
+    #[error("instance with id {0} not found")]
     InstanceNotFound(InstanceId),
 
-    #[error("Tenant with id {0} not found")]
+    #[error("tenant with id {0} not found")]
     TenantNotFound(String),
 
-    #[error("I/O error. Does the file exist? {0}")]
+    #[error("no SitePrefix found with id {0}")]
+    SitePrefixNotFound(SitePrefixId),
+
+    #[error("I/O error. does the file exist? {0}")]
     IOError(#[from] std::io::Error),
 
     /// For when you expected some values but the response was empty.
     /// If empty is acceptable don't use this.
-    #[error("No results returned")]
+    #[error("no results returned")]
     Empty,
 
-    #[error("Not Implemented {0}")]
+    #[error("not implemented {0}")]
     NotImplemented(String),
 
-    #[error("Invalid Machine id: {0}")]
+    #[error("unsupported operation: {0}")]
+    UnsupportedOperation(&'static str),
+
+    #[error("invalid machine id: {0}")]
     InvalidMachineId(#[from] MachineIdParseError),
 
-    #[error("Invalid Switch id: {0}")]
+    #[error("invalid switch id: {0}")]
     InvalidSwitchId(#[from] SwitchIdParseError),
 
     #[error("RPC data conversion error: {0}")]
     RpcDataConversionError(#[from] ::rpc::errors::RpcDataConversionError),
-
-    #[error("Invalid Routing Profile Type: {0}")]
-    InvalidRoutingProfileType(String),
 
     #[error(transparent)]
     EyreReport(eyre::Report),
@@ -126,4 +129,4 @@ impl From<eyre::Report> for CarbideCliError {
     }
 }
 
-pub type CarbideCliResult<T> = Result<T, CarbideCliError>;
+pub(crate) type CarbideCliResult<T> = Result<T, CarbideCliError>;

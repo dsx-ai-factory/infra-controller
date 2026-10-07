@@ -21,6 +21,7 @@ type WorkerPool struct {
 	cancel  context.CancelFunc
 	started int32
 	stopped int32
+	mu      sync.RWMutex // protects jobs channel close vs. concurrent sends
 
 	// Metrics
 	metrics *metricsCollector
@@ -118,7 +119,9 @@ func (wp *WorkerPool) Stop() error {
 	wp.cancel()
 
 	// Close job queue to prevent new submissions
+	wp.mu.Lock()
 	close(wp.jobs)
+	wp.mu.Unlock()
 
 	// Wait for all workers to finish
 	wp.wg.Wait()
@@ -133,6 +136,9 @@ func (wp *WorkerPool) Submit(task Task) error {
 
 // SubmitWithResult adds a task to the worker pool and optionally sends the result to the provided channel.
 func (wp *WorkerPool) SubmitWithResult(task Task, resultCh chan<- JobResult) error {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
+
 	if atomic.LoadInt32(&wp.stopped) == 1 {
 		return fmt.Errorf("worker pool is stopped")
 	}

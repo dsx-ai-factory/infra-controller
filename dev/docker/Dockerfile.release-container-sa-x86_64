@@ -41,15 +41,9 @@ RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
   /etc/init.d/postgresql start && \
   sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;" && \
   createdb root && \
-  # --no-workspace: runs the task once at workspace root instead of once per workspace member.
-  # Without this flag, cargo-make iterates all 64 crates and invokes `cargo clippy` / `cargo build`
-  # per member, which causes shared deps (tonic, sqlx, carbide-rpc, etc.) to be recompiled
-  # repeatedly. With --no-workspace, a single invocation at the root builds everything once.
-  #
-  # Trade-off: per-crate feature isolation is lost — features are unified across the whole
-  # workspace at compile time. This is acceptable here because all crates ship together as a
-  # single release image; feature conflicts between separately-deployed services are not a concern.
-  # clippy-release shares release artifacts with build-release below, avoiding a full double-compile.
+  # Run clippy once at the workspace root. build-release itself selects only the packages whose
+  # artifacts are copied into the runtime image, so test-only workspace members cannot enable
+  # features in production dependencies.
   cargo make --no-workspace clippy-release && \
   echo "$(date): Finished cargo make clippy-release\n" && \
   cargo make carbide-lints && \
@@ -78,12 +72,15 @@ ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 RUN mkdir -p /opt/carbide/migrations && \
   mkdir -p /opt/carbide/pxe/templates && \
+  mkdir -p /opt/carbide/scout-firmware-scripts && \
   mkdir -p /opt/carbide/static
 
 RUN echo "$(date): Start runtime container build"
 
 COPY --from=builder ["/carbide/target/bin/carbide-api", "/carbide/target/bin/carbide", "/carbide/target/bin/carbide-dns", "/carbide/target/bin/nico-admin-cli", "/carbide/target/bin/carbide-dsx-exchange-consumer", "/carbide/target/bin/forge-dpu-agent", "/carbide/target/bin/forge-dhcp-server", "/carbide/target/bin/forge-hw-health", "/carbide/target/bin/forge-log-parser", "/carbide/target/bin/ssh-console", "/carbide/target/bin/carbide-bmc-proxy", "/opt/carbide/"]
 COPY --from=builder /carbide/target/bin/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks
+RUN mkdir -p /usr/lib/kea/hooks && \
+    ln -sf /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so /usr/lib/kea/hooks/libdhcp.so
 RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli && \
     ln -s /opt/carbide/nico-admin-cli /opt/carbide/forge-admin-cli
 
@@ -91,6 +88,7 @@ RUN echo "$(date): Finished copies"
 
 COPY crates/api-db/migrations/ /opt/carbide/migrations/
 COPY pxe/templates/*  /opt/carbide/pxe/templates/
+COPY pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
 COPY crates/api/casbin-policy.csv /opt/carbide/
 
 ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv

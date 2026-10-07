@@ -7,11 +7,12 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/testsuite"
+	temporalworkflow "go.temporal.io/sdk/workflow"
 )
 
 type CreateExpectedRackTestSuite struct {
@@ -32,31 +33,35 @@ func (certs *CreateExpectedRackTestSuite) AfterTest(suiteName, testName string) 
 func (certs *CreateExpectedRackTestSuite) Test_CreateExpectedRack_Success() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRack{
-		RackId:        &cwssaws.RackId{Id: "test-create-rack-workflow-001"},
-		RackProfileId: &cwssaws.RackProfileId{Id: "test-create-rack-profile-001"},
+	request := &corev1.ExpectedRack{
+		RackId:        &corev1.RackId{Id: "test-create-rack-workflow-001"},
+		RackProfileId: &corev1.RackProfileId{Id: "test-create-rack-profile-001"},
 	}
 
 	// Mock CreateExpectedRackOnSite activity
 	certs.env.RegisterActivity(expectedRackManager.CreateExpectedRackOnSite)
 	certs.env.OnActivity(expectedRackManager.CreateExpectedRackOnSite, mock.Anything, mock.Anything).Return(nil)
 
-	// Mock CreateExpectedRackOnFlow activity
-	certs.env.RegisterActivity(expectedRackManager.CreateExpectedRackOnFlow)
-	certs.env.OnActivity(expectedRackManager.CreateExpectedRackOnFlow, mock.Anything, mock.Anything).Return(nil)
+	certs.env.OnGetVersion(
+		removeCreateExpectedRackOnFlowChangeID,
+		temporalworkflow.DefaultVersion,
+		removeCreateExpectedRackOnFlowVersion,
+	).Return(removeCreateExpectedRackOnFlowVersion)
+	certs.env.OnActivity(expectedRackManager.CreateExpectedRackOnFlow, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// Execute CreateExpectedRack workflow
 	certs.env.ExecuteWorkflow(CreateExpectedRack, request)
 	certs.True(certs.env.IsWorkflowCompleted())
 	certs.NoError(certs.env.GetWorkflowError())
+	certs.env.AssertActivityNumberOfCalls(certs.T(), "CreateExpectedRackOnFlow", 0)
 }
 
 func (certs *CreateExpectedRackTestSuite) Test_CreateExpectedRack_Failure() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRack{
-		RackId:        &cwssaws.RackId{Id: "test-create-rack-workflow-001"},
-		RackProfileId: &cwssaws.RackProfileId{Id: "test-create-rack-profile-001"},
+	request := &corev1.ExpectedRack{
+		RackId:        &corev1.RackId{Id: "test-create-rack-workflow-001"},
+		RackProfileId: &corev1.RackProfileId{Id: "test-create-rack-profile-001"},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -65,26 +70,29 @@ func (certs *CreateExpectedRackTestSuite) Test_CreateExpectedRack_Failure() {
 	certs.env.RegisterActivity(expectedRackManager.CreateExpectedRackOnSite)
 	certs.env.OnActivity(expectedRackManager.CreateExpectedRackOnSite, mock.Anything, mock.Anything).Return(errors.New(errMsg))
 
-	// Register CreateExpectedRackOnFlow activity (not called when Core fails)
-	certs.env.RegisterActivity(expectedRackManager.CreateExpectedRackOnFlow)
-
 	// Execute CreateExpectedRack workflow
 	certs.env.ExecuteWorkflow(CreateExpectedRack, request)
 	certs.True(certs.env.IsWorkflowCompleted())
 	certs.Error(certs.env.GetWorkflowError())
 }
 
-func (certs *CreateExpectedRackTestSuite) Test_CreateExpectedRack_CoreSuccess_FlowFailure() {
+func (certs *CreateExpectedRackTestSuite) Test_CreateExpectedRack_LegacyVersion_FlowFailure() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRack{
-		RackId:        &cwssaws.RackId{Id: "test-create-rack-workflow-002"},
-		RackProfileId: &cwssaws.RackProfileId{Id: "test-create-rack-profile-002"},
+	request := &corev1.ExpectedRack{
+		RackId:        &corev1.RackId{Id: "test-create-rack-workflow-002"},
+		RackProfileId: &corev1.RackProfileId{Id: "test-create-rack-profile-002"},
 	}
 
 	// Mock CreateExpectedRackOnSite activity (success)
 	certs.env.RegisterActivity(expectedRackManager.CreateExpectedRackOnSite)
 	certs.env.OnActivity(expectedRackManager.CreateExpectedRackOnSite, mock.Anything, mock.Anything).Return(nil)
+
+	certs.env.OnGetVersion(
+		removeCreateExpectedRackOnFlowChangeID,
+		temporalworkflow.DefaultVersion,
+		removeCreateExpectedRackOnFlowVersion,
+	).Return(temporalworkflow.DefaultVersion)
 
 	// Mock CreateExpectedRackOnFlow activity (failure - workflow should still succeed)
 	certs.env.RegisterActivity(expectedRackManager.CreateExpectedRackOnFlow)
@@ -118,9 +126,9 @@ func (uerts *UpdateExpectedRackTestSuite) AfterTest(suiteName, testName string) 
 func (uerts *UpdateExpectedRackTestSuite) Test_UpdateExpectedRack_Success() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRack{
-		RackId:        &cwssaws.RackId{Id: "test-update-rack-workflow-001"},
-		RackProfileId: &cwssaws.RackProfileId{Id: "test-update-rack-profile-001"},
+	request := &corev1.ExpectedRack{
+		RackId:        &corev1.RackId{Id: "test-update-rack-workflow-001"},
+		RackProfileId: &corev1.RackProfileId{Id: "test-update-rack-profile-001"},
 	}
 
 	// Mock UpdateExpectedRackOnSite activity
@@ -136,9 +144,9 @@ func (uerts *UpdateExpectedRackTestSuite) Test_UpdateExpectedRack_Success() {
 func (uerts *UpdateExpectedRackTestSuite) Test_UpdateExpectedRack_Failure() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRack{
-		RackId:        &cwssaws.RackId{Id: "test-update-rack-workflow-001"},
-		RackProfileId: &cwssaws.RackProfileId{Id: "test-update-rack-profile-001"},
+	request := &corev1.ExpectedRack{
+		RackId:        &corev1.RackId{Id: "test-update-rack-workflow-001"},
+		RackProfileId: &corev1.RackProfileId{Id: "test-update-rack-profile-001"},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -175,7 +183,7 @@ func (derts *DeleteExpectedRackTestSuite) AfterTest(suiteName, testName string) 
 func (derts *DeleteExpectedRackTestSuite) Test_DeleteExpectedRack_Success() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRackRequest{
+	request := &corev1.ExpectedRackRequest{
 		RackId: "test-delete-rack-workflow-001",
 	}
 
@@ -192,7 +200,7 @@ func (derts *DeleteExpectedRackTestSuite) Test_DeleteExpectedRack_Success() {
 func (derts *DeleteExpectedRackTestSuite) Test_DeleteExpectedRack_Failure() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRackRequest{
+	request := &corev1.ExpectedRackRequest{
 		RackId: "test-delete-rack-workflow-001",
 	}
 
@@ -230,11 +238,11 @@ func (rarts *ReplaceAllExpectedRacksTestSuite) AfterTest(suiteName, testName str
 func (rarts *ReplaceAllExpectedRacksTestSuite) Test_ReplaceAllExpectedRacks_Success() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRackList{
-		ExpectedRacks: []*cwssaws.ExpectedRack{
+	request := &corev1.ExpectedRackList{
+		ExpectedRacks: []*corev1.ExpectedRack{
 			{
-				RackId:        &cwssaws.RackId{Id: "test-replace-rack-workflow-001"},
-				RackProfileId: &cwssaws.RackProfileId{Id: "test-replace-rack-profile-001"},
+				RackId:        &corev1.RackId{Id: "test-replace-rack-workflow-001"},
+				RackProfileId: &corev1.RackProfileId{Id: "test-replace-rack-profile-001"},
 			},
 		},
 	}
@@ -252,11 +260,11 @@ func (rarts *ReplaceAllExpectedRacksTestSuite) Test_ReplaceAllExpectedRacks_Succ
 func (rarts *ReplaceAllExpectedRacksTestSuite) Test_ReplaceAllExpectedRacks_Failure() {
 	var expectedRackManager iActivity.ManageExpectedRack
 
-	request := &cwssaws.ExpectedRackList{
-		ExpectedRacks: []*cwssaws.ExpectedRack{
+	request := &corev1.ExpectedRackList{
+		ExpectedRacks: []*corev1.ExpectedRack{
 			{
-				RackId:        &cwssaws.RackId{Id: "test-replace-rack-workflow-001"},
-				RackProfileId: &cwssaws.RackProfileId{Id: "test-replace-rack-profile-001"},
+				RackId:        &corev1.RackId{Id: "test-replace-rack-workflow-001"},
+				RackProfileId: &corev1.RackProfileId{Id: "test-replace-rack-profile-001"},
 			},
 		},
 	}

@@ -16,13 +16,12 @@
  */
 
 use rpc::forge::InstanceConfigBuilder;
-pub use rpc::forge::{
-    ComputeAllocationAttributes, CreateComputeAllocationRequest, DeleteComputeAllocationRequest,
+pub(in crate::tests) use rpc::forge::{
     DhcpDiscovery, InstanceAllocationRequest, InstanceConfig, InstanceConfigUpdateRequest,
-    UpdateComputeAllocationRequest, VpcCreationRequest, VpcDeletionRequest, VpcUpdateRequest,
+    VpcCreationRequest, VpcDeletionRequest, VpcUpdateRequest,
 };
 
-pub trait InstanceConfigExt {
+pub(in crate::tests) trait InstanceConfigExt {
     fn default_tenant_and_os() -> InstanceConfigBuilder;
 }
 

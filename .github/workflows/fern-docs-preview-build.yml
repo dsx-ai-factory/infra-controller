@@ -15,7 +15,7 @@
 
 # Workflow 1 of 2 for Fern doc previews.
 #
-# Collects fern/, docs/, rest-api/openapi/, and PR metadata and uploads an artifact.
+# Collects Fern's source inputs and PR metadata and uploads an artifact.
 #
 # The companion workflow (fern-docs-preview-comment.yml) runs after this one;
 # it skips cleanly when no artifact exists (e.g. skipped fork pull_request).
@@ -27,6 +27,8 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
+      - 'rest-api/flow/docs/**'
       - 'rest-api/openapi/**'
       - '.github/workflows/fern-docs-preview-build.yml'
   push:
@@ -35,6 +37,8 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
+      - 'rest-api/flow/docs/**'
       - 'rest-api/openapi/**'
       - '.github/workflows/fern-docs-preview-build.yml'
 
@@ -46,29 +50,30 @@ jobs:
     if: >-
       (github.event_name == 'push' && contains(github.ref, 'refs/heads/pull-request/'))
       || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout PR
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Save PR metadata
         env:
+          BASE_REF: ${{ github.base_ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           mkdir -p preview-metadata
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "${{ github.event.pull_request.number }}" > preview-metadata/pr_number
             echo "${{ github.head_ref }}" > preview-metadata/head_ref
-            git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- '*.md' > preview-metadata/changed_md_files 2>/dev/null || true
+            git diff --name-only "origin/${BASE_REF}...HEAD" -- '*.md' '*.mdx' > preview-metadata/changed_md_files 2>/dev/null || true
           else
             # copy-pr-bot push to pull-request/<n> (no pull_request payload on push)
             branch="${GITHUB_REF_NAME}"
             echo "${branch#pull-request/}" > preview-metadata/pr_number
             echo "${branch}" > preview-metadata/head_ref
-            git fetch origin "${DEFAULT_BRANCH}" --depth=64 2>/dev/null || true
-            git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" -- '*.md' > preview-metadata/changed_md_files 2>/dev/null || true
+            git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" -- '*.md' '*.mdx' > preview-metadata/changed_md_files 2>/dev/null || true
           fi
 
       - name: Upload Fern docs inputs and metadata
@@ -78,6 +83,8 @@ jobs:
           path: |
             fern/
             docs/
+            RELEASE.md
+            rest-api/flow/docs/
             rest-api/openapi/
             preview-metadata/
           retention-days: 1

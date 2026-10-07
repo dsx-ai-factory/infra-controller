@@ -58,7 +58,10 @@ func LoginCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			cfg, _ := LoadConfig()
+			cfg, err := LoadConfig()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
 			ApplyEnvOverrides(cfg)
 
 			tokenCommand := c.String("token-command")
@@ -236,14 +239,16 @@ func LoginWithOIDCConfig(cfg *ConfigFile, configPath string) (string, error) {
 		tokenResp, err = refreshTokenGrant(oidc.TokenURL, oidc.ClientID, oidc.ClientSecret, oidc.RefreshToken)
 	}
 	if tokenResp == nil && oidc.Username == "" && oidc.ClientSecret != "" {
-		tokenResp, err = clientCredentialsGrant(oidc.TokenURL, oidc.ClientID, oidc.ClientSecret)
+		tokenResp, err = clientCredentialsGrant(oidc)
 	}
 	if tokenResp == nil && oidc.Username != "" && oidc.Password != "" {
 		tokenResp, err = passwordGrant(oidc.TokenURL, oidc.ClientID, oidc.ClientSecret, oidc.Username, oidc.Password)
 	}
 	if tokenResp == nil {
 		if err != nil {
-			return "", fmt.Errorf("OIDC login failed: %w", err)
+			// Nothing is defaulted on this path, every value came from config, so the
+			// hint carries only the endpoint that was contacted.
+			return "", fmt.Errorf("OIDC login failed: %w%s", err, loginFailureHint(oidc.TokenURL, nil))
 		}
 		return "", fmt.Errorf("OIDC login requires auth.oidc.refresh_token, client credentials, or username/password in config")
 	}
@@ -373,25 +378,79 @@ func extractNGCToken(body []byte) string {
 	return resp.AccessToken
 }
 
-func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
-	tokenURL := c.String("token-url")
-	if tokenURL == "" && cfg.Auth.OIDC != nil {
-		tokenURL = cfg.Auth.OIDC.TokenURL
+// resolveOIDCRealm returns the Keycloak realm used to build the token endpoint from
+// --keycloak-url, and whether it came from the flag's built-in default rather than from
+// the command line or config. An explicit flag wins over config, matching client-id.
+func resolveOIDCRealm(c *cli.Context, cfg *ConfigFile) (realm string, fromDefault bool) {
+	if cliFlagExplicitlySet(c, "keycloak-realm") {
+		return c.String("keycloak-realm"), false
 	}
+	if cfg.Auth.OIDC != nil && cfg.Auth.OIDC.Realm != "" {
+		return cfg.Auth.OIDC.Realm, false
+	}
+	return c.String("keycloak-realm"), true
+}
+
+// resolveOIDCClientID returns the OAuth client ID, and whether it came from the flag's
+// built-in default rather than from the command line or config.
+func resolveOIDCClientID(c *cli.Context, cfg *ConfigFile) (clientID string, fromDefault bool) {
+	if cliFlagExplicitlySet(c, "client-id") {
+		return c.String("client-id"), false
+	}
+	if cfg.Auth.OIDC != nil && cfg.Auth.OIDC.ClientID != "" {
+		return cfg.Auth.OIDC.ClientID, false
+	}
+	return c.String("client-id"), true
+}
+
+// loginFailureHint names the token endpoint that was actually contacted, plus any values
+// that came from a built-in default. A realm or client that does not exist in the target
+// Keycloak fails with a 404 or invalid_client that identifies neither, so without this
+// the built-in defaults are invisible in the error.
+func loginFailureHint(tokenURL string, defaulted []string) string {
+	hint := "\n  token endpoint: " + tokenURL
+	if len(defaulted) > 0 {
+		hint += "\n  using built-in default " + strings.Join(defaulted, " and ")
+		hint += "\n  pass the flag explicitly, or set auth.oidc in " + ConfigPath()
+	}
+	return hint
+}
+
+func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
+	// Values that fell back to a built-in default, recorded so a failed login can name
+	// them. Only populated where the value was actually used: a realm supplied through
+	// --token-url never goes through resolveOIDCRealm.
+	var defaulted []string
+	var resolvedRealm string
+
+	// An endpoint supplied on the command line or in the environment beats the config,
+	// matching resolveOIDCRealm and resolveOIDCClientID. `nicocli init` scaffolds
+	// auth.oidc.token_url, and login persists it, so checking the config first left
+	// --keycloak-url ignored and the login pointed at whichever realm the config named.
+	// Neither URL flag declares a Value, so a non-empty string came from the user.
+	tokenURL := c.String("token-url")
 	if tokenURL == "" {
-		if keycloakURL := c.String("keycloak-url"); keycloakURL != "" {
-			realm := c.String("keycloak-realm")
+		keycloakURL := c.String("keycloak-url")
+		if keycloakURL != "" {
+			realm, realmFromDefault := resolveOIDCRealm(c, cfg)
+			if realmFromDefault {
+				defaulted = append(defaulted, "--keycloak-realm="+realm)
+			}
+			resolvedRealm = realm
 			tokenURL = fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token",
 				strings.TrimRight(keycloakURL, "/"), realm)
 		}
+	}
+	if tokenURL == "" && cfg.Auth.OIDC != nil {
+		tokenURL = cfg.Auth.OIDC.TokenURL
 	}
 	if tokenURL == "" {
 		return fmt.Errorf("--token-url or --keycloak-url is required (or set auth.oidc.token_url in config)")
 	}
 
-	clientID := c.String("client-id")
-	if clientID == "" && cfg.Auth.OIDC != nil {
-		clientID = cfg.Auth.OIDC.ClientID
+	clientID, clientIDFromDefault := resolveOIDCClientID(c, cfg)
+	if clientIDFromDefault {
+		defaulted = append(defaulted, "--client-id="+clientID)
 	}
 
 	clientSecret := c.String("client-secret")
@@ -413,11 +472,20 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 	var err error
 
 	if username == "" && clientSecret != "" {
-		tokenResp, err = clientCredentialsGrant(tokenURL, clientID, clientSecret)
+		requestOIDC := ConfigOIDC{}
+		if cfg.Auth.OIDC != nil {
+			requestOIDC = *cfg.Auth.OIDC
+		}
+		requestOIDC.TokenURL = tokenURL
+		requestOIDC.ClientID = clientID
+		requestOIDC.ClientSecret = clientSecret
+		tokenResp, err = clientCredentialsGrant(&requestOIDC)
 	} else {
 		if username == "" {
 			fmt.Print("Username: ")
-			fmt.Scanln(&username)
+			if _, scanErr := fmt.Scanln(&username); scanErr != nil {
+				return fmt.Errorf("reading username: %w", scanErr)
+			}
 		}
 		if password == "" {
 			fmt.Print("Password: ")
@@ -431,7 +499,7 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 		tokenResp, err = passwordGrant(tokenURL, clientID, clientSecret, username, password)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%w%s", err, loginFailureHint(tokenURL, defaulted))
 	}
 
 	if cfg.Auth.OIDC == nil {
@@ -443,6 +511,11 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 	cfg.Auth.OIDC.TokenURL = tokenURL
 	cfg.Auth.OIDC.ClientID = clientID
 	cfg.Auth.OIDC.ClientSecret = clientSecret
+	// Only persist a realm that was used to build tokenURL; a realm is meaningless
+	// against a token endpoint supplied directly.
+	if resolvedRealm != "" {
+		cfg.Auth.OIDC.Realm = resolvedRealm
+	}
 
 	if err := SaveConfig(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
@@ -465,14 +538,59 @@ func passwordGrant(tokenURL, clientID, clientSecret, username, password string) 
 	return postToken(tokenURL, data)
 }
 
-func clientCredentialsGrant(tokenURL, clientID, clientSecret string) (*TokenResponse, error) {
-	data := url.Values{
-		"grant_type":    {"client_credentials"},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
-		"scope":         {"openid"},
+func clientCredentialsGrant(oidc *ConfigOIDC) (*TokenResponse, error) {
+	const (
+		clientSecretPost  = "client_secret_post"
+		clientSecretBasic = "client_secret_basic"
+	)
+	reserved := map[string]struct{}{
+		"grant_type": {}, "client_id": {}, "client_secret": {}, "scope": {},
+		"username": {}, "password": {}, "refresh_token": {},
+		"client_assertion": {}, "client_assertion_type": {},
 	}
-	return postToken(tokenURL, data)
+	data := url.Values{
+		"grant_type": {"client_credentials"},
+	}
+	scopes := oidc.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{"openid"}
+	}
+	data.Set("scope", strings.Join(scopes, " "))
+	for name, value := range oidc.TokenParameters {
+		if _, blocked := reserved[name]; blocked {
+			return nil, fmt.Errorf("reserved token parameter %q cannot be configured", name)
+		}
+		data.Set(name, value)
+	}
+
+	method := oidc.ClientAuthMethod
+	if method == "" {
+		method = clientSecretPost
+	}
+	switch method {
+	case clientSecretPost:
+		data.Set("client_id", oidc.ClientID)
+		data.Set("client_secret", oidc.ClientSecret)
+		return postToken(oidc.TokenURL, data)
+	case clientSecretBasic:
+		return postTokenWithBasicAuth(oidc.TokenURL, data, oidc.ClientID, oidc.ClientSecret)
+	default:
+		return nil, fmt.Errorf("unsupported client_auth_method %q", method)
+	}
+}
+
+func postTokenWithBasicAuth(tokenURL string, data url.Values, clientID, clientSecret string) (*TokenResponse, error) {
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(clientID), url.QueryEscape(clientSecret))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token request: %w", err)
+	}
+	return parseTokenResponse(resp)
 }
 
 func refreshTokenGrant(tokenURL, clientID, clientSecret, refreshToken string) (*TokenResponse, error) {
@@ -492,6 +610,10 @@ func postToken(tokenURL string, data url.Values) (*TokenResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("token request: %w", err)
 	}
+	return parseTokenResponse(resp)
+}
+
+func parseTokenResponse(resp *http.Response) (*TokenResponse, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {

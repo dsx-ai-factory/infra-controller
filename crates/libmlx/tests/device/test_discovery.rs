@@ -14,8 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use carbide_test_support::Outcome::*;
-use carbide_test_support::{scenarios, value_scenarios};
+use carbide_test_support::scenarios;
 use libmlx::device::discovery::{convert_pci_name_to_address, parse_mlxfwmanager_xml};
 
 // Test XML to use for a single DPU with failed access due to lockdown.
@@ -26,25 +27,7 @@ const DPU_FAILED_XML: &str = r#"
             <FW current="--" available=""/>
           </Versions>
           <MACs Base_Mac="N/A" />
-          <Status>Failed to open device</Status>
-          <Description></Description>
-        </Device>
-    </Devices>
-    "#;
-
-// More test XML for DPUs with failed access. Depending on
-// whatever, mlxfwmanager can decide to do different things.
-const DPU_FAILED_XML2: &str = r#"
-    <Devices>
-        <Device pciName="0000:9d:00.0" type="BlueField3" psid="" partNumber="--">
-          <Versions>
-            <FW current="--" available=""/>
-            <PXE current="--" available=""/>
-            <UEFI current="--" available=""/>
-            <UEFI_Virtio_blk current="--" available=""/>
-            <UEFI_Virtio_net current="--" available=""/>
-          </Versions>
-          <MACs Base_Mac="N/A" />
+          <GUIDs Base_Guid="--" />
           <Status>Failed to open device</Status>
           <Description></Description>
         </Device>
@@ -63,20 +46,12 @@ const MIXED_DEVICES_XML: &str = r#"
             <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
           </Versions>
           <MACs Base_Mac="c470bd31eb46" />
+          <GUIDs Base_Guid="c470bd030031eb46" />
           <Status>No matching image found</Status>
           <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
         </Device>
-        <Device pciName="0000:9d:00.0" type="BlueField3" psid="" partNumber="--">
-          <Versions>
-            <FW current="--" available=""/>
-            <PXE current="--" available=""/>
-            <UEFI current="--" available=""/>
-            <UEFI_Virtio_blk current="--" available=""/>
-            <UEFI_Virtio_net current="--" available=""/>
-          </Versions>
-          <MACs Base_Mac="N/A" />
+        <Device pciName="0000:9d:00.0" type="BlueField3">
           <Status>Failed to open device</Status>
-          <Description></Description>
         </Device>
         <Device pciName="0000:9c:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
           <Versions>
@@ -93,95 +68,253 @@ const MIXED_DEVICES_XML: &str = r#"
     </Devices>
     "#;
 
+const MISSING_OPTIONALS_XML: &str = r#"
+    <Devices>
+        <Device pciName="0000:01:00.0" type="ConnectX-6" psid="N/A" partNumber="N/A">
+          <Versions></Versions>
+          <MACs Base_Mac="N/A" />
+          <GUIDs Base_Guid="N/A" />
+          <Description>N/A</Description>
+        </Device>
+    </Devices>
+    "#;
+
+const EMPTY_DEVICES_XML: &str = "<Devices></Devices>";
+const MALFORMED_XML: &str = "<Devices><Device";
+
+// The child command's PATH is private to each case; no test changes the
+// process-wide environment or invokes a hardware management tool.
+#[cfg(unix)]
 #[test]
-fn test_parse_dpu_failed_device() {
-    let devices = parse_mlxfwmanager_xml(DPU_FAILED_XML).unwrap();
+fn report_collection_preserves_the_command_exit_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
-    assert_eq!(devices.len(), 1);
-    let device = &devices[0];
+    use libmlx::device::report::MlxDeviceReport;
 
-    // Basic fields should be present
-    assert_eq!(device.pci_name, "b4:00.0"); // Domain prefix removed
-    assert_eq!(device.device_type, "BlueField3");
+    struct Case {
+        scenario: &'static str,
+        exit_code: Option<u8>,
+        error: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            scenario: "successful query",
+            exit_code: Some(0),
+            error: None,
+        },
+        Case {
+            scenario: "partial query",
+            exit_code: Some(1),
+            error: None,
+        },
+        Case {
+            scenario: "unexpected tool failure despite valid XML",
+            exit_code: Some(2),
+            error: Some("mlxfwmanager failed with unexpected exit code"),
+        },
+        Case {
+            scenario: "missing tool",
+            exit_code: None,
+            error: Some("failed to build cmd"),
+        },
+    ];
+    for case in cases {
+        let directory = tempfile::tempdir().unwrap();
+        if let Some(exit_code) = case.exit_code {
+            let tool = directory.path().join("mlxfwmanager");
+            std::fs::write(
+                &tool,
+                format!("#!/bin/sh\nprintf '%s' \"$MLX_TEST_XML\"\nexit {exit_code}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mlxconfig-device"))
+            .args(["device", "report", "--format", "json"])
+            .env("PATH", directory.path())
+            .env("MLX_TEST_XML", MIXED_DEVICES_XML)
+            .output()
+            .unwrap();
+        match case.error {
+            Some(error) => {
+                assert!(!output.status.success(), "{}", case.scenario);
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(error),
+                    "{}: {:?}",
+                    case.scenario,
+                    output,
+                );
+            }
+            None => {
+                assert!(output.status.success(), "{}: {:?}", case.scenario, output);
+                let report: MlxDeviceReport = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report.devices.len(), 3, "{}", case.scenario);
+            }
+        }
+    }
+}
 
-    // Optional fields should be None for failed devices
-    assert_eq!(device.psid, None);
-    assert_eq!(device.part_number, None);
-    assert_eq!(device.fw_version_current, None); // "--" becomes None
-    assert_eq!(device.base_mac, None); // "N/A" becomes None
-    assert_eq!(device.device_description, None); // Empty becomes None
+fn device_with_missing_optionals(
+    pci_name: &str,
+    device_type: &str,
+    status: Option<&str>,
+) -> MlxDeviceInfo {
+    MlxDeviceInfo {
+        pci_name: pci_name.to_string(),
+        device_type: device_type.to_string(),
+        psid: None,
+        device_description: None,
+        part_number: None,
+        fw_version_current: None,
+        pxe_version_current: None,
+        uefi_version_current: None,
+        uefi_version_virtio_blk_current: None,
+        uefi_version_virtio_net_current: None,
+        base_mac: None,
+        base_guid: None,
+        status: status.map(str::to_string),
+    }
+}
 
-    // Status should be captured
-    assert_eq!(device.status, Some("Failed to open device".to_string()));
+fn failed_device(pci_name: &str) -> MlxDeviceInfo {
+    device_with_missing_optionals(pci_name, "BlueField3", Some("Failed to open device"))
+}
+
+fn accessible_device(pci_name: &str, base_mac: &str) -> MlxDeviceInfo {
+    MlxDeviceInfo {
+        pci_name: pci_name.to_string(),
+        device_type: "BlueField3".to_string(),
+        psid: Some("MT_0000001010".to_string()),
+        device_description: Some(
+            "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB \
+             (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; \
+             16GB on-board DDR; integrated BMC; Crypto Enabled"
+                .to_string(),
+        ),
+        part_number: Some("900-9D3B4-00EN-E_Ax".to_string()),
+        fw_version_current: Some("32.42.1000".to_string()),
+        pxe_version_current: Some("3.7.0500".to_string()),
+        uefi_version_current: Some("14.35.0015".to_string()),
+        uefi_version_virtio_blk_current: Some("22.4.0013".to_string()),
+        uefi_version_virtio_net_current: Some("21.4.0013".to_string()),
+        base_mac: Some(base_mac.parse().unwrap()),
+        base_guid: None,
+        status: Some("No matching image found".to_string()),
+    }
 }
 
 #[test]
-fn test_parse_dpu_failed_device2() {
-    let devices = parse_mlxfwmanager_xml(DPU_FAILED_XML2).unwrap();
+fn parse_mlxfwmanager_xml_cases() {
+    scenarios!(
+        run = parse_mlxfwmanager_xml;
+        "failed DPU normalizes omitted and placeholder values" {
+            DPU_FAILED_XML => Yields(vec![failed_device("b4:00.0")]),
+        }
 
-    assert_eq!(devices.len(), 1);
-    let device = &devices[0];
+        "mixed devices preserve every parsed field" {
+            MIXED_DEVICES_XML => Yields(vec![
+                MlxDeviceInfo {
+                    base_guid: Some("c470bd030031eb46".to_string()),
+                    ..accessible_device("dc:00.0", "c4:70:bd:31:eb:46")
+                },
+                failed_device("9d:00.0"),
+                accessible_device("9c:00.0", "c4:70:bd:31:ea:12"),
+            ]),
+        }
 
-    // Basic fields should be present
-    assert_eq!(device.pci_name, "9d:00.0"); // Domain prefix removed
-    assert_eq!(device.device_type, "BlueField3");
+        "InfiniBand device reports a base GUID without a MAC" {
+            r#"<Devices>
+                <Device pciName="0000:04:00.0" type="ConnectX6" psid="MT_0000000224" partNumber="MCX653106A-ECA_Ax">
+                    <Versions><FW current="20.43.1014"/></Versions>
+                    <GUIDs Base_Guid="b8599f030023f954"/>
+                    <Status>Up to date</Status>
+                </Device>
+            </Devices>"# => Yields(vec![MlxDeviceInfo {
+                psid: Some("MT_0000000224".to_string()),
+                part_number: Some("MCX653106A-ECA_Ax".to_string()),
+                fw_version_current: Some("20.43.1014".to_string()),
+                base_guid: Some("b8599f030023f954".to_string()),
+                ..device_with_missing_optionals("04:00.0", "ConnectX6", Some("Up to date"))
+            }]),
+        }
 
-    // All version fields should be None since they contain "--"
-    assert_eq!(device.fw_version_current, None);
-    assert_eq!(device.pxe_version_current, None);
-    assert_eq!(device.uefi_version_current, None);
-    assert_eq!(device.uefi_version_virtio_blk_current, None);
-    assert_eq!(device.uefi_version_virtio_net_current, None);
+        "placeholder fields become absent values" {
+            MISSING_OPTIONALS_XML => Yields(vec![
+                device_with_missing_optionals("01:00.0", "ConnectX-6", None),
+            ]),
+        }
 
-    // Status should be captured
-    assert_eq!(device.status, Some("Failed to open device".to_string()));
+        "omitted fields and empty sections become absent values" {
+            r#"<Devices><Device pciName="0000:01:00.0" type="ConnectX-8"/></Devices>"#
+                => Yields(vec![device_with_missing_optionals("01:00.0", "ConnectX-8", None)]),
+            r#"<Devices><Device pciName="0000:01:00.0" type="ConnectX-8">
+                <Versions><FW available="N/A"/><PXE current="3.7.0500"/></Versions>
+                <MACs/>
+                <GUIDs/>
+            </Device></Devices>"# => Yields(vec![MlxDeviceInfo {
+                pxe_version_current: Some("3.7.0500".to_string()),
+                ..device_with_missing_optionals("01:00.0", "ConnectX-8", None)
+            }]),
+        }
+
+        "structural device identity is required" {
+            r#"<Devices><Device type="ConnectX-8"/></Devices>"# => Fails,
+            r#"<Devices><Device pciName="0000:01:00.0"/></Devices>"# => Fails,
+        }
+
+        "empty device lists are rejected" {
+            EMPTY_DEVICES_XML => Fails,
+        }
+
+        "malformed XML is rejected" {
+            MALFORMED_XML => Fails,
+        }
+    );
 }
 
 #[test]
-fn test_parse_mixed_devices() {
-    let devices = parse_mlxfwmanager_xml(MIXED_DEVICES_XML).unwrap();
+fn device_info_json_without_base_guid_remains_readable() {
+    let device: MlxDeviceInfo = serde_json::from_str(
+        r#"{"pci_name":"01:00.0","device_type":"ConnectX-6","base_mac":"b8:3f:d2:12:34:56"}"#,
+    )
+    .unwrap();
+    assert_eq!(device.base_guid, None);
+    assert_eq!(device.base_mac, Some("b8:3f:d2:12:34:56".parse().unwrap()));
+}
 
-    assert_eq!(devices.len(), 3);
+#[cfg(unix)]
+#[test]
+fn device_describe_displays_reported_and_missing_base_guids() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
-    // First device should be a working SuperNIC
-    let working_device = &devices[0];
-    assert_eq!(working_device.pci_name, "dc:00.0");
-    assert_eq!(working_device.psid, Some("MT_0000001010".to_string()));
-    assert_eq!(
-        working_device.part_number,
-        Some("900-9D3B4-00EN-E_Ax".to_string())
-    );
-    assert_eq!(
-        working_device.fw_version_current,
-        Some("32.42.1000".to_string())
-    );
-    assert!(working_device.base_mac.is_some());
-    assert_eq!(
-        working_device.status,
-        Some("No matching image found".to_string())
-    );
+    let directory = tempfile::tempdir().unwrap();
+    let tool = directory.path().join("mlxfwmanager");
+    std::fs::write(&tool, "#!/bin/sh\nprintf '%s' \"$MLX_TEST_XML\"\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-    // Second device should be a failed DPU
-    let failed_device = &devices[1];
-    assert_eq!(failed_device.pci_name, "9d:00.0");
-    assert_eq!(failed_device.psid, None);
-    assert_eq!(failed_device.part_number, None);
-    assert_eq!(failed_device.fw_version_current, None);
-    assert_eq!(failed_device.base_mac, None);
-    assert_eq!(
-        failed_device.status,
-        Some("Failed to open device".to_string())
-    );
-
-    // Third device should be another working SuperNIC
-    let third_device = &devices[2];
-    assert_eq!(third_device.pci_name, "9c:00.0");
-    assert_eq!(third_device.psid, Some("MT_0000001010".to_string()));
-    assert_eq!(
-        third_device.part_number,
-        Some("900-9D3B4-00EN-E_Ax".to_string())
-    );
-    assert!(third_device.base_mac.is_some());
+    for (pci_name, expected_guid) in [("dc:00.0", "c470bd030031eb46"), ("9d:00.0", "--")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mlxconfig-device"))
+            .args(["device", "describe", pci_name])
+            .env("PATH", directory.path())
+            .env("MLX_TEST_XML", MIXED_DEVICES_XML)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{pci_name}: {output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let rows: Vec<Vec<&str>> = stdout
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .map(|line| line.split('|').map(str::trim).collect())
+            .collect();
+        assert_eq!(rows[0], ["", "Field", "Value", ""], "{pci_name}");
+        assert!(
+            rows.iter()
+                .any(|row| row == &["", "base_guid", expected_guid, ""]),
+            "{pci_name}: {stdout}",
+        );
+    }
 }
 
 // convert_pci_name_to_address strips a single leading "0000:" domain prefix from a
@@ -213,60 +346,6 @@ fn test_convert_pci_name_to_address() {
 
         "passes through an empty string" {
             "" => Yields("".to_string()),
-        }
-    );
-}
-
-#[test]
-fn test_mac_address_parsing() {
-    // Test that valid MAC addresses parse correctly
-    let devices = parse_mlxfwmanager_xml(MIXED_DEVICES_XML).unwrap();
-    let working_device = &devices[0];
-
-    // Should successfully parse the MAC address
-    assert!(working_device.base_mac.is_some());
-    assert_eq!(
-        working_device.base_mac.unwrap().to_string(),
-        "c4:70:bd:31:eb:46".to_uppercase()
-    );
-}
-
-// get_field_value renders a None optional field as "--" and returns the value of a
-// present field. Exercised against the failed-DPU device, whose optionals are all
-// absent while pci_name/device_type/status are set.
-#[test]
-fn test_optional_field_handling() {
-    let devices = parse_mlxfwmanager_xml(DPU_FAILED_XML).unwrap();
-    let device = &devices[0];
-
-    value_scenarios!(
-        run = |field| device.get_field_value(field);
-        "None psid renders as --" {
-            "psid" => "--".to_string(),
-        }
-
-        "None part_number renders as --" {
-            "part_number" => "--".to_string(),
-        }
-
-        "None base_mac renders as --" {
-            "base_mac" => "--".to_string(),
-        }
-
-        "None fw_version_current renders as --" {
-            "fw_version_current" => "--".to_string(),
-        }
-
-        "present pci_name" {
-            "pci_name" => "b4:00.0".to_string(),
-        }
-
-        "present device_type" {
-            "device_type" => "BlueField3".to_string(),
-        }
-
-        "present status" {
-            "status" => "Failed to open device".to_string(),
         }
     );
 }

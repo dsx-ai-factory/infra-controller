@@ -21,7 +21,7 @@ use crate::rpc::ApiClient;
 
 /// "Attaches" a network security group to an object (VPC/Instance)
 /// by updating the config of the object.
-pub async fn attach(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn attach(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     // Check that at least one of instance ID or VPC ID has been sent
     if args.instance_id.is_none() && args.vpc_id.is_none() {
         return Err(CarbideCliError::GenericError(

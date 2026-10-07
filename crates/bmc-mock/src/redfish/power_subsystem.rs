@@ -21,7 +21,7 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 use crate::redfish::Builder;
 
-pub fn resource(chassis_id: &str) -> redfish::Resource<'static> {
+pub(super) fn resource(chassis_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!(
         "{}/PowerSubsystem",
         redfish::chassis::resource(chassis_id).odata_id
@@ -34,13 +34,13 @@ pub fn resource(chassis_id: &str) -> redfish::Resource<'static> {
     }
 }
 
-pub fn builder(resource: &redfish::Resource) -> PowerSubsystemBuilder {
+pub(super) fn builder(resource: &redfish::Resource) -> PowerSubsystemBuilder {
     PowerSubsystemBuilder {
         value: resource.json_patch(),
     }
 }
 
-pub struct PowerSubsystemBuilder {
+pub(super) struct PowerSubsystemBuilder {
     value: serde_json::Value,
 }
 
@@ -53,11 +53,11 @@ impl Builder for PowerSubsystemBuilder {
 }
 
 impl PowerSubsystemBuilder {
-    pub fn power_supplies(self, v: redfish::Collection) -> Self {
+    pub(super) fn power_supplies(self, v: redfish::Collection) -> Self {
         self.apply_patch(v.nav_property("PowerSupplies"))
     }
 
-    pub fn build(self) -> serde_json::Value {
+    pub(super) fn build(self) -> serde_json::Value {
         self.value
     }
 }

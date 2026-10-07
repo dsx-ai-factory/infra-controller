@@ -3,6 +3,16 @@ name: Build Container with Buildx
 on:
   workflow_call:
     inputs:
+      target_prebuild_login:
+        description: 'Log into the target registry before the build (base refs point there after a rebuild)'
+        required: false
+        default: false
+        type: boolean
+      source_registry_host:
+        description: 'Registry host for read-only base-image pulls (empty = skip source login)'
+        required: false
+        default: ''
+        type: string
       dockerfile_path:
         description: 'Path to Dockerfile'
         required: true
@@ -28,7 +38,7 @@ on:
         type: boolean
         default: true
       image_name:
-        description: 'Image name without registry prefix'
+        description: 'Full image repository (registry/path/name), no tag'
         required: true
         type: string
       image_tag:
@@ -60,6 +70,21 @@ on:
         required: false
         default: false
         type: boolean
+      artifact_pattern:
+        description: 'Glob for which run artifacts to download. Defaults to every artifact in the run, which is rarely what a build needs -- set this to the arch/type the Dockerfile actually consumes.'
+        required: false
+        default: ''
+        type: string
+      scan:
+        description: "Have main's pushed image scanned for vulnerabilities. Records a scan target; image-scan.yml scans it after this workflow finishes. Requires push."
+        required: false
+        default: false
+        type: boolean
+      cache:
+        description: 'Use the GitHub Actions buildx layer cache, scoped per image and architecture. Turn off for images whose Dockerfile has no RUN steps: there are no expensive layers to reuse, and caching them just pushes gigabytes of payload into the cache for no gain.'
+        required: false
+        default: true
+        type: boolean
       timeout_minutes:
         description: 'Job timeout in minutes'
         required: false
@@ -71,6 +96,18 @@ on:
         required: false
       NVCR_TOKEN:
         description: "NVIDIA Container Registry API token"
+        required: false
+      NICO_SOURCE_REGISTRY_USERNAME:
+        description: "Username for the read-only source registry (falls back to NVCR_USERNAME)"
+        required: false
+      NICO_SOURCE_REGISTRY_TOKEN:
+        description: "Token for the read-only source registry (falls back to NVCR_TOKEN)"
+        required: false
+      NICO_TARGET_REGISTRY_USERNAME:
+        description: "Username for the push target registry (falls back to NVCR_USERNAME)"
+        required: false
+      NICO_TARGET_REGISTRY_TOKEN:
+        description: "Token for the push target registry (falls back to NVCR_TOKEN)"
         required: false
     outputs:
       image_digest:
@@ -92,32 +129,58 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.push.outputs.digest || steps.build.outputs.digest }}
       image_tag: ${{ inputs.image_tag }}
       image_ref: ${{ steps.tag_list.outputs.primary }}
       tags: ${{ steps.tag_list.outputs.tags }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Download all artifacts
+      - name: Download build artifacts
         if: inputs.download_artifacts == true
         uses: actions/download-artifact@v4
         with:
-          pattern: '*-${{ github.run_id }}'
+          pattern: ${{ inputs.artifact_pattern != '' && inputs.artifact_pattern || format('*-{0}', github.run_id) }}
           merge-multiple: true
 
+      # Must run unconditionally, not just when pushing. The default docker
+      # driver can neither import nor export a build cache, so gating this on
+      # `push` is what silently disabled layer caching on every PR build.
       - name: Set up Docker Buildx
-        if: inputs.push
         uses: docker/setup-buildx-action@v3
         with:
           buildkitd-config: /etc/buildkit/buildkitd.toml
 
-      - name: Login to NVCR
+      - name: Derive registry host
+        id: registry-host
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+        run: echo "host=${IMAGE_NAME%%/*}" >> "$GITHUB_OUTPUT"
+
+      # Pull credentials and push credentials can differ in mirrors: base
+      # images come from the source registry, the built image goes to the
+      # target (whose login happens after the build, so no credential is
+      # ever presented during base-image pulls).
+      - name: Login to source registry
+        if: ${{ inputs.source_registry_host != '' }}
         uses: ./.github/actions/docker-auth
         with:
-          username: ${{ secrets.NVCR_USERNAME }}
-          token: ${{ secrets.NVCR_TOKEN }}
+          registry: ${{ inputs.source_registry_host }}
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # needed when this run rebuilt base containers (their refs point at the
+      # target) and for multi-platform builds that push from the build step
+      - name: Login to target registry (pre-build)
+        if: ${{ (inputs.target_prebuild_login && inputs.source_registry_host != '') || (inputs.push && (contains(inputs.platforms, ',') || github.repository == 'dsx-ai-factory/infra-controller')) }}
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ steps.registry-host.outputs.host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
       - name: Prepare tag list
         id: tag_list
@@ -146,6 +209,50 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # A per-image, per-arch cache scope. Without this every image shares one
+      # unscoped namespace and they evict each other; with it, an x86 release
+      # container build only ever reads layers from previous x86 release
+      # container builds.
+      - name: Compute cache scope
+        id: cache
+        if: inputs.cache
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          scope="$(basename -- "$IMAGE_NAME")-$(echo "$PLATFORMS" | tr '/,' '--')"
+          echo "scope=${scope}" >> "$GITHUB_OUTPUT"
+          echo "Cache scope: ${scope}"
+
+      # sccache inside the build needs to reach the Actions cache service, but
+      # ACTIONS_RUNTIME_TOKEN is only visible to JS actions, never to `run:`
+      # steps. github-script is first-party, so we use it to re-export the two
+      # values instead of taking on a third-party action for this.
+      #
+      # Deliberately not tied to `inputs.cache`. That input turns off the
+      # BuildKit layer cache, which is a different mechanism: sccache caches
+      # individual compilations, so it still pays off for an image whose layers
+      # are worthless because `COPY . ./` invalidates everything after it. When
+      # the two shared one input, turning the layer cache off for the Rust
+      # images also dropped sccache to the local mount and cost
+      # build-release-container-x86_64 its 347 hits and 2m11s.
+      #
+      # Runs unconditionally and always exports a non-empty value. buildx
+      # rejects a secret whose value is empty, so a skipped step or an unset
+      # token would fail the build outright instead of merely disabling the
+      # cache. The sentinel is what the Dockerfiles detect.
+      - name: Expose Actions cache credentials to the build
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN || '';
+            const url = process.env.ACTIONS_RESULTS_URL || '';
+            if (token) core.setSecret(token);
+            core.exportVariable('BUILD_ACTIONS_RUNTIME_TOKEN', token || 'unavailable');
+            core.exportVariable('BUILD_ACTIONS_RESULTS_URL', url || 'unavailable');
+            core.info(`In-build sccache backend: ${token && url ? 'enabled' : 'disabled'}`);
+
       - name: Parse build arguments
         id: parse-args
         run: |
@@ -160,19 +267,116 @@ jobs:
             echo "build_args=" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and optionally push Docker image
+      # Loading means exporting the whole image to the daemon, so it is only
+      # worth doing when a later step reads it back: the deferred push on
+      # mirrors. A pull request never does, yet the 8 GB boot-artifacts carrier
+      # still spent a measured 5m20s on the export before every step that could
+      # have used it was skipped. Decided once here so the build and the summary
+      # cannot disagree about what happened.
+      #
+      # The scan clause is inert now the scan reads the registry, but is the only
+      # clause consulting inputs.load.
+      - name: Decide whether to load the image locally
+        id: loadgate
+        env:
+          NEEDED: ${{ (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller') }}
+        run: printf 'load=%s\n' "${NEEDED}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context_path }}
           file: ${{ inputs.dockerfile_path }}
           platforms: ${{ inputs.platforms }}
-          push: ${{ inputs.push }}
-          load: ${{ inputs.load && !inputs.push }}
+          # canonical pushes straight from the build step (original behavior,
+          # BuildKit provenance intact); mirrors defer the push until after the
+          # build so no credential is present during base pulls. Multi-platform
+          # images cannot be loaded into the classic store, so they always push
+          # directly.
+          push: ${{ inputs.push && (contains(inputs.platforms, ',') || github.repository == 'dsx-ai-factory/infra-controller') }}
+          load: ${{ steps.loadgate.outputs.load == 'true' }}
+          # mirrors: the docker exporter cannot attach attestations, and
+          # provenance would embed private downstream repo refs into artifacts
+          provenance: ${{ github.repository == 'dsx-ai-factory/infra-controller' && 'mode=min' || 'false' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.image_tag }}
           tags: ${{ steps.tag_list.outputs.tags }}
           build-args: ${{ steps.parse-args.outputs.build_args }}
-          cache-from: type=gha
-          cache-to: ${{ inputs.push && 'type=gha,mode=max' || '' }}
+          # Every ref reads the cache; only main writes it. The Rust images
+          # `COPY . ./` before the compile, so any new commit invalidates the
+          # builder layer and a PR can never hit its own exported cache -- a
+          # measured 18-21 min per job spent exporting layers that only a
+          # byte-identical tree could ever reuse. sccache, not the layer cache,
+          # is what carries reuse across commits.
+          cache-from: ${{ inputs.cache && format('type=gha,scope={0}', steps.cache.outputs.scope) || '' }}
+          cache-to: ${{ inputs.cache && github.ref == 'refs/heads/main' && format('type=gha,mode=max,scope={0}', steps.cache.outputs.scope) || '' }}
+          # Lets sccache in the builder stage use the Actions cache as a shared
+          # backend. Always passed and never empty -- buildx rejects a secret
+          # with an empty value outright. The Dockerfiles check the URL for a
+          # real endpoint and fall back to the local BuildKit cache mount when
+          # it is absent, so a plain local `docker build` still works. PRs can
+          # read compiler entries populated by main but never upload their own.
+          secrets: |
+            actions_results_url=${{ env.BUILD_ACTIONS_RESULTS_URL }}
+            actions_runtime_token=${{ env.BUILD_ACTIONS_RUNTIME_TOKEN }}
+            sccache_gha_rw_mode=${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
+
+      - name: Login to target registry
+        if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ steps.registry-host.outputs.host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Push image tags
+        id: push
+        if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}
+        env:
+          TAGS: ${{ steps.tag_list.outputs.tags }}
+          PRIMARY: ${{ steps.tag_list.outputs.primary }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r TAG; do
+            [ -z "${TAG}" ] && continue
+            docker push "${TAG}"
+          done <<< "${TAGS}"
+          DIGEST=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${PRIMARY}" | grep -m1 -F "${PRIMARY%:*}@")
+          echo "digest=${DIGEST##*@}" >> "$GITHUB_OUTPUT"
+
+      # Scan only the image pushed by the main branch build. This avoids a
+      # vulnerability scan on every pull request while retaining the mainline
+      # security signal.
+      #
+      # image-scan.yml does the scanning once this workflow has finished, so it
+      # no longer holds a build job open. Requires push: a later scan can only
+      # fetch an image that reached the registry.
+      - name: Record the pushed image as a scan target
+        id: scantarget
+        if: ${{ inputs.scan && inputs.push && github.ref == 'refs/heads/main' && steps.build.outcome == 'success' }}
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE: ${{ steps.tag_list.outputs.primary }}
+          RUNNER_LABEL: ${{ inputs.runner }}
+        run: |
+          set -euo pipefail
+          key="$(basename -- "${IMAGE_NAME}")"
+          printf 'key=%s\n' "${key}" >> "$GITHUB_OUTPUT"
+          # The runner label travels with the target: a single-platform manifest
+          # can only be pulled by the architecture that built it.
+          jq -n --arg key "${key}" --arg image "${IMAGE}" --arg runner "${RUNNER_LABEL}" \
+            '{key: $key, image: $image, runner: $runner}' | tee scan-target.json
+
+      - name: Upload the scan target
+        if: ${{ inputs.scan && inputs.push && github.ref == 'refs/heads/main' && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-target-${{ steps.scantarget.outputs.key }}
+          path: scan-target.json
+          # Consumed by image-scan.yml minutes later, never wanted again.
+          retention-days: 1
 
       - name: Display build summary
         run: |
@@ -181,4 +385,4 @@ jobs:
           echo "  Digest: ${{ steps.build.outputs.digest }}"
           echo "  Platforms: ${{ inputs.platforms }}"
           echo "  Pushed: ${{ inputs.push }}"
-          echo "  Loaded locally: ${{ inputs.load && !inputs.push }}"
+          echo "  Loaded locally: ${{ steps.loadgate.outputs.load }}"

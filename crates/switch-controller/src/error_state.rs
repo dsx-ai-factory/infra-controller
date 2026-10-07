@@ -34,7 +34,10 @@ pub async fn handle_error(
     state: &mut Switch,
     _ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!("Switch is in error state {}", _switch_id.to_string());
+    tracing::info!(
+        switch_id = %_switch_id,
+        "Switch is in error state",
+    );
     if state.is_marked_as_deleted() {
         return Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Deleting,
@@ -48,9 +51,7 @@ pub async fn handle_error(
             "Switch maintenance requested from Error; transitioning to Maintenance"
         );
         return Ok(StateHandlerOutcome::transition(
-            SwitchControllerState::Maintenance {
-                operation: req.operation,
-            },
+            SwitchControllerState::maintenance_for_request(req.clone()),
         ));
     }
 

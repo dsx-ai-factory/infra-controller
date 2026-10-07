@@ -16,7 +16,24 @@ NICo provides APIs and automated workflows to manage these components for the fo
 
 ## Dependencies
 
-In order to use rack-level administration features today, NICo deployment needs to include NICo Flow, NSM, and PSM, properly configured with the REST API, site agent, temporal workflow, and NICo Core. The following diagram shows the control and data flows within NICo services and dependencies.
+Rack-level administration does not require one fixed backend stack. NICo Core
+must be configured with a component-manager backend for each role being managed:
+
+- [RMS](../configuration/rms.md) can provide compute, switch,
+  and power-shelf management.
+- An externally managed NSM is required only when the switch backend is set to
+  `nsm`.
+- An externally managed PSM is required only when the power-shelf backend is
+  set to `psm`.
+
+The NICo deployment charts do not install NSM or PSM. Their Core backend
+configuration remains available for sites that operate those managers as
+external services.
+
+NICo Flow is required for deployments using the HW Lifecycle REST API and its
+workflow orchestration. Clients using NICo Core APIs directly do not require
+NICo Flow. The following diagram shows the Flow-based REST deployment and its
+control and data paths.
 
 ![Dependencies](../static/rack-level-admin-dependencies.svg)
 
@@ -28,51 +45,59 @@ The end-to-end service path for NICo rack-level administration goes in the follo
 
 ![Architecture](../static/rack-level-admin-architecture.svg)
 
-* **HW Lifecycle REST API**: NICo provides all rack-level administration operations via a set of HW Lifecycle REST APIs. Besides providing inventory, bringup, validation, power control, and firmware update functionalities for racks and trays (rack components), it supports referencing racks using the DCIM-supplied rack ID (e.g., “A12”) and referencing trays using rack-based tray addressing (e.g. “Rack A12 Tray Slot 19” or “Rack A12 Compute Tray \#3”), in addition to using tray serial numbers or BMC MAC addresses. It also exposes the task sequences running, pending, or completed on racks and trays, and allows cancellation. Non-rack compute machines are also supported.
+- **HW Lifecycle REST API**: NICo provides all rack-level administration operations via a set of HW Lifecycle REST APIs. Besides providing inventory, bringup, validation, power control, and firmware update functionalities for racks and trays (rack components), it supports referencing racks using the DCIM-supplied rack ID (e.g., “A12”) and referencing trays using rack-based tray addressing (e.g. “Rack A12 Tray Slot 19” or “Rack A12 Compute Tray \#3”), in addition to using tray serial numbers or BMC MAC addresses. It also exposes the task sequences running, pending, or completed on racks and trays, and allows cancellation. Non-rack compute machines are also supported.
 
-* **NICo Flow**: The REST APIs are supported via NICo Flow, which is a NICo software component (discrete service) that uses NICo Core APIs to orchestrate hardware operation sequences and automate hardware operations, with user defined customization via dynamic rules and policies, in order to scale both operation of AI-factory hardware and the evolution of AI-factory software stack, by abstracting the topology and details of the mechanics of updates, maintenance, and responding to state changes in the datacenter.
+- **NICo Flow**: The REST APIs are supported via NICo Flow, which is a NICo software component (discrete service) that uses NICo Core APIs to orchestrate hardware operation sequences and automate hardware operations, with user-defined customization via dynamic rules and policies, in order to scale both operation of AI-factory hardware and the evolution of AI-factory software stack, by abstracting the topology and details of the mechanics of updates, maintenance, and responding to state changes in the datacenter.
 
-NICo Flow contains software-defined states for managing a site, such as those for task and workflow, user customizable operation sequence and automation, as well as user-defined policies such as those for HW gating (preventing risky conditions in HW automation), remediation (dealing with broken or degraded HW or services), and leak handling.
+  NICo Flow contains software-defined states for managing a site, such as those for task and workflow, user-customizable operation sequence and automation, as well as user-defined policies such as those for HW gating (preventing risky conditions in HW automation), remediation (dealing with broken or degraded HW or services), and leak handling.
 
-* **NICo Core**: NICo Flow calls NICo Core service to perform the actual HW management operations. NICo Core is the original main NICo service that provides all the critical features for bare metal management, such as HW inventory and credential management, discovery and ingestion, state machines for power control and firmware update of component HW, managed host and VPC resource, and HW health reports. NICo Core contains all hardware-defined states for component HW and state-based automations.
+- **NICo Core**: NICo Flow calls NICo Core service to perform the actual HW management operations. NICo Core is the original main NICo service that provides all the critical features for bare-metal management, such as HW inventory and credential management, discovery and ingestion, state machines for power control and firmware update of component HW, managed host and VPC resource, and HW health reports. NICo Core contains all hardware-defined states for component HW and state-based automations.
 
-* **Backend**: Previously, NICo Core accessed machines directly via BMC. With rack-scale systems, we now have more types of component HW (compute, switch, and powershelf), as well as more ways to access these components (BMC and NVUE). The complexity of these HW access and management operations are now moved out of NICo Core into the backend for NICo. NICo backend is an extensible interface for different types of hardware to be plugged into and managed by NICo.
+- **Backend**: Previously, NICo Core accessed machines directly via BMC. With rack-scale systems, we now have more types of component HW (compute, switch, and powershelf), as well as more ways to access these components (BMC and NVUE). The complexity of these HW access and management operations are now moved out of NICo Core into the backend for NICo. NICo backend is an extensible interface for different types of hardware to be plugged into and managed by NICo.
 
-Today there is a NVSwitch Manager (NSM) backend and a Powershelf Manager (PSM) backend, providing access to switch and powershelf trays in racks, called from NICo Core.
-
-In the near future, NVIDIA Rack Manager Service (RMS) will be shipped as a backend for NICo to provide unified compute, switch, and powershelf trays access and management, as well as optimized default HW sequencing for rack power control and firmware update.
+NICo Core supports NVSwitch Manager (NSM) and PowerShelf Manager (PSM)
+backends for switch and power-shelf access. NVIDIA Rack Manager Service (RMS)
+can serve compute, switch, and power-shelf roles and provides rack-level power
+and firmware operations. Refer to
+[RMS Configuration](../configuration/rms.md)
+for RMS configuration requirements and a link to the RMS compatibility
+reference. Confirm hardware support against the deployed RMS release.
 
 ## Rack-Level Operations
 
-### 1. Expected Inventory
+<Steps toc={true}>
+
+<Step title="Expected Inventory">
 
 NICo needs to be loaded with the expected rack equipment inventory to be managed. In most cases, the information should be available from a DCIM service.
 
-The expected inventory often contain the following information:
+The expected inventory often contains the following information:
 
-* **NVLink Domain**
-  * ID/Name
-  * Description
-  * Racks in the domain
-* **Rack**
-  * ID/Name
-  * Vendor
-  * Model
-  * Serial Number
-  * Location
-  * Description
-  * Trays in the rack
-* **Tray**
-  * ID
-  * Type
-  * Vendor
-  * Model
-  * Serial Number
-  * In-rack information, including the rack ID, slot number, and tray index
-  * Description
-  * SKU, including firmware-updatable devices in the tray
+- **NVLink Domain**
+  - ID/Name
+  - Description
+  - Racks in the domain
+- **Rack**
+  - ID/Name
+  - Vendor
+  - Model
+  - Serial Number
+  - Location
+  - Description
+  - Trays in the rack
+- **Tray**
+  - ID
+  - Type
+  - Vendor
+  - Model
+  - Serial Number
+  - In-rack information, including the rack ID, slot number, and tray index
+  - Description
+  - SKU, including firmware-updatable devices in the tray
 
-### 2. Inventory Bringup
+</Step>
+
+<Step title="Inventory Bringup">
 
 After NICo imports the expected inventory, it goes through the following workflow to discover and ingest the trays and bring up the rack and NVLink domain.
 
@@ -82,13 +107,27 @@ After NICo imports the expected inventory, it goes through the following workflo
 4. NICo waits for and verifies that all compute, switch, and powershelf trays have been discovered and ingested, updates their FW to achieve consistency and compatibility, and perform the required power control sequence to ready the use of the rack components.
 5. Once all the components are ready, the rack is considered *ready*.
 
-### 3. Actual Inventory and Validation
+</Step>
+
+<Step title="Actual Inventory and Validation">
 
 NICo monitors the discovered and ingested trays and racks. It reports the actual inventory with dynamic information such as power status and installed firmware versions. It also compares the actual inventory against the expected inventory, and reports on any discrepancies (e.g. wrong rack installed, wrong slot installed, or wrong serial number).
 
-### 4. Power Control
+Rack and tray inventory includes synchronized health snapshots. See
+[Monitoring and Health](../operations/monitoring-health.md#rack-and-tray-health-snapshots)
+for freshness and empty-report semantics, and
+[Leak Detection and Handling](../operations/leak-detection-handling.md)
+for leak-specific status.
+
+</Step>
+
+<Step title="Power Control">
 
 NICo provides power control for racks as well as arbitrary groupings of trays in racks, following predefined or customized power operation sequences.
+
+Power operations are asynchronous and tracked as Flow tasks. See
+[REST power operations](../operations/flow/operation-rules.md#rest-power-operations)
+for supported states, AC power-cycle limitations, and task monitoring.
 
 **Sample Rack Power On Sequence:**
 
@@ -104,49 +143,58 @@ NICo provides power control for racks as well as arbitrary groupings of trays in
 2. Power off the switch tray hosts and wait for all to be off.
 3. Power off the power shelves and wait for all to be off.
 
-### 5. Firmware Management and Upgrade
+</Step>
 
-NICo provides firmware update management for racks as well as arbitrary groups of trays in racks, following predefined or customized firmware update operation sequences.
+<Step title="Firmware Management and Upgrade">
 
-**Sample Rack Firmware Update Sequence**
+NICo provides firmware update management for racks as well as arbitrary groups of trays in racks, following predefined or customized firmware update operation sequences. The selected rule determines component ordering, verification, and any power cycles needed for activation.
 
-1. Perform firmware update on power shelves and wait for all to finish successfully.
-2. Reboot power shelves and wait for all to be back online.
-3. Perform firmware update on switch trays and wait for all to finish successfully.
-4. Reboot switch trays and wait for all to be back online.
-5. Perform firmware update on compute trays and wait for each to finish successfully.
-6. Reboot compute trays and wait for all to be back online.
+See [Rack and Tray Firmware Updates](../operations/firmware-updates/rack-component-firmware.md)
+for request parameters, default sequencing, authentication, and task monitoring.
 
-When a rack FW update completes successfully, all compute trays in the rack will have the same firmware version, all switch trays in the rack will have the same firmware version, and the compute tray firmware and switch tray firmware are supposed to be compatible with each other.
+</Step>
+
+</Steps>
 
 ## REST API
 
-Currently, NICo only supports GB200 NVL72 racks, where a rack and a NVL domain overlaps precisely. Hence, domain endpoints are currently not exposed and rack endpoints should be used. This will change in the future.
+Use Rack endpoints for rack inventory, validation, and bringup, and Domain
+endpoints for domain inventory, power, and firmware operations. See
+[Flow inventory queries](../operations/flow/overview.md#inventory-queries)
+for component inclusion and list ordering.
 
 ### Rack Endpoints
 
-- [GET /v2/org/{org}/carbide/rack](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/get-all-rack): Retrieve all racks in the specified site.  
-- [GET /v2/org/{org}/carbide/rack/{rack_id}](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/get-rack): Retrieve a rack with the specified ID.  
-- [GET /v2/org/{org}/carbide/rack/validation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/validate-racks): Validate components of all racks in the specified site by comparing the expected inventory data to the actual inventory data.  
-- [GET /v2/org/{org}/carbide/rack/{rack_id}/validation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/validate-rack): Validate components of the specified rack by comparing the expected inventory data to the actual inventory data.  
-- [PATCH /v2/org/{org}/carbide/rack/power](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/power-control-racks): Control power of all or selected racks in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.  
-- [PATCH /v2/org/{org}/carbide/rack/{id}/power](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/power-control-rack): Control power of the specified rack. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.  
-- [PATCH /v2/org/{org}/carbide/rack/firmware](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/firmware-update-racks): Update firmware on all or selected racks in the site.  
-- [PATCH /v2/org/{org}/carbide/rack/{id}/firmware](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/firmware-update-rack): Update firmware on the specified rack.  
-- [POST /v2/org/{org}/carbide/rack/bringup](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/bringup-racks): Bring up all or selected racks in the site.  
-- [POST /v2/org/{org}/carbide/rack/{id}/bringup](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/bringup-racks): Bring up the specified rack.  
-- [GET /v2/org/{org}/carbide/rack/task/{id}](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/get-rack-task): Retrieve the status of the specified rack task.  
-- [GET /v2/org/{org}/carbide/rack/task/{id}/cancel](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/rack/get-rack-task): Cancel the specified rack task.
+- [GET /v2/org/{org}/nico/rack](api:GET/v2/org/:org/nico/rack): Retrieve all racks in the specified site.
+- [GET /v2/org/{org}/nico/rack/{id}](api:GET/v2/org/:org/nico/rack/:id): Retrieve a rack with the specified ID.
+- [GET /v2/org/{org}/nico/rack/validation](api:GET/v2/org/:org/nico/rack/validation): Validate components of all racks in the specified site by comparing the expected inventory data to the actual inventory data.
+- [GET /v2/org/{org}/nico/rack/{id}/validation](api:GET/v2/org/:org/nico/rack/:id/validation): Validate components of the specified rack by comparing the expected inventory data to the actual inventory data.
+- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of all or selected racks in the site.
+- [PATCH /v2/org/{org}/nico/rack/{id}/power](api:PATCH/v2/org/:org/nico/rack/:id/power): Control power of the specified rack.
+- [PATCH /v2/org/{org}/nico/rack/firmware](api:PATCH/v2/org/:org/nico/rack/firmware): Update firmware on all or selected racks in the site.
+- [PATCH /v2/org/{org}/nico/rack/{id}/firmware](api:PATCH/v2/org/:org/nico/rack/:id/firmware): Update firmware on the specified rack.
+- [POST /v2/org/{org}/nico/rack/bringup](api:POST/v2/org/:org/nico/rack/bringup): Bring up all or selected racks in the site.
+- [POST /v2/org/{org}/nico/rack/{id}/bringup](api:POST/v2/org/:org/nico/rack/:id/bringup): Bring up the specified rack.
+- [GET /v2/org/{org}/nico/rack/{id}/task](api:GET/v2/org/:org/nico/rack/:id/task): Retrieve all tasks for the specified rack.
+- [GET /v2/org/{org}/nico/task/{id}](api:GET/v2/org/:org/nico/task/:id): Retrieve the status of the specified task.
+- [POST /v2/org/{org}/nico/task/{id}/cancel](api:POST/v2/org/:org/nico/task/:id/cancel): Cancel the specified task.
 
 ### Tray (Rack Component) Endpoints
 
-- [GET /v2/org/{org}/carbide/tray](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/get-all-trays): Retrieve all trays in the specified site.  
-- [GET /v2/org/{org}/carbide/tray/{id}](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/get-tray): Retrieve a tray with the specified id.  
-- [GET /v2/org/{org}/carbide/tray/validation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/validate-trays): Validate all or selected trays in the site by comparing the expected inventory data to the actual inventory data.  
-- [GET /v2/org/{org}/carbide/tray/{id}/validation](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/validate-tray): Validate the specified tray by comparing the expected inventory data to the actual inventory data.  
-- [PATCH /v2/org/{org}/carbide/tray/power](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/power-control-trays): Control the power of all or selected trays in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.  
-- [PATCH /v2/org/{org}/carbide/tray/{id}/power](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/power-control-tray): Control the power of the specified tray. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.  
-- [PATCH /v2/org/{org}/carbide/tray/firmware](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/firmware-update-trays): Update the firmware on all or selected trays in the site.  
-- [PATCH /v2/org/{org}/carbide/tray/{id}/firmware](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tray/firmware-update-tray): Update the firmware on the specified tray.
+- [GET /v2/org/{org}/nico/tray](api:GET/v2/org/:org/nico/tray): Retrieve all trays and their health snapshots in the specified site.
+- [GET /v2/org/{org}/nico/tray/{id}](api:GET/v2/org/:org/nico/tray/:id): Retrieve a tray and its health snapshot with the specified ID.
+- [GET /v2/org/{org}/nico/tray/validation](api:GET/v2/org/:org/nico/tray/validation): Validate all or selected trays in the site by comparing the expected inventory data to the actual inventory data.
+- [GET /v2/org/{org}/nico/tray/{id}/validation](api:GET/v2/org/:org/nico/tray/:id/validation): Validate the specified tray by comparing the expected inventory data to the actual inventory data.
+- [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site.
+- [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray.
+- [PATCH /v2/org/{org}/nico/tray/firmware](api:PATCH/v2/org/:org/nico/tray/firmware): Update the firmware on all or selected trays in the site.
+- [PATCH /v2/org/{org}/nico/tray/{id}/firmware](api:PATCH/v2/org/:org/nico/tray/:id/firmware): Update the firmware on the specified tray.
 
+### NVLink Domain Endpoints
 
+- [GET /v2/org/{org}/nico/domain/nvlink](api:GET/v2/org/:org/nico/domain/nvlink): Retrieve NVLink Domains in the specified Site.
+- [GET /v2/org/{org}/nico/domain/nvlink/{id}](api:GET/v2/org/:org/nico/domain/nvlink/:id): Retrieve an NVLink Domain by its ID.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/power](api:PATCH/v2/org/:org/nico/domain/nvlink/power): Control power for explicitly selected NVLink Domains.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/{id}/power](api:PATCH/v2/org/:org/nico/domain/nvlink/:id/power): Control power for one NVLink Domain.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/firmware](api:PATCH/v2/org/:org/nico/domain/nvlink/firmware): Update firmware for explicitly selected NVLink Domains.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/{id}/firmware](api:PATCH/v2/org/:org/nico/domain/nvlink/:id/firmware): Update firmware for one NVLink Domain.

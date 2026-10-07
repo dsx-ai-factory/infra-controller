@@ -190,52 +190,19 @@ fn proto_match_mode_to_rust(mode: i32) -> Result<MatchMode, String> {
 #[cfg(test)]
 mod tests {
     use carbide_libmlx_model::device::info::MlxDeviceInfo;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
 
     use super::*;
-
-    // create_test_device creates a sample device for testing purposes.
-    fn create_test_device() -> MlxDeviceInfo {
-        MlxDeviceInfo {
-            pci_name: "01:00.0".to_string(),
-            device_type: "ConnectX-6".to_string(),
-            psid: Some("MT_0000055".to_string()),
-            device_description: Some("Mellanox ConnectX-6 Dx EN 100GbE".to_string()),
-            part_number: Some("MCX623106AN-CDAT_A1".to_string()),
-            fw_version_current: Some("22.32.1010".to_string()),
-            pxe_version_current: Some("3.6.0502".to_string()),
-            uefi_version_current: Some("14.25.1020".to_string()),
-            uefi_version_virtio_blk_current: Some("1.0.0".to_string()),
-            uefi_version_virtio_net_current: Some("1.0.0".to_string()),
-            base_mac: Some("b8:3f:d2:12:34:56".parse().unwrap()),
-            status: None,
-        }
-    }
-
-    // create_test_device_with_missing_data creates a device with partial data (like a DPU).
-    fn create_test_device_with_missing_data() -> MlxDeviceInfo {
-        MlxDeviceInfo {
-            pci_name: "b4:00.0".to_string(),
-            device_type: "BlueField3".to_string(),
-            psid: None,
-            device_description: None,
-            part_number: None,
-            fw_version_current: None,
-            pxe_version_current: None,
-            uefi_version_current: None,
-            uefi_version_virtio_blk_current: None,
-            uefi_version_virtio_net_current: None,
-            base_mac: None,
-            status: Some("Failed to open device".to_string()),
-        }
-    }
 
     #[test]
     fn test_device_report_roundtrip_conversion() {
         let original = MlxDeviceReport {
             hostname: "test-host".to_string(),
-            timestamp: Utc::now(),
-            devices: vec![create_test_device(), create_test_device_with_missing_data()],
+            timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 123_456_789).unwrap(),
+            devices: vec![
+                MlxDeviceInfo::create_test_device(),
+                MlxDeviceInfo::create_test_device_with_missing_data(),
+            ],
             filters: None,
             machine_id: None,
         };
@@ -244,12 +211,10 @@ mod tests {
         let converted: MlxDeviceReport = proto.try_into().unwrap();
 
         assert_eq!(original.hostname, converted.hostname);
-        assert_eq!(original.devices.len(), converted.devices.len());
-        // Timestamp comparison with some tolerance due to precision differences.
-        let time_diff = (original.timestamp - converted.timestamp)
-            .num_milliseconds()
-            .abs();
-        assert!(time_diff < 1000); // Within 1 second
+        assert_eq!(original.timestamp, converted.timestamp);
+        assert_eq!(original.devices, converted.devices);
+        assert!(converted.filters.is_none());
+        assert_eq!(original.machine_id, converted.machine_id);
     }
 
     #[test]

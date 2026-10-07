@@ -25,4 +25,4 @@ Generate a site-default host UEFI password to store in Vault:
     $ nico-admin-cli host generate-host-uefi-password
 
 ")]
-pub struct Args {}
+pub(crate) struct Args {}

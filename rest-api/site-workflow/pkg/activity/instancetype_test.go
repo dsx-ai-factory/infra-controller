@@ -13,9 +13,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 func TestManageInstanceType_UpdateInstanceTypeOnSite(t *testing.T) {
@@ -32,7 +32,7 @@ func TestManageInstanceType_UpdateInstanceTypeOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.UpdateInstanceTypeRequest
+		request *corev1.UpdateInstanceTypeRequest
 	}
 	tests := []struct {
 		name    string
@@ -47,12 +47,12 @@ func TestManageInstanceType_UpdateInstanceTypeOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateInstanceTypeRequest{
+				request: &corev1.UpdateInstanceTypeRequest{
 					Id: uuid.NewString(),
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "updated_name",
 						Description: "updated_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -70,12 +70,12 @@ func TestManageInstanceType_UpdateInstanceTypeOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateInstanceTypeRequest{
+				request: &corev1.UpdateInstanceTypeRequest{
 					Id: "",
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "updated_name",
 						Description: "updated_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -122,7 +122,7 @@ func TestManageInstanceType_AssociateMachinesWithInstanceTypeOnSite(t *testing.T
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.AssociateMachinesWithInstanceTypeRequest
+		request *corev1.AssociateMachinesWithInstanceTypeRequest
 	}
 	tests := []struct {
 		name    string
@@ -137,7 +137,7 @@ func TestManageInstanceType_AssociateMachinesWithInstanceTypeOnSite(t *testing.T
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.AssociateMachinesWithInstanceTypeRequest{
+				request: &corev1.AssociateMachinesWithInstanceTypeRequest{
 					InstanceTypeId: uuid.NewString(),
 					MachineIds:     []string{uuid.NewString(), uuid.NewString()},
 				},
@@ -162,7 +162,7 @@ func TestManageInstanceType_AssociateMachinesWithInstanceTypeOnSite(t *testing.T
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.AssociateMachinesWithInstanceTypeRequest{
+				request: &corev1.AssociateMachinesWithInstanceTypeRequest{
 					InstanceTypeId: uuid.NewString(),
 					MachineIds:     []string{},
 				},
@@ -176,7 +176,7 @@ func TestManageInstanceType_AssociateMachinesWithInstanceTypeOnSite(t *testing.T
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.AssociateMachinesWithInstanceTypeRequest{
+				request: &corev1.AssociateMachinesWithInstanceTypeRequest{
 					InstanceTypeId: "",
 					MachineIds:     []string{uuid.NewString(), uuid.NewString()},
 				},
@@ -208,7 +208,7 @@ func TestManageInstanceType_RemoveMachineInstanceTypeAssociationOnSite(t *testin
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.RemoveMachineInstanceTypeAssociationRequest
+		request *corev1.RemoveMachineInstanceTypeAssociationRequest
 	}
 	tests := []struct {
 		name    string
@@ -223,7 +223,7 @@ func TestManageInstanceType_RemoveMachineInstanceTypeAssociationOnSite(t *testin
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.RemoveMachineInstanceTypeAssociationRequest{
+				request: &corev1.RemoveMachineInstanceTypeAssociationRequest{
 					MachineId: uuid.NewString(),
 				},
 			},
@@ -247,7 +247,7 @@ func TestManageInstanceType_RemoveMachineInstanceTypeAssociationOnSite(t *testin
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.RemoveMachineInstanceTypeAssociationRequest{
+				request: &corev1.RemoveMachineInstanceTypeAssociationRequest{
 					MachineId: "",
 				},
 			},
@@ -281,7 +281,7 @@ func TestManageInstanceType_CreateInstanceTypeOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.CreateInstanceTypeRequest
+		request *corev1.CreateInstanceTypeRequest
 	}
 	tests := []struct {
 		name    string
@@ -296,12 +296,12 @@ func TestManageInstanceType_CreateInstanceTypeOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateInstanceTypeRequest{
+				request: &corev1.CreateInstanceTypeRequest{
 					Id: util.GetStrPtr(uuid.NewString()),
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -332,12 +332,12 @@ func TestManageInstanceType_CreateInstanceTypeOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateInstanceTypeRequest{
+				request: &corev1.CreateInstanceTypeRequest{
 					Id: util.GetStrPtr(""),
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -356,12 +356,12 @@ func TestManageInstanceType_CreateInstanceTypeOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateInstanceTypeRequest{
+				request: &corev1.CreateInstanceTypeRequest{
 					Id: nil,
-					Metadata: &cwssaws.Metadata{
+					Metadata: &corev1.Metadata{
 						Name:        "new_name",
 						Description: "new_description",
-						Labels: []*cwssaws.Label{
+						Labels: []*corev1.Label{
 							{
 								Key:   labelKey,
 								Value: &labelValue,
@@ -472,7 +472,7 @@ func TestManageInstanceTypeInventory_DiscoverInstanceTypeInventory(t *testing.T)
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.InstanceTypeInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.InstanceTypeInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -481,12 +481,12 @@ func TestManageInstanceTypeInventory_DiscoverInstanceTypeInventory(t *testing.T)
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.InstanceTypes))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -502,7 +502,7 @@ func TestManageInstanceType_DeleteInstanceTypeOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.DeleteInstanceTypeRequest
+		request *corev1.DeleteInstanceTypeRequest
 	}
 	tests := []struct {
 		name    string
@@ -517,7 +517,7 @@ func TestManageInstanceType_DeleteInstanceTypeOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteInstanceTypeRequest{
+				request: &corev1.DeleteInstanceTypeRequest{
 					Id: uuid.NewString(),
 				},
 			},
@@ -530,7 +530,7 @@ func TestManageInstanceType_DeleteInstanceTypeOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteInstanceTypeRequest{
+				request: &corev1.DeleteInstanceTypeRequest{
 					Id: "",
 				},
 			},

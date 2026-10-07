@@ -23,7 +23,7 @@ func (coregrpc *API) Init() {
 
 	prometheus.MustRegister(
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Namespace: "elektra_site_agent",
+			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
 			Name:      MetricCoreGrpcStatus,
 			Help:      "Core gRPC health status",
 		},
@@ -68,7 +68,7 @@ func (coregrpc *API) GetState() []string {
 	strs = append(strs, fmt.Sprintln(" GRPC Succeeded:", state.GrpcSucc.Load()))
 	strs = append(strs, fmt.Sprintln(" GRPC Failed:", state.GrpcFail.Load()))
 	strs = append(strs, fmt.Sprintln(" GRPC Status:", computils.CompStatus(state.HealthStatus.Load())))
-	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err))
+	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err.Load()))
 
 	return strs
 }

@@ -5,25 +5,24 @@ package sku
 
 import (
 	"fmt"
-	"time"
 
+	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	skuActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sku"
 )
 
 // UpdateSkuInventory is a workflow called by Site Agent to update SKU inventory for a Site
-func UpdateSkuInventory(ctx workflow.Context, siteID string, skuInventory *cwssaws.SkuInventory) (err error) {
+func UpdateSkuInventory(ctx workflow.Context, siteID string, skuInventory *corev1.SkuInventory) (err error) {
 	logger := log.With().Str("Workflow", "UpdateSkuInventory").Str("Site ID", siteID).Logger()
 
-	startTime := time.Now()
+	startTime := workflow.Now(ctx)
 
 	logger.Info().Msg("starting workflow")
 
@@ -33,19 +32,7 @@ func UpdateSkuInventory(ctx workflow.Context, siteID string, skuInventory *cwssa
 		return err
 	}
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
-	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    5 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    30 * time.Second,
-		MaximumAttempts:    2,
-	}
-	options := workflow.ActivityOptions{
-		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 30 * time.Second,
-		// Optionally provide a customized RetryPolicy.
-		RetryPolicy: retrypolicy,
-	}
+	options := cwi.ActivityOptions()
 
 	ctx = workflow.WithActivityOptions(ctx, options)
 
@@ -62,7 +49,7 @@ func UpdateSkuInventory(ctx workflow.Context, siteID string, skuInventory *cwssa
 	// Record latency for this inventory call
 	var inventoryMetricsManager cwm.ManageInventoryMetrics
 
-	err = workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, parsedSiteID, "UpdateSkuInventory", err != nil, time.Since(startTime)).Get(ctx, nil)
+	err = workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, parsedSiteID, "UpdateSkuInventory", err != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to execute activity: RecordLatency")
 	}

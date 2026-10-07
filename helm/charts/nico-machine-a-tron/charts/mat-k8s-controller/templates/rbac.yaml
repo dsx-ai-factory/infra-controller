@@ -1,0 +1,32 @@
+{{- if and .Values.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mat-k8s-controller.fullname" . }}
+  namespace: {{ include "mat-k8s-controller.namespace" . }}
+  labels:
+    {{- include "mat-k8s-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mat-k8s-controller.fullname" . }}
+  namespace: {{ include "mat-k8s-controller.namespace" . }}
+  labels:
+    {{- include "mat-k8s-controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mat-k8s-controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mat-k8s-controller.serviceAccountName" . }}
+    namespace: {{ include "mat-k8s-controller.namespace" . }}
+{{- end }}

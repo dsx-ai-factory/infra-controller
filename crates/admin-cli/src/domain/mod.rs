@@ -15,21 +15,23 @@
  * limitations under the License.
  */
 
+mod create;
 mod show;
+mod update;
 
 // Cross-module re-exports for jump module
-pub use show::args::Args as ShowDomain;
-pub use show::cmd::handle_show;
-
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
+pub(crate) use show::args::Args as ShowDomain;
+pub(crate) use show::cmd::handle_show;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Display Domain information")]
     Show(show::Args),
+    #[clap(about = "Create a Domain, optionally owned by a VPC")]
+    Create(create::Args),
+    #[clap(about = "Update domain default TTL")]
+    Update(update::Args),
 }

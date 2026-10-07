@@ -22,70 +22,54 @@ use libmlx::lockdown::lockdown::StatusReport;
 use rpc::admin_cli::OutputFormat;
 use rpc::protos::mlx_device as mlx_device_pb;
 
-use super::args::{
-    LockdownCommand, LockdownLockCommand, LockdownStatusCommand, LockdownUnlockCommand,
-};
+use super::args::{LockdownLockCommand, LockdownStatusCommand, LockdownUnlockCommand};
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
-use crate::mlx::CliContext;
 
-// dispatch routes lockdown subcommands to their handlers.
-pub async fn dispatch(
-    command: LockdownCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    match command {
-        LockdownCommand::Lock(cmd) => handle_lock(cmd, ctxt).await,
-        LockdownCommand::Unlock(cmd) => handle_unlock(cmd, ctxt).await,
-        LockdownCommand::Status(cmd) => handle_status(cmd, ctxt).await,
+// handle_lock locks a device on a machine.
+impl Run for LockdownLockCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminLockdownLockRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_lockdown_lock(request).await?;
+
+        let status_report_pb = response.status_report.ok_or_else(|| {
+            CarbideCliError::GenericError("no status report returned".to_string())
+        })?;
+
+        print_lockdown_response(status_report_pb.into(), &ctx.config.format)?;
+        Ok(())
     }
 }
 
-// handle_lock locks a device on a machine.
-async fn handle_lock(
-    cmd: LockdownLockCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminLockdownLockRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_lockdown_lock(request).await?;
-
-    let status_report_pb = response
-        .status_report
-        .ok_or_else(|| CarbideCliError::GenericError("no status report returned".to_string()))?;
-
-    print_lockdown_response(status_report_pb.into(), ctxt.format)?;
-    Ok(())
-}
-
 // handle_unlock unlocks a device on a machine.
-async fn handle_unlock(
-    cmd: LockdownUnlockCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminLockdownUnlockRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_lockdown_unlock(request).await?;
+impl Run for LockdownUnlockCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminLockdownUnlockRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_lockdown_unlock(request).await?;
 
-    let status_report_pb = response
-        .status_report
-        .ok_or_else(|| CarbideCliError::GenericError("no status report returned".to_string()))?;
+        let status_report_pb = response.status_report.ok_or_else(|| {
+            CarbideCliError::GenericError("no status report returned".to_string())
+        })?;
 
-    print_lockdown_response(status_report_pb.into(), ctxt.format)?;
-    Ok(())
+        print_lockdown_response(status_report_pb.into(), &ctx.config.format)?;
+        Ok(())
+    }
 }
 
 // handle_status gets the lock status of a device on a machine.
-async fn handle_status(
-    cmd: LockdownStatusCommand,
-    ctxt: &mut CliContext<'_, '_>,
-) -> CarbideCliResult<()> {
-    let request: mlx_device_pb::MlxAdminLockdownStatusRequest = cmd.into();
-    let response = ctxt.grpc_conn.0.mlx_admin_lockdown_status(request).await?;
+impl Run for LockdownStatusCommand {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request: mlx_device_pb::MlxAdminLockdownStatusRequest = self.into();
+        let response = ctx.api_client.0.mlx_admin_lockdown_status(request).await?;
 
-    let status_report_pb = response
-        .status_report
-        .ok_or_else(|| CarbideCliError::GenericError("no status report returned".to_string()))?;
+        let status_report_pb = response.status_report.ok_or_else(|| {
+            CarbideCliError::GenericError("no status report returned".to_string())
+        })?;
 
-    print_lockdown_response(status_report_pb.into(), ctxt.format)?;
-    Ok(())
+        print_lockdown_response(status_report_pb.into(), &ctx.config.format)?;
+        Ok(())
+    }
 }
 
 // print_lockdown_response prints the lockdown response in the specified format.

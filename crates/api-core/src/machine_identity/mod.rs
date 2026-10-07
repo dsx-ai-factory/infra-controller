@@ -20,8 +20,6 @@
 //! This module handles signing JWT-SVID tokens for machine identity verification.
 //! [`crypto`] holds AES envelope helpers for `tenant_identity_config` ciphertext.
 //! [`token_exchange`] implements RFC 8693 HTTP calls to a tenant token endpoint.
-#![allow(dead_code)] // Signer, Es256Signer, SignOptions, crypto, token_exchange: tests + handler
-
 mod crypto;
 mod token_exchange;
 
@@ -30,7 +28,8 @@ use std::fmt;
 
 use base64::Engine;
 pub(crate) use crypto::{
-    ReencryptBlobOutcome, decrypt_machine_identity_ciphertext,
+    MachineIdentityStoredSecretDecryptionFailed, ReencryptBlobOutcome,
+    StoredMachineIdentitySecretKind, decrypt_machine_identity_ciphertext,
     decrypt_token_delegation_encrypted_blob, machine_identity_encryption_secret,
     reencrypt_ciphertext_if_needed, token_delegation_credentials,
 };
@@ -44,7 +43,7 @@ pub(crate) use token_exchange::{token_exchange_http_client, token_exchange_reque
 
 /// Error type for JWT-SVID signing.
 #[derive(Debug, thiserror::Error)]
-pub enum SignError {
+pub(crate) enum SignError {
     #[error("invalid JSON payload: {0}")]
     InvalidPayload(String),
     #[error("encode error: {0}")]
@@ -53,31 +52,25 @@ pub enum SignError {
 
 /// Options for signing (e.g. future overrides for expiry, audience).
 #[derive(Debug, Default, Clone)]
-pub struct SignOptions {}
+pub(crate) struct SignOptions {}
 
 /// Abstraction for signing JWT-SVID tokens. Key loading and metadata (e.g. from DB)
 /// stay outside: the caller builds a signer and passes it here.
-pub trait Signer: Send + Sync {
+pub(crate) trait Signer: Send + Sync {
     /// Signs the given JSON payload (JWT claims) and returns the signed JWT string.
     fn sign(&self, payload: &Value, opts: &SignOptions) -> Result<String, SignError>;
-
-    /// Key identifier (e.g. for JWKS `kid`, JWT header `kid`).
-    fn key_id(&self) -> &str;
-
-    /// Algorithm name (e.g. `"ES256"`).
-    fn algorithm(&self) -> &str;
 }
 
 /// ES256 signer (ECDSA P-256 + SHA-256). Holds key material and key_id only;
 /// no I/O or DB access.
-pub struct Es256Signer {
+pub(crate) struct Es256Signer {
     key_id: String,
     encoding_key: EncodingKey,
 }
 
 impl Es256Signer {
     /// Builds an ES256 signer from PEM-encoded EC P-256 private key and key id (`kid`).
-    pub fn new(key: &[u8], key_id: impl AsRef<str>) -> Result<Self, SignError> {
+    pub(crate) fn new(key: &[u8], key_id: impl AsRef<str>) -> Result<Self, SignError> {
         let encoding_key = EncodingKey::from_ec_pem(key).map_err(SignError::Encode)?;
         Ok(Self {
             key_id: key_id.as_ref().to_string(),
@@ -100,27 +93,11 @@ impl Signer for Es256Signer {
         let token = encode(&header, &claims, &self.encoding_key)?;
         Ok(token)
     }
-
-    fn key_id(&self) -> &str {
-        &self.key_id
-    }
-
-    fn algorithm(&self) -> &str {
-        "ES256"
-    }
-}
-
-/// Convenience: signs a JSON payload with an EC P-256 private key (PEM) and returns a JWT-SVID.
-/// Uses a default key_id. For production, prefer building an `Es256Signer` (e.g. from DB-loaded key)
-/// and calling `Signer::sign`.
-pub fn sign(payload: &Value, key: &[u8]) -> Result<String, SignError> {
-    let signer = Es256Signer::new(key, "default")?;
-    signer.sign(payload, &SignOptions::default())
 }
 
 /// Failure building a RFC 7517 JWK / JWKS JSON value from a tenant public key PEM.
 #[derive(Debug)]
-pub struct JwkBuildError(pub String);
+pub(crate) struct JwkBuildError(String);
 
 impl fmt::Display for JwkBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -132,7 +109,7 @@ impl std::error::Error for JwkBuildError {}
 
 /// JWK `use` (RFC 7517 / SPIFFE bundle) for the tenant signing public key in `GetJWKS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum JwkPublicKeyUse {
+pub(crate) enum JwkPublicKeyUse {
     /// RFC 7517 `sig` — OIDC-style JWT signature verification (`/.well-known/jwks.json`).
     OidcSignature,
     /// SPIFFE bundle `jwt-svid` — JWT-SVID validation (SPIFFE Trust Domain and Bundle §4.2.2).
@@ -142,7 +119,7 @@ pub enum JwkPublicKeyUse {
 impl JwkPublicKeyUse {
     /// Wire value for the JWK `use` parameter.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::OidcSignature => "sig",
             Self::SpiffeJwtSvid => "jwt-svid",
@@ -151,7 +128,7 @@ impl JwkPublicKeyUse {
 }
 
 /// Maps `public_pem` (SPKI PEM) into one RFC 7517 JWK JSON object.
-pub fn public_pem_to_jwk_value(
+pub(crate) fn public_pem_to_jwk_value(
     public_key_pem: &str,
     kid: &str,
     algorithm: &str,
@@ -187,7 +164,7 @@ pub fn public_pem_to_jwk_value(
 }
 
 /// Serializes `{"keys":[ ... ]}` as compact UTF-8 JSON for gRPC [`rpc::forge::Jwks::jwks`].
-pub fn jwks_document_string(keys: &[Value]) -> Result<String, JwkBuildError> {
+pub(crate) fn jwks_document_string(keys: &[Value]) -> Result<String, JwkBuildError> {
     if keys.is_empty() {
         return Err(JwkBuildError(
             "JWKS document requires at least one verification key".into(),
@@ -203,6 +180,11 @@ mod tests {
     use p256::pkcs8::{DecodePrivateKey, EncodePublicKey};
 
     use super::*;
+
+    fn sign(payload: &Value, key: &[u8]) -> Result<String, SignError> {
+        let signer = Es256Signer::new(key, "default")?;
+        signer.sign(payload, &SignOptions::default())
+    }
 
     /// Returns an EC P-256 private key in PKCS#8 PEM format (standard encoding), generated at test time.
     fn ec_p256_private_key_pem() -> Vec<u8> {
@@ -264,8 +246,7 @@ mod tests {
     fn es256_signer_implements_signer_trait() {
         let key = ec_p256_private_key_pem();
         let signer = Es256Signer::new(&key, "test-key-1").expect("create signer");
-        assert_eq!(signer.key_id(), "test-key-1");
-        assert_eq!(signer.algorithm(), "ES256");
+        assert_eq!(signer.key_id, "test-key-1");
         let payload = serde_json::json!({ "sub": "spiffe://example.org/machine/456" });
         let token = signer
             .sign(&payload, &SignOptions::default())

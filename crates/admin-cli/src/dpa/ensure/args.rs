@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 use rpc::forge::DpaInterfaceType;
 
@@ -32,19 +32,19 @@ Create/ensure a DPA interface with a device description:
     00:11:22:33:44:55 BlueField3 5e:00.0 \"NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC\"
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Machine ID")]
-    pub machine_id: MachineId,
+    machine_id: HostMachineId,
     #[clap(help = "MAC address (e.g. 00:11:22:33:44:55)")]
-    pub mac_addr: String,
+    mac_addr: String,
     #[clap(help = "Device type (e.g. BlueField3)")]
-    pub device_type: String,
+    device_type: String,
     #[clap(help = "PCI name (e.g. 5e:00.0)")]
-    pub pci_name: String,
+    pci_name: String,
     #[clap(help = "Interface type (e.g. SVPC or ASTRA)", value_enum)]
-    pub interface_type: DpaInterfaceType,
+    interface_type: DpaInterfaceType,
     #[clap(help = "Device description (e.g. NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC)")]
-    pub device_description: Option<String>,
+    device_description: Option<String>,
 }
 
 impl From<Args> for ::rpc::forge::DpaInterfaceCreationRequest {

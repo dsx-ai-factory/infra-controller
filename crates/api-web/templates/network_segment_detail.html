@@ -17,6 +17,7 @@
 	<tr><th>Domain id</th><td><a href="/admin/domain">{{ domain_id }}</a></td></tr>
 	<tr><th>Domain name</th><td>{{ domain_name }}</td></tr>
 	<tr><th>Type</th><td>{{ segment_type }}</td></tr>
+	<tr><th>Infer SLAAC EUI-64 addresses</th><td>{{ infer_slaac_eui64_addresses }}</td></tr>
 </table>
 
 {{ lifecycle_detail|safe }}
@@ -44,7 +45,7 @@
 	{% for event in history %}
 		<tr>
 			<td>{{event.version|config_version|safe}}</td>
-			<td><div style="overflow: auto;"><pre><code class="prettyjson">{{event.state}}</code></pre></div></td>
+			<td><div style="overflow: auto;"><pre><code>{{event.state|pretty_json}}</code></pre></div></td>
 		</tr>
 	{% endfor %}
 	</tbody>

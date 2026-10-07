@@ -1,0 +1,94 @@
+suite: rbac tests
+templates:
+  - templates/rbac.yaml
+tests:
+  - it: should create Role with services and deployments permissions
+    set:
+      enabled: true
+      rbac:
+        create: true
+    asserts:
+      - isKind:
+          of: Role
+        documentIndex: 0
+      - equal:
+          path: rules[0].apiGroups
+          value: [""]
+        documentIndex: 0
+      - equal:
+          path: rules[0].resources
+          value: ["services"]
+        documentIndex: 0
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        documentIndex: 0
+      - equal:
+          path: rules[1].apiGroups
+          value: ["apps"]
+        documentIndex: 0
+      - equal:
+          path: rules[1].resources
+          value: ["deployments"]
+        documentIndex: 0
+      - equal:
+          path: rules[1].verbs
+          value: ["get"]
+        documentIndex: 0
+
+  - it: should create RoleBinding
+    set:
+      enabled: true
+      rbac:
+        create: true
+    asserts:
+      - isKind:
+          of: RoleBinding
+        documentIndex: 1
+
+  - it: should not create RBAC when disabled
+    set:
+      enabled: true
+      rbac:
+        create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create RBAC when controller disabled
+    set:
+      enabled: false
+      rbac:
+        create: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+---
+suite: namespace tests
+templates:
+  - templates/deployment.yaml
+  - templates/serviceaccount.yaml
+  - templates/rbac.yaml
+tests:
+  - it: should use Release.Namespace when no global override
+    release:
+      namespace: release-ns
+    set:
+      enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: release-ns
+
+  - it: should use global.namespaceOverride when set
+    release:
+      namespace: release-ns
+    set:
+      enabled: true
+      global:
+        namespaceOverride: nico-system
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: nico-system

@@ -31,8 +31,8 @@ pub async fn handle_created(
     _ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     tracing::info!(
-        "Switch {:?} created, transitioning to Initializing",
-        switch_id
+        switch_id = ?switch_id,
+        "Switch created, transitioning to Initializing",
     );
     Ok(StateHandlerOutcome::transition(
         SwitchControllerState::Initializing {

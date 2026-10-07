@@ -193,7 +193,7 @@ fn artifacts_to_json(artifacts: &[rpc::IpxeTemplateArtifact]) -> serde_json::Val
     )
 }
 
-pub async fn create_operating_system(
+pub(crate) async fn create_operating_system(
     api: &Api,
     request: Request<rpc::CreateOperatingSystemRequest>,
 ) -> Result<Response<rpc::OperatingSystem>, Status> {
@@ -270,9 +270,14 @@ pub async fn create_operating_system(
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
-    if req.tenant_organization_id.is_empty() {
+    // if tenant_organization_id is provided it must not be empty:
+    if req
+        .tenant_organization_id
+        .as_deref()
+        .is_some_and(|org| org.is_empty())
+    {
         return Err(Status::invalid_argument(
-            "tenant_organization_id is required",
+            "tenant_organization_id must not be empty when provided",
         ));
     }
 
@@ -308,7 +313,7 @@ pub async fn create_operating_system(
     Ok(Response::new(def))
 }
 
-pub async fn get_operating_system(
+pub(crate) async fn get_operating_system(
     api: &Api,
     request: Request<OperatingSystemId>,
 ) -> Result<Response<rpc::OperatingSystem>, Status> {
@@ -329,7 +334,7 @@ pub async fn get_operating_system(
     Ok(Response::new(def))
 }
 
-pub async fn update_operating_system(
+pub(crate) async fn update_operating_system(
     api: &Api,
     request: Request<rpc::UpdateOperatingSystemRequest>,
 ) -> Result<Response<rpc::OperatingSystem>, Status> {
@@ -475,7 +480,7 @@ pub async fn update_operating_system(
     Ok(Response::new(def))
 }
 
-pub async fn delete_operating_system(
+pub(crate) async fn delete_operating_system(
     api: &Api,
     request: Request<rpc::DeleteOperatingSystemRequest>,
 ) -> Result<Response<rpc::DeleteOperatingSystemResponse>, Status> {
@@ -503,7 +508,7 @@ pub async fn delete_operating_system(
     Ok(Response::new(rpc::DeleteOperatingSystemResponse {}))
 }
 
-pub async fn find_operating_system_ids(
+pub(crate) async fn find_operating_system_ids(
     api: &Api,
     request: Request<rpc::OperatingSystemSearchFilter>,
 ) -> Result<Response<rpc::OperatingSystemIdList>, Status> {
@@ -521,7 +526,7 @@ pub async fn find_operating_system_ids(
     Ok(Response::new(rpc::OperatingSystemIdList { ids }))
 }
 
-pub async fn get_operating_system_cachable_ipxe_script_artifacts(
+pub(crate) async fn get_operating_system_cachable_ipxe_script_artifacts(
     api: &Api,
     request: Request<rpc::GetOperatingSystemCachableIpxeTemplateArtifactsRequest>,
 ) -> Result<Response<rpc::IpxeTemplateArtifactList>, Status> {
@@ -546,7 +551,7 @@ pub async fn get_operating_system_cachable_ipxe_script_artifacts(
     Ok(Response::new(rpc::IpxeTemplateArtifactList { artifacts }))
 }
 
-pub async fn update_operating_system_cachable_ipxe_script_artifacts(
+pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
     api: &Api,
     request: Request<rpc::UpdateOperatingSystemIpxeTemplateArtifactRequest>,
 ) -> Result<Response<rpc::IpxeTemplateArtifactList>, Status> {
@@ -646,7 +651,7 @@ pub async fn update_operating_system_cachable_ipxe_script_artifacts(
     Ok(Response::new(rpc::IpxeTemplateArtifactList { artifacts }))
 }
 
-pub async fn find_operating_systems_by_ids(
+pub(crate) async fn find_operating_systems_by_ids(
     api: &Api,
     request: Request<rpc::OperatingSystemsByIdsRequest>,
 ) -> Result<Response<rpc::OperatingSystemList>, Status> {

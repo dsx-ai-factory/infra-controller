@@ -20,27 +20,9 @@ use std::sync::Arc;
 use axum::Router;
 
 use crate::instance_metadata_endpoint::{InstanceMetadataRouterStateImpl, get_fmds_router};
-use crate::instrumentation::{
-    AgentMetricsState, WithTracingLayer, get_metrics_router, get_prometheus_registry,
-};
+use crate::instrumentation::{AgentMetricsState, WithTracingLayer};
 
-/// Exposes Prometheus metrics on `[telemetry] metrics-address` (default `0.0.0.0:8888`),
-/// matching the `/metrics` route served alongside embedded FMDS on DPU OS.
-pub fn spawn_prometheus_metrics_server(
-    metrics_address: String,
-) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!(
-        metrics_address = %metrics_address,
-        "Starting Prometheus /metrics endpoint"
-    );
-    let prometheus_registry = get_prometheus_registry();
-    start_server(
-        metrics_address,
-        Router::new().nest("/metrics", get_metrics_router(prometheus_registry)),
-    )
-}
-
-pub fn spawn_metadata_service(
+pub(super) fn spawn_metadata_service(
     metadata_service_address: String,
     metrics_state: Arc<AgentMetricsState>,
     state: Arc<InstanceMetadataRouterStateImpl>,

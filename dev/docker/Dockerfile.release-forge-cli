@@ -25,12 +25,22 @@ WORKDIR ./carbide
 COPY . ./
 
 # --mount=type=cache persists the sccache directory across builds. Requires BuildKit (default in Docker 23+).
+# On CI the BuildKit state is discarded per job, so prefer the shared Actions
+# cache backend when the workflow supplies credentials.
+# dev/docker/sccache-cache.sh picks between the two and reports on whether the
+# choice worked.
 RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+    --mount=type=secret,id=actions_results_url \
+    --mount=type=secret,id=actions_runtime_token \
+    --mount=type=secret,id=sccache_gha_rw_mode \
   cd /carbide && \
   export SCCACHE_DIR=/sccache && \
   export RUSTC_WRAPPER=sccache && \
   export CARGO_PROFILE_RELEASE_DEBUG=true && \
-  cargo build --release -p nico-admin-cli
+  . /carbide/dev/docker/sccache-cache.sh && \
+  sccache_setup && \
+  cargo build --release -p nico-admin-cli && \
+  sccache_report
 
 FROM debian:12-slim
 ARG CI_COMMIT_SHORT_SHA
@@ -44,12 +54,12 @@ RUN apt update && \
 WORKDIR /app
 COPY --from=builder /carbide/target/release/nico-admin-cli ./
 RUN ln -s /app/nico-admin-cli /app/carbide-admin-cli
-# Cert paths read by nico-admin-cli via carbide_api_cli.json.
+# Cert paths read by nico-admin-cli via nico_api_cli.json.
 # Internal deployments: mount provisioned client certs into /root/.config/carbide/certs/.
 RUN mkdir -p /root/.config/carbide/certs && \
 mkdir -p /opt/forge
 COPY ./dev/certs/forge_root.pem /opt/forge
-RUN echo '{"forge_root_ca_path": "/opt/forge/forge_root.pem","client_key_path": "/root/.config/carbide/certs/client","client_cert_path": "/root/.config/carbide/certs/client.crt"}' > /root/.config/carbide_api_cli.json
+RUN echo '{"root_ca_path": "/opt/forge/forge_root.pem","client_key_path": "/root/.config/carbide/certs/client","client_cert_path": "/root/.config/carbide/certs/client.crt"}' > /root/.config/nico_api_cli.json
 ENV PATH="$PATH:/app"
 
 ENTRYPOINT ["/app/nico-admin-cli"]

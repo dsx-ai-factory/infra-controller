@@ -16,183 +16,120 @@
  */
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tonic::transport::Channel;
 
+use super::collector_metrics::ExportMetricsServiceRequest;
 use super::collector_metrics::metrics_service_client::MetricsServiceClient;
-use super::convert::build_metrics_export_request;
-use crate::collectors::{BackoffConfig, ExponentialBackoff};
-use crate::sink::otlp::OtlpMetricsQueue;
-use crate::sink::{EventContext, MetricSample};
+use super::convert::build_queued_metrics_export_request;
+use super::metrics::metric;
+use super::{OtlpExport, OtlpSignal, run_drain};
+use crate::config::OtlpTargetConfig;
+use crate::sink::otlp::{OtlpMetricsQueue, QueuedMetric};
 
 pub(crate) struct OtlpMetricsDrainTask {
     queue: Arc<OtlpMetricsQueue>,
-    endpoint: String,
-    batch_size: usize,
-    flush_interval: Duration,
+    target: OtlpTargetConfig,
+    metric_name_prefix: String,
 }
 
 impl OtlpMetricsDrainTask {
-    pub fn new(
+    pub(crate) fn new(
         queue: Arc<OtlpMetricsQueue>,
-        endpoint: String,
-        batch_size: usize,
-        flush_interval: Duration,
+        target: OtlpTargetConfig,
+        metric_name_prefix: String,
     ) -> Self {
         Self {
             queue,
-            endpoint,
-            batch_size,
-            flush_interval,
+            target,
+            metric_name_prefix,
         }
     }
 
-    fn drain_batch(&self, batch: &mut Vec<(EventContext, MetricSample)>) {
-        let remaining = self.batch_size.saturating_sub(batch.len());
-        for _ in 0..remaining {
-            match self.queue.pop() {
-                Some((_key, value)) => batch.push(value),
-                None => break,
-            }
-        }
+    pub(crate) async fn run(self) {
+        let metric_name_prefix: Arc<str> = self.metric_name_prefix.into();
+        run_drain(
+            self.queue,
+            self.target,
+            OtlpSignal::Metrics,
+            move |channel| MetricsExport {
+                client: MetricsServiceClient::new(channel),
+                metric_name_prefix: metric_name_prefix.clone(),
+            },
+        )
+        .await;
+    }
+}
+
+/// Metric export to one target.
+#[derive(Clone)]
+struct MetricsExport {
+    client: MetricsServiceClient<Channel>,
+    metric_name_prefix: Arc<str>,
+}
+
+impl OtlpExport for MetricsExport {
+    type Item = QueuedMetric;
+    type Request = ExportMetricsServiceRequest;
+
+    fn build(&self, items: &[Self::Item], observed_nanos: u64) -> Self::Request {
+        build_queued_metrics_export_request(items, observed_nanos, &self.metric_name_prefix)
     }
 
-    pub async fn run(self) {
-        let mut client = match self.connect().await {
-            Some(c) => c,
-            None => return,
-        };
-
-        let mut batch = Vec::with_capacity(self.batch_size);
-        let mut interval = tokio::time::interval(self.flush_interval);
-
-        loop {
-            tokio::select! {
-                _ = self.queue.notified() => {
-                    self.drain_batch(&mut batch);
-                    if batch.len() >= self.batch_size {
-                        self.flush(&mut client, &mut batch).await;
-                        interval.reset();
-                    }
-                }
-                _ = interval.tick() => {
-                    self.drain_batch(&mut batch);
-                    if !batch.is_empty() {
-                        self.flush(&mut client, &mut batch).await;
-                    }
-                }
-            }
-        }
-    }
-
-    async fn connect(&self) -> Option<MetricsServiceClient<Channel>> {
-        let endpoint = match Channel::from_shared(self.endpoint.clone()) {
-            Ok(e) => e,
-            Err(error) => {
-                tracing::error!(
-                    ?error,
-                    endpoint = %self.endpoint,
-                    "invalid otlp metrics endpoint uri, stopping drain"
-                );
-                return None;
-            }
-        };
-
-        let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-            initial: Duration::from_secs(1),
-            max: Duration::from_secs(30),
-        });
-
-        loop {
-            match endpoint.connect().await {
-                Ok(channel) => {
-                    tracing::info!(endpoint = %self.endpoint, "connected to otlp metrics collector");
-                    return Some(MetricsServiceClient::new(channel));
-                }
-                Err(error) => {
-                    let delay = backoff.next_delay();
-                    tracing::warn!(
-                        ?error,
-                        endpoint = %self.endpoint,
-                        retry_in = ?delay,
-                        "failed to connect to otlp metrics collector"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    async fn flush(
-        &self,
-        client: &mut MetricsServiceClient<Channel>,
-        batch: &mut Vec<(EventContext, MetricSample)>,
-    ) {
-        if batch.is_empty() {
-            return;
-        }
-
-        let request = build_metrics_export_request(batch);
-        batch.clear();
-
-        let point_count = request
+    fn record_count(request: &Self::Request) -> usize {
+        request
             .resource_metrics
             .iter()
             .flat_map(|rm| &rm.scope_metrics)
             .flat_map(|sm| &sm.metrics)
-            .count();
+            .map(|metric| match metric.data.as_ref() {
+                Some(metric::Data::Gauge(gauge)) => gauge.data_points.len(),
+                Some(metric::Data::Sum(sum)) => sum.data_points.len(),
+                Some(metric::Data::Histogram(histogram)) => histogram.data_points.len(),
+                Some(metric::Data::ExponentialHistogram(histogram)) => histogram.data_points.len(),
+                Some(metric::Data::Summary(summary)) => summary.data_points.len(),
+                None => 0,
+            })
+            .sum()
+    }
 
-        if point_count == 0 {
-            return;
-        }
+    fn encoded_len(request: &Self::Request) -> usize {
+        prost::Message::encoded_len(request)
+    }
 
-        const MAX_RETRIES: usize = 5;
-
-        let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-            initial: Duration::from_millis(100),
-            max: Duration::from_secs(10),
-        });
-
-        for attempt in 0..=MAX_RETRIES {
-            match client.export(request.clone()).await {
-                Ok(_) => {
-                    tracing::debug!(point_count, "exported metrics to otlp collector");
-                    break;
-                }
-                Err(status) if is_retryable(&status) && attempt < MAX_RETRIES => {
-                    let delay = backoff.next_delay();
-                    tracing::warn!(
-                        code = ?status.code(),
-                        message = status.message(),
-                        attempt,
-                        retry_in = ?delay,
-                        "retryable otlp metrics export error"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                Err(status) => {
-                    tracing::error!(
-                        code = ?status.code(),
-                        message = status.message(),
-                        point_count,
-                        attempt,
-                        "otlp metrics export failed, dropping batch"
-                    );
-                    break;
-                }
-            }
-        }
+    async fn send(&mut self, request: Self::Request) -> Result<(), tonic::Status> {
+        self.client.export(request).await.map(drop)
     }
 }
 
-fn is_retryable(status: &tonic::Status) -> bool {
-    matches!(
-        status.code(),
-        tonic::Code::Unavailable
-            | tonic::Code::DeadlineExceeded
-            | tonic::Code::ResourceExhausted
-            | tonic::Code::Aborted
-            | tonic::Code::Internal
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::otlp::metrics::{
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+    };
+
+    #[test]
+    fn export_record_count_counts_datapoints_in_grouped_metrics() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![
+                                NumberDataPoint::default(),
+                                NumberDataPoint::default(),
+                                NumberDataPoint::default(),
+                            ],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        assert_eq!(MetricsExport::record_count(&request), 3);
+    }
 }

@@ -28,11 +28,11 @@ Delete a rack by name:
     $ nico-admin-cli rack delete rack-01
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         help = "Rack ID or name to delete (should not have any associated compute trays, nvlink switches or power shelves)"
     )]
-    pub identifier: String,
+    identifier: String,
 }
 
 impl From<Args> for ::rpc::forge::DeleteRackRequest {

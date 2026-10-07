@@ -25,6 +25,6 @@ Delete a SKU by ID:
     $ nico-admin-cli sku delete DGX-H100-640GB
 
 ")]
-pub struct Args {
-    pub sku_id: String,
+pub(crate) struct Args {
+    pub(super) sku_id: String,
 }

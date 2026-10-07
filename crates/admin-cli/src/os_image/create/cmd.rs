@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn create(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn create(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let image_attrs: ::rpc::forge::OsImageAttributes = args.try_into()?;
     let image = api_client.0.create_os_image(image_attrs).await?;
     if let Some(x) = image.attributes {

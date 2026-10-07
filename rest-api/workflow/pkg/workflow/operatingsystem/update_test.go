@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	osImageActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/operatingsystem"
 )
@@ -40,19 +40,19 @@ func (s *UpdateOsImageTestSuite) Test_UpdateOsImageInventory_Success() {
 	siteID := uuid.New()
 	osIDs := []uuid.UUID{uuid.New(), uuid.New()}
 
-	osImageInventory := &cwssaws.OsImageInventory{
-		OsImages: []*cwssaws.OsImage{
+	osImageInventory := &corev1.OsImageInventory{
+		OsImages: []*corev1.OsImage{
 			{
-				Attributes: &cwssaws.OsImageAttributes{
-					Id: &cwssaws.UUID{Value: osIDs[0].String()},
+				Attributes: &corev1.OsImageAttributes{
+					Id: &corev1.UUID{Value: osIDs[0].String()},
 				},
-				Status: cwssaws.OsImageStatus_ImageReady,
+				Status: corev1.OsImageStatus_ImageReady,
 			},
 			{
-				Attributes: &cwssaws.OsImageAttributes{
-					Id: &cwssaws.UUID{Value: osIDs[1].String()},
+				Attributes: &corev1.OsImageAttributes{
+					Id: &corev1.UUID{Value: osIDs[1].String()},
 				},
-				Status: cwssaws.OsImageStatus_ImageFailed,
+				Status: corev1.OsImageStatus_ImageFailed,
 			},
 		},
 	}
@@ -74,19 +74,19 @@ func (s *UpdateOsImageTestSuite) Test_UpdateOsImageInventory_ActivityFails() {
 	siteID := uuid.New()
 	osIDs := []uuid.UUID{uuid.New(), uuid.New()}
 
-	osImageInventory := &cwssaws.OsImageInventory{
-		OsImages: []*cwssaws.OsImage{
+	osImageInventory := &corev1.OsImageInventory{
+		OsImages: []*corev1.OsImage{
 			{
-				Attributes: &cwssaws.OsImageAttributes{
-					Id: &cwssaws.UUID{Value: osIDs[0].String()},
+				Attributes: &corev1.OsImageAttributes{
+					Id: &corev1.UUID{Value: osIDs[0].String()},
 				},
-				Status: cwssaws.OsImageStatus_ImageReady,
+				Status: corev1.OsImageStatus_ImageReady,
 			},
 			{
-				Attributes: &cwssaws.OsImageAttributes{
-					Id: &cwssaws.UUID{Value: osIDs[1].String()},
+				Attributes: &corev1.OsImageAttributes{
+					Id: &corev1.UUID{Value: osIDs[1].String()},
 				},
-				Status: cwssaws.OsImageStatus_ImageFailed,
+				Status: corev1.OsImageStatus_ImageFailed,
 			},
 		},
 	}

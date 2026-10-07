@@ -22,7 +22,8 @@ use std::string::String;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue, USER_AGENT};
-use reqwest::{Client as HttpClient, ClientBuilder, Method, StatusCode};
+use reqwest::{ClientBuilder, Method, StatusCode};
+use reqwest_middleware::ClientWithMiddleware as HttpClient;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::debug;
@@ -34,8 +35,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(thiserror::Error, Debug)]
 pub enum NmxmApiError {
-    #[error("Network error talking to NMX-M server at {url}. {source}")]
-    NetworkError { url: String, source: reqwest::Error },
+    #[error("network error talking to NMX-M server at {url}. {source}")]
+    NetworkError {
+        url: String,
+        source: reqwest_middleware::Error,
+    },
 
     #[error("HTTP {status_code} at {url}: {response_body}")]
     HTTPErrorCode {
@@ -54,36 +58,36 @@ pub enum NmxmApiError {
     #[error("API error {status}: no response at {url}")]
     APINoResponseError { url: String, status: StatusCode },
 
-    #[error("Could not deserialize response from {url}. Body: {body}. {source}")]
+    #[error("could not deserialize response from {url}. body: {body}. {source}")]
     JsonDeserializeError {
         url: String,
         body: String,
         source: serde_json::Error,
     },
 
-    #[error("Could not serialize request body for {url}. Obj: {object_debug}. {source}")]
+    #[error("could not serialize request body for {url}. obj: {object_debug}. {source}")]
     JsonSerializeError {
         url: String,
         object_debug: String,
         source: serde_json::Error,
     },
 
-    #[error("Remote returned empty body at {url}, {source}")]
+    #[error("remote returned empty body at {url}, {source}")]
     NoContent { url: String, source: reqwest::Error },
 
     #[error("HTTP client not initialized")]
     Uninitialized,
 
-    #[error("Login failure")]
+    #[error("login failure")]
     LoginFailure,
 
-    #[error("Logout failure")]
+    #[error("logout failure")]
     LogoutFailure,
 
-    #[error("Reqwest error: '{0}'")]
+    #[error("reqwest error: '{0}'")]
     ReqwestError(#[from] reqwest::Error),
 
-    #[error("Invalid arguments")]
+    #[error("invalid arguments")]
     InvalidArguments,
 }
 
@@ -119,6 +123,12 @@ impl NmxmClientPoolBuilder {
             .danger_accept_invalid_certs(self.accept_invalid_certs)
             .timeout(self.timeout)
             .build()?;
+
+        // The `reqwest-tracing` middleware injects the current span's W3C trace context into every
+        // outgoing request (#2438).
+        let client = reqwest_middleware::ClientBuilder::new(client)
+            .with(reqwest_tracing::TracingMiddleware::default())
+            .build();
 
         let pool = NmxmClientPool { client };
 
@@ -346,7 +356,11 @@ impl NmxmApiClient {
                 source: e,
             })?;
         let response_body = String::from_utf8_lossy(&response_buffer).to_string();
-        debug!("RX {status_code} {}", truncate(&response_body, 1500));
+        debug!(
+            http_status = status_code.as_u16(),
+            response_body = truncate(&response_body, 1500),
+            "Received NMX-M response"
+        );
 
         if !status_code.is_success() {
             return Err(NmxmApiError::HTTPErrorCode {

@@ -29,10 +29,12 @@ use rpc::forge::forge_server::Forge;
 use super::Base;
 use super::pagination::{self, PageContext, PaginationParams};
 use crate::filters;
+use crate::site_explorer_run_status::SiteExplorerLastRunDisplay;
 
 #[derive(Template)]
 #[template(path = "expected_machine_show.html")]
 struct ExpectedMachines {
+    last_run: Option<SiteExplorerLastRunDisplay>,
     expected_rows: Vec<ExpectedMachineRow>,
     unexpected_rows: Vec<UnexpectedMachineRow>,
     all_count: usize,
@@ -148,7 +150,7 @@ impl ExpectedMachineTabs {
     }
 }
 
-pub async fn show_all_html(
+pub(super) async fn show_all_html(
     AxumState(api): AxumState<Arc<Api>>,
     Query(mut params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -169,7 +171,7 @@ pub async fn show_all_html(
     {
         Ok(machines) => machines,
         Err(err) => {
-            tracing::error!(%err, "get_all_expected_machines_linked");
+            tracing::error!(error = %err, "get_all_expected_machines_linked");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading expected machines from carbide-api",
@@ -192,7 +194,7 @@ pub async fn show_all_html(
     {
         Ok(list) => list,
         Err(err) => {
-            tracing::error!(%err, "get_all_unexpected_machines");
+            tracing::error!(error = %err, "get_all_unexpected_machines");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading unexpected machines from carbide-api",
@@ -207,6 +209,17 @@ pub async fn show_all_html(
         .collect();
     unexpected_machines.sort_unstable();
     let unexpected_count = unexpected_machines.len();
+    let last_run = match api
+        .get_site_explorer_last_run(tonic::Request::new(()))
+        .await
+        .map(|response| response.into_inner().last_run)
+    {
+        Ok(last_run) => last_run.as_ref().map(Into::into),
+        Err(err) => {
+            tracing::error!(error = %err, "get_site_explorer_last_run");
+            None
+        }
+    };
 
     let (expected_rows, unexpected_rows, info) = match active_tab.as_str() {
         "all" => {
@@ -248,6 +261,7 @@ pub async fn show_all_html(
     };
 
     let tmpl = ExpectedMachines {
+        last_run,
         expected_rows,
         unexpected_rows,
         all_count,
@@ -263,7 +277,9 @@ pub async fn show_all_html(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_expected_machine_raw_json(AxumState(api): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_expected_machine_raw_json(
+    AxumState(api): AxumState<Arc<Api>>,
+) -> Response {
     let result = match api
         .get_all_expected_machines(tonic::Request::new(()))
         .await
@@ -271,7 +287,7 @@ pub async fn show_expected_machine_raw_json(AxumState(api): AxumState<Arc<Api>>)
     {
         Ok(machines) => machines,
         Err(err) => {
-            tracing::error!(%err, "show_expected_machine_raw_json");
+            tracing::error!(error = %err, "show_expected_machine_raw_json");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading expected machines from carbide-api",

@@ -19,7 +19,7 @@
 
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::machine;
-use model::machine::Machine;
+use model::machine::StableHostMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::rack::Rack;
 use model::rack_type::{RackCapabilitiesSet, RackProfile};
@@ -35,18 +35,20 @@ pub mod deleting;
 pub mod discovering;
 pub mod error_state;
 pub mod fabric_manager;
+pub mod firmware_object;
 pub mod handler;
 pub mod io;
 pub mod maintenance;
 pub mod metrics;
 pub mod ready;
-pub mod validating;
+mod validating;
+pub mod write_ops;
 
 /// Loads all machines associated with the given rack via their `rack_id` FK.
 pub(crate) async fn get_machines_from_rack(
     rack: &Rack,
     txn: &mut PgConnection,
-) -> Result<Vec<Machine>, StateHandlerError> {
+) -> Result<Vec<StableHostMachine>, StateHandlerError> {
     let search_cfg = MachineSearchConfig {
         rack_id: Some(rack.id.clone()),
         ..Default::default()
@@ -74,7 +76,10 @@ pub(crate) fn resolve_profile<'a>(
     let rack_profile_id = match rack_profile_id {
         Some(rc) => rc,
         None => {
-            tracing::info!("Rack {} has no rack_profile_id configured", id);
+            tracing::info!(
+                rack_id = %id,
+                "Rack has no rack_profile_id configured",
+            );
             return None;
         }
     };
@@ -88,9 +93,9 @@ pub(crate) fn resolve_profile<'a>(
         Some(profile) => Some(profile),
         None => {
             tracing::warn!(
-                "Rack {} has unknown rack_profile_id '{}'",
-                id,
-                rack_profile_id
+                rack_id = %id,
+                rack_profile_id = %rack_profile_id,
+                "Rack has unknown rack_profile_id",
             );
             None
         }

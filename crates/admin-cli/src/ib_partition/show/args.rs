@@ -35,16 +35,16 @@ Find a partition by name:
     $ nico-admin-cli ib-partition show --name my-partition
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(None),
         help = "The InfiniBand Partition ID to query, leave empty for all (default)"
     )]
-    pub id: Option<IBPartitionId>,
+    pub(super) id: Option<IBPartitionId>,
 
     #[clap(short, long, help = "The Tenant Org ID to query")]
-    pub tenant_org_id: Option<String>,
+    pub(super) tenant_org_id: Option<String>,
 
     #[clap(short, long, help = "The InfiniBand Partition name to query")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
 }

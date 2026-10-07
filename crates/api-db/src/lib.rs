@@ -15,19 +15,24 @@
  * limitations under the License.
  */
 
-// Allow txn_without_commit in tests
-#![cfg_attr(test, allow(txn_without_commit))]
-#![allow(unknown_lints)]
+// It's too cumbersome for tests to adhere to these, which are less important in testing anyway.
+#![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
 pub mod attestation;
+pub mod attestation_profile;
 pub mod bmc_metadata;
 pub mod bmc_redfish_session;
+pub mod bmc_suppression;
 pub mod carbide_version;
 pub mod compute_allocation;
+mod conditional_write;
+mod config_drift;
+pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
+pub mod direct_dispatch_firmware_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
@@ -36,12 +41,15 @@ pub mod dpu_remediation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;
+pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
+pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
+pub mod host_firmware_config;
 pub mod host_machine_update;
 pub mod host_naming;
 pub mod ib_partition;
@@ -52,11 +60,15 @@ pub mod instance_type;
 pub mod ip_allocator;
 pub mod machine;
 pub mod machine_boot_override;
+pub mod machine_desired_boot_interface;
 pub mod machine_interface;
 pub mod machine_interface_address;
+pub mod machine_lldp_neighbor;
+pub mod machine_pending_action;
 pub mod machine_topology;
 pub mod machine_validation;
 pub mod machine_validation_config;
+pub mod machine_validation_execution;
 pub mod machine_validation_result;
 pub mod machine_validation_suites;
 pub mod managed_host;
@@ -66,6 +78,7 @@ pub mod network_devices;
 pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
+pub mod nic_firmware;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
@@ -80,8 +93,12 @@ pub mod rack;
 pub mod redfish_actions;
 pub mod resource_pool;
 pub mod retained_boot_interface;
+pub mod retired_ib_membership;
 pub mod route_servers;
+pub mod secrets;
 pub mod site_exploration_report;
+pub mod site_explorer_run_status;
+pub mod site_prefix;
 pub mod sku;
 pub mod spx_partition;
 pub mod state_history;
@@ -89,6 +106,7 @@ pub mod switch;
 pub mod tenant;
 pub mod tenant_identity_config;
 pub mod tenant_keyset;
+pub mod tenant_prefix_overlap;
 pub mod trim_table;
 pub mod vpc;
 pub mod vpc_dpu_loopback;
@@ -96,15 +114,25 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 use std::backtrace::{Backtrace, BacktraceStatus};
+use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::pin::Pin;
 
+use carbide_instrument::{Event, LabelValue, emit};
 #[cfg(test)]
 pub(crate) use carbide_macros::sqlx_test;
+use carbide_uuid::machine::InvalidMachineType;
 use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
@@ -315,7 +343,7 @@ impl AnnotatedSqlxError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum DatabaseError {
-    #[error("Generic error from report: {0}")]
+    #[error("generic error from report: {0}")]
     GenericErrorFromReport(#[from] eyre::ErrReport),
     #[error(transparent)]
     Sqlx(#[from] AnnotatedSqlxError),
@@ -326,13 +354,13 @@ pub enum DatabaseError {
         /// The ID of the resource that was not found
         id: String,
     },
-    #[error("Internal error: {message}")]
+    #[error("internal error: {message}")]
     Internal { message: String },
-    #[error("Unable to parse string into IP Address: {0}")]
+    #[error("unable to parse string into IP address: {0}")]
     AddressParseError(#[from] std::net::AddrParseError),
     #[error(transparent)]
     AddressAlreadyInUse(#[from] AddressAlreadyInUseError),
-    #[error("Unable to parse string into IP Network: {0}")]
+    #[error("unable to parse string into IP network: {0}")]
     NetworkParseError(#[from] ipnetwork::IpNetworkError),
     #[error("{kind} already exists: {id}")]
     AlreadyFoundError {
@@ -341,54 +369,80 @@ pub enum DatabaseError {
         /// The ID of the resource that already exists.
         id: String,
     },
-    #[error("Argument is invalid: {0}")]
+    #[error("argument is invalid: {0}")]
     InvalidArgument(String),
-    #[error("Duplicate MAC address for expected host BMC interface: {0}")]
+    #[error("duplicate MAC address for expected host BMC interface: {0}")]
     ExpectedHostDuplicateMacAddress(MacAddress),
-    #[error("Argument is missing in input: {0}")]
+    #[error("NVOS MAC address is already claimed by another expected switch: {0}")]
+    ExpectedSwitchDuplicateNvosMacAddress(MacAddress),
+    #[error("argument is missing in input: {0}")]
     MissingArgument(&'static str),
-    #[error("Uuid type conversion error: {0}")]
+    #[error("uuid type conversion error: {0}")]
     UuidConversionError(#[from] uuid::Error),
-    #[error("RPC Uuid type conversion error: {0}")]
+    #[error("RPC uuid type conversion error: {0}")]
     RpcUuidConversionError(#[from] carbide_uuid::UuidConversionError),
     #[error(
-        "An object of type {0} was intended to be modified did not have the expected version {1}"
+        "an object of type {0} was intended to be modified did not have the expected version {1}"
     )]
     ConcurrentModificationError(&'static str, String),
     #[error("{0}")]
     FailedPrecondition(String),
-    #[error("All Network Segments are not allocated yet.")]
+    #[error("all network segments are not allocated yet")]
     NetworkSegmentNotAllocated,
-    #[error("Find one returned no results but should return one for uuid - {0}")]
+    #[error("find one returned no results but should return one for uuid - {0}")]
     FindOneReturnedNoResultsError(uuid::Uuid),
-    #[error("Find one returned many results but should return one for uuid - {0}")]
+    #[error("find one returned many results but should return one for uuid - {0}")]
     FindOneReturnedManyResultsError(uuid::Uuid),
-    #[error("Resource {0} is empty")]
+    #[error("resource {0} is empty")]
     ResourceExhausted(String),
-    #[error("Invalid configuration: {0}")]
+    #[error("tenant SitePrefix quota reached: {used} of {limit} retained SitePrefixes are in use")]
+    TenantSitePrefixQuotaExceeded { used: u32, limit: u32 },
+    #[error("invalid configuration: {0}")]
     InvalidConfiguration(#[from] ConfigValidationError),
-    #[error("Resource pool error: {0}")]
+    #[error("resource pool error: {0}")]
     ResourcePoolError(#[from] model::resource_pool::ResourcePoolError),
-    #[error("Only one interface per machine can be marked as primary")]
+    #[error("only one interface per machine can be marked as primary")]
     OnePrimaryInterface,
-    #[error("Duplicate MAC address for network: {0}")]
+    #[error("duplicate MAC address for network: {0}")]
     NetworkSegmentDuplicateMacAddress(MacAddress),
-    #[error("Admin network is not configured.")]
+    #[error("admin network is not configured")]
     AdminNetworkNotConfigured,
-    #[error("Network has attached VPC or Subdomain : {0}")]
+    #[error("network has attached VPC or subdomain : {0}")]
     NetworkSegmentDelete(String),
-    #[error("Tenant handling error: {0}")]
+    #[error("tenant handling error: {0}")]
     TenantError(#[from] TenantError),
-    #[error("Hardware info error: {0}")]
+    #[error("hardware info error: {0}")]
     HardwareInfoError(#[from] HardwareInfoError),
-    #[error("The function is not implemented")]
+    #[error("the function is not implemented")]
     NotImplemented,
-    #[error("Error in DHCP allocation/handling: {0}")]
+    #[error("error in DHCP allocation/handling: {0}")]
     DhcpError(#[from] DhcpError),
-    #[error("Maximum one association per interface")]
+    #[error("maximum one association per interface")]
     MaxOneInterfaceAssociation,
-    #[error("Fast-path allocation failed and can be retried")]
+    #[error("fast-path allocation failed and can be retried")]
     TryAgain,
+    #[error("no site-wide rotation target for credential type: {0:?}")]
+    MissingSitewideRotationTarget(crate::credential_rotation::CredentialRotationType),
+}
+
+// Implement From<Infallible> so that we can write generic code that converts between MachineId
+// representations using TryFrom, while supporting "non-converting" cases where the caller is
+// already passing the right type. (The `impl TryFrom<T> for T` blanket impl uses `Infallible` as
+// its error type.)
+impl From<Infallible> for DatabaseError {
+    fn from(_: Infallible) -> Self {
+        // We just crash if this is ever called, because the whole point of `Infallible` is that
+        // it's an error variant that is never actually constructed. Future rust versions will use
+        // `!` as the error type for TryFrom<T> for T, and this whole conversion will become
+        // unnecessary (as the compiler will already determine it to be unreachable.)
+        unreachable!()
+    }
+}
+
+impl From<InvalidMachineType> for DatabaseError {
+    fn from(value: InvalidMachineType) -> Self {
+        Self::internal(value.to_string())
+    }
 }
 
 impl DatabaseError {
@@ -409,11 +463,15 @@ impl DatabaseError {
     }
 
     pub fn is_fqdn_conflict(&self) -> bool {
+        self.violates_constraint("fqdn_must_be_unique")
+    }
+
+    /// Returns `true` if the database error identifies the named constraint
+    /// or unique index as the cause of the failure.
+    pub fn violates_constraint(&self, name: &str) -> bool {
         match self {
             DatabaseError::Sqlx(sqlx_error) => match &sqlx_error.source {
-                sqlx::Error::Database(database_error) => {
-                    database_error.constraint() == Some("fqdn_must_be_unique")
-                }
+                sqlx::Error::Database(database_error) => database_error.constraint() == Some(name),
                 _ => false,
             },
             _ => false,
@@ -522,7 +580,12 @@ impl From<DatabaseError> for tonic::Status {
             if f.len() == 2 {
                 let handler = f[0].trim();
                 let location = f[1].trim().replace("at ", "");
-                tracing::error!("{from} location={location} handler='{handler}'");
+                tracing::error!(
+                    error = %from,
+                    error_location = %location,
+                    handler,
+                    "database error conversion",
+                );
                 true
             } else {
                 false
@@ -534,7 +597,7 @@ impl From<DatabaseError> for tonic::Status {
         if !printed {
             match from {
                 DatabaseError::NotImplemented => {}
-                _ => tracing::error!("{from}"),
+                _ => tracing::error!(error = %from, "database error conversion"),
             }
         }
 
@@ -547,6 +610,9 @@ impl From<DatabaseError> for tonic::Status {
                 Status::failed_precondition(error.to_string())
             }
             error @ DatabaseError::ExpectedHostDuplicateMacAddress(_) => {
+                Status::failed_precondition(error.to_string())
+            }
+            error @ DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
                 Status::failed_precondition(error.to_string())
             }
             error @ DatabaseError::FailedPrecondition(_) => {
@@ -563,6 +629,9 @@ impl From<DatabaseError> for tonic::Status {
                 Status::not_found(format!("{kind} not found: {id}"))
             }
             DatabaseError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
+            error @ DatabaseError::TenantSitePrefixQuotaExceeded { .. } => {
+                Status::resource_exhausted(error.to_string())
+            }
             error @ DatabaseError::RpcUuidConversionError(_) => {
                 Status::invalid_argument(error.to_string())
             }
@@ -588,6 +657,61 @@ impl From<::measured_boot::Error> for DatabaseError {
     fn from(value: ::measured_boot::Error) -> Self {
         DatabaseError::internal(value.to_string())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+enum DatabaseTransactionRollbackTrigger {
+    ExplicitCleanup,
+    ClosureError,
+}
+
+#[derive(Event)]
+#[event(
+    event_name = "database_transaction_rollback_failed",
+    metric_name = "carbide_database_transaction_rollback_failures_total",
+    component = "nico-api",
+    log = warn,
+    metric = counter,
+    message = "Failed to roll back transaction",
+    describe = "Number of database transaction rollback failures, by trigger."
+)]
+struct DatabaseTransactionRollbackFailed {
+    #[label]
+    trigger: DatabaseTransactionRollbackTrigger,
+    #[context]
+    caller: String,
+    #[context]
+    context: &'static str,
+    #[context]
+    error: String,
+}
+
+impl DatabaseTransactionRollbackFailed {
+    fn new(
+        trigger: DatabaseTransactionRollbackTrigger,
+        caller: &'static Location<'static>,
+        context: &'static str,
+        error: &DatabaseError,
+    ) -> Self {
+        Self {
+            trigger,
+            caller: caller.to_string(),
+            context,
+            error: error.to_string(),
+        }
+    }
+}
+
+fn record_database_transaction_rollback_failure(
+    trigger: DatabaseTransactionRollbackTrigger,
+    caller: &'static Location<'static>,
+    context: &'static str,
+    error: sqlx::Error,
+) {
+    let error = DatabaseError::txn_rollback(error, caller);
+    emit(DatabaseTransactionRollbackFailed::new(
+        trigger, caller, context, &error,
+    ));
 }
 
 #[derive(Debug)]
@@ -671,6 +795,31 @@ impl<'a> Transaction<'a> {
         })
     }
 
+    // This function can just async when
+    // https://github.com/rust-lang/rust/issues/110011 will be
+    // implemented
+    /// Roll back the transaction, logging a warning tagged with `context` if
+    /// the rollback itself fails, rather than propagating -- for read-only or
+    /// cleanup paths where the caller can't act on a rollback error but must
+    /// not swallow it.
+    #[track_caller]
+    pub fn rollback_or_log(
+        self,
+        context: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let loc = Location::caller();
+        Box::pin(async move {
+            if let Err(error) = self.inner.rollback().await {
+                record_database_transaction_rollback_failure(
+                    DatabaseTransactionRollbackTrigger::ExplicitCleanup,
+                    loc,
+                    context,
+                    error,
+                );
+            }
+        })
+    }
+
     pub fn as_pgconn(&mut self) -> &mut sqlx::PgConnection {
         &mut self.inner
     }
@@ -734,7 +883,14 @@ impl WithTransaction for PgPool {
                     Ok(Ok(output))
                 }
                 Err(e) => {
-                    t.rollback().await.ok();
+                    if let Err(error) = t.rollback().await {
+                        record_database_transaction_rollback_failure(
+                            DatabaseTransactionRollbackTrigger::ClosureError,
+                            caller,
+                            "transaction closure returned an error",
+                            error,
+                        );
+                    }
                     Ok(Err(e))
                 }
             }
@@ -758,48 +914,121 @@ impl TransactionVending for PgPool {
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn setup_test_logging() {
-    use tracing::metadata::LevelFilter;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::fmt::TestWriter;
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    // This duplicates code from api-test-helper, but we don't want to take a dependency on that.
-    // Copy/pasting is fine.
-    if let Err(e) = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::Layer::default()
-                .compact()
-                .with_writer(TestWriter::new),
-        )
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
-                .add_directive("sqlx=warn".parse().unwrap())
-                .add_directive("tower=warn".parse().unwrap())
-                .add_directive("rustify=off".parse().unwrap())
-                .add_directive("rustls=warn".parse().unwrap())
-                .add_directive("hyper=warn".parse().unwrap())
-                .add_directive("h2=warn".parse().unwrap())
-                // Silence permissive mode related messages
-                .add_directive("carbide_api_core::auth=error".parse().unwrap()),
-        )
-        .try_init()
-    {
-        // Note: Resist the temptation to ignore this error. We really should only have one place in
-        // the test binary that initializes logging.
-        panic!(
-            "Failed to initialize trace logging for api-db tests. It's possible some earlier \
-            code path has already set a global default log subscriber: {e}"
-        );
-    }
+    carbide_test_support::setup_test_logging("api-db");
 }
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
     use crate::ip_allocator::DhcpError;
+
+    const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =
+        "carbide_database_transaction_rollback_failures_total";
+
+    #[derive(Clone, Copy)]
+    struct RollbackFailureCase {
+        trigger: DatabaseTransactionRollbackTrigger,
+        context: &'static str,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct RollbackFailureRecord {
+        metadata_name: String,
+        level: tracing::Level,
+        message: String,
+        event_name: Option<String>,
+        metric_name: Option<String>,
+        trigger: Option<String>,
+        caller: Option<String>,
+        context: Option<String>,
+        error: Option<String>,
+        counter_delta: f64,
+    }
+
+    #[test]
+    fn database_transaction_rollback_failures_log_and_count_by_trigger() {
+        let caller = Location::caller();
+
+        check_values(
+            [
+                Check {
+                    scenario: "explicit cleanup",
+                    input: RollbackFailureCase {
+                        trigger: DatabaseTransactionRollbackTrigger::ExplicitCleanup,
+                        context: "read-only cleanup",
+                    },
+                    expect: RollbackFailureRecord {
+                        metadata_name: "database_transaction_rollback_failed".to_string(),
+                        level: tracing::Level::WARN,
+                        message: "Failed to roll back transaction".to_string(),
+                        event_name: Some("database_transaction_rollback_failed".to_string()),
+                        metric_name: Some(TRANSACTION_ROLLBACK_FAILURES_METRIC.to_string()),
+                        trigger: Some("explicit_cleanup".to_string()),
+                        caller: Some(caller.to_string()),
+                        context: Some("read-only cleanup".to_string()),
+                        error: Some("internal error: rollback unavailable".to_string()),
+                        counter_delta: 1.0,
+                    },
+                },
+                Check {
+                    scenario: "closure error",
+                    input: RollbackFailureCase {
+                        trigger: DatabaseTransactionRollbackTrigger::ClosureError,
+                        context: "transaction closure returned an error",
+                    },
+                    expect: RollbackFailureRecord {
+                        metadata_name: "database_transaction_rollback_failed".to_string(),
+                        level: tracing::Level::WARN,
+                        message: "Failed to roll back transaction".to_string(),
+                        event_name: Some("database_transaction_rollback_failed".to_string()),
+                        metric_name: Some(TRANSACTION_ROLLBACK_FAILURES_METRIC.to_string()),
+                        trigger: Some("closure_error".to_string()),
+                        caller: Some(caller.to_string()),
+                        context: Some("transaction closure returned an error".to_string()),
+                        error: Some("internal error: rollback unavailable".to_string()),
+                        counter_delta: 1.0,
+                    },
+                },
+            ],
+            |case| {
+                let metrics = MetricsCapture::start();
+                let error = DatabaseError::Internal {
+                    message: "rollback unavailable".to_string(),
+                };
+                let logs = capture_logs(|| {
+                    emit(DatabaseTransactionRollbackFailed::new(
+                        case.trigger,
+                        caller,
+                        case.context,
+                        &error,
+                    ));
+                });
+
+                assert_eq!(logs.len(), 1, "one emit must produce one log record");
+                let log = &logs[0];
+                let trigger = case.trigger.label_value();
+
+                RollbackFailureRecord {
+                    metadata_name: log.metadata_name.clone(),
+                    level: log.level,
+                    message: log.message.clone(),
+                    event_name: log.field("event_name").map(str::to_string),
+                    metric_name: log.field("metric_name").map(str::to_string),
+                    trigger: log.field("trigger").map(str::to_string),
+                    caller: log.field("caller").map(str::to_string),
+                    context: log.field("context").map(str::to_string),
+                    error: log.field("error").map(str::to_string),
+                    counter_delta: metrics.counter_delta(
+                        TRANSACTION_ROLLBACK_FAILURES_METRIC,
+                        &[("trigger", trigger.as_str())],
+                    ),
+                }
+            },
+        );
+    }
 
     #[test]
     fn test_database_error_new() {

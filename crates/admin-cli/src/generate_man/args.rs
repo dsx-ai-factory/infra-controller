@@ -30,10 +30,10 @@ Generate man pages into a specific directory:
     $ nico-admin-cli generate-man --out-dir /usr/local/share/man/man1
 
 ")]
-pub struct Cmd {
+pub(crate) struct Cmd {
     /// Directory to write the generated man pages into. Created if it does
     /// not exist. `clap_mangen` writes one `<command>.1` file per command
     /// in the tree.
     #[clap(long, default_value = "man")]
-    pub out_dir: PathBuf,
+    pub(super) out_dir: PathBuf,
 }

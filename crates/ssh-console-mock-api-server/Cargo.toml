@@ -20,6 +20,7 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 # TODO: rename to carbide_ssh_console_mock_api_server in source
@@ -42,9 +43,14 @@ tokio = { features = ["macros"], workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 eyre = { workspace = true }
+futures = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 
 [build-dependencies]
+carbide-proto-compiler = { path = "../proto-compiler" }
 carbide-version = { path = "../version" }
 tonic-prost-build = "0.14"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

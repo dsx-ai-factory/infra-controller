@@ -15,23 +15,21 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmd;
+mod args;
+mod cmd;
 
-pub use args::Args;
+pub(super) use args::Args;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
 /// `expected-machine patch`: forwards CLI flags to `ApiClient::patch_expected_machine` (partial
-/// update; unset flags keep existing values). `--bmc-ip-address` uses the same server-side
-/// static-interface logic as a full RPC update.
+/// update; unset flags keep existing values).
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        if let Err(e) = self.validate() {
-            eprintln!("{e}");
-            return Ok(());
+        if let Err(error) = self.validate() {
+            error.exit();
         }
         ctx.api_client
             .patch_expected_machine(
@@ -50,11 +48,13 @@ impl Run for Args {
                 self.dpf_enabled,
                 self.bmc_ip_address,
                 self.bmc_retain_credentials,
-                self.dpu_mode,
+                self.dpu_policy,
+                self.bmc_ip_allocation,
                 self.disable_lockdown
                     .map(|dl| ::rpc::forge::HostLifecycleProfile {
                         disable_lockdown: Some(dl),
                     }),
+                self.interfaces,
             )
             .await?;
         Ok(())

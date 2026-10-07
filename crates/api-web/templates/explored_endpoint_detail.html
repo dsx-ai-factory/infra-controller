@@ -7,10 +7,12 @@
     {% if !has_machine %}
     <a id="delete-link" href="#" onclick="if(confirm('Are you sure you want to delete this endpoint?')) { document.getElementById('delete-form').submit(); } return false;">Delete</a>
     {% endif %}
+    {% if !Self::logs_link_template().is_empty() %}
     <a id="logs-link" href="" target="_blank">Logs</a>
+    {% endif %}
     <a id="json-link" href="">JSON</a>
-    <a id="refresh-endpoint" href="#" title="Refresh this endpoint's report immediately. If you stay on this page, you will see the status message and spinner until the refresh finishes." aria-label="Refresh endpoint report">
-        <span>Refresh</span>
+    <a id="refresh-endpoint" href="#" title="Explore this endpoint's report immediately. If you stay on this page, you will see the status message and spinner until the exploration finishes." aria-label="Explore endpoint report">
+        <span>Explore</span>
         <svg class="refresh-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.5 2v6h-6"/>
             <path d="M2.5 22v-6h6"/>
@@ -50,7 +52,7 @@
 				</div>
 				<div>
 					<form method="GET" action="/admin/redfish-browser">
-						<input type="hidden" name="url" value="https://{{ endpoint.address }}/redfish/v1">
+						<input type="hidden" name="url" value="{{ redfish_url }}">
 						<input type="submit" value="Redfish Browser">
 					</form>
 				</div>
@@ -88,7 +90,7 @@
 			<th>Last Exploration Error</th>
 			<td class="action-cell">
 				<div style="overflow: auto;">
-					<pre><code class="prettyjson">{{ last_exploration_error }}</code></pre>
+					<pre><code>{{ last_exploration_error|pretty_json }}</code></pre>
 				</div>
 				<div style="margin-left: 1rem;">
 					<form id="clearlasterror_action" method="POST" action="/admin/explored-endpoint/{{ endpoint.address }}/clear-last-error">
@@ -164,26 +166,6 @@
 			</td>
 		</tr>
 		<tr>
-			<th>Restore Boot Interface</th>
-			<td class="action-cell">
-				<div>
-					<form id="restore_boot_interface" method="POST" action="/admin/explored-endpoint/{{ endpoint.address }}/restore-boot-interface" onsubmit="action_reminder(event)">
-						<div style="display: flex; gap: 8px; align-items: center;">
-							<span class="action-spinner"></span>
-							<input type="submit" value="Restore Boot Interface">
-						</div>
-					</form>
-					<div class="config-card-reminder">Re-applies this host's resolved boot interface (MAC + Redfish interface id): the machine's designated primary interface once managed, or site-explorer's automatic default before that. Use it to restore boot setup when the boot MAC is no longer reported by Redfish, e.g. after a DPU was switched to NIC mode.</div>
-				</div>
-				{% include "restart_reminder.html" %}
-				{% if let Some(status) = action_status %}
-				{% if status.action == action_status::Type::RestoreBootInterface %}
-				{{ status.action_result_script()|safe }}
-				{% endif %}
-				{% endif %}
-			</td>
-		</tr>
-		<tr>
 			<th>Configuration</th>
 			<td>
 				<div class="config-cards-grid">
@@ -238,13 +220,13 @@
 					</div>
 					{% endif %}
 					<!-- Secure Boot Card -->
+					{% if secure_boot_status != "Unknown" %}
 					<div class="config-card">
 						<div class="config-card-header">
 						<div class="config-card-title">Secure Boot</div>
 						<span class="bubble
 						{% if secure_boot_status == "Disabled" %}
 							success
-						{% else if secure_boot_status == "Unknown" %}
 						{% else %}
 							error
 						{% endif %}
@@ -252,7 +234,7 @@
 						</div>
 					<form id="disable_secure_boot" method="POST" action="/admin/explored-endpoint/{{ endpoint.address }}/disable-secure-boot" class="config-card-action">
 						<div class="config-card-reminder">Reboot required to take effect.</div>
-						<input type="submit" value="Disable Secure Boot" class="{% if secure_boot_status == "Unknown" %}disabled{% endif %}" {% if secure_boot_status == "Unknown" %}onclick="return false;"{% endif %}>
+						<input type="submit" value="Disable Secure Boot">
 						<span class="action-spinner"></span>
 					</form>
 					{% if let Some(status) = action_status %}
@@ -261,7 +243,9 @@
 					{% endif %}
 					{% endif %}
 					</div>
+					{% endif %}
 					<!-- Lockdown Card -->
+					{% if lockdown_status != "Unknown" %}
 					<div class="config-card">
 						<div class="config-card-header">
 							<div class="config-card-title">Lockdown</div>
@@ -270,7 +254,6 @@
 							success
 						{% else if lockdown_status == "Partial" %}
 							warning
-						{% else if lockdown_status == "Unknown" %}
 						{% else %}
 							error
 						{% endif %}
@@ -285,7 +268,7 @@
 					{% else %}
 					<form id="disable_lockdown" method="POST" action="/admin/explored-endpoint/{{ endpoint.address }}/disable-lockdown" class="config-card-action">
 						<div class="config-card-reminder">Reboot required to take effect.</div>
-						<input type="submit" value="Disable Lockdown" class="{% if lockdown_status == "Unknown" %}disabled{% endif %}" {% if lockdown_status == "Unknown" %}onclick="return false;"{% endif %}>
+						<input type="submit" value="Disable Lockdown">
 						<span class="action-spinner"></span>
 					</form>
 					{% endif %}
@@ -294,6 +277,23 @@
 					{{ status.action_result_script()|safe }}
 					{% endif %}
 					{% endif %}
+					</div>
+					{% endif %}
+					<!-- Restore Boot Interface Card -->
+					<div class="config-card">
+						<div class="config-card-header">
+							<div class="config-card-title">Boot Interface<span class="config-card-help" tabindex="0" role="button" aria-label="Boot Interface description">?<span class="config-card-tooltip">Re-applies this host's resolved boot interface (MAC + Redfish interface id): the machine's designated primary interface once managed, or site-explorer's automatic default before that. Use it to restore boot setup when the boot MAC is no longer reported by Redfish, e.g. after a DPU was switched to NIC mode.</span></span></div>
+						</div>
+						<form id="restore_boot_interface" method="POST" action="/admin/explored-endpoint/{{ endpoint.address }}/restore-boot-interface" class="config-card-action">
+							<div class="config-card-reminder">Reboot required to take effect.</div>
+							<input type="submit" value="Restore Boot Interface">
+							<span class="action-spinner"></span>
+						</form>
+						{% if let Some(status) = action_status %}
+						{% if status.action == action_status::Type::RestoreBootInterface %}
+						{{ status.action_result_script()|safe }}
+						{% endif %}
+						{% endif %}
 					</div>
 				</div>
 			</td>
@@ -510,7 +510,12 @@
 
 document.addEventListener('DOMContentLoaded', function() {
 	const bmcIp = "{{ endpoint.address }}";
-	document.getElementById('logs-link').href = buildGrafanaLogsUrl(bmcIp);
+
+	// Set up Logs link (if configured)
+	const logsLink = document.getElementById('logs-link');
+	if (logsLink) {
+		logsLink.href = buildLogsUrl(bmcIp);
+	}
 
 	var refreshToast = sessionStorage.getItem('refreshToast');
 	if (refreshToast) {
@@ -537,7 +542,7 @@ document.addEventListener('DOMContentLoaded', function() {
 					return res.json().catch(function() { return {}; }).then(function(body) {
 						if (res.ok) {
 							sessionStorage.setItem('refreshToast', JSON.stringify({
-								message: 'Report Refreshed',
+								message: 'Endpoint Explored',
 								error: body.has_exploration_error || false
 							}));
 						} else {
@@ -559,4 +564,3 @@ document.addEventListener('DOMContentLoaded', function() {
 {% endmatch %}
 
 {% endblock %}
-

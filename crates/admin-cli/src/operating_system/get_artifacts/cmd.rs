@@ -24,7 +24,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::operating_system::common::{SerializableArtifact, str_to_os_id};
 use crate::rpc::ApiClient;
 
-pub async fn get_artifacts(
+pub(super) async fn get_artifacts(
     opts: Args,
     format: OutputFormat,
     api_client: &ApiClient,

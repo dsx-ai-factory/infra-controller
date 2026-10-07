@@ -29,12 +29,12 @@ Add a UFM credential with a token:
     $ nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, required(true), help = "The UFM url")]
-    pub url: String,
+    url: String,
 
     #[clap(long, default_value(""), help = "The UFM token")]
-    pub token: String,
+    token: String,
 }
 
 impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
@@ -47,6 +47,7 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password: args.token,
             mac_address: None,
             vendor: None,
+            credential_name: None,
         })
     }
 }

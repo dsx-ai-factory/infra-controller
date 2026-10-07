@@ -14,215 +14,549 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-pub mod tests {
+pub(in crate::tests) mod tests {
 
+    use carbide_spdm_controller::io::SpdmStateControllerIO;
     use carbide_uuid::machine::MachineId;
+    use chrono::{DateTime, Utc};
+    use config_version::ConfigVersion;
+    use model::attestation::profile::{
+        ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode,
+        ComponentIdMatch,
+    };
     use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
     use rpc::forge::forge_server::Forge;
     use rpc::forge::{
         SpdmListAttestationMachinesRequest, SpdmListAttestationMachinesRequestSelector,
-        SpdmMachineAttestationStatus, SpdmMachineAttestationTriggerRequest,
+        SpdmMachineAttestationStatus, SpdmMachineAttestationTriggerRequest, SpdmSchedulingOutcome,
         spdm_list_attestation_machines_request,
     };
     use sqlx::PgConnection;
-    //use sqlx::PgConnection;
+    use state_controller::io::StateControllerIO;
     use tonic::Request;
 
+    use crate::cfg::file::CarbideConfig;
+    use crate::test_support::fixture_config::MOCK_HOST_HARDWARE_CLASS;
     use crate::tests::common::api_fixtures::{
-        RedfishOverrides, TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
-        create_test_env_with_overrides,
+        TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
+        create_test_env_with_overrides, get_config,
     };
-    // A simple test to test basic db functions.
+
+    /// The default test config leaves SPDM disabled, matching a fresh
+    /// deployment. `trigger_machine_attestation` refuses to schedule at a site
+    /// with it switched off, so every test that drives a trigger turns it on.
+    ///
+    /// Enabling it also makes `create_managed_host` attest the machine during
+    /// host init. Tests that model a misbehaving BMC therefore inject the fault
+    /// after setup, so it applies to the trigger under test rather than to that
+    /// unrelated attestation.
+    fn spdm_enabled_config() -> CarbideConfig {
+        let mut config = get_config();
+        config.spdm.enabled = true;
+        config
+    }
+
+    /// The fixture seeds a profile for the mock host's class, and creation
+    /// rejects a duplicate class, so seeding unconditionally would panic the
+    /// moment a test built a second environment on one pool. Nothing else
+    /// holds the fixture to seeding only when the profile is absent.
     #[crate::sqlx_test]
-    async fn test_attestation_succeeds(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
-        // trigger attestation - corresponding device attestations are created
-        // query attestation status - should be in progress
-        // run controller iterations - should be able to:
-        // - fetch metadata
-        // - fetch certificate,
-        // - schedule evidence
-        // - poll and collect evidence
-        // - do nras verification
-        // - apply appraisal policy
-        // - move into passed state
-        // verify the state in each iteration using direct db lookups
+    async fn a_second_spdm_environment_reuses_the_seeded_profile(pool: sqlx::PgPool) {
+        for _ in 0..2 {
+            let mut overrides = TestEnvOverrides::no_network_segments();
+            overrides.config = Some(spdm_enabled_config());
+            let _env = create_test_env_with_overrides(pool.clone(), overrides).await;
+        }
+    }
 
+    #[crate::sqlx_test]
+    async fn test_spdm_controller_persistence_honors_supplied_versions(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
-        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
-        let _ = env
-            .api
-            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id),
-                redfish_timeout_secs: u32::MAX,
-            }))
-            .await?;
+        let machine_id = create_managed_host(&env).await.host().id.into();
+        let object_id = SpdmObjectId(machine_id, "HGX_IRoT_GPU_0".to_string());
+        let old_version = ConfigVersion::initial();
 
-        // device attestations should be created now
-        let statuses = list_machines_under_attestation(&env).await?;
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation \
+             (machine_id, device_id, nonce, state, state_version, started_at) \
+             VALUES ($1, $2, gen_random_uuid(), $3, $4, now())",
+        )
+        .bind(machine_id)
+        .bind(&object_id.1)
+        .bind(sqlx::types::Json(SpdmAttestationState::FetchMetadata))
+        .bind(old_version)
+        .execute(&env.pool)
+        .await
+        .unwrap();
 
-        assert_eq!(1, statuses.len());
-
-        let machine_id = statuses[0].machine_id.expect("missing machine id");
-
-        // check that attestation's status is InProgress
+        // Another iteration commits before the stale transition is persisted.
+        let current_version = old_version.increment();
+        let mut txn = env.db_txn().await;
         assert_eq!(
-            rpc::forge::SpdmAttestationStatus::SpdmAttInProgress,
-            rpc::forge::SpdmAttestationStatus::try_from(statuses[0].attestation_status)?
+            db::attestation::spdm::persist_controller_state(
+                &mut txn,
+                &object_id,
+                old_version,
+                current_version,
+                &SpdmAttestationState::FetchCertificate,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
         );
-
-        // now, look at the state of the attestation and check that it is FetchMetadata
-        let mut txn = env.pool.begin().await.unwrap();
-
-        let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
-            .await
-            .expect("Failed getting object ids for attestation");
-
-        for object_id in &object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-
-            assert_eq!(SpdmAttestationState::FetchMetadata, attestation_state);
-        }
-
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-            assert_eq!(SpdmAttestationState::FetchCertificate, attestation_state);
-        }
-
-        // now proceed to FetchCertificate
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
-            .await
-            .expect("Failed getting object ids for attestation");
-        assert_eq!(3, object_ids.len());
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(
-                    attestation_state,
-                    SpdmAttestationState::TriggerEvidenceCollection { .. }
-                ),
-                "expected TriggerEvidenceCollection, got: {:?}",
-                attestation_state
-            );
-        }
-
-        // now move onto PollEvidenceCollection
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(
-                    attestation_state,
-                    SpdmAttestationState::PollEvidenceCollection { .. }
-                ),
-                "expected PollEvidenceCollection, got: {:?}",
-                attestation_state
-            );
-        }
-
-        // after we collected the evidence, do the NRAS verification
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(attestation_state, SpdmAttestationState::NrasVerification),
-                "expected NrasVerification, got: {:?}",
-                attestation_state
-            );
-        }
-
-        // do the policy appraisal
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(
-                    attestation_state,
-                    SpdmAttestationState::ApplyAppraisalPolicy
-                ),
-                "expected ApplyAppraisalPolicy, got: {:?}",
-                attestation_state
-            );
-        }
-
-        // and finally we should be in the Passed state
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(attestation_state, SpdmAttestationState::Passed),
-                "expected Passed, got: {:?}",
-                attestation_state
-            );
-        }
-
-        // now check the attestation history table
-        let mut txn = env.pool.begin().await.unwrap();
-        let devices_history =
-            sqlx::query("SELECT * FROM spdm_device_attestation_history WHERE machine_id=$1")
-                .bind(machine_id)
-                .fetch_all(&mut *txn)
-                .await?;
         txn.commit().await.unwrap();
 
-        assert_eq!(devices_history.len(), 18);
+        // The same-state case pins the persistence contract, not an SPDM
+        // handler path. Use a distinct replacement so IO cannot recompute it.
+        let replacement_version = current_version.increment().increment();
+        struct Case {
+            scenario: &'static str,
+            device_id: &'static str,
+            old_version: ConfigVersion,
+            state: SpdmAttestationState,
+            expected: db::ConditionalWrite<(), db::ControllerStateNotCurrent>,
+            stored_state: Option<(SpdmAttestationState, ConfigVersion)>,
+        }
+        let io = SpdmStateControllerIO::default();
+        for case in [
+            Case {
+                scenario: "stale iteration cannot replace the committed state",
+                device_id: "HGX_IRoT_GPU_0",
+                old_version,
+                state: SpdmAttestationState::Passed,
+                expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
+                stored_state: Some((SpdmAttestationState::FetchCertificate, current_version)),
+            },
+            Case {
+                scenario: "persistence stores the supplied version for the same state",
+                device_id: "HGX_IRoT_GPU_0",
+                old_version: current_version,
+                state: SpdmAttestationState::FetchCertificate,
+                expected: db::ConditionalWrite::Applied(()),
+                stored_state: Some((SpdmAttestationState::FetchCertificate, replacement_version)),
+            },
+            Case {
+                scenario: "missing device rejects the transition",
+                device_id: "missing-device",
+                old_version: replacement_version,
+                state: SpdmAttestationState::Passed,
+                expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
+                stored_state: None,
+            },
+        ] {
+            let mut txn = env.db_txn().await;
+            let write = io
+                .persist_controller_state(
+                    &mut txn,
+                    &SpdmObjectId(machine_id, case.device_id.to_string()),
+                    case.old_version,
+                    replacement_version,
+                    &case.state,
+                )
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            assert_eq!(write, case.expected, "{}", case.scenario);
+
+            let stored_state: Option<(sqlx::types::Json<SpdmAttestationState>, ConfigVersion)> =
+                sqlx::query_as(
+                    "SELECT state, state_version FROM spdm_machine_devices_attestation \
+                     WHERE machine_id = $1 AND device_id = $2",
+                )
+                .bind(machine_id)
+                .bind(case.device_id)
+                .fetch_optional(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                stored_state.map(|(state, version)| (state.0, version)),
+                case.stored_state,
+                "{}",
+                case.scenario
+            );
+        }
+    }
+
+    /// With SPDM off no state controller is spawned, so anything this scheduled
+    /// would sit unprocessed forever. The "enabled" half of the contract is
+    /// covered by every other test in this module, which all schedule
+    /// successfully with SPDM on.
+    #[crate::sqlx_test]
+    async fn trigger_is_refused_when_spdm_is_disabled_for_the_site(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env(pool).await;
+        assert!(
+            !env.config.spdm.enabled,
+            "this test relies on the default config leaving SPDM disabled"
+        );
+
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        let status = env
+            .api
+            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                machine_id: Some(machine_id.into()),
+                redfish_timeout_secs: u32::MAX,
+            }))
+            .await
+            .expect_err("a site with SPDM disabled must not start attestation");
+
+        assert_eq!(tonic::Code::Unavailable, status.code());
+
+        // Refusing has to leave no work behind: a caller that retries after
+        // enabling SPDM should start from nothing.
+        assert_eq!(0, list_machines_under_attestation(&env).await?.len());
 
         Ok(())
+    }
+
+    /// What the trigger reports for each outcome a profile can produce.
+    ///
+    /// The machine moves on to the same next state no matter which of these
+    /// happened: the profile disabled attestation, it named attesters the BMC
+    /// does not have, or nobody wrote one. Only the response tells them apart.
+    #[crate::sqlx_test]
+    async fn trigger_reports_the_profile_that_decided(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        struct Case {
+            scenario: &'static str,
+            /// Replaces the profile the fixture seeded for the mock host's
+            /// class, run before the trigger.
+            reprofile: fn() -> Vec<(String, AttesterSelection)>,
+            expect_outcome: SpdmSchedulingOutcome,
+            expect_devices: i32,
+            expect_fallback: bool,
+        }
+
+        let cases = [
+            Case {
+                scenario: "a profile written for the class attests what it names",
+                reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_devices: 3,
+                expect_fallback: false,
+            },
+            Case {
+                scenario: "the any profile covers a class nobody wrote one for",
+                reprofile: || vec![(ANY_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_devices: 3,
+                expect_fallback: true,
+            },
+            Case {
+                scenario: "NONE attests nothing without contacting the BMC",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::None,
+                            component_ids: Vec::new(),
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
+                expect_devices: 0,
+                expect_fallback: false,
+            },
+            Case {
+                scenario: "an unprofiled class names the missing profile",
+                reprofile: Vec::new,
+                expect_outcome: SpdmSchedulingOutcome::NoProfile,
+                expect_devices: 0,
+                expect_fallback: false,
+            },
+            Case {
+                scenario: "a profile naming absent attesters is not silent",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::Allowlist,
+                            component_ids: vec![ComponentIdMatch::Exact("NOT_PRESENT".to_string())],
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
+                expect_devices: 0,
+                expect_fallback: false,
+            },
+            Case {
+                // The absent pattern is reported without costing the GPUs the
+                // present one matched, which is the whole point of keeping this
+                // apart from PolicyMatchedNothing.
+                scenario: "one absent pattern does not stop the attesters that are there",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::Allowlist,
+                            component_ids: vec![
+                                ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string()),
+                                ComponentIdMatch::Exact("NOT_PRESENT".to_string()),
+                            ],
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
+                expect_devices: 3,
+                expect_fallback: false,
+            },
+        ];
+
+        // One host, reused: the fixture attests it during init, which needs
+        // the profile it seeded, so every case rewrites the profiles only
+        // after the host exists.
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        for case in cases {
+            // Only a scheduling run clears the device rows, so the cases that
+            // schedule nothing would otherwise inherit the previous case's.
+            let mut txn = env.pool.begin().await?;
+            sqlx::query("DELETE FROM attestation_profiles")
+                .execute(&mut *txn)
+                .await?;
+            sqlx::query("DELETE FROM spdm_machine_devices_attestation")
+                .execute(&mut *txn)
+                .await?;
+            for (hardware_class, selection) in (case.reprofile)() {
+                db::attestation_profile::create(
+                    &mut txn,
+                    &hardware_class,
+                    &AttestationPolicyDocument::new(selection),
+                    "test",
+                )
+                .await?;
+            }
+            txn.commit().await?;
+
+            let response = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner();
+
+            assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+            assert_eq!(
+                case.expect_devices, response.devices_under_attestation,
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                case.expect_fallback, response.used_any_fallback,
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                MOCK_HOST_HARDWARE_CLASS, response.resolved_hardware_class,
+                "{}: the class is reported whether or not it had a profile",
+                case.scenario
+            );
+            assert_eq!(
+                case.expect_outcome != SpdmSchedulingOutcome::NoProfile,
+                response.profile_version.is_some(),
+                "{}: a version is reported exactly when a profile decided",
+                case.scenario
+            );
+
+            // The reported instant has to be the one on the rows, or a caller
+            // cannot use it to tell its own scheduling from a later one.
+            let started_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT DISTINCT started_at FROM spdm_machine_devices_attestation
+                 WHERE machine_id = $1",
+            )
+            .bind(machine_id)
+            .fetch_optional(&env.pool)
+            .await?;
+            assert_eq!(
+                started_at.map(rpc::Timestamp::from),
+                response.started_at,
+                "{}: the response must report the rows' own timestamp",
+                case.scenario
+            );
+        }
+
+        Ok(())
+    }
+
+    /// The outcomes a profile settles on its own report the same answer over a
+    /// BMC that cannot be reached, which is what makes them answerable without
+    /// it. Client creation is forced to fail for the duration, so contacting
+    /// the BMC at all would surface as an error instead of the outcome.
+    ///
+    /// Both early returns are covered: `NoProfile` leaves during profile
+    /// resolution, `AttestationDisabled` after it. The site every deployment
+    /// starts as, with no profiles written, is the first of them.
+    #[crate::sqlx_test]
+    async fn the_outcomes_a_profile_settles_never_reach_the_bmc(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        struct Case {
+            scenario: &'static str,
+            profiles: fn() -> Vec<(String, AttesterSelection)>,
+            expect_outcome: SpdmSchedulingOutcome,
+        }
+
+        let cases = [
+            Case {
+                scenario: "NONE is answered from the profile alone",
+                profiles: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::None,
+                            component_ids: Vec::new(),
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
+            },
+            Case {
+                scenario: "a class nobody profiled has nothing to ask the BMC for",
+                profiles: Vec::new,
+                expect_outcome: SpdmSchedulingOutcome::NoProfile,
+            },
+        ];
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        // After setup, which attests the host over a BMC that answers.
+        env.redfish_sim
+            .set_create_client_error("the BMC cannot be reached");
+
+        for case in cases {
+            let mut txn = env.pool.begin().await?;
+            sqlx::query("DELETE FROM attestation_profiles")
+                .execute(&mut *txn)
+                .await?;
+            for (hardware_class, selection) in (case.profiles)() {
+                db::attestation_profile::create(
+                    &mut txn,
+                    &hardware_class,
+                    &AttestationPolicyDocument::new(selection),
+                    "test",
+                )
+                .await?;
+            }
+            txn.commit().await?;
+
+            let response = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner();
+
+            assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+        }
+
+        Ok(())
+    }
+
+    /// The other half of that contract: a profile that does need the BMC
+    /// still fails when it cannot be reached, reported as the Redfish problem
+    /// it is so an operator gets the reachability mitigation rather than a
+    /// generic attestation failure.
+    #[crate::sqlx_test]
+    async fn a_profile_needing_an_unreachable_bmc_reports_a_redfish_error(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        let mut txn = env.pool.begin().await?;
+        sqlx::query("DELETE FROM attestation_profiles")
+            .execute(&mut *txn)
+            .await?;
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(gpu_allowlist()),
+            "test",
+        )
+        .await?;
+        txn.commit().await?;
+
+        env.redfish_sim
+            .set_create_client_error("the BMC cannot be reached");
+
+        let status = env
+            .api
+            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                machine_id: Some(machine_id.into()),
+                redfish_timeout_secs: u32::MAX,
+            }))
+            .await
+            .expect_err("a profile naming attesters cannot be satisfied without the BMC");
+
+        assert_eq!(
+            Some("NICO-REDFISH-500"),
+            status
+                .metadata()
+                .get("nico-error-code")
+                .map(|code| code.to_str().expect("the error code is ASCII"))
+        );
+
+        Ok(())
+    }
+
+    fn gpu_allowlist() -> AttesterSelection {
+        AttesterSelection {
+            mode: AttesterSelectionMode::Allowlist,
+            component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+        }
     }
 
     #[crate::sqlx_test]
     async fn test_component_integrity_fails_no_attestation_started(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
-        // set up redfish to return no component integrities
-        let overrides = TestEnvOverrides {
-            redfish_overrides: Some(RedfishOverrides {
-                no_component_integrities: true,
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let env = create_test_env_with_overrides(pool, overrides).await;
+            },
+        )
+        .await;
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        // set up redfish to return no component integrities
+        env.redfish_sim.set_no_component_integrities(true);
+
         let response = env
             .api
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id),
+                machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
             }))
             .await?;
@@ -241,21 +575,24 @@ pub mod tests {
     async fn test_fetch_metadata_fails_state_does_not_change(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
-        // set up redfish to return an error in FetchMetadata state
-        let overrides = TestEnvOverrides {
-            redfish_overrides: Some(RedfishOverrides {
-                firmware_for_component_error: true,
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let env = create_test_env_with_overrides(pool, overrides).await;
+            },
+        )
+        .await;
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        // set up redfish to return an error in FetchMetadata state
+        env.redfish_sim.set_firmware_for_component_error(true);
+
         let response = env
             .api
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id),
+                machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
             }))
             .await?;
@@ -298,21 +635,25 @@ pub mod tests {
     async fn test_poll_evidence_fails_controller_retries_then_fails(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
-        // set up redfish to return an error in FetchMetadata state
-        let overrides = TestEnvOverrides {
-            redfish_overrides: Some(RedfishOverrides {
-                get_task_trigger_evidence_returns_interrupted: true,
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let env = create_test_env_with_overrides(pool, overrides).await;
+            },
+        )
+        .await;
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        // set up redfish to interrupt evidence collection
+        env.redfish_sim
+            .set_get_task_trigger_evidence_returns_interrupted(true);
+
         let response = env
             .api
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id),
+                machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
             }))
             .await?;
@@ -385,12 +726,19 @@ pub mod tests {
         // -  cancel the whole thing - make sure it goes into cancelled state
         // verify the state in each iteration using direct db lookups
 
-        let env = create_test_env(pool).await;
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
         let _ = env
             .api
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id),
+                machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
             }))
             .await?;

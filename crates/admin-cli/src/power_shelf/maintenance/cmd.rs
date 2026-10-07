@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn maintenance(api_client: &ApiClient, action: Args) -> CarbideCliResult<()> {
+pub(super) async fn maintenance(api_client: &ApiClient, action: Args) -> CarbideCliResult<()> {
     let req = action.into_request();
     let count = req.power_shelf_ids.len();
     api_client.0.set_power_shelf_maintenance(req).await?;

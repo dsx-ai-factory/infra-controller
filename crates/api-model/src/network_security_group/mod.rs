@@ -348,3 +348,30 @@ impl<'r> sqlx::FromRow<'r, PgRow> for NetworkSecurityGroup {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_rule_ignores_unknown_legacy_fields() {
+        let rule: NetworkSecurityGroupRule = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "src_net": { "Prefix": "0.0.0.0/0" },
+            "dst_net": { "Prefix": "0.0.0.0/0" },
+            "direction": "Ingress",
+            "ipv6": false,
+            "src_port_start": null,
+            "src_port_end": null,
+            "dst_port_start": null,
+            "dst_port_end": null,
+            "protocol": "Any",
+            "action": "Deny",
+            "priority": 1,
+            "legacy_field": "ignored"
+        }))
+        .expect("persisted NSG rules remain backward-compatible");
+
+        assert_eq!(rule.priority, 1);
+    }
+}

@@ -26,16 +26,16 @@ List all SPDM attestations recorded for a machine:
     $ nico-admin-cli attestation spdm list 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, help = "Machine ID", conflicts_with = "selector")]
-    pub machine_id: Option<MachineId>,
+    pub(super) machine_id: Option<MachineId>,
     #[clap(long, value_enum, help = "Filter attestation machines by selector")]
-    pub selector: Option<Selector>,
+    pub(super) selector: Option<Selector>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
-pub enum Selector {
+pub(super) enum Selector {
     InProgress,
     Unsuccessful,
 }

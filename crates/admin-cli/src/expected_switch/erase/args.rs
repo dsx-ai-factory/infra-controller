@@ -25,7 +25,7 @@ Erase all expected switch records (requires explicit confirmation):
     $ nico-admin-cli expected-switch erase --confirm
 
 ")]
-pub struct Args {
-    #[clap(long, help = "Confirm that you want to erase all records.")]
-    pub confirm: bool,
+pub(crate) struct Args {
+    #[clap(long, help = "Required to erase all expected switch records.")]
+    pub(super) confirm: bool,
 }

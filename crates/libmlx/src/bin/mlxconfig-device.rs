@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
+
 use clap::Parser;
 use libmlx::device::cmd::{Cli, dispatch_command};
 

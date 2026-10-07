@@ -18,21 +18,34 @@
 pub mod builder;
 pub mod default_config;
 pub mod fixture_config;
-pub mod ib_fabric;
-pub mod ib_guid_pool;
+pub mod health;
+pub(crate) mod ib_fabric;
+pub(crate) mod ib_guid_pool;
 pub mod mac_address_pool;
+pub mod metadata;
 pub mod network;
 pub mod network_segment;
+pub mod redfish;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use carbide_secrets::credentials::CredentialManager;
 use db::work_lock_manager::WorkLockManagerHandle;
 use model::resource_pool::common::CommonPools;
 pub use rpc;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 pub use crate::api::Api;
 pub use crate::api::metrics::ApiMetricsEmitter;
+pub use crate::logging::setup::dep_log_filter;
+
+pub const MAX_BGP_PASSWORD_LENGTH: usize = crate::handlers::credential::MAX_BGP_PASSWORD_LENGTH;
+
+pub fn default_credential_key(credential: &crate::api::DefaultCredential) -> &str {
+    credential.key()
+}
 
 impl Api {
     pub fn work_lock_manager_handle(&self) -> WorkLockManagerHandle {
@@ -46,41 +59,25 @@ impl Api {
     pub fn credential_manager(&self) -> &Arc<dyn CredentialManager> {
         &self.credential_manager
     }
+
+    pub fn start_dynamic_settings_reset_task(
+        &self,
+        join_set: &mut JoinSet<()>,
+        period: Duration,
+        cancel_token: CancellationToken,
+    ) {
+        self.dynamic_settings
+            .start_reset_task(join_set, period, cancel_token);
+    }
+
+    pub async fn process_scout_req_for_test(
+        &self,
+        machine_id: carbide_uuid::machine::HostMachineId,
+    ) -> crate::CarbideResult<rpc::forge_agent_control_response::Action> {
+        crate::handlers::process_scout_req_for_test(self, machine_id).await
+    }
 }
 
 pub fn setup_test_logging() {
-    use tracing::metadata::LevelFilter;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::fmt::TestWriter;
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    if let Err(e) = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::Layer::default()
-                .compact()
-                .with_writer(TestWriter::new),
-        )
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
-                .add_directive("sqlx=warn".parse().unwrap())
-                .add_directive("tower=warn".parse().unwrap())
-                .add_directive("rustify=off".parse().unwrap())
-                .add_directive("rustls=warn".parse().unwrap())
-                .add_directive("hyper=warn".parse().unwrap())
-                .add_directive("h2=warn".parse().unwrap())
-                // Silence permissive mode related messages
-                .add_directive("carbide_api_core::auth=error".parse().unwrap()),
-        )
-        .try_init()
-    {
-        // Note: Resist the temptation to ignore this error. We really should only have one place in
-        // the test binary that initializes logging.
-        panic!(
-            "Failed to initialize trace logging for carbide-api tests. It's possible some earlier \
-            code path has already set a global default log subscriber: {e}"
-        );
-    }
+    carbide_test_support::setup_test_logging("carbide-api");
 }

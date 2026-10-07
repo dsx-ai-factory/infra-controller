@@ -29,101 +29,101 @@ use crate::ib::ufmclient::rest::ResponseDetails;
 mod rest;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SmConfig {
+pub(super) struct SmConfig {
     /// The subnet_prefix of openSM
-    pub subnet_prefix: String,
+    pub(super) subnet_prefix: String,
     /// The m_key of openSM
-    pub m_key: String,
+    pub(super) m_key: String,
     /// The sm_key of openSM
-    pub sm_key: String,
+    pub(super) sm_key: String,
     /// The sa_key of openSM
-    pub sa_key: String,
+    pub(super) sa_key: String,
     /// The m_key_per_port of openSM
-    pub m_key_per_port: bool,
+    pub(super) m_key_per_port: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct PartitionQoS {
+pub(super) struct PartitionQoS {
     // Default 2k; one of 2k or 4k; the MTU of the services.
-    pub mtu_limit: u16,
+    pub(super) mtu_limit: u16,
     // Default is None, value can be range from 0-15
-    pub service_level: u8,
+    pub(super) service_level: u8,
     /// Supported values: 10, 30, 5, 20, 40, 60, 80, 120, 14, 56, 112, 168, 25, 100, 200, or 300.
     /// 2 is also valid but is used internally to represent rate limit 2.5 that is possible in UFM for lagecy hardware.
     /// It is done to avoid floating point data type usage for rate limit w/o obvious benefits.
     /// 2 to 2.5 and back conversion is done just on REST API operations.
-    pub rate_limit: f32,
+    pub(super) rate_limit: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum PortMembership {
+pub(super) enum PortMembership {
     Limited,
     Full,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct PortConfig {
+pub(super) struct PortConfig {
     /// The GUID of Port.
-    pub guid: String,
+    pub(super) guid: String,
     /// Default false; store the PKey at index 0 of the PKey table of the GUID.
-    pub index0: bool,
+    pub(super) index0: bool,
     /// Default is full:
     ///   "full"    - members with full membership can communicate with all hosts (members) within the network/partition
     ///   "limited" - members with limited membership cannot communicate with other members with limited membership.
     ///               However, communication is allowed between every other combination of membership types.
-    pub membership: PortMembership,
+    pub(super) membership: PortMembership,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct PartitionKey(u16);
+pub(super) struct PartitionKey(u16);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Partition {
+pub(super) struct Partition {
     /// The name of Partition.
-    pub name: String,
+    pub(super) name: String,
     /// The pkey of Partition.
-    pub pkey: PartitionKey,
+    pub(super) pkey: PartitionKey,
     /// Default false
-    pub ipoib: bool,
+    pub(super) ipoib: bool,
     /// The QoS of Partition.
-    pub qos: Option<PartitionQoS>,
+    pub(super) qos: Option<PartitionQoS>,
     /// GUIDS attached to the Partition. Only available if explictly queried for
-    pub guids: Option<HashSet<String>>,
+    pub(super) guids: Option<HashSet<String>>,
     /// The default membership status of ports on this partition
     /// The value is only available if all of these things are true:
     /// - The partition is the default partition
     /// - associated ports/guid are queried
     /// - UFM version is 6.19 or newer
-    pub membership: Option<PortMembership>,
+    pub(super) membership: Option<PortMembership>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
-pub struct Port {
-    pub guid: String,
-    pub name: String,
+pub(super) struct Port {
+    pub(super) guid: String,
+    pub(super) name: String,
     #[serde(rename = "systemID")]
-    pub system_id: String,
-    pub lid: i32,
-    pub dname: String,
-    pub system_name: String,
-    pub physical_state: String,
-    pub logical_state: String,
+    pub(super) system_id: String,
+    pub(super) lid: i32,
+    pub(super) dname: String,
+    pub(super) system_name: String,
+    pub(super) physical_state: String,
+    pub(super) logical_state: String,
 }
 
 #[derive(Default)]
-pub struct Filter {
-    pub guids: Option<HashSet<String>>,
-    pub pkey: Option<PartitionKey>,
-    pub logical_state: Option<String>,
+pub(super) struct Filter {
+    pub(super) guids: Option<HashSet<String>>,
+    pub(super) pkey: Option<PartitionKey>,
+    pub(super) logical_state: Option<String>,
 }
 
 #[derive(Default, Debug, Copy, Clone)]
-pub struct GetPartitionOptions {
+pub(super) struct GetPartitionOptions {
     /// Whether to include `guids` associated with each partition in the response
-    pub include_guids_data: bool,
+    pub(super) include_guids_data: bool,
     /// Whether the response should contain the `qos_conf` and `ip_over_ib` parameters
-    pub include_qos_conf: bool,
+    pub(super) include_qos_conf: bool,
 }
 
 /// Partition data with extra options as presented by UFM
@@ -141,7 +141,7 @@ struct PartitionData {
     /// - The partition is the default partition
     /// - associated ports/guid are queried with `guids_data==true`
     /// - UFM version is 6.19 or newer
-    pub membership: Option<PortMembership>,
+    membership: Option<PortMembership>,
 }
 
 const HEX_PRE: &str = "0x";
@@ -202,19 +202,19 @@ impl From<PartitionKey> for u16 {
     }
 }
 
-pub struct Ufm {
+pub(super) struct Ufm {
     client: RestClient,
 }
 
 #[derive(Error, Debug)]
-pub enum UFMError {
-    #[error("Invalid argument: {0}")]
+pub(super) enum UFMError {
+    #[error("invalid argument: {0}")]
     InvalidArgument(String),
-    #[error("Invalid pkey '{0}'")]
+    #[error("invalid pkey '{0}'")]
     InvalidPKey(String),
-    #[error("Invalid configuration: '{0}'")]
+    #[error("invalid configuration: '{0}'")]
     InvalidConfig(String),
-    #[error("Response body can not be deserialized: {body}")]
+    #[error("response body can not be deserialized: {body}")]
     MalformedResponse {
         status_code: u16,
         body: String,
@@ -231,7 +231,7 @@ pub enum UFMError {
     /// This error type is just needed because UFM in some cases does not return a 404 status
     /// code but a 200 status code with a body containing {}
     #[error(
-        "Resource at path {path} was not found. UFM returned: '{body}'. Status code: {status_code}"
+        "resource at path {path} was not found. UFM returned: '{body}'. status code: {status_code}"
     )]
     NotFound {
         path: String,
@@ -280,21 +280,21 @@ impl From<RestError> for UFMError {
 }
 
 #[derive(Clone, Debug)]
-pub struct UFMCert {
-    pub ca_crt: String,
-    pub tls_key: String,
-    pub tls_crt: String,
+pub(super) struct UFMCert {
+    pub(super) ca_crt: String,
+    pub(super) tls_key: String,
+    pub(super) tls_crt: String,
 }
 
-pub struct UFMConfig {
-    pub address: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub token: Option<String>,
-    pub cert: Option<UFMCert>,
+pub(super) struct UFMConfig {
+    pub(super) address: String,
+    pub(super) username: Option<String>,
+    pub(super) password: Option<String>,
+    pub(super) token: Option<String>,
+    pub(super) cert: Option<UFMCert>,
 }
 
-pub fn new_client(conf: UFMConfig) -> Result<Ufm, UFMError> {
+pub(super) fn new_client(conf: UFMConfig) -> Result<Ufm, UFMError> {
     let addr = Url::parse(&conf.address)
         .map_err(|_| UFMError::InvalidConfig(format!("invalid UFM url: {}", conf.address)))?;
     let address = addr.host_str().ok_or(UFMError::InvalidConfig(format!(
@@ -342,14 +342,14 @@ pub fn new_client(conf: UFMConfig) -> Result<Ufm, UFMError> {
 }
 
 impl Ufm {
-    pub async fn get_sm_config(&self) -> Result<SmConfig, UFMError> {
+    pub(super) async fn get_sm_config(&self) -> Result<SmConfig, UFMError> {
         let path = String::from("/app/smconf");
         let sm_config: SmConfig = self.client.get(&path).await?.0;
 
         Ok(sm_config)
     }
 
-    pub async fn update_partition_qos(
+    pub(super) async fn update_partition_qos(
         &self,
         pkey: PartitionKey,
         qos: PartitionQoS,
@@ -377,7 +377,11 @@ impl Ufm {
         Ok(())
     }
 
-    pub async fn bind_ports(&self, p: Partition, ports: Vec<PortConfig>) -> Result<(), UFMError> {
+    pub(super) async fn bind_ports(
+        &self,
+        p: Partition,
+        ports: Vec<PortConfig>,
+    ) -> Result<(), UFMError> {
         let path = String::from("/resources/pkeys");
 
         let mut membership = PortMembership::Full;
@@ -415,7 +419,7 @@ impl Ufm {
         Ok(())
     }
 
-    pub async fn unbind_ports(
+    pub(super) async fn unbind_ports(
         &self,
         pkey: PartitionKey,
         guids: Vec<String>,
@@ -441,17 +445,20 @@ impl Ufm {
         Ok(())
     }
 
-    pub async fn list_partitions(
+    pub(super) async fn list_partitions(
         &self,
         options: GetPartitionOptions,
     ) -> Result<HashMap<PartitionKey, Partition>, UFMError> {
         let path = match (options.include_guids_data, options.include_qos_conf) {
             (true, true) => {
-                // This API is not supported in current UFM version: https://nvbugspro.nvidia.com/bug/5409095
+                // This API is not supported in current UFM version: https://github.com/NVIDIA/infra-controller/issues/5558
                 // Instead of returning unexpected results, don't even try to talk to UFM
                 // and make developers aware of the issue.
                 // That at least allows the application developer to implement a workaround
-                return Err(UFMError::InvalidArgument("Returning qos_conf and guids_data is not supported: https://nvbugspro.nvidia.com/bug/5409095".to_string()));
+                return Err(UFMError::InvalidArgument(
+                    "returning qos_conf and guids_data together is not supported by UFM"
+                        .to_string(),
+                ));
             }
             (true, false) => "/resources/pkeys?guids_data=true",
             (false, true) => "/resources/pkeys?qos_conf=true",
@@ -480,7 +487,7 @@ impl Ufm {
         Ok(results)
     }
 
-    pub async fn get_partition(
+    pub(super) async fn get_partition(
         &self,
         pkey: PartitionKey,
         options: GetPartitionOptions,
@@ -512,7 +519,7 @@ impl Ufm {
         })
     }
 
-    pub async fn list_port(&self, filter: Option<Filter>) -> Result<Vec<Port>, UFMError> {
+    pub(super) async fn list_port(&self, filter: Option<Filter>) -> Result<Vec<Port>, UFMError> {
         let path = String::from("/resources/ports?sys_type=Computer");
         let ports: Vec<Port> = self.client.list(&path).await?.0;
 
@@ -582,7 +589,7 @@ impl Ufm {
         }
     }
 
-    pub async fn version(&self) -> Result<String, UFMError> {
+    pub(super) async fn version(&self) -> Result<String, UFMError> {
         #[derive(Serialize, Deserialize, Debug)]
         struct Version {
             ufm_release_version: String,
@@ -594,7 +601,7 @@ impl Ufm {
         Ok(v.ufm_release_version)
     }
 
-    pub async fn raw_get(&self, path: &str) -> Result<(String, ResponseDetails), UFMError> {
+    pub(super) async fn raw_get(&self, path: &str) -> Result<(String, ResponseDetails), UFMError> {
         let (body, details) = self.client.get_raw(path).await?;
 
         Ok((body, details))

@@ -25,7 +25,7 @@ use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use serde::Deserialize;
 
-use super::Base;
+use super::{Base, filters};
 
 #[derive(Template)]
 #[template(path = "ufm_browser.html")]
@@ -46,21 +46,21 @@ struct Header {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct QueryParams {
+pub(super) struct QueryParams {
     fabric_id: Option<String>,
     path: Option<String>,
 }
 
 /// Queries the redfish endpoint in the query parameter
 /// and displays the result
-pub async fn query(
+pub(super) async fn query(
     AxumState(state): AxumState<Arc<Api>>,
     AxumQuery(query): AxumQuery<QueryParams>,
 ) -> Response {
     let fabric_ids = match super::ib_fabric::fetch_ib_fabric_ids(state.clone()).await {
         Ok(fabric_ids) => fabric_ids,
         Err(err) => {
-            tracing::error!(%err, "fetch_ib_fabric_ids");
+            tracing::error!(error = %err, "fetch_ib_fabric_ids");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading IB fabrics",

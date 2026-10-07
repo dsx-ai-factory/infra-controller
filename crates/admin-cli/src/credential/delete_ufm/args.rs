@@ -29,9 +29,9 @@ Delete a UFM credential by its URL:
     $ nico-admin-cli credential delete-ufm --url https://192.0.2.10
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, required(true), help = "The UFM url")]
-    pub url: String,
+    url: String,
 }
 
 impl TryFrom<Args> for forgerpc::CredentialDeletionRequest {
@@ -42,6 +42,7 @@ impl TryFrom<Args> for forgerpc::CredentialDeletionRequest {
             credential_type: CredentialType::Ufm.into(),
             username: Some(username),
             mac_address: None,
+            credential_name: None,
         })
     }
 }

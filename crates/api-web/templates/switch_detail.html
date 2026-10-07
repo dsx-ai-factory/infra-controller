@@ -71,6 +71,12 @@
 <h2>BMC</h2>
 <table class="detailsview">
 	{% if let Some(bmc_info) = bmc_info %}
+	{% if let Some(machine_interface_id) = bmc_info.machine_interface_id %}
+	<tr>
+		<th>Machine Interface ID</th>
+		<td>{{ machine_interface_id }}</td>
+	</tr>
+	{% endif %}
 	{% if let Some(ip) = bmc_info.ip %}
 	<tr>
 		<th>BMC IP</th>
@@ -112,7 +118,38 @@
 <p>TBD</p>
 
 <h2>Interfaces</h2>
-<p>TBD</p>
+{% if nvos_ports.is_empty() %}
+<p class="text-muted">No NVOS management port information available.</p>
+{% else %}
+{% for nvos_port in nvos_ports %}
+<h3>NVOS Management Endpoint {{ loop.index }}</h3>
+<table class="detailsview">
+	<tr>
+		<th>MAC Address</th>
+		<td>{{ nvos_port.mac }}</td>
+	</tr>
+	{% if let Some(service_port) = nvos_port.service_port %}
+	<tr>
+		<th>Service Port</th>
+		<td>{{ service_port }}</td>
+	</tr>
+	{% endif %}
+	{% if nvos_port.addresses.is_empty() %}
+	<tr>
+		<th>IP Addresses</th>
+		<td class="text-muted">No IP addresses available.</td>
+	</tr>
+	{% else %}
+	{% for address in nvos_port.addresses %}
+	<tr>
+		<th>{{ address.address_family }} Address</th>
+		<td>{{ address.address }}</td>
+	</tr>
+	{% endfor %}
+	{% endif %}
+</table>
+{% endfor %}
+{% endif %}
 
 <h2>History</h2>
 <a href="/admin/switch/{{ id }}/state-history">Open State History on separate page</a>

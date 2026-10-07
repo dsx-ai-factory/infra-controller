@@ -35,7 +35,7 @@ func (api *API) RegisterSubscriber() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("ExpectedMachine: Successfully registered UpdateExpectedMachines workflow")
 
 	// Register activities
-	expectedMachineManager := swa.NewManageExpectedMachine(ManagerAccess.Data.EB.Managers.CoreGrpc.Client, ManagerAccess.Data.EB.Managers.FlowGrpc.Client)
+	expectedMachineManager := swa.NewManageExpectedMachine(ManagerAccess.Data.EB.Managers.CoreGrpc.Client)
 
 	// Register CreateExpectedMachineOnSite activity
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(expectedMachineManager.CreateExpectedMachineOnSite)

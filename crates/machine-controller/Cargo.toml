@@ -20,6 +20,11 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [features]
 default = []
@@ -29,17 +34,21 @@ test-support = ["dep:mockall"]
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-credential-rotation = { path = "../credential-rotation", default-features = false }
 carbide-dpf = { path = "../dpf", default-features = false }
 carbide-health-report = { path = "../health-report", default-features = false }
 carbide-health-metrics = { path = "../health-metrics" }
 carbide-utils = { path = "../utils", default-features = false }
 carbide-firmware = { path = "../firmware", default-features = false }
+carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi", default-features = false }
+carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-measured-boot = { path = "../measured-boot", default-features = false }
 carbide-redfish = { path = "../redfish", default-features = false }
 carbide-secrets = { path = "../secrets" }
 carbide-state-controller-common = { path = "../state-controller-common", default-features = false }
 carbide-uuid = { path = "../uuid", default-features = false }
+component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version", default-features = false }
 state-controller = { path = "../state-controller" }
 
@@ -49,28 +58,45 @@ duration-str = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+hex = { workspace = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
 mockall = { workspace = true, optional = true }
 opentelemetry = { workspace = true }
+prometheus = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+carbide-api-model = { path = "../api-model", default-features = false, features = [
+  "test-support",
+] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
+carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-test-harness = { path = "../test-harness" }
+carbide-test-support = { path = "../test-support" }
+
 figment = { workspace = true, features = ["env", "test", "toml"] }
 regex = { workspace = true }
 lazy_static = { workspace = true }
+tempfile = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
 
 [build-dependencies]
+carbide-proto-compiler = { path = "../proto-compiler" }
 tonic-prost-build = "0.14"
 
 [lints]

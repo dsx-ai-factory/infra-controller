@@ -24,6 +24,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// The escape sequence for IPMI is vendor-independent since it's specific to ipmitool.
 pub static IPMITOOL_ESCAPE_SEQUENCE: EscapeSequence =
     EscapeSequence::Pair((b'~', &[b'.', b'B', b'?', 0x1a, 0x18]));
+const LENOVO_SOL_PRIMARY_FAILURE: &[u8] = b"The command line contains extraneous arguments";
+const LENOVO_SOL_FALLBACK_ACTIVATE_COMMANDS: &[&[u8]] = &[b"console kill", b"console start"];
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum BmcVendor {
@@ -65,7 +67,7 @@ pub enum SshBmcVendor {
 }
 
 impl BmcVendor {
-    pub fn detect_from_api_vendor(
+    pub(in crate::bmc) fn detect_from_api_vendor(
         vendor_string: &str,
         machine_id: &MachineId,
     ) -> Result<Self, BmcVendorDetectionError> {
@@ -82,7 +84,7 @@ impl BmcVendor {
             BMCVendor::Nvidia => BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking),
             // Intentionally not doing a default `_` case so we get compiler errors (and can add more cases) later.
             // TODO: figure out what kind of connection power shelves use.
-            BMCVendor::Liteon | BMCVendor::Delta | BMCVendor::Unknown => {
+            BMCVendor::Liteon | BMCVendor::Delta | BMCVendor::Sushy | BMCVendor::Unknown => {
                 return Err(BmcVendorDetectionError::UnknownSysVendor {
                     sys_vendor: vendor_string.to_owned(),
                 });
@@ -119,10 +121,8 @@ impl BmcVendor {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum BmcVendorDetectionError {
-    #[error("Machine has no DMI data")]
-    MissingDmiData,
-    #[error("Unknown or unsupported sys_vendor string: {sys_vendor}")]
+pub(in crate::bmc) enum BmcVendorDetectionError {
+    #[error("unknown or unsupported sys_vendor string: {sys_vendor}")]
     UnknownSysVendor { sys_vendor: String },
 }
 
@@ -151,7 +151,7 @@ impl<'de> Deserialize<'de> for BmcVendor {
 }
 
 impl SshBmcVendor {
-    pub fn serial_activate_command(&self) -> Option<&'static [u8]> {
+    pub(in crate::bmc) fn serial_activate_command(&self) -> Option<&'static [u8]> {
         match self {
             SshBmcVendor::Dell => Some(b"connect com2"),
             SshBmcVendor::Lenovo => Some(b"console kill 1\nconsole 1"),
@@ -161,7 +161,7 @@ impl SshBmcVendor {
         }
     }
 
-    pub fn bmc_prompt(&self) -> Option<&'static [u8]> {
+    pub(in crate::bmc) fn bmc_prompt(&self) -> Option<&'static [u8]> {
         match self {
             SshBmcVendor::Dell => Some(b"\nracadm>>"),
             SshBmcVendor::Lenovo => Some(b"\nsystem>"),
@@ -169,6 +169,35 @@ impl SshBmcVendor {
             SshBmcVendor::Hpe => Some(b"\n</>hpiLO->"),
             SshBmcVendor::Dpu => None,
         }
+    }
+
+    pub(in crate::bmc) fn fallback_serial_activate_commands_if_needed(
+        &self,
+        prompt_buf: &[u8],
+        fallback_sent: bool,
+    ) -> Option<&'static [&'static [u8]]> {
+        match self {
+            SshBmcVendor::Lenovo
+                if !fallback_sent
+                    && bytes_contains(prompt_buf, LENOVO_SOL_PRIMARY_FAILURE)
+                    && self
+                        .bmc_prompt()
+                        .is_some_and(|prompt| bytes_contains(prompt_buf, prompt)) =>
+            {
+                Some(LENOVO_SOL_FALLBACK_ACTIVATE_COMMANDS)
+            }
+            _ => None,
+        }
+    }
+
+    pub(in crate::bmc) fn should_accept_sol_activation_output(
+        &self,
+        prompt_buf: &[u8],
+        skip_data_read_len: usize,
+    ) -> bool {
+        let lenovo_failure_pending = matches!(self, SshBmcVendor::Lenovo)
+            && bytes_contains(prompt_buf, LENOVO_SOL_PRIMARY_FAILURE);
+        !lenovo_failure_pending && prompt_buf.len() > skip_data_read_len
     }
 
     pub fn filter_escape_sequences<'a>(
@@ -200,6 +229,10 @@ impl SshBmcVendor {
             SshBmcVendor::Dpu => "dpu",
         }
     }
+}
+
+fn bytes_contains(buf: &[u8], pat: &[u8]) -> bool {
+    !pat.is_empty() && buf.windows(pat.len()).any(|window| window == pat)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -317,146 +350,319 @@ impl EscapeSequence {
     }
 }
 
-#[test]
-fn test_filter_escape_sequence() {
-    // Pass-through: no escapes
-    {
-        let result =
-            EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"hello world", false);
-        assert_eq!(result, (Cow::Borrowed(b"hello world".as_slice()), false));
-        // Make sure we don't allocate
-        assert!(matches!(result.0, Cow::Borrowed(_)));
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+    use super::*;
+
+    /// One row of the escape-sequence filtering table: which vendor escape to
+    /// apply, the input bytes, and whether the previous slice ended mid-escape.
+    struct FilterCase {
+        escape: EscapeSequence,
+        input: &'static [u8],
+        prev_pending: bool,
     }
 
-    // Only a trailing pending escape byte
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"hello world\x1b", false),
-        (Cow::Borrowed(b"hello world".as_slice()), true)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"\x28", true),
-        (Cow::Borrowed(b"".as_slice()), false)
-    );
-
-    assert!(
-        !EscapeSequence::Pair((0x1b, &[0x28]))
-            .filter_escape_sequences(&[0x1b, 0x1b, 0x28, 0x28], false)
-            .0
-            .windows(2)
-            .any(|w| w[0] == 0x1b && w[1] == 0x28)
-    );
-
-    assert!(
-        !EscapeSequence::Pair((0x1b, &[0x28]))
-            .filter_escape_sequences(&[0x1b, 0x28, 0x28], true)
-            .0
-            .windows(2)
-            .any(|w| w[0] == 0x1b && w[1] == 0x28)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"\x1b", false),
-        (Cow::Borrowed(b"".as_slice()), true)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"hello world\x1b!", false),
-        (Cow::Borrowed(b"hello world\x1b!".as_slice()), false)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28]))
-            .filter_escape_sequences(b"hello \x1b\x28 world", false),
-        (Cow::Borrowed(b"hello  world".as_slice()), false)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28]))
-            .filter_escape_sequences(b"hello world\x1b\x28", false),
-        (Cow::Borrowed(b"hello world".as_slice()), false)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"Z", true),
-        (Cow::Borrowed(b"\x1bZ".as_slice()), false)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"hello world", true),
-        (Cow::Borrowed(b"\x1bhello world".as_slice()), false)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"\x28hello world", true),
-        (Cow::Borrowed(b"hello world".as_slice()), false)
-    );
-
-    assert_eq!(
-        EscapeSequence::Pair((0x1b, &[0x28])).filter_escape_sequences(b"\x28hello world\x1b", true),
-        (Cow::Borrowed(b"hello world".as_slice()), true)
-    );
-
-    {
-        let result = EscapeSequence::Single(0x1b).filter_escape_sequences(b"hello world", false);
-        assert_eq!(result, (Cow::Borrowed(b"hello world".as_slice()), false));
-        // Make sure we don't allocate if there's no sequence
-        assert!(matches!(result.0, Cow::Borrowed(_)))
+    struct FallbackCase {
+        vendor: SshBmcVendor,
+        output: &'static [u8],
+        fallback_sent: bool,
     }
 
-    assert_eq!(
-        EscapeSequence::Single(0x1c).filter_escape_sequences(b"hello \x1c world", false),
-        (Cow::Borrowed(b"hello  world".as_slice()), false)
-    );
+    struct AcceptActivationCase {
+        vendor: SshBmcVendor,
+        output: &'static [u8],
+        skip_data_read_len: usize,
+    }
 
-    assert_eq!(
-        EscapeSequence::Single(0x1c).filter_escape_sequences(b"hello world\x1c", false),
-        (Cow::Borrowed(b"hello world".as_slice()), false)
-    );
+    /// The Lenovo/HPE two-byte escape (`ESC (`), used by most filtering rows.
+    const ESC_PAREN: EscapeSequence = EscapeSequence::Pair((0x1b, &[0x28]));
 
-    assert_eq!(
-        EscapeSequence::Single(0x1c).filter_escape_sequences(b"\x1chello world", false),
-        (Cow::Borrowed(b"hello world".as_slice()), false)
-    );
+    #[test]
+    fn filter_escape_sequences_removes_escapes_and_tracks_pending() {
+        // Each row runs `filter_escape_sequences`, projecting the borrowed/owned
+        // `Cow` to an owned `Vec<u8>` so the asserted output and the pending flag
+        // both stay visible per case.
+        scenarios!(
+            run = |FilterCase { escape, input, prev_pending }| {
+                let (output, pending) = escape.filter_escape_sequences(input, prev_pending);
+                Ok::<_, ()>((output.into_owned(), pending))
+            };
 
-    assert_eq!(
-        EscapeSequence::Single(0x1c).filter_escape_sequences(b"\x1c", false),
-        (Cow::Borrowed(b"".as_slice()), false)
-    );
+            "ESC ( pass-through and pending lead" {
+                FilterCase { escape: ESC_PAREN, input: b"hello world", prev_pending: false } => Yields((b"hello world".to_vec(), false)),
+                FilterCase { escape: ESC_PAREN, input: b"hello world\x1b", prev_pending: false } => Yields((b"hello world".to_vec(), true)),
+                FilterCase { escape: ESC_PAREN, input: b"\x1b", prev_pending: false } => Yields((b"".to_vec(), true)),
+                FilterCase { escape: ESC_PAREN, input: b"hello world\x1b!", prev_pending: false } => Yields((b"hello world\x1b!".to_vec(), false)),
+            }
 
-    let ipmitool_escape_sequence = IPMITOOL_ESCAPE_SEQUENCE;
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(b"~~", false),
-        (Cow::Borrowed(b"~".as_slice()), true)
-    );
+            "ESC ( escape removed mid-stream" {
+                FilterCase { escape: ESC_PAREN, input: b"hello \x1b\x28 world", prev_pending: false } => Yields((b"hello  world".to_vec(), false)),
+                FilterCase { escape: ESC_PAREN, input: b"hello world\x1b\x28", prev_pending: false } => Yields((b"hello world".to_vec(), false)),
+            }
 
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(b"~~~", false),
-        (Cow::Borrowed(b"~~".as_slice()), true)
-    );
+            "ESC ( with a pending lead from the previous slice" {
+                FilterCase { escape: ESC_PAREN, input: b"\x28", prev_pending: true } => Yields((b"".to_vec(), false)),
+                FilterCase { escape: ESC_PAREN, input: b"Z", prev_pending: true } => Yields((b"\x1bZ".to_vec(), false)),
+                FilterCase { escape: ESC_PAREN, input: b"hello world", prev_pending: true } => Yields((b"\x1bhello world".to_vec(), false)),
+                FilterCase { escape: ESC_PAREN, input: b"\x28hello world", prev_pending: true } => Yields((b"hello world".to_vec(), false)),
+                FilterCase { escape: ESC_PAREN, input: b"\x28hello world\x1b", prev_pending: true } => Yields((b"hello world".to_vec(), true)),
+            }
 
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(b"~~.", false),
-        (Cow::Borrowed(b"~".as_slice()), false)
-    );
+            "single-byte (Dell ctrl+\\) escape removed" {
+                FilterCase { escape: EscapeSequence::Single(0x1b), input: b"hello world", prev_pending: false } => Yields((b"hello world".to_vec(), false)),
+                FilterCase { escape: EscapeSequence::Single(0x1c), input: b"hello \x1c world", prev_pending: false } => Yields((b"hello  world".to_vec(), false)),
+                FilterCase { escape: EscapeSequence::Single(0x1c), input: b"hello world\x1c", prev_pending: false } => Yields((b"hello world".to_vec(), false)),
+                FilterCase { escape: EscapeSequence::Single(0x1c), input: b"\x1chello world", prev_pending: false } => Yields((b"hello world".to_vec(), false)),
+                FilterCase { escape: EscapeSequence::Single(0x1c), input: b"\x1c", prev_pending: false } => Yields((b"".to_vec(), false)),
+            }
 
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(b"~.", false),
-        (Cow::Borrowed(b"".as_slice()), false)
-    );
+            "ipmitool multi-trail escape" {
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: b"~~", prev_pending: false } => Yields((b"~".to_vec(), true)),
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: b"~~~", prev_pending: false } => Yields((b"~~".to_vec(), true)),
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: b"~~.", prev_pending: false } => Yields((b"~".to_vec(), false)),
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: b"~.", prev_pending: false } => Yields((b"".to_vec(), false)),
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: b"~B", prev_pending: false } => Yields((b"".to_vec(), false)),
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: &[b'~', 0x1a], prev_pending: false } => Yields((b"".to_vec(), false)),
+                FilterCase { escape: IPMITOOL_ESCAPE_SEQUENCE, input: &[b'~', 0x18], prev_pending: false } => Yields((b"".to_vec(), false)),
+            }
+        );
 
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(b"~B", false),
-        (Cow::Borrowed(b"".as_slice()), false)
-    );
+        // A clean stream is returned borrowed, with no allocation. This asserts a
+        // structural property (the `Cow` variant) that the value table above can't
+        // express, so it stays a hand-written check.
+        assert!(matches!(
+            ESC_PAREN.filter_escape_sequences(b"hello world", false).0,
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            EscapeSequence::Single(0x1b)
+                .filter_escape_sequences(b"hello world", false)
+                .0,
+            Cow::Borrowed(_)
+        ));
 
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(&[b'~', 0x1a], false),
-        (Cow::Borrowed(b"".as_slice()), false)
-    );
+        // Adjacent escapes must not leave a reconstructable `ESC (` pair in the
+        // output; assert that absence directly rather than the exact bytes.
+        assert!(
+            !ESC_PAREN
+                .filter_escape_sequences(&[0x1b, 0x1b, 0x28, 0x28], false)
+                .0
+                .windows(2)
+                .any(|w| w[0] == 0x1b && w[1] == 0x28)
+        );
+        assert!(
+            !ESC_PAREN
+                .filter_escape_sequences(&[0x1b, 0x28, 0x28], true)
+                .0
+                .windows(2)
+                .any(|w| w[0] == 0x1b && w[1] == 0x28)
+        );
+    }
 
-    assert_eq!(
-        ipmitool_escape_sequence.filter_escape_sequences(&[b'~', 0x18], false),
-        (Cow::Borrowed(b"".as_slice()), false)
-    );
+    /// Wraps a [`BmcVendor`] in a struct field so its custom serde is exercised
+    /// through a real (de)serializer; the field is a plain TOML string.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Wrap {
+        vendor: BmcVendor,
+    }
+
+    #[derive(Clone, Copy)]
+    enum VendorSerdeInput {
+        RoundTrip(BmcVendor),
+        Deserialize(&'static str),
+    }
+
+    #[derive(Clone, Copy)]
+    struct VendorDetectionInput {
+        vendor_string: &'static str,
+        machine_id: MachineId,
+    }
+
+    const ALL_VENDORS: [(BmcVendor, &str); 7] = [
+        (BmcVendor::Ssh(SshBmcVendor::Dell), "dell"),
+        (BmcVendor::Ssh(SshBmcVendor::Lenovo), "lenovo"),
+        (BmcVendor::Ssh(SshBmcVendor::LenovoAmi), "lenovo_ami"),
+        (BmcVendor::Ssh(SshBmcVendor::Hpe), "hpe"),
+        (BmcVendor::Ssh(SshBmcVendor::Dpu), "dpu"),
+        (BmcVendor::Ipmi(IpmiBmcVendor::Supermicro), "supermicro"),
+        (
+            BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking),
+            "nvidia_viking",
+        ),
+    ];
+
+    #[test]
+    fn bmc_vendor_config_strings_map_both_directions() {
+        check_values(
+            ALL_VENDORS.map(|(vendor, config_string)| Check {
+                scenario: config_string,
+                input: (vendor, config_string),
+                expect: (config_string, Some(vendor)),
+            }),
+            |(vendor, config_string)| {
+                (
+                    vendor.config_string(),
+                    BmcVendor::from_config_string(config_string),
+                )
+            },
+        );
+
+        value_scenarios!(
+            run = |s: &str| BmcVendor::from_config_string(s);
+
+            "an unknown string has no vendor" {
+                "" => None,
+                "bogus" => None,
+            }
+        );
+    }
+
+    #[test]
+    fn bmc_vendor_serde_uses_config_strings() {
+        scenarios!(
+            run = |input| match input {
+                VendorSerdeInput::RoundTrip(vendor) => {
+                    let serialized =
+                        toml::to_string(&Wrap { vendor }).map_err(|error| error.to_string())?;
+                    let deserialized =
+                        toml::from_str(&serialized).map_err(|error| error.to_string())?;
+                    Ok((Some(serialized), deserialized))
+                }
+                VendorSerdeInput::Deserialize(serialized) => toml::from_str(serialized)
+                    .map(|vendor| (None, vendor))
+                    .map_err(|error| error.to_string()),
+            };
+
+            "representative transports round trip" {
+                VendorSerdeInput::RoundTrip(BmcVendor::Ssh(SshBmcVendor::Dell)) => Yields((
+                    Some("vendor = \"dell\"\n".to_string()),
+                    Wrap { vendor: BmcVendor::Ssh(SshBmcVendor::Dell) },
+                )),
+                VendorSerdeInput::RoundTrip(BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking)) => Yields((
+                    Some("vendor = \"nvidia_viking\"\n".to_string()),
+                    Wrap { vendor: BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking) },
+                )),
+            }
+
+            "invalid config values are rejected" {
+                VendorSerdeInput::Deserialize("vendor = \"bogus\"") => Fails,
+                VendorSerdeInput::Deserialize("vendor = 7") => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn bmc_vendor_detect_from_api_vendor_maps_hosts_and_dpus() {
+        let host_id = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host);
+        let dpu_id = MachineId::new(MachineIdSource::Tpm, [2; 32], MachineType::Dpu);
+
+        scenarios!(
+            run = |VendorDetectionInput { vendor_string, machine_id }| {
+                BmcVendor::detect_from_api_vendor(vendor_string, &machine_id)
+                    .map_err(|error| error.to_string())
+            };
+
+            "DPU identity takes priority over the API vendor" {
+                VendorDetectionInput { vendor_string: "", machine_id: dpu_id } =>
+                    Yields(BmcVendor::Ssh(SshBmcVendor::Dpu)),
+            }
+
+            "supported host vendors select their transport" {
+                VendorDetectionInput { vendor_string: "lenovo", machine_id: host_id } =>
+                    Yields(BmcVendor::Ssh(SshBmcVendor::Lenovo)),
+                VendorDetectionInput { vendor_string: "lenovoami", machine_id: host_id } =>
+                    Yields(BmcVendor::Ssh(SshBmcVendor::LenovoAmi)),
+                VendorDetectionInput { vendor_string: "dell", machine_id: host_id } =>
+                    Yields(BmcVendor::Ssh(SshBmcVendor::Dell)),
+                VendorDetectionInput { vendor_string: "supermicro", machine_id: host_id } =>
+                    Yields(BmcVendor::Ipmi(IpmiBmcVendor::Supermicro)),
+                VendorDetectionInput { vendor_string: "hpe", machine_id: host_id } =>
+                    Yields(BmcVendor::Ssh(SshBmcVendor::Hpe)),
+                VendorDetectionInput { vendor_string: "nvidia", machine_id: host_id } =>
+                    Yields(BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking)),
+            }
+
+            "unsupported host vendors preserve the API text in the error" {
+                VendorDetectionInput { vendor_string: "liteon", machine_id: host_id } =>
+                    FailsWith("unknown or unsupported sys_vendor string: liteon".to_string()),
+                VendorDetectionInput { vendor_string: "delta", machine_id: host_id } =>
+                    FailsWith("unknown or unsupported sys_vendor string: delta".to_string()),
+                VendorDetectionInput { vendor_string: "Acme BMC", machine_id: host_id } =>
+                    FailsWith("unknown or unsupported sys_vendor string: Acme BMC".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn fallback_serial_activate_commands_if_needed_detects_lenovo_failure() {
+        let lenovo_primary_failure =
+            b"console kill 1\r\nThe command line contains extraneous arguments\r\nsystem>";
+
+        value_scenarios!(
+            run = |case: FallbackCase| case.vendor
+                .fallback_serial_activate_commands_if_needed(case.output, case.fallback_sent)
+                .is_some();
+
+            "Lenovo SR650 v4 fallback" {
+                FallbackCase { vendor: SshBmcVendor::Lenovo, output: lenovo_primary_failure, fallback_sent: false } => true,
+                FallbackCase { vendor: SshBmcVendor::Lenovo, output: b"console kill 1\r\nThe command line contains extraneous arguments\r\n", fallback_sent: false } => false,
+                FallbackCase { vendor: SshBmcVendor::Lenovo, output: lenovo_primary_failure, fallback_sent: true } => false,
+                FallbackCase { vendor: SshBmcVendor::Dell, output: lenovo_primary_failure, fallback_sent: false } => false,
+            }
+        );
+
+        let commands = SshBmcVendor::Lenovo
+            .fallback_serial_activate_commands_if_needed(lenovo_primary_failure, false)
+            .expect("Lenovo failure should provide fallback commands");
+        assert_eq!(
+            commands,
+            &[b"console kill".as_slice(), b"console start".as_slice()]
+        );
+    }
+
+    #[test]
+    fn should_accept_sol_activation_output_handles_fallback_cases() {
+        let bmc_prompt = SshBmcVendor::Lenovo.bmc_prompt().unwrap();
+        let lenovo_primary_skip_len = bmc_prompt.len()
+            + SshBmcVendor::Lenovo
+                .serial_activate_command()
+                .unwrap()
+                .len();
+        let lenovo_start_skip_len = bmc_prompt.len() + b"console start".len();
+
+        value_scenarios!(
+            run = |case: AcceptActivationCase| case.vendor.should_accept_sol_activation_output(
+                case.output,
+                case.skip_data_read_len,
+            );
+
+            "Lenovo primary failure waits for fallback" {
+                AcceptActivationCase {
+                    vendor: SshBmcVendor::Lenovo,
+                    output: b"console kill 1\r\nThe command line contains extraneous arguments\r\n",
+                    skip_data_read_len: lenovo_primary_skip_len,
+                } => false,
+            }
+
+            "Lenovo fallback start succeeds by byte count" {
+                AcceptActivationCase {
+                    vendor: SshBmcVendor::Lenovo,
+                    output: b"console start\r\nroot@host # ",
+                    skip_data_read_len: lenovo_start_skip_len,
+                } => true,
+            }
+
+            "non-Lenovo activation still succeeds by byte count" {
+                AcceptActivationCase {
+                    vendor: SshBmcVendor::Dell,
+                    output: b"connect com2\r\nready",
+                    skip_data_read_len: b"connect com2".len(),
+                } => true,
+            }
+        );
+    }
 }

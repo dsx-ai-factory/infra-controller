@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
-pub mod spdm;
+mod spdm;
 
-pub mod measured_boot;
+pub(crate) mod measured_boot;
 
 use clap::Parser;
 
@@ -25,7 +25,7 @@ use crate::cfg::dispatch::Dispatch;
 use crate::cfg::measurement;
 
 #[derive(Dispatch, Parser, Debug)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[dispatch]
     #[clap(about = "Perform SPDM attestation", subcommand)]
     Spdm(spdm::Cmd),

@@ -34,12 +34,13 @@ use carbide_uuid::measured_boot::MeasurementJournalId;
 use clap::Parser;
 use measured_boot::pcr::{PcrSet, parse_pcr_index_input};
 
+use crate::cfg::dispatch::Dispatch;
 use crate::errors::CarbideCliError;
 
 /// CmdJournal provides a container for the `journal` subcommand, which itself
 /// contains other subcommands for working with journals.
-#[derive(Parser, Debug)]
-pub enum CmdJournal {
+#[derive(Parser, Debug, Dispatch)]
+pub(crate) enum CmdJournal {
     #[clap(about = "Delete a journal entry.", visible_alias = "d")]
     Delete(Delete),
 
@@ -66,9 +67,9 @@ Delete a journal entry by ID:
     12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Delete {
+pub(crate) struct Delete {
     #[clap(help = "The journal ID to delete.")]
-    pub journal_id: MeasurementJournalId,
+    journal_id: MeasurementJournalId,
 }
 
 /// List is used to list all journal entry IDs.
@@ -84,9 +85,9 @@ List journal entries for a single machine:
     12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct List {
+pub(crate) struct List {
     #[clap(help = "List journal entries for a machine ID.")]
-    pub machine_id: Option<MachineId>,
+    machine_id: Option<MachineId>,
 }
 
 /// Show is used to show a journal entry based on ID, or all entries
@@ -103,9 +104,9 @@ Show one journal entry by ID:
     12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Show {
+pub(crate) struct Show {
     #[clap(help = "The optional journal entry ID.")]
-    pub journal_id: Option<MeasurementJournalId>,
+    pub(super) journal_id: Option<MeasurementJournalId>,
 }
 
 /// Promote is used to promote a journal entry's report
@@ -123,16 +124,16 @@ Promote only specific PCR registers (indices and ranges):
     12345678-1234-5678-90ab-cdef01234567 --pcr-registers 0,7,11-14
 
 ")]
-pub struct Promote {
+pub(crate) struct Promote {
     #[clap(help = "The journal entry ID to promote a report from.")]
-    pub journal_id: MeasurementJournalId,
+    pub(super) journal_id: MeasurementJournalId,
 
     #[clap(
         long,
         help = "Select specific PCR range(s) to use for the promoted bundle."
     )]
     #[arg(value_parser = parse_pcr_index_input)]
-    pub pcr_registers: Option<PcrSet>,
+    pub(super) pcr_registers: Option<PcrSet>,
 }
 
 impl From<Delete> for DeleteMeasurementJournalRequest {

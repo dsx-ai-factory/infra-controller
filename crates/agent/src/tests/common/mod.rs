@@ -67,7 +67,7 @@ discovery-retry-secs = 1
 discovery-retries-max = 1000
 "#;
 
-pub fn setup_agent_run_env(
+pub(super) fn setup_agent_run_env(
     addr: &SocketAddr,
     td: &TempDir,
     acf: &NamedTempFile,
@@ -81,6 +81,10 @@ pub fn setup_agent_run_env(
     };
     let root_dir = PathBuf::from(repo_root);
 
+    // SAFETY: Initial lint enablement: these test settings are installed before the
+    // in-process agent starts, but the parallel test harness and Tokio runtimes may
+    // already have other threads. Unix process-wide exclusion from environment readers
+    // is not proven; this needs owner review.
     unsafe {
         env::set_var("DISABLE_TLS_ENFORCEMENT", "true");
         env::set_var("IGNORE_MGMT_VRF", "true");
@@ -97,7 +101,7 @@ pub fn setup_agent_run_env(
     }
 
     let hbn_root = td.path();
-    tracing::info!("Using hbn_root: {:?}", hbn_root);
+    tracing::info!(?hbn_root, "Using HBN root");
     fs::create_dir_all(hbn_root.join("etc/frr"))?;
     fs::create_dir_all(hbn_root.join("etc/network"))?;
     fs::create_dir_all(hbn_root.join("etc/supervisor/conf.d"))?;
@@ -120,6 +124,7 @@ pub fn setup_agent_run_env(
             skip_upgrade_check: false,
             dhcp_grpc_server: None,
             fmds_grpc_server: None,
+            fmds_connect_timeout_secs: 3,
             hbn_config_mode: crate::command_line::HbnConfigMode::ContainerExec,
             agent_platform_type: crate::command_line::AgentPlatformType::DpuOs,
             dhcp_server_interface_prepend: None,
@@ -129,7 +134,7 @@ pub fn setup_agent_run_env(
     Ok(Some(opts))
 }
 
-pub async fn run_grpc_server(
+pub(super) async fn run_grpc_server(
     app: axum::Router<()>,
 ) -> eyre::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?; // 0 let OS choose available port
@@ -169,7 +174,7 @@ fn make_rustls_server_config() -> eyre::Result<ServerConfig> {
         })
         .map(|data| PrivateKeyDer::try_from(data).map_err(|s| eyre::eyre!("{s}")))
         .next()
-        .ok_or(eyre::eyre!("No keys in key file"))??;
+        .ok_or(eyre::eyre!("no keys in key file"))??;
 
     let mut server_config = ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
@@ -196,7 +201,7 @@ async fn wait_for_server_to_start(addr: SocketAddr) -> eyre::Result<()> {
             }
             Ok(resp) => {
                 eyre::bail!(
-                    "Invalid status code from /up on mock grpc server: {}",
+                    "invalid status code from /up on mock grpc server: {}",
                     resp.status(),
                 );
             }
@@ -204,7 +209,7 @@ async fn wait_for_server_to_start(addr: SocketAddr) -> eyre::Result<()> {
         }
     }
     if Instant::now() >= deadline {
-        eyre::bail!("Timed out waiting for mock grpc server to start");
+        eyre::bail!("timed out waiting for mock grpc server to start");
     }
     Ok(())
 }
@@ -254,7 +259,7 @@ impl HttpBody for GrpcBody {
 }
 
 /// Takes an rpc object (built from rpc/proto/forge.proto) and turns into into a gRPC axum response
-pub fn respond(out: impl prost::Message) -> impl IntoResponse {
+pub(super) fn respond(out: impl prost::Message) -> impl IntoResponse {
     let msg_len = out.encoded_len() as u32;
     let mut body = Vec::with_capacity(1 + 4 + msg_len as usize);
     // first byte is compression: 0 means none

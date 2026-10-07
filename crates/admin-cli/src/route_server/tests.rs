@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
+
 // The intent of the tests.rs file is to test the integrity of the
 // command, including things like basic structure parsing, enum
 // translations, and any external input validators that are
@@ -23,23 +25,12 @@
 // Command Structure - Baseline debug_assert() of the entire command.
 // Argument Parsing  - Ensure required/optional arg combinations parse correctly.
 // ValueEnum Parsing - Test clap ValueEnum translations (if applicable).
-
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
 use clap::{CommandFactory, Parser};
 
 use super::*;
-
-// variant names the parsed subcommand so a routing-only case can assert
-// "parsed into the right variant" without inspecting any fields.
-fn variant(cmd: &Cmd) -> &'static str {
-    match cmd {
-        Cmd::Get(_) => "get",
-        Cmd::Add(_) => "add",
-        Cmd::Remove(_) => "remove",
-        Cmd::Replace(_) => "replace",
-    }
-}
+use crate::test_support::parse_with_leaf_matches;
 
 // verify_cmd_structure runs a baseline clap debug_assert()
 // to do basic command configuration checking and validation,
@@ -64,8 +55,14 @@ fn verify_cmd_structure() {
 fn subcommands_route_to_their_variant() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| variant(&cmd))
+            let subcommand = argv[1];
+            parse_with_leaf_matches::<Cmd>(argv, &[subcommand])
+                .map(|(cmd, _)| match cmd {
+                    Cmd::Get(_) => "get",
+                    Cmd::Remove(_) => "remove",
+                    Cmd::Replace(_) => "replace",
+                    _ => panic!("expected Get, Remove, or Replace variant"),
+                })
                 .map_err(drop)
         };
         "get with no args" {
@@ -87,19 +84,22 @@ fn subcommands_route_to_their_variant() {
 // count. Yields the parsed IP count for whichever subcommand carries them.
 #[test]
 fn ip_list_parses_for_each_subcommand() {
-    fn ip_count(cmd: &Cmd) -> usize {
-        match cmd {
-            Cmd::Add(args) => args.inner.ip.len(),
-            Cmd::Remove(args) => args.inner.ip.len(),
-            Cmd::Replace(args) => args.inner.ip.len(),
-            Cmd::Get(_) => panic!("expected an IP-bearing variant"),
-        }
-    }
-
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| ip_count(&cmd))
+            let subcommand = argv[1];
+            parse_with_leaf_matches::<Cmd>(argv, &[subcommand])
+                .map(|(cmd, matches)| {
+                    assert!(matches!(
+                        (subcommand, cmd),
+                        ("add", Cmd::Add(_))
+                            | ("remove", Cmd::Remove(_))
+                            | ("replace", Cmd::Replace(_))
+                    ));
+                    matches
+                        .get_many::<IpAddr>("ip")
+                        .map(Iterator::count)
+                        .unwrap_or(0)
+                })
                 .map_err(drop)
         };
         "add with a single IP" {
@@ -130,10 +130,16 @@ fn ip_list_parses_for_each_subcommand() {
 fn parse_add_single_ip_renders_back() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Add(args) => args.inner.ip[0].to_string(),
-                    _ => panic!("expected Add variant"),
+            parse_with_leaf_matches::<Cmd>(argv, &["add"])
+                .map(|(cmd, matches)| {
+                    assert!(matches!(cmd, Cmd::Add(_)));
+                    matches
+                        .get_many::<IpAddr>("ip")
+                        .into_iter()
+                        .flatten()
+                        .next()
+                        .expect("one IP address is required")
+                        .to_string()
                 })
                 .map_err(drop)
         };
@@ -155,10 +161,12 @@ fn parse_add_single_ip_renders_back() {
 fn add_source_type_maps_to_proto_int() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Add(args) => args.inner.source_type as i32,
-                    _ => panic!("expected Add variant"),
+            parse_with_leaf_matches::<Cmd>(argv, &["add"])
+                .map(|(cmd, matches)| {
+                    assert!(matches!(cmd, Cmd::Add(_)));
+                    *matches
+                        .get_one::<rpc::forge::RouteServerSourceType>("source_type")
+                        .expect("source type has a default") as i32
                 })
                 .map_err(drop)
         };

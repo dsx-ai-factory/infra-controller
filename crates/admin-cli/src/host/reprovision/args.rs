@@ -17,7 +17,7 @@
 
 use ::rpc::forge::host_reprovisioning_request::Mode;
 use ::rpc::forge::{HostReprovisioningRequest, UpdateInitiator};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
@@ -34,7 +34,7 @@ List all hosts pending reprovisioning:
     $ nico-admin-cli host reprovision list
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Set the host in reprovisioning mode.")]
     Set(ReprovisionSet),
     #[clap(about = "Clear the reprovisioning mode.")]
@@ -62,19 +62,19 @@ Set into reprovisioning mode and raise a health alert with a message:
     --update-message \"Quarterly firmware refresh\"
 
 ")]
-pub struct ReprovisionSet {
+pub(crate) struct ReprovisionSet {
     #[clap(short, long, help = "Machine ID for which reprovisioning is needed.")]
-    pub id: MachineId,
+    pub(super) id: StableHostMachineId,
 
     #[clap(short, long, action)]
-    pub update_firmware: bool,
+    update_firmware: bool,
 
     #[clap(
         long,
         alias = "maintenance_reference",
         help = "If set, a HostUpdateInProgress health alert will be applied to the host"
     )]
-    pub update_message: Option<String>,
+    pub(super) update_message: Option<String>,
 }
 
 impl From<&ReprovisionSet> for HostReprovisioningRequest {
@@ -99,16 +99,16 @@ Clear reprovisioning mode and update firmware:
     --update-firmware
 
 ")]
-pub struct ReprovisionClear {
+pub(crate) struct ReprovisionClear {
     #[clap(
         short,
         long,
         help = "Machine ID for which reprovisioning should be cleared."
     )]
-    pub id: MachineId,
+    id: StableHostMachineId,
 
     #[clap(short, long, action)]
-    pub update_firmware: bool,
+    update_firmware: bool,
 }
 
 impl From<ReprovisionClear> for HostReprovisioningRequest {
@@ -130,11 +130,11 @@ Mark manual firmware upgrade complete for a host:
     --id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct ManualFirmwareUpgradeComplete {
+pub(crate) struct ManualFirmwareUpgradeComplete {
     #[clap(
         short,
         long,
         help = "Machine ID for which manual firmware upgrade should be set."
     )]
-    pub id: MachineId,
+    pub(super) id: StableHostMachineId,
 }

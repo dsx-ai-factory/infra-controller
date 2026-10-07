@@ -20,7 +20,7 @@ use config_version::ConfigVersion;
 use model::state_history::StateHistoryRecord;
 use serde::Serialize;
 use sqlx::postgres::PgRow;
-use sqlx::{Encode, FromRow, PgConnection, Postgres, Row, Type};
+use sqlx::{FromRow, PgConnection, Row};
 
 use crate::{DatabaseError, DatabaseResult};
 
@@ -63,7 +63,9 @@ pub enum StateHistoryTableId {
     IbPartition,
     PowerShelf,
     Rack,
+    SitePrefix,
     Switch,
+    ExtensionService,
 }
 
 impl StateHistoryTableId {
@@ -76,33 +78,9 @@ impl StateHistoryTableId {
             StateHistoryTableId::IbPartition => "ib_partition_state_history",
             StateHistoryTableId::PowerShelf => "power_shelf_state_history",
             StateHistoryTableId::Rack => "rack_state_history",
+            StateHistoryTableId::SitePrefix => "site_prefix_state_history",
             StateHistoryTableId::Switch => "switch_state_history",
-        }
-    }
-
-    pub fn object_id_column(self) -> &'static str {
-        match self {
-            StateHistoryTableId::Machine => "machine_id",
-            StateHistoryTableId::NetworkSegment => "segment_id",
-            StateHistoryTableId::VpcPrefix => "vpc_prefix_id",
-            StateHistoryTableId::DpaInterface => "interface_id",
-            StateHistoryTableId::IbPartition => "partition_id",
-            StateHistoryTableId::PowerShelf => "power_shelf_id",
-            StateHistoryTableId::Rack => "rack_id",
-            StateHistoryTableId::Switch => "switch_id",
-        }
-    }
-
-    fn object_id_sql_type(self) -> &'static str {
-        match self {
-            StateHistoryTableId::NetworkSegment
-            | StateHistoryTableId::VpcPrefix
-            | StateHistoryTableId::DpaInterface
-            | StateHistoryTableId::IbPartition => "uuid",
-            StateHistoryTableId::Machine
-            | StateHistoryTableId::PowerShelf
-            | StateHistoryTableId::Rack
-            | StateHistoryTableId::Switch => "varchar",
+            StateHistoryTableId::ExtensionService => "extension_service_state_history",
         }
     }
 }
@@ -120,13 +98,10 @@ pub async fn find_by_object_ids(
         return Ok(std::collections::HashMap::new());
     }
 
-    let mut qb = sqlx::QueryBuilder::new("SELECT ");
-    qb.push(table_id.object_id_column());
-    qb.push("::TEXT AS object_id, state::TEXT, state_version, timestamp FROM ");
+    let mut qb =
+        sqlx::QueryBuilder::new("SELECT object_id, state::TEXT, state_version, timestamp FROM ");
     qb.push(table_id.sql_table());
-    qb.push(" WHERE ");
-    qb.push(table_id.object_id_column());
-    qb.push("::TEXT IN (");
+    qb.push(" WHERE object_id IN (");
 
     let mut separated = qb.separated(", ");
     for id in ids {
@@ -157,9 +132,7 @@ pub async fn for_object(
 ) -> DatabaseResult<Vec<StateHistoryRecord>> {
     let mut query = sqlx::QueryBuilder::new("SELECT state::TEXT, state_version, timestamp FROM ");
     query.push(table_id.sql_table());
-    query.push(" WHERE ");
-    query.push(table_id.object_id_column());
-    query.push("::TEXT = ");
+    query.push(" WHERE object_id = ");
     query.push_bind(object_id.to_string());
     query.push(" ORDER BY id ASC");
     query
@@ -170,24 +143,20 @@ pub async fn for_object(
 }
 
 /// Store a state history record for an object.
-pub async fn persist<ID, S>(
+pub async fn persist<S>(
     txn: &mut PgConnection,
     table_id: StateHistoryTableId,
-    object_id: &ID,
+    object_id: &impl std::fmt::Display,
     state: &S,
     state_version: ConfigVersion,
 ) -> DatabaseResult<StateHistoryRecord>
 where
-    ID: std::fmt::Display + Sync,
-    for<'q> &'q ID: Encode<'q, Postgres> + Type<Postgres>,
     S: Serialize + Sync,
 {
     let mut query = sqlx::QueryBuilder::new("INSERT INTO ");
     query.push(table_id.sql_table());
-    query.push(" (");
-    query.push(table_id.object_id_column());
-    query.push(", state, state_version) VALUES (");
-    query.push_bind(object_id);
+    query.push(" (object_id, state, state_version) VALUES (");
+    query.push_bind(object_id.to_string());
     query.push(", ");
     query.push_bind(sqlx::types::Json(state));
     query.push(", ");
@@ -212,15 +181,9 @@ pub async fn update_object_ids(
 ) -> DatabaseResult<()> {
     let mut query = sqlx::QueryBuilder::new("UPDATE ");
     query.push(table_id.sql_table());
-    query.push(" SET ");
-    query.push(table_id.object_id_column());
-    query.push(" = ");
+    query.push(" SET object_id = ");
     query.push_bind(new_object_id.to_string());
-    query.push("::");
-    query.push(table_id.object_id_sql_type());
-    query.push(" WHERE ");
-    query.push(table_id.object_id_column());
-    query.push("::TEXT = ");
+    query.push(" WHERE object_id = ");
     query.push_bind(old_object_id.to_string());
     query
         .build()
@@ -231,22 +194,128 @@ pub async fn update_object_ids(
     Ok(())
 }
 
-/// Delete all state history entries for an object.
-pub async fn delete_by_object_id(
-    txn: &mut PgConnection,
-    table_id: StateHistoryTableId,
-    object_id: &impl std::fmt::Display,
-) -> DatabaseResult<u64> {
-    let mut query = sqlx::QueryBuilder::new("DELETE FROM ");
-    query.push(table_id.sql_table());
-    query.push(" WHERE ");
-    query.push(table_id.object_id_column());
-    query.push("::TEXT = ");
-    query.push_bind(object_id.to_string());
-    let result = query
-        .build()
-        .execute(txn)
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::{StateHistoryTableId, persist};
+
+    const TABLES: [StateHistoryTableId; 10] = [
+        StateHistoryTableId::Machine,
+        StateHistoryTableId::NetworkSegment,
+        StateHistoryTableId::VpcPrefix,
+        StateHistoryTableId::DpaInterface,
+        StateHistoryTableId::IbPartition,
+        StateHistoryTableId::PowerShelf,
+        StateHistoryTableId::Rack,
+        StateHistoryTableId::SitePrefix,
+        StateHistoryTableId::Switch,
+        StateHistoryTableId::ExtensionService,
+    ];
+
+    // This test helper intentionally keeps the first transaction open while it verifies that the
+    // per-object advisory lock blocks a concurrent writer.
+    async fn assert_concurrent_retention(
+        pool: &PgPool,
+        table_id: StateHistoryTableId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let table_name = table_id.sql_table();
+        let object_id = format!("concurrent-{table_name}");
+
+        let mut seed = sqlx::QueryBuilder::new("INSERT INTO ");
+        seed.push(table_name);
+        seed.push(" (object_id, state, state_version) SELECT ");
+        seed.push_bind(&object_id);
+        seed.push(", to_jsonb(sequence), ");
+        seed.push_bind(config_version::ConfigVersion::new(1));
+        seed.push(" FROM generate_series(1, 249) AS sequence");
+        seed.build().execute(pool).await?;
+
+        let mut first_txn = pool.begin().await?;
+        persist(
+            &mut first_txn,
+            table_id,
+            &object_id,
+            &250_u32,
+            config_version::ConfigVersion::new(250),
+        )
+        .await?;
+
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let second_pool = pool.clone();
+        let second_object_id = object_id.clone();
+        let second_insert = tokio::spawn(async move {
+            let mut txn = second_pool.begin().await.map_err(|err| err.to_string())?;
+            let pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut *txn)
+                .await
+                .map_err(|err| err.to_string())?;
+            pid_sender
+                .send(pid)
+                .map_err(|_| "could not report second writer PID".to_string())?;
+            persist(
+                &mut txn,
+                table_id,
+                &second_object_id,
+                &251_u32,
+                config_version::ConfigVersion::new(251),
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            txn.commit().await.map_err(|err| err.to_string())
+        });
+
+        let second_pid = pid_receiver.await?;
+        let wait_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                         SELECT 1 FROM pg_locks \
+                         WHERE pid = $1 AND locktype = 'advisory' AND NOT granted\
+                     )",
+                )
+                .bind(second_pid)
+                .fetch_one(pool)
+                .await?;
+                if waiting {
+                    return Ok::<(), sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .map_err(|e| DatabaseError::query("state_history::delete_by_object_id", e))?;
-    Ok(result.rows_affected())
+        .map_err(|_| {
+            std::io::Error::other(format!(
+                "second writer did not wait for {table_name} retention lock",
+            ))
+        });
+
+        first_txn.commit().await?;
+        let second_result = second_insert.await?.map_err(std::io::Error::other);
+        wait_result??;
+        second_result?;
+
+        let mut retained_query = sqlx::QueryBuilder::new("SELECT state::TEXT FROM ");
+        retained_query.push(table_name);
+        retained_query.push(" WHERE object_id = ");
+        retained_query.push_bind(&object_id);
+        retained_query.push(" ORDER BY id ASC");
+        let retained: Vec<String> = retained_query.build_query_scalar().fetch_all(pool).await?;
+        assert_eq!(retained.len(), 250, "retention failed for {table_name}");
+        assert_eq!(retained.first().unwrap(), "2");
+        assert_eq!(retained.last().unwrap(), "251");
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn concurrent_inserts_are_serialized_per_object(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for table_id in TABLES {
+            assert_concurrent_retention(&pool, table_id).await?;
+        }
+
+        Ok(())
+    }
 }

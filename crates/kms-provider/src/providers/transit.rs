@@ -26,6 +26,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use carbide_instrument::{Event, LabelValue, emit, red};
 use vaultrs::api::transit::requests::DataKeyType;
 use vaultrs::client::VaultClient;
 use vaultrs::transit;
@@ -33,6 +34,43 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{EncryptedDek, KmsBackend, KmsError};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+enum TokenMaintenanceStage {
+    Lookup,
+    Renew,
+}
+
+/// Transit KMS token maintenance failed. Each variant is the stage that broke.
+#[derive(Event)]
+#[event(
+    event_name = "kms_token_maintenance_failed",
+    metric_name = "carbide_kms_token_maintenance_failures_total",
+    component = "carbide-kms-provider",
+    metric = counter,
+    describe = "Number of Transit KMS token maintenance failures, by maintenance stage",
+    labels(stage: TokenMaintenanceStage),
+)]
+enum TokenMaintenanceFailed {
+    #[event(
+        labels(stage = TokenMaintenanceStage::Lookup),
+        log = warn,
+        message = "failed to look up Transit KMS token; retrying"
+    )]
+    Lookup {
+        #[context]
+        error: String,
+    },
+
+    #[event(
+        labels(stage = TokenMaintenanceStage::Renew),
+        log = warn,
+        message = "failed to renew Transit KMS vault token"
+    )]
+    Renew {
+        #[context]
+        error: String,
+    },
+}
 /// DEFAULT_TRANSIT_MOUNT is the default Transit
 /// secrets engine mount path.
 pub const DEFAULT_TRANSIT_MOUNT: &str = "transit";
@@ -67,19 +105,32 @@ impl TransitKmsProvider {
         }
     }
 
-    /// start_token_renewal spawns a background task
-    /// that periodically renews the Vault token. Right
-    /// now it's just renewing at 90% (0.9) of the lease
-    /// duration.
-    pub fn start_token_renewal(&self) -> tokio::task::JoinHandle<()> {
+    /// run_token_renewal returns a future that renews
+    /// the Vault token at 90% (0.9) of each lease
+    /// duration until `cancel` fires. The caller spawns
+    /// it -- typically onto the process JoinSet, so
+    /// shutdown actually stops it.
+    pub fn run_token_renewal(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> impl Future<Output = ()> + Send + 'static {
         let client = self.client.clone();
-        tokio::spawn(async move {
-            // Initial lookup to get the token's TTL and renewability.
-            let info = match vaultrs::token::lookup_self(client.as_ref()).await {
-                Ok(info) => info,
-                Err(e) => {
-                    tracing::warn!("failed to look up Transit KMS token: {e}");
-                    return;
+        async move {
+            // Look up the token's TTL and renewability, retrying until it
+            // answers -- a vault blip while carbide-api boots must not
+            // disable renewal for the life of the process.
+            let info = loop {
+                match vaultrs::token::lookup_self(client.as_ref()).await {
+                    Ok(info) => break info,
+                    Err(e) => {
+                        emit(TokenMaintenanceFailed::Lookup {
+                            error: e.to_string(),
+                        });
+                        tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                        }
+                    }
                 }
             };
 
@@ -91,10 +142,13 @@ impl TransitKmsProvider {
             let mut next_renewal = Duration::from_secs((info.ttl as f64 * 0.9).max(30.0) as u64);
             loop {
                 tracing::debug!(
-                    sleep_secs = next_renewal.as_secs(),
+                    sleep_seconds = next_renewal.as_secs(),
                     "scheduling Transit KMS token renewal"
                 );
-                tokio::time::sleep(next_renewal).await;
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(next_renewal) => {}
+                }
 
                 match vaultrs::token::renew_self(client.as_ref(), None).await {
                     Ok(renewed) => {
@@ -102,37 +156,45 @@ impl TransitKmsProvider {
                             (renewed.lease_duration as f64 * 0.9).max(30.0) as u64,
                         );
                         tracing::info!(
-                            new_lease_duration = renewed.lease_duration,
+                            new_lease_duration_seconds = renewed.lease_duration,
                             "renewed Transit KMS vault token"
                         );
                     }
                     Err(e) => {
-                        tracing::warn!("failed to renew Transit KMS vault token: {e}");
+                        emit(TokenMaintenanceFailed::Renew {
+                            error: e.to_string(),
+                        });
                         next_renewal = Duration::from_secs(30);
                     }
                 }
             }
-        })
+        }
     }
 }
 
 #[async_trait]
 impl KmsBackend for TransitKmsProvider {
     async fn encrypt_dek(&self, kek_id: &str, dek: &[u8; 32]) -> Result<EncryptedDek, KmsError> {
-        let plaintext_b64 = BASE64.encode(dek);
-        let response = transit::data::encrypt(
-            self.client.as_ref(),
-            &self.transit_mount,
-            kek_id,
-            &plaintext_b64,
-            None,
+        // The base64 string is another copy of the DEK; zeroize it like the
+        // decoded buffers.
+        let plaintext_b64 = Zeroizing::new(BASE64.encode(dek));
+        let response = red::instrumented(
+            "vault_transit",
+            "encrypt_dek",
+            transit::data::encrypt(
+                self.client.as_ref(),
+                &self.transit_mount,
+                kek_id,
+                &plaintext_b64,
+                None,
+            ),
         )
         .await
         .map_err(|e| KmsError::EncryptionFailed(format!("vault transit encrypt: {e}")))?;
 
-        // Vault Transit returns ciphertext as a string like "vault:v1:<base64>".
-        // Store the entire string as bytes, and then just 'll pass it back verbatim
-        // to decrypt.
+        // Vault Transit returns ciphertext as a string like
+        // "vault:v1:<base64>". Store the entire string as bytes and pass it
+        // back verbatim on decrypt.
         Ok(EncryptedDek {
             ciphertext: response.ciphertext.into_bytes(),
             nonce: vec![], // Transit manages nonces internally.
@@ -144,22 +206,28 @@ impl KmsBackend for TransitKmsProvider {
         kek_id: &str,
         encrypted: &EncryptedDek,
     ) -> Result<Zeroizing<[u8; 32]>, KmsError> {
-        let ciphertext_str = String::from_utf8(encrypted.ciphertext.clone())
+        let ciphertext_str = std::str::from_utf8(&encrypted.ciphertext)
             .map_err(|_| KmsError::DecryptionFailed("invalid ciphertext encoding".to_string()))?;
 
-        let response = transit::data::decrypt(
-            self.client.as_ref(),
-            &self.transit_mount,
-            kek_id,
-            &ciphertext_str,
-            None,
+        let response = red::instrumented(
+            "vault_transit",
+            "decrypt_dek",
+            transit::data::decrypt(
+                self.client.as_ref(),
+                &self.transit_mount,
+                kek_id,
+                ciphertext_str,
+                None,
+            ),
         )
         .await
         .map_err(|e| KmsError::DecryptionFailed(format!("vault transit decrypt: {e}")))?;
 
-        // Vault returns base64-encoded plaintext.
+        // Vault returns base64-encoded plaintext: one more copy of the DEK,
+        // zeroized along with the decoded buffer.
+        let plaintext_b64 = Zeroizing::new(response.plaintext);
         let mut decoded = BASE64
-            .decode(&response.plaintext)
+            .decode(plaintext_b64.as_bytes())
             .map_err(|e| KmsError::DecryptionFailed(format!("invalid base64 from vault: {e}")))?;
         let len = decoded.len();
         let dek: [u8; 32] = decoded
@@ -174,26 +242,34 @@ impl KmsBackend for TransitKmsProvider {
         self.known_keys.iter().any(|k| k == kek_id)
     }
 
+    fn kek_ids(&self) -> Vec<String> {
+        self.known_keys.clone()
+    }
+
     async fn generate_and_wrap_dek(
         &self,
         kek_id: &str,
     ) -> Result<(Zeroizing<[u8; 32]>, EncryptedDek), KmsError> {
-        let response = transit::generate::data_key(
-            self.client.as_ref(),
-            &self.transit_mount,
-            kek_id,
-            DataKeyType::Plaintext,
-            None,
+        let response = red::instrumented(
+            "vault_transit",
+            "generate_data_key",
+            transit::generate::data_key(
+                self.client.as_ref(),
+                &self.transit_mount,
+                kek_id,
+                DataKeyType::Plaintext,
+                None,
+            ),
         )
         .await
         .map_err(|e| KmsError::EncryptionFailed(format!("vault transit generate data key: {e}")))?;
 
-        let plaintext_b64 = response.plaintext.ok_or_else(|| {
+        let plaintext_b64 = Zeroizing::new(response.plaintext.ok_or_else(|| {
             KmsError::Other("vault returned no plaintext for data key".to_string())
-        })?;
+        })?);
 
         let mut decoded = BASE64
-            .decode(&plaintext_b64)
+            .decode(plaintext_b64.as_bytes())
             .map_err(|e| KmsError::Other(format!("invalid base64 from vault: {e}")))?;
         let len = decoded.len();
         let dek: [u8; 32] = decoded
@@ -216,11 +292,104 @@ mod tests {
     use std::net::TcpListener;
     use std::process::Stdio;
 
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_test_support::{Check, check_values};
     use serial_test::serial;
     use tokio::io::AsyncBufReadExt;
     use tokio::process;
 
     use super::*;
+
+    const TOKEN_MAINTENANCE_FAILURE_METRIC: &str = "carbide_kms_token_maintenance_failures_total";
+
+    #[derive(Debug, PartialEq)]
+    struct TokenMaintenanceFailureObservation {
+        log_count: usize,
+        level: tracing::Level,
+        metadata_name: String,
+        message: String,
+        event_name: Option<String>,
+        metric_name: Option<String>,
+        stage: Option<String>,
+        error: Option<String>,
+        exposes_sensitive_identity: bool,
+        counter_delta: f64,
+    }
+
+    #[test]
+    fn token_maintenance_failures_emit_metrics_and_preserve_warning_logs() {
+        check_values(
+            [
+                Check {
+                    scenario: "token lookup failure",
+                    input: TokenMaintenanceStage::Lookup,
+                    expect: TokenMaintenanceFailureObservation {
+                        log_count: 1,
+                        level: tracing::Level::WARN,
+                        metadata_name: "kms_token_maintenance_failed".to_string(),
+                        message: "failed to look up Transit KMS token; retrying".to_string(),
+                        event_name: Some("kms_token_maintenance_failed".to_string()),
+                        metric_name: Some(TOKEN_MAINTENANCE_FAILURE_METRIC.to_string()),
+                        stage: Some("lookup".to_string()),
+                        error: Some("vault unavailable".to_string()),
+                        exposes_sensitive_identity: false,
+                        counter_delta: 1.0,
+                    },
+                },
+                Check {
+                    scenario: "token renewal failure",
+                    input: TokenMaintenanceStage::Renew,
+                    expect: TokenMaintenanceFailureObservation {
+                        log_count: 1,
+                        level: tracing::Level::WARN,
+                        metadata_name: "kms_token_maintenance_failed".to_string(),
+                        message: "failed to renew Transit KMS vault token".to_string(),
+                        event_name: Some("kms_token_maintenance_failed".to_string()),
+                        metric_name: Some(TOKEN_MAINTENANCE_FAILURE_METRIC.to_string()),
+                        stage: Some("renew".to_string()),
+                        error: Some("vault unavailable".to_string()),
+                        exposes_sensitive_identity: false,
+                        counter_delta: 1.0,
+                    },
+                },
+            ],
+            |stage| {
+                let metrics = MetricsCapture::start();
+                let logs = capture_logs(|| {
+                    let error = "vault unavailable".to_string();
+                    emit(match stage {
+                        TokenMaintenanceStage::Lookup => TokenMaintenanceFailed::Lookup { error },
+                        TokenMaintenanceStage::Renew => TokenMaintenanceFailed::Renew { error },
+                    });
+                });
+                let log = logs.first().expect("failure Event should log once");
+
+                TokenMaintenanceFailureObservation {
+                    log_count: logs.len(),
+                    level: log.level,
+                    metadata_name: log.metadata_name.clone(),
+                    message: log.message.clone(),
+                    event_name: log.field("event_name").map(str::to_string),
+                    metric_name: log.field("metric_name").map(str::to_string),
+                    stage: log.field("stage").map(str::to_string),
+                    error: log.field("error").map(str::to_string),
+                    exposes_sensitive_identity: ["token", "transit_mount", "kek_id", "key"]
+                        .into_iter()
+                        .any(|field| log.field(field).is_some()),
+                    counter_delta: metrics.counter_delta(
+                        TOKEN_MAINTENANCE_FAILURE_METRIC,
+                        &[(
+                            "stage",
+                            match stage {
+                                TokenMaintenanceStage::Lookup => "lookup",
+                                TokenMaintenanceStage::Renew => "renew",
+                            },
+                        )],
+                    ),
+                }
+            },
+        );
+    }
 
     /// VaultDev holds a running Vault dev server
     /// for testing.

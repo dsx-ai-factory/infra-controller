@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Pull Request Description
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: pr-description-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate pull request description
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Publish pr-description status
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          post_status() {
+            local sha="$1"
+            local state="$2"
+            local description="$3"
+
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
+              --field state="${state}" \
+              --field context=pr-description \
+              --field description="${description}" \
+              --field target_url="${RUN_URL}" \
+              >/dev/null
+          }
+
+          status_finalized=false
+          publish_error_on_exit() {
+            local exit_code="$?"
+
+            if [[ "${exit_code}" -ne 0 && "${status_finalized}" != "true" ]]; then
+              message="PR description validation could not complete; inspect the workflow run"
+              post_status "${EVENT_HEAD_SHA}" error "${message}" || true
+              echo "::error::${message}"
+            fi
+          }
+          trap publish_error_on_exit EXIT
+
+          post_status \
+            "${EVENT_HEAD_SHA}" \
+            pending \
+            "Checking the current pull request description"
+
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+
+          template="$(
+            gh api \
+              --header "Accept: application/vnd.github.raw+json" \
+              "repos/${GITHUB_REPOSITORY}/contents/.github/PULL_REQUEST_TEMPLATE.md?ref=${BASE_SHA}"
+          )"
+          body="$(jq -r '.body // ""' <<<"${pr_json}")"
+
+          comparison="$(
+            jq -n \
+              --arg body "${body}" \
+              --arg template "${template}" \
+              '{body: $body, template: $template}' \
+              | python3 -c '
+          import json
+          import re
+          import sys
+
+          data = json.load(sys.stdin)
+          body = data["body"]
+
+          if not "".join(body.split()):
+              print("empty")
+              raise SystemExit
+
+          def normalize(value):
+              without_comments = re.sub(r"<!--.*?-->", "", value, flags=re.DOTALL)
+              return "".join(without_comments.split())
+
+          if normalize(body) == normalize(data["template"]):
+              print("template")
+          else:
+              print("different")
+          '
+          )"
+
+          if [[ "${comparison}" == "empty" ]]; then
+            message="Pull request description must not be empty"
+            post_status "${EVENT_HEAD_SHA}" failure "${message}"
+            status_finalized=true
+            echo "::error::${message}"
+            exit 1
+          fi
+
+          if [[ "${comparison}" == "template" ]]; then
+            message="Fill in the pull request template before submitting"
+            post_status "${EVENT_HEAD_SHA}" failure "${message}"
+            status_finalized=true
+            echo "::error::${message}"
+            exit 1
+          fi
+
+          if [[ "${body}" == *"<!--"* ]]; then
+            message="Remove all <!-- ... --> comments from the pull request description"
+            post_status "${EVENT_HEAD_SHA}" failure "${message}"
+            status_finalized=true
+            echo "::error::${message}"
+            exit 1
+          fi
+
+          post_status \
+            "${EVENT_HEAD_SHA}" \
+            success \
+            "Pull request description is valid"
+          status_finalized=true

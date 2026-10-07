@@ -26,13 +26,13 @@ use crate::errors::CarbideCliError::GenericError;
 use crate::rpc::ApiClient;
 
 #[derive(Clone, Debug)]
-pub enum VpcPrefixSelector {
+pub(super) enum VpcPrefixSelector {
     Id(VpcPrefixId),
     Prefix(ipnet::IpNet),
 }
 
 impl VpcPrefixSelector {
-    pub async fn fetch(
+    pub(super) async fn fetch(
         self,
         api_client: &ApiClient,
         deleted: DeletedFilter,
@@ -82,7 +82,7 @@ impl FromStr for VpcPrefixSelector {
     }
 }
 
-pub fn prefix_match_exact(prefix: &IpNet) -> VpcPrefixSearchQuery {
+fn prefix_match_exact(prefix: &IpNet) -> VpcPrefixSearchQuery {
     VpcPrefixSearchQuery {
         prefix_match: Some(prefix.to_string()),
         prefix_match_type: Some(PrefixMatchType::PrefixExact as i32),
@@ -90,13 +90,13 @@ pub fn prefix_match_exact(prefix: &IpNet) -> VpcPrefixSearchQuery {
     }
 }
 
-pub fn match_all() -> VpcPrefixSearchQuery {
+pub(super) fn match_all() -> VpcPrefixSearchQuery {
     VpcPrefixSearchQuery {
         ..Default::default()
     }
 }
 
-pub async fn search(
+pub(super) async fn search(
     api_client: &ApiClient,
     query: VpcPrefixSearchQuery,
 ) -> Result<Vec<VpcPrefixId>, CarbideCliError> {
@@ -107,7 +107,7 @@ pub async fn search(
         .map(|response| response.vpc_prefix_ids)?)
 }
 
-pub async fn get_by_ids(
+pub(super) async fn get_by_ids(
     api_client: &ApiClient,
     batch_size: usize,
     ids: &[VpcPrefixId],
@@ -129,7 +129,7 @@ pub async fn get_by_ids(
     Ok(vpc_prefixes)
 }
 
-pub async fn get_one_by_id(
+async fn get_one_by_id(
     api_client: &ApiClient,
     id: VpcPrefixId,
     deleted: DeletedFilter,
@@ -149,7 +149,7 @@ pub async fn get_one_by_id(
     }
 }
 
-pub enum Quantity<T> {
+enum Quantity<T> {
     Zero,
     One(T),
     Many(Vec<T>),
@@ -160,7 +160,7 @@ impl<T> From<Vec<T>> for Quantity<T> {
         let mut items = value;
         match items.len() {
             0 => Quantity::Zero,
-            1 => Quantity::One(items.pop().unwrap()),
+            1 => Quantity::One(items.pop().expect("len()==1 should have an item")),
             _ => Quantity::Many(items),
         }
     }

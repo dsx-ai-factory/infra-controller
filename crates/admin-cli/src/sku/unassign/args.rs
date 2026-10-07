@@ -29,9 +29,9 @@ Force the unassignment:
     $ nico-admin-cli sku unassign 12345678-1234-5678-90ab-cdef01234567 --force
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The machine id of the machine to unassign")]
-    pub machine_id: MachineId,
+    pub(super) machine_id: MachineId,
     #[clap(long)]
-    pub force: bool,
+    pub(super) force: bool,
 }

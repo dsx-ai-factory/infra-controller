@@ -7,15 +7,16 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +31,8 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 	model := "M1"
 	description := "primary"
 	bmcIP := "10.0.0.1"
+	nicType := "CX9"
+	fixedIP := "192.0.2.9"
 	var slot, trayIdx, host int32 = 1, 2, 3
 
 	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
@@ -43,8 +46,8 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 
 	t.Run("invalid id leaves em.ID unchanged", func(t *testing.T) {
 		em := &ExpectedMachine{ID: id}
-		em.FromProto(&cwssaws.ExpectedMachine{
-			Id:            &cwssaws.UUID{Value: "not-a-uuid"},
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:            &corev1.UUID{Value: "not-a-uuid"},
 			BmcMacAddress: "aa:bb",
 		}, nil)
 
@@ -54,14 +57,14 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 
 	t.Run("populates all proto fields", func(t *testing.T) {
 		em := &ExpectedMachine{}
-		em.FromProto(&cwssaws.ExpectedMachine{
-			Id:                       &cwssaws.UUID{Value: id.String()},
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:                       &corev1.UUID{Value: id.String()},
 			BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
 			ChassisSerialNumber:      "CSN-1",
 			SkuId:                    &skuID,
 			FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
 			BmcIpAddress:             &bmcIP,
-			RackId:                   &cwssaws.RackId{Id: rackID},
+			RackId:                   &corev1.RackId{Id: rackID},
 			Name:                     &name,
 			Manufacturer:             &manufacturer,
 			Model:                    &model,
@@ -69,11 +72,12 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 			SlotId:                   &slot,
 			TrayIdx:                  &trayIdx,
 			HostId:                   &host,
-			Metadata: &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{
+			Metadata: &corev1.Metadata{
+				Labels: []*corev1.Label{
 					{Key: "env", Value: cutil.GetPtr("prod")},
 				},
 			},
+			HostNics: []*corev1.ExpectedHostNic{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIp: &fixedIP}},
 		}, &linkedMachineID)
 
 		assert.Equal(t, id, em.ID)
@@ -94,12 +98,27 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 		assert.Equal(t, &trayIdx, em.TrayIdx)
 		assert.Equal(t, &host, em.HostID)
 		assert.Equal(t, Labels{"env": "prod"}, em.Labels)
+		assert.Equal(t, []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP}}, em.Interfaces)
+	})
+
+	t.Run("populates dpfEnabled from is_dpf_enabled", func(t *testing.T) {
+		em := &ExpectedMachine{}
+		enabled := false
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:            &corev1.UUID{Value: id.String()},
+			BmcMacAddress: "aa:bb",
+			IsDpfEnabled:  &enabled,
+		}, nil)
+
+		if assert.NotNil(t, em.IsDpfEnabled) {
+			assert.False(t, *em.IsDpfEnabled)
+		}
 	})
 
 	t.Run("nil linkedMachineID leaves MachineID nil", func(t *testing.T) {
 		em := &ExpectedMachine{}
-		em.FromProto(&cwssaws.ExpectedMachine{
-			Id:            &cwssaws.UUID{Value: id.String()},
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:            &corev1.UUID{Value: id.String()},
 			BmcMacAddress: "aa:bb",
 		}, nil)
 
@@ -109,12 +128,159 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 	t.Run("nil RackId clears em.RackID", func(t *testing.T) {
 		stale := "stale-rack"
 		em := &ExpectedMachine{RackID: &stale}
-		em.FromProto(&cwssaws.ExpectedMachine{
-			Id:            &cwssaws.UUID{Value: id.String()},
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:            &corev1.UUID{Value: id.String()},
 			BmcMacAddress: "aa:bb",
 		}, nil)
 
 		assert.Nil(t, em.RackID)
+	})
+
+	t.Run("populates host_lifecycle_profile", func(t *testing.T) {
+		em := &ExpectedMachine{}
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:                   &corev1.UUID{Value: id.String()},
+			BmcMacAddress:        "aa:bb",
+			HostLifecycleProfile: &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		}, nil)
+
+		if assert.NotNil(t, em.HostLifecycleProfile.DisableLockdown) {
+			assert.Equal(t, true, *em.HostLifecycleProfile.DisableLockdown)
+		}
+	})
+
+	t.Run("missing host_lifecycle_profile clears the field", func(t *testing.T) {
+		em := &ExpectedMachine{HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}}
+		em.FromProto(&corev1.ExpectedMachine{
+			Id:            &corev1.UUID{Value: id.String()},
+			BmcMacAddress: "aa:bb",
+		}, nil)
+
+		assert.Nil(t, em.HostLifecycleProfile.DisableLockdown)
+	})
+}
+
+func TestHostLifecycleProfile_ToProto(t *testing.T) {
+	t.Run("unset profile maps to nil proto", func(t *testing.T) {
+		assert.Nil(t, HostLifecycleProfile{}.ToProto())
+	})
+
+	t.Run("disableLockdown true maps to populated proto", func(t *testing.T) {
+		got := HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}.ToProto()
+		if assert.NotNil(t, got) {
+			assert.Equal(t, true, got.GetDisableLockdown())
+		}
+	})
+
+	t.Run("disableLockdown false maps to populated proto", func(t *testing.T) {
+		got := HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}.ToProto()
+		if assert.NotNil(t, got) {
+			assert.NotNil(t, got.DisableLockdown)
+			assert.Equal(t, false, got.GetDisableLockdown())
+		}
+	})
+}
+
+func TestHostLifecycleProfile_FromProto(t *testing.T) {
+	t.Run("nil proto clears receiver", func(t *testing.T) {
+		h := HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}
+		h.FromProto(nil)
+		assert.Nil(t, h.DisableLockdown)
+	})
+
+	t.Run("populates disableLockdown", func(t *testing.T) {
+		h := HostLifecycleProfile{}
+		h.FromProto(&corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)})
+		if assert.NotNil(t, h.DisableLockdown) {
+			assert.Equal(t, true, *h.DisableLockdown)
+		}
+	})
+}
+
+func TestExpectedMachine_ToProto_HostLifecycleProfile(t *testing.T) {
+	t.Run("sets host_lifecycle_profile when disableLockdown present", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                   uuid.New(),
+			BmcMacAddress:        "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber:  "CSN-1",
+			HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		if assert.NotNil(t, proto.GetHostLifecycleProfile()) {
+			assert.Equal(t, true, proto.GetHostLifecycleProfile().GetDisableLockdown())
+		}
+	})
+
+	t.Run("leaves host_lifecycle_profile unset when no setting present", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  uuid.New(),
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.Nil(t, proto.GetHostLifecycleProfile())
+	})
+}
+
+func TestExpectedMachine_ToProto(t *testing.T) {
+	id := uuid.New()
+	enabled := true
+	disabled := false
+
+	t.Run("sets is_dpf_enabled when stored", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			IsDpfEnabled:        &enabled,
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.True(t, *proto.IsDpfEnabled)
+	})
+
+	t.Run("omits is_dpf_enabled when unset", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.Nil(t, proto.IsDpfEnabled)
+		assert.False(t, proto.DpfEnabled)
+	})
+
+	t.Run("forwards false value", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			IsDpfEnabled:        &disabled,
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		if assert.NotNil(t, proto.IsDpfEnabled) {
+			assert.False(t, *proto.IsDpfEnabled)
+		}
+		assert.False(t, proto.DpfEnabled)
+	})
+
+	t.Run("forwards interfaces in order", func(t *testing.T) {
+		nicType := "CX9"
+		fixedIP := "192.0.2.9"
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			Interfaces: []ExpectedMachineInterface{
+				{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
+				{MacAddress: "02:00:00:00:00:0a"},
+			},
+		}
+		got := em.ToProto(ExpectedMachineCredentials{}).GetHostNics()
+		require.Len(t, got, 2)
+		assert.Equal(t, "02:00:00:00:00:09", got[0].GetMacAddress())
+		assert.Equal(t, "CX9", got[0].GetNicType())
+		assert.Equal(t, "192.0.2.9", got[0].GetFixedIp())
+		assert.Equal(t, "02:00:00:00:00:0a", got[1].GetMacAddress())
 	})
 }
 
@@ -198,7 +364,12 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					BmcMacAddress:            "00:1B:44:11:3A:B7",
 					ChassisSerialNumber:      "CHASSIS123",
 					FallbackDpuSerialNumbers: []string{"DPU001", "DPU002"},
-					BmcIpAddress:             cutil.GetPtr("192.168.1.10"),
+					Interfaces: []ExpectedMachineInterface{{
+						MacAddress: "02:00:00:00:00:09",
+						NicType:    cutil.GetPtr("CX9"),
+						FixedIP:    cutil.GetPtr("192.0.2.9"),
+					}},
+					BmcIpAddress: cutil.GetPtr("192.168.1.10"),
 					Labels: map[string]string{
 						"environment": "test",
 						"location":    "datacenter1",
@@ -280,14 +451,17 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, input.ChassisSerialNumber, em.ChassisSerialNumber)
 					assert.Equal(t, input.FallbackDpuSerialNumbers, em.FallbackDpuSerialNumbers)
 					assert.Equal(t, input.BmcIpAddress, em.BmcIpAddress)
+					if input.Interfaces == nil {
+						assert.Empty(t, em.Interfaces)
+					} else {
+						assert.Equal(t, input.Interfaces, em.Interfaces)
+					}
 					assert.Equal(t, Labels(input.Labels), em.Labels)
 				}
 
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -365,6 +539,100 @@ func testExpectedMachineSQLDAOCreateExpectedMachines(ctx context.Context, t *tes
 	return
 }
 
+func TestExpectedMachineSQLDAO_GetDistinctLabelKeys(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+	created := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	_, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: created[0].ID,
+		Labels: map[string]string{
+			"environment":               "test",
+			"location":                  "datacenter1",
+			"nvidia.com/failure-domain": "fd-a",
+		},
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		filter    ExpectedMachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted keys", want: []string{"environment", "location", "nvidia.com/failure-domain"}, wantTotal: 3},
+		{
+			name: "descending second result",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelKeyOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"location"}, wantTotal: 3,
+		},
+		{name: "empty site scope", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelKeys(ctx, nil, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
+func TestExpectedMachineSQLDAO_GetDistinctLabelValues(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+	created := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	_, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: created[0].ID,
+		Labels: map[string]string{
+			"environment":               "test",
+			"location":                  "datacenter1",
+			"nvidia.com/failure-domain": "fd-a",
+		},
+	})
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		filter    ExpectedMachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted values", labelKey: "environment", want: []string{"production", "test"}, wantTotal: 2},
+		{name: "missing key", labelKey: "missing", want: []string{}, wantTotal: 0},
+		{name: "slash in key", labelKey: "nvidia.com/failure-domain", want: []string{"fd-a"}, wantTotal: 1},
+		{name: "site scope", labelKey: "location", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{created[0].SiteID}}, want: []string{"datacenter1"}, wantTotal: 1},
+		{
+			name: "descending second result", labelKey: "environment",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelValueOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"production"}, wantTotal: 2,
+		},
+		{name: "empty site scope", labelKey: "environment", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelValues(ctx, nil, tt.labelKey, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
 func TestExpectedMachineSQLDAO_GetByID(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
@@ -424,8 +692,6 @@ func TestExpectedMachineSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -650,8 +916,6 @@ func TestExpectedMachineSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1011,12 +1275,84 @@ func TestExpectedMachineSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
 	}
+}
+
+func TestExpectedMachineSQLDAO_HostLifecycleProfile(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+
+	emsd := NewExpectedMachineDAO(dbSession)
+	emID := uuid.New()
+
+	// Create with disable_lockdown = true and confirm it persists.
+	created, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:    emID,
+		SiteID:               site.ID,
+		BmcMacAddress:        "00:1B:44:11:3A:C0",
+		ChassisSerialNumber:  "CHASSIS-HLP",
+		HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		CreatedBy:            user.ID,
+	})
+	assert.NoError(t, err)
+	if assert.NotNil(t, created.HostLifecycleProfile.DisableLockdown) {
+		assert.Equal(t, true, *created.HostLifecycleProfile.DisableLockdown)
+	}
+
+	got, err := emsd.Get(ctx, nil, emID, nil, false)
+	assert.NoError(t, err)
+	if assert.NotNil(t, got.HostLifecycleProfile.DisableLockdown) {
+		assert.Equal(t, true, *got.HostLifecycleProfile.DisableLockdown)
+	}
+
+	// Update disable_lockdown to false.
+	_, err = emsd.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID:    emID,
+		HostLifecycleProfile: &HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+	})
+	assert.NoError(t, err)
+	got, err = emsd.Get(ctx, nil, emID, nil, false)
+	assert.NoError(t, err)
+	if assert.NotNil(t, got.HostLifecycleProfile.DisableLockdown) {
+		assert.Equal(t, false, *got.HostLifecycleProfile.DisableLockdown)
+	}
+
+	// Updating another field without the profile preserves the existing value.
+	_, err = emsd.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID:   emID,
+		ChassisSerialNumber: cutil.GetPtr("CHASSIS-HLP-2"),
+	})
+	assert.NoError(t, err)
+	got, err = emsd.Get(ctx, nil, emID, nil, false)
+	assert.NoError(t, err)
+	if assert.NotNil(t, got.HostLifecycleProfile.DisableLockdown) {
+		assert.Equal(t, false, *got.HostLifecycleProfile.DisableLockdown)
+	}
+
+	// Creating without a profile persists the empty (unset) default.
+	em2ID := uuid.New()
+	em2, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   em2ID,
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:C1",
+		ChassisSerialNumber: "CHASSIS-HLP-DEFAULT",
+		CreatedBy:           user.ID,
+	})
+	assert.NoError(t, err)
+	assert.Nil(t, em2.HostLifecycleProfile.DisableLockdown)
+
+	got2, err := emsd.Get(ctx, nil, em2ID, nil, false)
+	assert.NoError(t, err)
+	assert.Nil(t, got2.HostLifecycleProfile.DisableLockdown)
 }
 
 func TestExpectedMachineSQLDAO_Clear(t *testing.T) {
@@ -1028,6 +1364,16 @@ func TestExpectedMachineSQLDAO_Clear(t *testing.T) {
 	emsExp := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
 	emsd := NewExpectedMachineDAO(dbSession)
 	assert.NotNil(t, emsd)
+	bmcEM, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              emsExp[0].SiteID,
+		BmcMacAddress:       "00:1B:44:11:3A:CA",
+		ChassisSerialNumber: "CHASSIS-CLEAR-BMC-IP",
+		BmcIpAddress:        cutil.GetPtr("192.0.2.10"),
+		CreatedBy:           emsExp[0].CreatedBy,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, bmcEM)
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -1052,6 +1398,14 @@ func TestExpectedMachineSQLDAO_Clear(t *testing.T) {
 			em:   emsExp[0],
 			input: ExpectedMachineClearInput{
 				Labels: true,
+			},
+			expectedUpdate: true,
+		},
+		{
+			desc: "can clear BmcIpAddress",
+			em:   *bmcEM,
+			input: ExpectedMachineClearInput{
+				BmcIpAddress: true,
 			},
 			expectedUpdate: true,
 		},
@@ -1083,6 +1437,9 @@ func TestExpectedMachineSQLDAO_Clear(t *testing.T) {
 			if tc.input.Labels {
 				assert.Nil(t, tmp.Labels)
 			}
+			if tc.input.BmcIpAddress {
+				assert.Nil(t, tmp.BmcIpAddress)
+			}
 
 			if tc.expectedUpdate {
 				assert.True(t, tmp.Updated.After(tc.em.Updated))
@@ -1091,8 +1448,6 @@ func TestExpectedMachineSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1146,8 +1501,6 @@ func TestExpectedMachineSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1267,8 +1620,6 @@ func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1336,6 +1687,196 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_MacSwap(t *testing.T) {
 	updatedEM2, err := emsd.Get(ctx, nil, em2.ID, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, macAddress1, updatedEM2.BmcMacAddress, "em2 should now have em1's original MAC address")
+}
+
+func TestExpectedMachineSQLDAO_LockForUpdateSerializesOverlappingBatches(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	first, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "AA:BB:CC:DD:EE:11",
+		ChassisSerialNumber: "CHASSIS-LOCK-001",
+		BmcIpAddress:        cutil.GetPtr("192.0.2.11"),
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+	second, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "AA:BB:CC:DD:EE:12",
+		ChassisSerialNumber: "CHASSIS-LOCK-002",
+		BmcIpAddress:        cutil.GetPtr("192.0.2.12"),
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	firstBatchName := "first-batch"
+	secondBatchName := "second-batch"
+	firstLocked := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+			if err := emsd.LockForUpdate(ctx, tx, []uuid.UUID{second.ID, first.ID}); err != nil {
+				return err
+			}
+			close(firstLocked)
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if _, err := emsd.Clear(ctx, tx, ExpectedMachineClearInput{
+				ExpectedMachineID: second.ID,
+				BmcIpAddress:      true,
+			}); err != nil {
+				return err
+			}
+			_, err := emsd.UpdateMultiple(ctx, tx, []ExpectedMachineUpdateInput{
+				{ExpectedMachineID: second.ID, Name: &firstBatchName},
+				{ExpectedMachineID: first.ID, Name: &firstBatchName},
+			})
+			return err
+		})
+	}()
+
+	select {
+	case <-firstLocked:
+	case err := <-firstDone:
+		t.Fatalf("first transaction completed before acquiring its row locks: %v", err)
+	case <-ctx.Done():
+		firstErr := <-firstDone
+		t.Fatalf("timed out waiting for the first transaction to acquire its row locks: %v (transaction: %v)", ctx.Err(), firstErr)
+	}
+
+	secondStarted := make(chan struct{})
+	secondLockAcquired := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+			close(secondStarted)
+			if err := emsd.LockForUpdate(ctx, tx, []uuid.UUID{first.ID, second.ID}); err != nil {
+				return err
+			}
+			close(secondLockAcquired)
+			if _, err := emsd.Clear(ctx, tx, ExpectedMachineClearInput{
+				ExpectedMachineID: first.ID,
+				BmcIpAddress:      true,
+			}); err != nil {
+				return err
+			}
+			_, err := emsd.UpdateMultiple(ctx, tx, []ExpectedMachineUpdateInput{
+				{ExpectedMachineID: first.ID, Name: &secondBatchName},
+				{ExpectedMachineID: second.ID, Name: &secondBatchName},
+			})
+			return err
+		})
+	}()
+	select {
+	case <-secondStarted:
+	case err := <-secondDone:
+		close(releaseFirst)
+		firstErr := <-firstDone
+		t.Fatalf("second transaction completed before attempting its canonical lock: %v (first transaction: %v)", err, firstErr)
+	case <-ctx.Done():
+		close(releaseFirst)
+		firstErr := <-firstDone
+		secondErr := <-secondDone
+		t.Fatalf(
+			"timed out waiting for the second transaction to attempt its canonical lock: %v (first transaction: %v, second transaction: %v)",
+			ctx.Err(),
+			firstErr,
+			secondErr,
+		)
+	}
+
+	// The second batch must wait at the full-row lock pass. If that lock returns
+	// before the first transaction completes, the partial-lock deadlock is
+	// possible again.
+	var secondErr error
+	secondFinishedEarly := false
+	secondLockAcquiredEarly := false
+	select {
+	case <-secondLockAcquired:
+		secondLockAcquiredEarly = true
+	case secondErr = <-secondDone:
+		secondFinishedEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirst)
+
+	require.NoError(t, <-firstDone)
+	if !secondFinishedEarly {
+		secondErr = <-secondDone
+	}
+	require.False(t, secondLockAcquiredEarly, "the competing batch should wait at the canonical lock pass")
+	require.False(t, secondFinishedEarly, "the competing batch should wait for the first transaction")
+	require.NoError(t, secondErr)
+
+	for _, expectedMachineID := range []uuid.UUID{first.ID, second.ID} {
+		stored, err := emsd.Get(ctx, nil, expectedMachineID, nil, false)
+		require.NoError(t, err)
+		assert.Nil(t, stored.BmcIpAddress)
+		assert.Equal(t, &secondBatchName, stored.Name)
+	}
+}
+
+func TestExpectedMachineSQLDAO_LockForUpdateErrors(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	emsd := NewExpectedMachineDAO(dbSession)
+	missingID := uuid.New()
+	tests := []struct {
+		name            string
+		lock            func() error
+		target          error
+		messageContains string
+	}{
+		{
+			name: "transaction is required",
+			lock: func() error {
+				return emsd.LockForUpdate(ctx, nil, []uuid.UUID{missingID})
+			},
+			messageContains: "transaction is required",
+		},
+		{
+			name: "missing row keeps typed error",
+			lock: func() error {
+				return db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+					return emsd.LockForUpdate(ctx, tx, []uuid.UUID{missingID})
+				})
+			},
+			target: db.ErrDoesNotExist,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.lock()
+			require.Error(t, err)
+			if test.target != nil {
+				require.ErrorIs(t, err, test.target)
+			}
+			if test.messageContains != "" {
+				require.ErrorContains(t, err, test.messageContains)
+			}
+		})
+	}
 }
 
 func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
@@ -1470,15 +2011,209 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 					if tc.inputs[i].Labels != nil {
 						assert.Equal(t, Labels(tc.inputs[i].Labels), em.Labels)
 					}
+					if tc.inputs[i].Interfaces != nil {
+						assert.Equal(t, tc.inputs[i].Interfaces, em.Interfaces)
+					}
 				}
 			}
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+}
+
+// TestExpectedMachineSQLDAO_UpdateMultiple_BmcIpAddress guards against a BMC
+// address supplied for one row clearing an address omitted by another row.
+func TestExpectedMachineSQLDAO_UpdateMultiple_BmcIpAddress(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	originalUpdatedIP := "192.0.2.50"
+	originalPreservedIP := "192.0.2.51"
+	updatedIP := "192.0.2.52"
+	originalUpdatedName := "original-updated-ip-machine"
+	originalPreservedName := "original-preserved-ip-machine"
+	updatedIPName := "updated-ip-machine"
+	preservedIPName := "preserved-ip-machine"
+	emUpdated, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F4",
+		ChassisSerialNumber: "CHASSIS-BMC-IP-A",
+		BmcIpAddress:        &originalUpdatedIP,
+		Name:                &originalUpdatedName,
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+	emPreserved, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F5",
+		ChassisSerialNumber: "CHASSIS-BMC-IP-B",
+		BmcIpAddress:        &originalPreservedIP,
+		Name:                &originalPreservedName,
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+
+	got, err := emsd.UpdateMultiple(ctx, nil, []ExpectedMachineUpdateInput{
+		{
+			ExpectedMachineID: emUpdated.ID,
+			BmcIpAddress:      &updatedIP,
+			Name:              &updatedIPName,
+		},
+		{
+			ExpectedMachineID: emPreserved.ID,
+			Name:              &preservedIPName,
+		},
+	})
+	require.NoError(t, err)
+	if assert.Len(t, got, 2) {
+		assert.Equal(t, &updatedIP, got[0].BmcIpAddress)
+		assert.Equal(t, &updatedIPName, got[0].Name)
+		assert.Equal(t, &originalPreservedIP, got[1].BmcIpAddress)
+		assert.Equal(t, &preservedIPName, got[1].Name)
+	}
+
+	stored, err := emsd.Get(ctx, nil, emPreserved.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, &originalPreservedIP, stored.BmcIpAddress)
+	assert.Equal(t, &preservedIPName, stored.Name)
+}
+
+// TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile guards against a
+// mixed batch clearing host_lifecycle_profile on rows that did not set it.
+// Because the shared bulk UPDATE applies one column list to every row, the field
+// must be applied separately to only the rows that provide it; rows that omit it
+// must keep their persisted profile.
+func TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	// emA starts with disable_lockdown=true and is updated with an empty profile
+	// object. That must behave like omission and preserve the stored value.
+	emA, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:    uuid.New(),
+		SiteID:               site.ID,
+		BmcMacAddress:        "00:1B:44:11:3A:F1",
+		ChassisSerialNumber:  "CHASSIS-HLP-A",
+		HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		CreatedBy:            user.ID,
+	})
+	assert.NoError(t, err)
+
+	// emB starts with disable_lockdown=false and is the only row that sets a
+	// profile in the batch (flipping it to true).
+	emB, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:    uuid.New(),
+		SiteID:               site.ID,
+		BmcMacAddress:        "00:1B:44:11:3A:F2",
+		ChassisSerialNumber:  "CHASSIS-HLP-B",
+		HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+		CreatedBy:            user.ID,
+	})
+	assert.NoError(t, err)
+
+	// emC starts unset and is updated WITHOUT a profile.
+	emC, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F3",
+		ChassisSerialNumber: "CHASSIS-HLP-C",
+		CreatedBy:           user.ID,
+	})
+	assert.NoError(t, err)
+
+	_, err = emsd.UpdateMultiple(ctx, nil, []ExpectedMachineUpdateInput{
+		{
+			ExpectedMachineID:    emA.ID,
+			ChassisSerialNumber:  cutil.GetPtr("CHASSIS-HLP-A2"),
+			HostLifecycleProfile: &HostLifecycleProfile{},
+		},
+		{
+			ExpectedMachineID:    emB.ID,
+			HostLifecycleProfile: &HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		},
+		{
+			ExpectedMachineID: emC.ID,
+			Labels:            map[string]string{"env": "test"},
+		},
+	})
+	assert.NoError(t, err)
+
+	// emA: other field changed, empty profile object preserved the stored value.
+	gotA, err := emsd.Get(ctx, nil, emA.ID, nil, false)
+	assert.NoError(t, err)
+	assert.Equal(t, "CHASSIS-HLP-A2", gotA.ChassisSerialNumber)
+	if assert.NotNil(t, gotA.HostLifecycleProfile.DisableLockdown, "omitted profile must be preserved") {
+		assert.Equal(t, true, *gotA.HostLifecycleProfile.DisableLockdown)
+	}
+
+	// emB: profile explicitly updated false -> true.
+	gotB, err := emsd.Get(ctx, nil, emB.ID, nil, false)
+	assert.NoError(t, err)
+	if assert.NotNil(t, gotB.HostLifecycleProfile.DisableLockdown) {
+		assert.Equal(t, true, *gotB.HostLifecycleProfile.DisableLockdown)
+	}
+
+	// emC: other field changed, unset profile stays unset.
+	gotC, err := emsd.Get(ctx, nil, emC.ID, nil, false)
+	assert.NoError(t, err)
+	assert.Equal(t, Labels{"env": "test"}, gotC.Labels)
+	assert.Nil(t, gotC.HostLifecycleProfile.DisableLockdown, "omitted profile (unset) must stay unset")
+}
+
+func TestExpectedMachineSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	existing := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	require.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedMachineCreateInput{ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:11:ee:01", ChassisSerialNumber: "other-site", CreatedBy: user.ID})
+	require.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedMachineCreateInput{
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:01", ChassisSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:02", ChassisSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "replacement-1", result[0].ChassisSerialNumber)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedMachineFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
 }

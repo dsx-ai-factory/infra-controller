@@ -17,16 +17,17 @@
 
 //! State Controller IO implementation for Machines
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use model::machine::machine_search_config::MachineSearchConfig;
+use model::dpa_interface::DpaSearchConfig;
 use model::machine::slas::MachineSlaConfig;
 use model::machine::{
-    self, AttestationMode, DpuDiscoveringState, DpuInitState, HostHealthConfig,
-    MachineValidatingState, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
+    self, AttestationMode, ConfigureAstraState, DecommissioningState, DpuDiscoveringState,
+    DpuInitState, HostHealthConfig, MachineMaintenanceOperation, MachineValidatingState,
+    ManagedHostState, ManagedHostStateSnapshot, MeasuringState, ReadyBootConfigState,
     SpdmMeasuringState, ValidationState,
 };
 use sqlx::PgConnection;
@@ -44,7 +45,7 @@ pub struct MachineStateControllerIO {
 
 #[async_trait::async_trait]
 impl StateControllerIO for MachineStateControllerIO {
-    type ObjectId = MachineId;
+    type ObjectId = HostMachineId;
     type State = ManagedHostStateSnapshot;
     type ControllerState = ManagedHostState;
     type MetricsEmitter = MachineMetricsEmitter;
@@ -59,14 +60,7 @@ impl StateControllerIO for MachineStateControllerIO {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        Ok(db::machine::find_machine_ids(
-            txn,
-            MachineSearchConfig {
-                include_predicted_host: true,
-                ..Default::default()
-            },
-        )
-        .await?)
+        db::managed_host::load_host_ids(txn).await
     }
 
     /// Loads a state snapshot from the database
@@ -75,19 +69,6 @@ impl StateControllerIO for MachineStateControllerIO {
         txn: &mut PgConnection,
         machine_id: &Self::ObjectId,
     ) -> Result<Option<Self::State>, DatabaseError> {
-        // Never load state for DPUs
-        // The state machine is only supposed to execute for hosts
-        // If by any accidental chance a DPU ID was enqueued into the system,
-        // we filter it here.
-        if machine_id.machine_type().is_dpu() {
-            return Err(DatabaseError::new(
-                "MachineStateControllerIO::load_object_state",
-                sqlx::Error::InvalidArgument(
-                    "DPU state can not be loaded by state controller".to_string(),
-                ),
-            ));
-        }
-
         let mut retstate = db::managed_host::load_snapshot(
             txn,
             machine_id,
@@ -100,8 +81,13 @@ impl StateControllerIO for MachineStateControllerIO {
         .await?;
 
         if let Some(retstate) = retstate.as_mut() {
+            let dpa_search_config = DpaSearchConfig {
+                only_svpc: false,
+                only_astra: false,
+            };
             let dpa_snapshots =
-                db::dpa_interface::find_by_machine_id(&mut *txn, *machine_id).await?;
+                db::dpa_interface::find_by_machine_id(&mut *txn, *machine_id, dpa_search_config)
+                    .await?;
             retstate.dpa_interface_snapshots = dpa_snapshots;
         };
 
@@ -123,18 +109,22 @@ impl StateControllerIO for MachineStateControllerIO {
         &self,
         txn: &mut PgConnection,
         object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        _new_version: ConfigVersion,
+        old_version: ConfigVersion,
+        new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
-        db::machine::update_state(txn, object_id, new_state).await?;
-        Ok(true)
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+        db::machine::try_update_controller_state(
+            txn,
+            object_id,
+            old_version,
+            new_version,
+            new_state,
+        )
+        .await
     }
 
-    /// State history for machines (including DPUs) is persisted internally by
-    /// `db::machine::advance()` inside `update_state`, so this is actually a
-    /// no-op for now.
-    // TODO(chet): Pull this in as well.
+    /// Machine persistence writes history before updating each machine, matching
+    /// `advance`'s lock order. Moving history here could deadlock with `advance`.
     async fn persist_state_history(
         &self,
         _txn: &mut PgConnection,
@@ -165,7 +155,10 @@ impl StateControllerIO for MachineStateControllerIO {
                 DpuInitState::WaitingForNetworkConfig => "waitingfornetworkconfig",
                 DpuInitState::WaitingForPlatformConfiguration => "waitingforplatformconfiguration",
                 DpuInitState::PollingBiosSetup => "pollingbiossetup",
-                DpuInitState::WaitingForPlatformPowercycle { .. } => "waitingforplatformpowercycle",
+                // The observed-Off wait remains part of the existing
+                // operator-facing power-cycle metric.
+                DpuInitState::WaitingForPlatformPowercycle { .. }
+                | DpuInitState::WaitingForPlatformPowerOff => "waitingforplatformpowercycle",
                 DpuInitState::DpfStates { .. } => "dpfstates",
             }
         }
@@ -258,9 +251,44 @@ impl StateControllerIO for MachineStateControllerIO {
             match validation_state {
                 MachineValidatingState::MachineValidating { .. } => "machinevalidating",
                 MachineValidatingState::RebootHost { .. } => "reboothost",
+                MachineValidatingState::PrepareBootRepair { .. } => "preparebootrepair",
+                MachineValidatingState::UnlockForBootRepair { .. } => "unlockforbootrepair",
+                MachineValidatingState::CheckBootConfigForRepair { .. } => {
+                    "checkbootconfigforrepair"
+                }
+                MachineValidatingState::ConfigureBootBios { .. } => "configurebootbios",
+                MachineValidatingState::WaitingForBootBiosJob { .. } => "waitingforbootbiosjob",
+                MachineValidatingState::PollingBootBiosSetup { .. } => "pollingbootbiossetup",
+                MachineValidatingState::RepairBootConfig { .. } => "repairbootconfig",
+                MachineValidatingState::LockAfterBootRepair { .. } => "lockafterbootrepair",
             }
         }
+
+        fn ready_boot_config_state_name(state: &ReadyBootConfigState) -> &'static str {
+            match state {
+                ReadyBootConfigState::Prepare => "prepare",
+                ReadyBootConfigState::UnlockHost { .. } => "unlockhost",
+                ReadyBootConfigState::CheckHostConfig => "checkhostconfig",
+                ReadyBootConfigState::ConfigureBios { .. } => "configurebios",
+                ReadyBootConfigState::WaitingForBiosJob { .. } => "waitingforbiosjob",
+                ReadyBootConfigState::PollingBiosSetup { .. } => "pollingbiossetup",
+                ReadyBootConfigState::SetBootOrder { .. } => "setbootorder",
+                ReadyBootConfigState::LockHost { .. } => "lockhost",
+                ReadyBootConfigState::RestoreFullLockdown { .. } => "restorefulllockdown",
+                ReadyBootConfigState::Failed { .. } => "failed",
+            }
+        }
+
         match state {
+            ManagedHostState::ConfigureAstra {
+                configure_astra_state,
+            } => (
+                "configureastra",
+                match configure_astra_state {
+                    ConfigureAstraState::EnableNics => "enablenics",
+                    ConfigureAstraState::WaitingForPowercycle => "waitingforpowercycle",
+                },
+            ),
             ManagedHostState::DpuDiscoveringState { dpu_states } => {
                 // Min state indicates the least processed DPU. The state machine is blocked
                 // becasue of this.
@@ -283,6 +311,55 @@ impl StateControllerIO for MachineStateControllerIO {
                 ("hostnotready", machine_state_name(machine_state))
             }
             ManagedHostState::Ready => ("ready", ""),
+            ManagedHostState::Decommissioning {
+                decommissioning_state,
+            } => match decommissioning_state {
+                DecommissioningState::SuppressingSiteExplorer => {
+                    ("decommissioning", "suppressingsiteexplorer")
+                }
+                DecommissioningState::DeconfiguringHost { .. } => {
+                    ("decommissioning", "deconfiguringhost")
+                }
+                DecommissioningState::DeconfiguringDpus { .. } => {
+                    ("decommissioning", "deconfiguringdpus")
+                }
+                DecommissioningState::SuppressingOobDhcp => {
+                    ("decommissioning", "suppressingoobdhcp")
+                }
+                DecommissioningState::PowerCyclingHost => ("decommissioning", "powercyclinghost"),
+                DecommissioningState::PoweringOnHost => ("decommissioning", "poweringonhost"),
+                DecommissioningState::WaitingForOobDhcpAcknowledgement => {
+                    ("decommissioning", "waitingforoobdhcpacknowledgement")
+                }
+                DecommissioningState::SuppressingBmcDhcp => {
+                    ("decommissioning", "suppressingbmcdhcp")
+                }
+                DecommissioningState::FactoryResettingBmcs { .. } => {
+                    ("decommissioning", "factoryresettingbmcs")
+                }
+                DecommissioningState::WaitingForBmcDhcpAcknowledgement => {
+                    ("decommissioning", "waitingforbmcdhcpacknowledgement")
+                }
+                DecommissioningState::DeletingManagedCredentials => {
+                    ("decommissioning", "deletingmanagedcredentials")
+                }
+                DecommissioningState::Decommissioned => ("decommissioning", "decommissioned"),
+            },
+            ManagedHostState::BootConfiguring {
+                boot_config_state, ..
+            } => (
+                "bootconfiguring",
+                ready_boot_config_state_name(boot_config_state),
+            ),
+            ManagedHostState::Maintenance { operation, .. } => {
+                let op = match operation {
+                    MachineMaintenanceOperation::PowerOn => "power_on",
+                    MachineMaintenanceOperation::PowerOff { .. } => "power_off",
+                    MachineMaintenanceOperation::Reset => "reset",
+                    MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
+                };
+                ("maintenance", op)
+            }
             ManagedHostState::Assigned { instance_state } => {
                 ("assigned", instance_state_name(instance_state))
             }
@@ -293,7 +370,12 @@ impl StateControllerIO for MachineStateControllerIO {
             ManagedHostState::ForceDeletion => ("forcedeletion", ""),
             ManagedHostState::Failed { .. } => ("failed", ""),
             ManagedHostState::DPUReprovision { .. } => ("reprovisioning", ""),
+            ManagedHostState::Reset { .. } => ("reset", ""),
             ManagedHostState::HostReprovision { .. } => ("hostreprovisioning", ""),
+            ManagedHostState::RotatingBmc { .. } => ("rotatingbmc", ""),
+            ManagedHostState::RotatingHostUefi { .. } => ("rotatinghostuefi", ""),
+            ManagedHostState::RotatingDpuUefi { .. } => ("rotatingdpuuefi", ""),
+            ManagedHostState::RotatingNicLockdown => ("rotatingniclockdown", ""),
             ManagedHostState::Measuring { measuring_state } => {
                 ("measuring", measuring_state_name(measuring_state))
             }
@@ -343,6 +425,22 @@ impl StateControllerIO for MachineStateControllerIO {
         }
     }
 
+    fn manual_intervention_reason(state: &Self::ControllerState) -> Option<&'static str> {
+        match state {
+            // A Failed state carrying NoError is not actionable by an operator.
+            ManagedHostState::Failed { details, .. }
+                if details.cause != model::machine::FailureCause::NoError =>
+            {
+                Some(details.cause.metric_label())
+            }
+            ManagedHostState::BootConfiguring {
+                boot_config_state: ReadyBootConfigState::Failed { .. },
+                ..
+            } => Some("boot_config_convergence_failed"),
+            _ => None,
+        }
+    }
+
     fn state_sla(
         &self,
         state: &Versioned<Self::ControllerState>,
@@ -355,5 +453,31 @@ impl StateControllerIO for MachineStateControllerIO {
             &object_state.aggregate_health,
             &self.sla_config,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use model::machine_boot_interface::MachineBootInterfaceTarget;
+
+    use super::*;
+
+    #[test]
+    fn terminal_ready_boot_config_requires_manual_intervention() {
+        let state = ManagedHostState::BootConfiguring {
+            desired_version: ConfigVersion::initial(),
+            desired_boot_interface: MachineBootInterfaceTarget::MacOnly(
+                "02:00:00:00:00:01".parse().unwrap(),
+            ),
+            post_lock_verification_retry_count: 0,
+            boot_config_state: ReadyBootConfigState::Failed {
+                failure: "exhausted".to_string(),
+            },
+        };
+
+        assert_eq!(
+            <MachineStateControllerIO as StateControllerIO>::manual_intervention_reason(&state),
+            Some("boot_config_convergence_failed"),
+        );
     }
 }

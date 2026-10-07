@@ -19,9 +19,9 @@ use clap::Parser;
 use mac_address::MacAddress;
 
 #[derive(Parser, Debug)]
-pub struct ExploreOptions {
+pub(super) struct ExploreOptions {
     #[clap(help = "BMC IP address or hostname with optional port")]
-    pub address: String,
+    pub(super) address: String,
     #[clap(long, help = "The MAC address the BMC sent DHCP from")]
-    pub mac: Option<MacAddress>,
+    pub(super) mac: Option<MacAddress>,
 }

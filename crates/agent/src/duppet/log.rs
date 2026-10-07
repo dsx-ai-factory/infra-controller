@@ -35,7 +35,7 @@ macro_rules! logln {
 /// maybe_colorize colorizes log line prefixes with fancy
 /// pretty colors. Can be disabled with the --no-color sync
 /// option, but why would you?
-pub fn maybe_colorize<'a>(
+pub(super) fn maybe_colorize<'a>(
     text: &'a str,
     style: fn(&'a str) -> ColoredString,
     options: &SyncOptions,
@@ -50,7 +50,7 @@ pub fn maybe_colorize<'a>(
 /// build_diff builds a diff between the source (expected) and
 /// destination (existing) files, in the case where the destination
 /// file already exists.
-pub fn build_diff(src: &str, dst: &str) -> String {
+pub(super) fn build_diff(src: &str, dst: &str) -> String {
     let diff = TextDiff::from_lines(dst, src);
     let mut diff_output = String::new();
 

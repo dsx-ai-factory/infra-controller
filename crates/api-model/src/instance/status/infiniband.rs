@@ -111,7 +111,7 @@ impl InstanceInfinibandStatus {
                     },
                     None => {
                         tracing::error!(
-                            interface = ?config.function_id,
+                            function_id = ?config.function_id,
                             ?config,
                             ?observation,
                             "Could not find matching status for interface",

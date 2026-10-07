@@ -27,7 +27,7 @@ Remove a health report source from a power shelf (source name from `health-repor
     internal-maintenance
 
 ")]
-pub struct Args {
-    pub power_shelf_id: PowerShelfId,
-    pub report_source: String,
+pub(crate) struct Args {
+    pub(super) power_shelf_id: PowerShelfId,
+    pub(super) report_source: String,
 }

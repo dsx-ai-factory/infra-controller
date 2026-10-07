@@ -23,9 +23,14 @@ pub mod arch;
 pub mod cmd;
 pub mod config;
 mod host_port_pair;
+pub mod managed_loop;
+pub mod memory_device_group;
 pub mod metrics;
+pub mod none_if_empty;
 pub mod periodic_timer;
 pub mod redfish;
+#[cfg(feature = "shutdown-handler")]
+pub mod shutdown_handler;
 pub mod sku;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -37,6 +42,18 @@ pub const DEFAULT_DMI_SYSTEM_MANUFACTURER: &str = "Unspecified System Manufactur
 pub const DEFAULT_DMI_SYSTEM_MODEL: &str = "Unspecified Model";
 pub const BF2_PRODUCT_NAME: &str = "BlueField SoC";
 pub const BF3_PRODUCT_NAME: &str = "BlueField-3 SmartNIC Main Card";
+pub const SCOUT_FIRMWARE_SCRIPTS_DIR: &str = "/opt/carbide/scout-firmware-scripts";
+
+/// Upper bound on a memory device group's device count accepted from any boundary (RPC,
+/// stored/deserialized form, etc). Far beyond any real DIMM slot count (even the largest
+/// multi-socket servers top out in the low hundreds), so this only exists to keep memory device
+/// group expansion from allocating an unbounded number of devices for a malicious or corrupted
+/// count.
+///
+/// Defined here (rather than in `carbide-api-model`, where it's consumed) so that
+/// `carbide-rpc` can use the same value without depending on `carbide-api-model`, which is only
+/// an optional dependency of `carbide-rpc` behind the `model` feature.
+pub const MAX_MEMORY_DEVICE_COUNT: u32 = 8192;
 
 // ordered_map is used with serde to take a HashMap and always serialize it in key sorted order
 pub fn ordered_map<S, K: Ord + Serialize, V: Serialize>(

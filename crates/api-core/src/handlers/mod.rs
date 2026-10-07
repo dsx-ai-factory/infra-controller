@@ -15,74 +15,125 @@
  * limitations under the License.
  */
 
-pub mod api;
-pub mod attestation;
-pub mod bmc_endpoint_explorer;
-pub mod bmc_metadata;
-pub mod boot_override;
-pub mod client_resolution;
-pub mod component_manager;
-pub mod compute_allocation;
-pub mod credential;
-pub mod db;
-pub mod dns;
-pub mod domain;
-pub mod dpa;
-pub mod dpf;
-pub mod dpu;
-pub mod dpu_remediation;
-pub mod expected_machine;
-pub mod expected_power_shelf;
-pub mod expected_rack;
-pub mod expected_switch;
-pub mod extension_service;
-pub mod finder;
-pub mod firmware;
-pub mod health;
-pub mod host_reprovisioning;
-pub mod ib_fabric;
-pub mod ib_partition;
-pub mod instance;
-pub mod instance_type;
-pub mod logical_partition;
-pub mod machine;
-pub mod machine_discovery;
-pub mod machine_hardware_info;
-pub mod machine_identity;
-pub mod machine_interface;
-pub mod machine_interface_address;
-pub mod machine_quarantine;
-pub mod machine_scout;
-pub mod machine_validation;
-pub mod managed_host;
-pub mod measured_boot;
-pub mod mlx_admin;
-pub mod network_devices;
-pub mod network_security_group;
-pub mod network_segment;
-pub mod nmxc_browse;
-pub mod nvl_partition;
-pub mod nvlink_domain;
-pub mod nvlink_nmxc_endpoints;
-pub mod operating_system;
-pub mod power_options;
-pub mod power_shelf;
-pub mod pxe;
-pub mod rack;
-pub mod redfish;
-pub mod resource_pool;
-pub mod route_server;
-pub mod scout_stream;
-pub mod site_explorer;
-pub mod sku;
-pub mod spx_partition;
-pub mod switch;
-pub mod tenant;
-pub mod tenant_identity_config;
-pub mod tenant_keyset;
-pub mod tpm_ca;
-pub mod uefi;
-pub mod utils;
-pub mod vpc;
-pub mod vpc_peering;
-pub mod vpc_prefix;
+pub(super) mod api;
+mod astra;
+pub(super) mod attestation;
+pub(super) mod attestation_profile;
+pub(super) mod bmc_credential_rotation;
+pub(super) mod bmc_endpoint_explorer;
+pub(super) mod bmc_metadata;
+pub(super) mod boot_override;
+pub(super) mod chassis_reset;
+mod client_resolution;
+pub(super) mod component_manager;
+pub(super) mod compute_allocation;
+pub(super) mod credential;
+pub(super) mod credential_rotation;
+pub(super) mod db;
+pub(super) mod dns;
+pub(super) mod domain;
+pub(super) mod dpa;
+pub(super) mod dpf;
+pub(super) mod dpu;
+pub(super) mod dpu_remediation;
+pub(super) mod dpu_service_sync;
+mod expected_component_patch;
+pub(super) mod expected_machine;
+pub(super) mod expected_power_shelf;
+pub(super) mod expected_rack;
+pub(super) mod expected_rack_group;
+pub(super) mod expected_switch;
+pub(super) mod extension_service;
+pub(super) mod finder;
+pub(super) mod firmware;
+pub(super) mod health;
+pub(super) mod host_reprovisioning;
+pub(super) mod ib_fabric;
+pub(super) mod ib_partition;
+pub(super) mod instance;
+pub(super) mod instance_type;
+pub(super) mod lldp;
+pub(super) mod logical_partition;
+pub(super) mod machine;
+pub(super) mod machine_boot_interfaces;
+pub(super) mod machine_discovery;
+pub(super) mod machine_hardware_info;
+pub(super) mod machine_identity;
+pub(super) mod machine_interface;
+pub(super) mod machine_interface_address;
+pub(super) mod machine_quarantine;
+pub(super) mod machine_scout;
+pub(super) mod machine_validation;
+pub(super) mod managed_host;
+pub(super) mod managed_host_reset;
+pub(super) mod measured_boot;
+pub(super) mod mlx_admin;
+pub(super) mod mlx_device_identity;
+mod mlx_device_report;
+pub(super) mod network_devices;
+pub(super) mod network_security_group;
+pub(super) mod network_segment;
+pub(super) mod nic_firmware;
+pub(super) mod nic_lockdown_credential_rotation;
+pub(super) mod nmxc_browse;
+pub(super) mod nvl_partition;
+pub(super) mod nvlink_domain;
+pub(super) mod nvlink_nmxc_endpoints;
+pub(super) mod operating_system;
+pub(super) mod power_options;
+pub(super) mod power_shelf;
+mod primary_interface;
+pub(super) mod pxe;
+pub(super) mod rack;
+pub(super) mod redfish;
+pub(super) mod resource_pool;
+pub(super) mod rms;
+pub(super) mod route_server;
+pub(super) mod scout_stream;
+pub(super) mod secrets;
+pub(super) mod site_explorer;
+pub(super) mod site_prefix;
+pub(super) mod sku;
+pub(super) mod spx_partition;
+mod static_address_metrics;
+pub(super) mod svpc;
+pub(super) mod switch;
+pub(super) mod tenant;
+pub(super) mod tenant_identity_config;
+pub(super) mod tenant_keyset;
+pub(super) mod tenant_prefix_overlap;
+pub(super) mod tpm_ca;
+pub(super) mod uefi;
+pub(super) mod uefi_credential_rotation;
+mod utils;
+pub(super) mod vpc;
+pub(super) mod vpc_peering;
+pub(super) mod vpc_prefix;
+
+#[cfg(test)]
+pub(crate) async fn resolve_machine_interface_for_test(
+    conn: &mut sqlx::PgConnection,
+    client_ip: std::net::IpAddr,
+) -> Result<model::machine::MachineInterfaceSnapshot, crate::CarbideError> {
+    client_resolution::resolve_machine_interface(conn, client_ip).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn process_scout_req_for_test(
+    api: &crate::Api,
+    machine_id: carbide_uuid::machine::HostMachineId,
+) -> crate::CarbideResult<rpc::forge_agent_control_response::Action> {
+    svpc::process_scout_req(api, machine_id).await
+}
+
+/// Exposes the private scout update path to crate-level database race tests.
+#[cfg(test)]
+pub(crate) async fn update_primary_interface_from_scout_for_test(
+    api: &crate::Api,
+    machine_id: carbide_uuid::machine::StableHostMachineId,
+    hardware_info: &model::hardware_info::HardwareInfo,
+) -> crate::CarbideResult<bool> {
+    primary_interface::update_primary_interface_from_scout(api, machine_id, hardware_info)
+        .await
+        .map(|update| update.reconciliation_needed)
+}

@@ -14,6 +14,10 @@
 ## trust domain).
 global:
   spiffe:
+    # Legacy SPIFFE trust domain (see GH-2060). Rust/Helm default is nico.local;
+    # keep forge.local here until every client cert and Vault URI SAN is issued
+    # under nico.local. Path prefixes (/forge-system/machine/, /forge-system/sa/)
+    # come from auth.namespace below, not from this trustDomain field.
     trustDomain: forge.local
 
 nico-api:

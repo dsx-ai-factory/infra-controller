@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,9 +27,9 @@ func TestManageTenantIdentity_CreateOrUpdateTenantIdentityConfigurationOnSite(t 
 	ctx := context.Background()
 
 	t.Run("success echoes config and publishes a current signing key", func(t *testing.T) {
-		req := &cwssaws.SetTenantIdentityConfigRequest{
+		req := &corev1.SetTenantIdentityConfigRequest{
 			OrganizationId: "acme-corp",
-			Config: &cwssaws.TenantIdentityConfig{
+			Config: &corev1.TenantIdentityConfig{
 				Enabled:         true,
 				Issuer:          "https://carbide.example.com/iss",
 				DefaultAudience: "openbao",
@@ -56,14 +56,14 @@ func TestManageTenantIdentity_CreateOrUpdateTenantIdentityConfigurationOnSite(t 
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.CreateOrUpdateTenantIdentityConfigurationOnSite(ctx, &cwssaws.SetTenantIdentityConfigRequest{
-			Config: &cwssaws.TenantIdentityConfig{DefaultAudience: "openbao"},
+		_, err := identityMgr.CreateOrUpdateTenantIdentityConfigurationOnSite(ctx, &corev1.SetTenantIdentityConfigRequest{
+			Config: &corev1.TenantIdentityConfig{DefaultAudience: "openbao"},
 		})
 		assert.Error(t, err)
 	})
 
 	t.Run("rejects missing config", func(t *testing.T) {
-		_, err := identityMgr.CreateOrUpdateTenantIdentityConfigurationOnSite(ctx, &cwssaws.SetTenantIdentityConfigRequest{
+		_, err := identityMgr.CreateOrUpdateTenantIdentityConfigurationOnSite(ctx, &corev1.SetTenantIdentityConfigRequest{
 			OrganizationId: "acme-corp",
 		})
 		assert.Error(t, err)
@@ -76,7 +76,7 @@ func TestManageTenantIdentity_GetTenantIdentityConfigurationFromSite(t *testing.
 	ctx := context.Background()
 
 	t.Run("success returns the org's current config and signing keys", func(t *testing.T) {
-		resp, err := identityMgr.GetTenantIdentityConfigurationFromSite(ctx, &cwssaws.GetTenantIdentityConfigRequest{
+		resp, err := identityMgr.GetTenantIdentityConfigurationFromSite(ctx, &corev1.GetTenantIdentityConfigRequest{
 			OrganizationId: "acme-corp",
 		})
 		require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestManageTenantIdentity_GetTenantIdentityConfigurationFromSite(t *testing.
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.GetTenantIdentityConfigurationFromSite(ctx, &cwssaws.GetTenantIdentityConfigRequest{})
+		_, err := identityMgr.GetTenantIdentityConfigurationFromSite(ctx, &corev1.GetTenantIdentityConfigRequest{})
 		assert.Error(t, err)
 	})
 }
@@ -105,7 +105,7 @@ func TestManageTenantIdentity_DeleteTenantIdentityConfigurationOnSite(t *testing
 	ctx := context.Background()
 
 	t.Run("success returns empty proto", func(t *testing.T) {
-		resp, err := identityMgr.DeleteTenantIdentityConfigurationOnSite(ctx, &cwssaws.GetTenantIdentityConfigRequest{
+		resp, err := identityMgr.DeleteTenantIdentityConfigurationOnSite(ctx, &corev1.GetTenantIdentityConfigRequest{
 			OrganizationId: "acme-corp",
 		})
 		require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestManageTenantIdentity_DeleteTenantIdentityConfigurationOnSite(t *testing
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.DeleteTenantIdentityConfigurationOnSite(ctx, &cwssaws.GetTenantIdentityConfigRequest{})
+		_, err := identityMgr.DeleteTenantIdentityConfigurationOnSite(ctx, &corev1.GetTenantIdentityConfigRequest{})
 		assert.Error(t, err)
 	})
 }
@@ -129,13 +129,13 @@ func TestManageTenantIdentity_CreateOrUpdateTenantIdentityTokenDelegationOnSite(
 	ctx := context.Background()
 
 	t.Run("success with client_secret_basic (hash returned, raw never)", func(t *testing.T) {
-		req := &cwssaws.TokenDelegationRequest{
+		req := &corev1.TokenDelegationRequest{
 			OrganizationId: "acme-corp",
-			Config: &cwssaws.TokenDelegation{
+			Config: &corev1.TokenDelegation{
 				TokenEndpoint:        "https://auth.acme.com/oauth2/token",
 				SubjectTokenAudience: "acme-exchange",
-				AuthMethodConfig: &cwssaws.TokenDelegation_ClientSecretBasic{
-					ClientSecretBasic: &cwssaws.ClientSecretBasic{
+				AuthMethodConfig: &corev1.TokenDelegation_ClientSecretBasic{
+					ClientSecretBasic: &corev1.ClientSecretBasic{
 						ClientId:     "client-123",
 						ClientSecret: "super-secret",
 					},
@@ -156,9 +156,9 @@ func TestManageTenantIdentity_CreateOrUpdateTenantIdentityTokenDelegationOnSite(
 	})
 
 	t.Run("success with auth method none (no client_secret_basic)", func(t *testing.T) {
-		req := &cwssaws.TokenDelegationRequest{
+		req := &corev1.TokenDelegationRequest{
 			OrganizationId: "acme-corp",
-			Config: &cwssaws.TokenDelegation{
+			Config: &corev1.TokenDelegation{
 				TokenEndpoint:        "https://auth.acme.com/oauth2/token",
 				SubjectTokenAudience: "acme-exchange",
 			},
@@ -175,14 +175,14 @@ func TestManageTenantIdentity_CreateOrUpdateTenantIdentityTokenDelegationOnSite(
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.CreateOrUpdateTenantIdentityTokenDelegationOnSite(ctx, &cwssaws.TokenDelegationRequest{
-			Config: &cwssaws.TokenDelegation{TokenEndpoint: "https://example.com"},
+		_, err := identityMgr.CreateOrUpdateTenantIdentityTokenDelegationOnSite(ctx, &corev1.TokenDelegationRequest{
+			Config: &corev1.TokenDelegation{TokenEndpoint: "https://example.com"},
 		})
 		assert.Error(t, err)
 	})
 
 	t.Run("rejects missing config", func(t *testing.T) {
-		_, err := identityMgr.CreateOrUpdateTenantIdentityTokenDelegationOnSite(ctx, &cwssaws.TokenDelegationRequest{
+		_, err := identityMgr.CreateOrUpdateTenantIdentityTokenDelegationOnSite(ctx, &corev1.TokenDelegationRequest{
 			OrganizationId: "acme-corp",
 		})
 		assert.Error(t, err)
@@ -195,7 +195,7 @@ func TestManageTenantIdentity_GetTenantIdentityTokenDelegationFromSite(t *testin
 	ctx := context.Background()
 
 	t.Run("success returns hashed secret, never raw", func(t *testing.T) {
-		resp, err := identityMgr.GetTenantIdentityTokenDelegationFromSite(ctx, &cwssaws.GetTokenDelegationRequest{
+		resp, err := identityMgr.GetTenantIdentityTokenDelegationFromSite(ctx, &corev1.GetTokenDelegationRequest{
 			OrganizationId: "acme-corp",
 		})
 		require.NoError(t, err)
@@ -212,7 +212,7 @@ func TestManageTenantIdentity_GetTenantIdentityTokenDelegationFromSite(t *testin
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.GetTenantIdentityTokenDelegationFromSite(ctx, &cwssaws.GetTokenDelegationRequest{})
+		_, err := identityMgr.GetTenantIdentityTokenDelegationFromSite(ctx, &corev1.GetTokenDelegationRequest{})
 		assert.Error(t, err)
 	})
 }
@@ -223,7 +223,7 @@ func TestManageTenantIdentity_DeleteTenantIdentityTokenDelegationOnSite(t *testi
 	ctx := context.Background()
 
 	t.Run("success returns empty proto", func(t *testing.T) {
-		resp, err := identityMgr.DeleteTenantIdentityTokenDelegationOnSite(ctx, &cwssaws.GetTokenDelegationRequest{
+		resp, err := identityMgr.DeleteTenantIdentityTokenDelegationOnSite(ctx, &corev1.GetTokenDelegationRequest{
 			OrganizationId: "acme-corp",
 		})
 		require.NoError(t, err)
@@ -236,7 +236,7 @@ func TestManageTenantIdentity_DeleteTenantIdentityTokenDelegationOnSite(t *testi
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.DeleteTenantIdentityTokenDelegationOnSite(ctx, &cwssaws.GetTokenDelegationRequest{})
+		_, err := identityMgr.DeleteTenantIdentityTokenDelegationOnSite(ctx, &corev1.GetTokenDelegationRequest{})
 		assert.Error(t, err)
 	})
 }
@@ -247,8 +247,8 @@ func TestManageTenantIdentity_GetJWKSFromSite(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("success oidc kind yields use=sig", func(t *testing.T) {
-		kind := cwssaws.JwksKind_Oidc
-		resp, err := identityMgr.GetJWKSFromSite(ctx, &cwssaws.JwksRequest{
+		kind := corev1.JwksKind_Oidc
+		resp, err := identityMgr.GetJWKSFromSite(ctx, &corev1.JwksRequest{
 			OrganizationId: "acme-corp",
 			Kind:           &kind,
 		})
@@ -258,8 +258,8 @@ func TestManageTenantIdentity_GetJWKSFromSite(t *testing.T) {
 	})
 
 	t.Run("success spiffe kind yields use=jwt-svid", func(t *testing.T) {
-		kind := cwssaws.JwksKind_Spiffe
-		resp, err := identityMgr.GetJWKSFromSite(ctx, &cwssaws.JwksRequest{
+		kind := corev1.JwksKind_Spiffe
+		resp, err := identityMgr.GetJWKSFromSite(ctx, &corev1.JwksRequest{
 			OrganizationId: "acme-corp",
 			Kind:           &kind,
 		})
@@ -274,7 +274,7 @@ func TestManageTenantIdentity_GetJWKSFromSite(t *testing.T) {
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.GetJWKSFromSite(ctx, &cwssaws.JwksRequest{})
+		_, err := identityMgr.GetJWKSFromSite(ctx, &corev1.JwksRequest{})
 		assert.Error(t, err)
 	})
 }
@@ -285,7 +285,7 @@ func TestManageTenantIdentity_GetOpenIDConfigurationFromSite(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("success returns well-formed discovery doc", func(t *testing.T) {
-		resp, err := identityMgr.GetOpenIDConfigurationFromSite(ctx, &cwssaws.OpenIdConfigRequest{
+		resp, err := identityMgr.GetOpenIDConfigurationFromSite(ctx, &corev1.OpenIdConfigRequest{
 			OrganizationId: "acme-corp",
 		})
 		require.NoError(t, err)
@@ -304,7 +304,7 @@ func TestManageTenantIdentity_GetOpenIDConfigurationFromSite(t *testing.T) {
 	})
 
 	t.Run("rejects missing organization_id", func(t *testing.T) {
-		_, err := identityMgr.GetOpenIDConfigurationFromSite(ctx, &cwssaws.OpenIdConfigRequest{})
+		_, err := identityMgr.GetOpenIDConfigurationFromSite(ctx, &corev1.OpenIdConfigRequest{})
 		assert.Error(t, err)
 	})
 }

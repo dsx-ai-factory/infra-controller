@@ -25,7 +25,7 @@ Immediately probe a BMC endpoint and persist the report:
     $ nico-admin-cli site-explorer refresh 192.0.2.10
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "BMC IP address")]
-    pub address: String,
+    pub(super) address: String,
 }

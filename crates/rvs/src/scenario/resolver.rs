@@ -94,6 +94,8 @@ fn eval_sotpath<'a>(sot: &'a RackFirmwareData, sotpath: &str) -> Result<&'a str,
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
     use serde_json::json;
 
     use super::*;
@@ -121,87 +123,125 @@ mod tests {
         }
     }
 
-    // --- eval_sotpath ---
-
     #[test]
-    fn eval_sotpath_returns_first_string_match() {
-        let sot = make_sot(json!({ "firmware": { "url": "https://cdn.example.com/fw.bin" } }));
-        let url = eval_sotpath(&sot, "$.firmware.url").unwrap();
-        assert_eq!(url, "https://cdn.example.com/fw.bin");
-    }
+    fn eval_sotpath_resolves_to_the_first_matching_string() {
+        /// A SOT config paired with the JSONPath to evaluate against it.
+        struct Query {
+            config: serde_json::Value,
+            sotpath: &'static str,
+        }
 
-    #[test]
-    fn eval_sotpath_no_match_is_error() {
-        let sot = make_sot(json!({ "firmware": {} }));
-        let err = eval_sotpath(&sot, "$.firmware.url").unwrap_err();
-        assert!(err.to_string().contains("matched nothing"), "got: {err}");
-    }
-
-    #[test]
-    fn eval_sotpath_non_string_match_is_error() {
-        let sot = make_sot(json!({ "firmware": { "version": 42 } }));
-        let err = eval_sotpath(&sot, "$.firmware.version").unwrap_err();
-        assert!(
-            err.to_string().contains("did not resolve to a string"),
-            "got: {err}"
+        scenarios!(
+            run = |Query { config, sotpath }: Query| {
+                // The match borrows `sot`, so resolve it to an owned String here.
+                // RvsError isn't PartialEq; the failing rows assert only that the
+                // path does not resolve, so carry the message as a String too.
+                eval_sotpath(&make_sot(config), sotpath)
+                    .map(str::to_string)
+                    .map_err(|e| e.to_string())
+            };
+            "a string match resolves to its value" {
+                Query {
+                    config: json!({ "firmware": { "url": "https://cdn.example.com/fw.bin" } }),
+                    sotpath: "$.firmware.url",
+                } => Yields("https://cdn.example.com/fw.bin".to_string()),
+            }
+            "a path matching nothing is an error" {
+                Query { config: json!({ "firmware": {} }), sotpath: "$.firmware.url" } => Fails,
+            }
+            "a non-string match is an error" {
+                Query {
+                    config: json!({ "firmware": { "version": 42 } }),
+                    sotpath: "$.firmware.version",
+                } => Fails,
+            }
         );
     }
 
-    // --- resolve_for_scenario ---
-
     #[test]
-    fn resolve_for_scenario_os_image_only() {
-        let sot = make_sot(json!({}));
-        let scenario = make_scenario("gb200nvl", "1.2.5");
-        let downloads = resolve_for_scenario(&sot, &scenario, "/cache").unwrap();
-        assert_eq!(downloads.len(), 1);
-        assert_eq!(downloads[0].output_path, "/cache/gb200nvl/1.2.5/os");
-        assert_eq!(downloads[0].url, "https://example.com/os.img");
-    }
+    fn resolve_for_scenario_collects_os_image_and_artifacts() {
+        /// A SOT config and the single artifact (if any) to resolve alongside the
+        /// always-present OS image.
+        struct Case {
+            config: serde_json::Value,
+            artifact: Option<super::super::Artifact>,
+        }
 
-    #[test]
-    fn resolve_for_scenario_direct_uri_artifact() {
-        let sot = make_sot(json!({}));
-        let mut scenario = make_scenario("gb200nvl", "1.2.5");
-        scenario.artifacts.push(super::super::Artifact {
-            name: "diag".to_string(),
-            output: "diag.bin".parse().unwrap(),
-            uri: Some("https://example.com/diag.bin".to_string()),
-            sotpath: None,
-        });
-        let downloads = resolve_for_scenario(&sot, &scenario, "/cache").unwrap();
-        assert_eq!(downloads.len(), 2);
-        assert_eq!(downloads[1].output_path, "/cache/gb200nvl/1.2.5/diag.bin");
-        assert_eq!(downloads[1].url, "https://example.com/diag.bin");
-    }
-
-    #[test]
-    fn resolve_for_scenario_sotpath_artifact() {
-        let sot = make_sot(json!({ "packages": { "diag": "https://cdn.example.com/diag.bin" } }));
-        let mut scenario = make_scenario("gb200nvl", "1.2.5");
-        scenario.artifacts.push(super::super::Artifact {
-            name: "diag".to_string(),
-            output: "diag.bin".parse().unwrap(),
-            uri: None,
-            sotpath: Some("$.packages.diag".to_string()),
-        });
-        let downloads = resolve_for_scenario(&sot, &scenario, "/cache").unwrap();
-        assert_eq!(downloads.len(), 2);
-        assert_eq!(downloads[1].output_path, "/cache/gb200nvl/1.2.5/diag.bin");
-        assert_eq!(downloads[1].url, "https://cdn.example.com/diag.bin");
-    }
-
-    #[test]
-    fn resolve_for_scenario_sotpath_missing_is_error() {
-        let sot = make_sot(json!({}));
-        let mut scenario = make_scenario("gb200nvl", "1.2.5");
-        scenario.artifacts.push(super::super::Artifact {
-            name: "diag".to_string(),
-            output: "diag.bin".parse().unwrap(),
-            uri: None,
-            sotpath: Some("$.packages.diag".to_string()),
-        });
-        let err = resolve_for_scenario(&sot, &scenario, "/cache").unwrap_err();
-        assert!(err.to_string().contains("matched nothing"), "got: {err}");
+        // The OS image is always the first download; any artifact follows. Each
+        // success row pins the full (output_path, url) list the resolution yields.
+        scenarios!(
+            run = |Case { config, artifact }: Case| {
+                let sot = make_sot(config);
+                let mut scenario = make_scenario("gb200nvl", "1.2.5");
+                scenario.artifacts.extend(artifact);
+                resolve_for_scenario(&sot, &scenario, "/cache")
+                    .map(|downloads| {
+                        downloads
+                            .into_iter()
+                            .map(|d| (d.output_path, d.url.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    // RvsError isn't PartialEq; the failing row asserts only that
+                    // an unresolvable sotpath fails, so carry the message as a String.
+                    .map_err(|e| e.to_string())
+            };
+            "the OS image alone is resolved when there are no artifacts" {
+                Case { config: json!({}), artifact: None } => Yields(vec![(
+                    "/cache/gb200nvl/1.2.5/os".to_string(),
+                    "https://example.com/os.img".to_string(),
+                )]),
+            }
+            "a direct-URI artifact follows the OS image" {
+                Case {
+                    config: json!({}),
+                    artifact: Some(super::super::Artifact {
+                        name: "diag".to_string(),
+                        output: "diag.bin".parse().unwrap(),
+                        uri: Some("https://example.com/diag.bin".to_string()),
+                        sotpath: None,
+                    }),
+                } => Yields(vec![
+                    (
+                        "/cache/gb200nvl/1.2.5/os".to_string(),
+                        "https://example.com/os.img".to_string(),
+                    ),
+                    (
+                        "/cache/gb200nvl/1.2.5/diag.bin".to_string(),
+                        "https://example.com/diag.bin".to_string(),
+                    ),
+                ]),
+            }
+            "a SOT-resolved artifact follows the OS image" {
+                Case {
+                    config: json!({ "packages": { "diag": "https://cdn.example.com/diag.bin" } }),
+                    artifact: Some(super::super::Artifact {
+                        name: "diag".to_string(),
+                        output: "diag.bin".parse().unwrap(),
+                        uri: None,
+                        sotpath: Some("$.packages.diag".to_string()),
+                    }),
+                } => Yields(vec![
+                    (
+                        "/cache/gb200nvl/1.2.5/os".to_string(),
+                        "https://example.com/os.img".to_string(),
+                    ),
+                    (
+                        "/cache/gb200nvl/1.2.5/diag.bin".to_string(),
+                        "https://cdn.example.com/diag.bin".to_string(),
+                    ),
+                ]),
+            }
+            "a SOT-resolved artifact whose path matches nothing is an error" {
+                Case {
+                    config: json!({}),
+                    artifact: Some(super::super::Artifact {
+                        name: "diag".to_string(),
+                        output: "diag.bin".parse().unwrap(),
+                        uri: None,
+                        sotpath: Some("$.packages.diag".to_string()),
+                    }),
+                } => Fails,
+            }
+        );
     }
 }

@@ -19,11 +19,15 @@
 
 use carbide_uuid::switch::SwitchId;
 use config_version::{ConfigVersion, Versioned};
-use db::{DatabaseError, ObjectColumnFilter, switch as db_switch};
+use db::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter,
+    switch as db_switch,
+};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::switch::{
-    Switch, SwitchControllerState, SwitchMaintenanceOperation, SwitchSearchFilter, state_sla,
+    ConfigureCertificateState, Switch, SwitchControllerState, SwitchDecommissioningState,
+    SwitchMaintenanceOperation, SwitchSearchFilter, state_sla,
 };
 use sqlx::PgConnection;
 use state_controller::io::StateControllerIO;
@@ -83,7 +87,7 @@ impl StateControllerIO for SwitchStateControllerIO {
                 "Switch::find()",
                 sqlx::Error::Decode(
                     eyre::eyre!(
-                        "Searching for Switch {} returned multiple results",
+                        "searching for switch {} returned multiple results",
                         switch_id
                     )
                     .into(),
@@ -110,7 +114,7 @@ impl StateControllerIO for SwitchStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db_switch::try_update_controller_state(txn, *object_id, old_version, new_version, new_state)
             .await
     }
@@ -147,14 +151,59 @@ impl StateControllerIO for SwitchStateControllerIO {
             SwitchControllerState::Created => ("created", ""),
             SwitchControllerState::Initializing { .. } => ("initializing", ""),
             SwitchControllerState::Configuring { .. } => ("configuring", ""),
+            SwitchControllerState::FetchInfo => ("fetchinfo", ""),
             SwitchControllerState::Validating { .. } => ("validating", ""),
             SwitchControllerState::BomValidating { .. } => ("bomvalidating", ""),
             SwitchControllerState::Ready => ("ready", ""),
-            SwitchControllerState::Maintenance { operation } => {
+            SwitchControllerState::Decommissioning {
+                decommissioning_state,
+            } => (
+                "decommissioning",
+                match decommissioning_state {
+                    SwitchDecommissioningState::SuppressingSiteExplorer => {
+                        "suppressing_site_explorer"
+                    }
+                    SwitchDecommissioningState::SuppressingNvosDhcp => "suppressing_nvos_dhcp",
+                    SwitchDecommissioningState::FactoryResetNvos => "factory_reset_nvos",
+                    SwitchDecommissioningState::WaitingForNvosFactoryReset { .. } => {
+                        "waiting_for_nvos_factory_reset"
+                    }
+                    SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { .. } => {
+                        "nvos_factory_reset_outcome_unknown"
+                    }
+                    SwitchDecommissioningState::RebootingSwitch => "rebooting_switch",
+                    SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
+                        "waiting_for_nvos_dhcp_acknowledgement"
+                    }
+                    SwitchDecommissioningState::SuppressingBmcDhcp => "suppressing_bmc_dhcp",
+                    SwitchDecommissioningState::FactoryResetBmc => "factory_reset_bmc",
+                    SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
+                        "waiting_for_bmc_dhcp_acknowledgement"
+                    }
+                    SwitchDecommissioningState::DeletingManagedCredentials => {
+                        "deleting_managed_credentials"
+                    }
+                    SwitchDecommissioningState::Decommissioned => "decommissioned",
+                },
+            ),
+            SwitchControllerState::RotatingBmc { .. } => ("rotatingbmc", ""),
+            SwitchControllerState::Maintenance {
+                operation,
+                configure_certificate,
+                ..
+            } => {
                 let substate = match operation {
                     SwitchMaintenanceOperation::PowerOn => "power_on",
-                    SwitchMaintenanceOperation::PowerOff => "power_off",
+                    SwitchMaintenanceOperation::PowerOff { .. } => "power_off",
                     SwitchMaintenanceOperation::Reset => "reset",
+                    SwitchMaintenanceOperation::ReconfigureCertificate => {
+                        return match configure_certificate {
+                            Some(ConfigureCertificateState::WaitForComplete { .. }) => {
+                                ("maintenance", "reconfigure_certificate_wait")
+                            }
+                            _ => ("maintenance", "reconfigure_certificate"),
+                        };
+                    }
                 };
                 ("maintenance", substate)
             }
@@ -162,6 +211,11 @@ impl StateControllerIO for SwitchStateControllerIO {
             SwitchControllerState::Error { .. } => ("error", ""),
             SwitchControllerState::Deleting => ("deleting", ""),
         }
+    }
+
+    fn manual_intervention_reason(state: &Self::ControllerState) -> Option<&'static str> {
+        // The stored cause is free text, so the reason is a fixed token.
+        matches!(state, SwitchControllerState::Error { .. }).then_some("error")
     }
 
     fn state_sla(

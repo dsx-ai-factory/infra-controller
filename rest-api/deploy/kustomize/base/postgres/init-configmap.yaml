@@ -13,41 +13,40 @@ data:
     -- Enable pg_trgm extension (required for text search)
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-    -- Create nico database and user (used by API, Workflow)
-    CREATE DATABASE nico WITH ENCODING 'UTF8';
-    CREATE USER nico WITH PASSWORD 'nico';
+    -- nico database + user (idempotent: safe on re-run / partial init)
+    SELECT 'CREATE DATABASE nico WITH ENCODING ''UTF8'''
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'nico')\gexec
+    DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nico') THEN CREATE ROLE nico LOGIN PASSWORD 'nico'; END IF; END $$;
     GRANT ALL PRIVILEGES ON DATABASE nico TO nico;
-
-    -- Connect to nico database to set up permissions
     \c nico
     GRANT ALL ON SCHEMA public TO nico;
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-    -- Create keycloak database
     \c postgres
-    CREATE DATABASE keycloak WITH ENCODING 'UTF8';
-    CREATE USER keycloak WITH PASSWORD 'keycloak';
-    GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;
 
+    -- keycloak database + user
+    SELECT 'CREATE DATABASE keycloak WITH ENCODING ''UTF8'''
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')\gexec
+    DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='keycloak') THEN CREATE ROLE keycloak LOGIN PASSWORD 'keycloak'; END IF; END $$;
+    GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;
     \c keycloak
     GRANT ALL ON SCHEMA public TO keycloak;
-
-    -- Create temporal databases (for Temporal workflow engine)
     \c postgres
-    CREATE DATABASE temporal WITH ENCODING 'UTF8';
-    CREATE USER temporal WITH PASSWORD 'temporal' CREATEDB;
+
+    -- temporal databases (for Temporal workflow engine)
+    SELECT 'CREATE DATABASE temporal WITH ENCODING ''UTF8'''
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'temporal')\gexec
+    DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='temporal') THEN CREATE ROLE temporal LOGIN PASSWORD 'temporal' CREATEDB; END IF; END $$;
     GRANT ALL PRIVILEGES ON DATABASE temporal TO temporal;
     ALTER DATABASE temporal OWNER TO temporal;
-
     \c temporal
     GRANT ALL ON SCHEMA public TO temporal;
     ALTER SCHEMA public OWNER TO temporal;
-
     \c postgres
-    CREATE DATABASE temporal_visibility WITH ENCODING 'UTF8';
+
+    SELECT 'CREATE DATABASE temporal_visibility WITH ENCODING ''UTF8'''
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'temporal_visibility')\gexec
     GRANT ALL PRIVILEGES ON DATABASE temporal_visibility TO temporal;
     ALTER DATABASE temporal_visibility OWNER TO temporal;
-
     \c temporal_visibility
     GRANT ALL ON SCHEMA public TO temporal;
     ALTER SCHEMA public OWNER TO temporal;

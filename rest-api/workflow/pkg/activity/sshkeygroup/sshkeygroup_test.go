@@ -13,7 +13,7 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -50,8 +50,8 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 		requestedVersion                   *string
 		IsSSHKeyGroupDeleting              *bool
 		IsSSHKeyGroupFailedOnInitialCreate *bool
-		createRequest                      *cwssaws.CreateTenantKeysetRequest
-		updateRequest                      *cwssaws.UpdateTenantKeysetRequest
+		createRequest                      *corev1.CreateTenantKeysetRequest
+		updateRequest                      *corev1.UpdateTenantKeysetRequest
 	}
 
 	dbSession := util.TestInitDB(t)
@@ -70,7 +70,7 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 
 	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, tnRoles)
 
-	tn := util.TestBuildTenant(t, dbSession, tnOrg, "Test Tenant", nil, tnu)
+	tn := util.TestBuildTenant(t, dbSession, "Test Tenant", tnOrg, nil, tnu)
 	assert.NotNil(t, tn)
 
 	st1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
@@ -225,13 +225,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				skgID:            skg1.ID,
 				skgsaID:          skgsa1.ID,
 				requestedVersion: skgsa1.Version,
-				createRequest: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				createRequest: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg1.ID.String(),
 						OrganizationId: skg1.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey1.PublicKey,
 								Comment:   sshKey1.Fingerprint,
@@ -260,13 +260,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				skgID:            skg2.ID,
 				skgsaID:          skgsa2.ID,
 				requestedVersion: skgsa2.Version,
-				updateRequest: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				updateRequest: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg2.ID.String(),
 						OrganizationId: skg2.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey3.PublicKey,
 								Comment:   sshKey3.Fingerprint,
@@ -301,13 +301,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				requestedVersion:      skgsa3.Version,
 				IsSSHKeyGroupDeleting: cutil.GetPtr(true),
 
-				updateRequest: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				updateRequest: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg3.ID.String(),
 						OrganizationId: skg3.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey3.PublicKey,
 								Comment:   sshKey3.Fingerprint,
@@ -340,13 +340,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				skgID:            skg4.ID,
 				skgsaID:          skgsa4.ID,
 				requestedVersion: skgsa4.Version,
-				createRequest: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				createRequest: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg4.ID.String(),
 						OrganizationId: skg4.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey3.PublicKey,
 								Comment:   sshKey3.Fingerprint,
@@ -395,13 +395,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				skgID:            skg5.ID,
 				skgsaID:          skgsa5.ID,
 				requestedVersion: skgsa5.Version,
-				updateRequest: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				updateRequest: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg5.ID.String(),
 						OrganizationId: skg5.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey3.PublicKey,
 								Comment:   sshKey3.Fingerprint,
@@ -437,13 +437,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				// This test simulates the retry scenario after duplicate key error
 				// The skgsa has an Error status detail with duplicate key message,
 				// so IsSSHKeyGroupCreatedOnSite returns true, triggering update path
-				updateRequest: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				updateRequest: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg6.ID.String(),
 						OrganizationId: skg6.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey1.PublicKey,
 								Comment:   sshKey1.Fingerprint,
@@ -474,13 +474,13 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				requestedVersion:                   skgsa7.Version,
 				IsSSHKeyGroupFailedOnInitialCreate: cutil.GetPtr(true),
 				// This test simulates the initial create attempt that fails with duplicate key
-				createRequest: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				createRequest: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg7.ID.String(),
 						OrganizationId: skg7.Org,
 					},
-					KeysetContent: &cwssaws.TenantKeysetContent{
-						PublicKeys: []*cwssaws.TenantPublicKey{
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
 							{
 								PublicKey: sshKey1.PublicKey,
 								Comment:   sshKey1.Fingerprint,
@@ -555,7 +555,7 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				assert.Equal(t, cdbm.SSHKeyGroupSiteAssociationStatusError, tvskgsa.Status)
 
 				statusDetailDAO := cdbm.NewStatusDetailDAO(mv.dbSession)
-				tvskgsast, _, err := statusDetailDAO.GetAllByEntityID(context.Background(), nil, tt.args.skgsaID.String(), nil, nil, nil)
+				tvskgsast, _, err := statusDetailDAO.GetAll(context.Background(), nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{tt.args.skgsaID.String()}}, cdbp.PageInput{})
 				assert.Nil(t, err)
 				assert.NotEqual(t, len(tvskgsast), 0)
 				// Verify the error message contains duplicate key constraint
@@ -578,7 +578,7 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 
 				if tt.args.IsSSHKeyGroupDeleting == nil {
 					statusDetailDAO := cdbm.NewStatusDetailDAO(mv.dbSession)
-					tvskgsast, _, err := statusDetailDAO.GetAllByEntityID(context.Background(), nil, tt.args.skgsaID.String(), nil, nil, nil)
+					tvskgsast, _, err := statusDetailDAO.GetAll(context.Background(), nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{tt.args.skgsaID.String()}}, cdbp.PageInput{})
 					assert.Nil(t, err)
 					assert.NotEqual(t, len(tvskgsast), 0)
 					// For successful workflows (both create and update), message should be Synced
@@ -606,7 +606,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupStatusInDB(t *testing.T) {
 
 	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, tnRoles)
 
-	tn := util.TestBuildTenant(t, dbSession, tnOrg, "Test Tenant", nil, tnu)
+	tn := util.TestBuildTenant(t, dbSession, "Test Tenant", tnOrg, nil, tnu)
 	assert.NotNil(t, tn)
 
 	st1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
@@ -810,13 +810,17 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupStatusInDB(t *testing.T) {
 
 				// Verify all SSHKeyAssociations are deleted
 				skaDAO := cdbm.NewSSHKeyAssociationDAO(dbSession)
-				_, skasCnt, err := skaDAO.GetAll(context.Background(), nil, nil, []uuid.UUID{tt.args.skg.ID}, nil, nil, nil, nil)
+				_, skasCnt, err := skaDAO.GetAll(context.Background(), nil, cdbm.SSHKeyAssociationFilterInput{
+					SSHKeyGroupIDs: []uuid.UUID{tt.args.skg.ID},
+				}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 0, skasCnt)
 
 				// Verify SSHKeyGroupInstanceAssociations are deleted
 				skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(dbSession)
-				_, skgiasCnt, err := skgiaDAO.GetAll(context.Background(), nil, []uuid.UUID{tt.args.skg.ID}, nil, nil, nil, nil, nil, nil)
+				_, skgiasCnt, err := skgiaDAO.GetAll(context.Background(), nil, cdbm.SSHKeyGroupInstanceAssociationFilterInput{
+					SSHKeyGroupIDs: []uuid.UUID{tt.args.skg.ID},
+				}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 0, skgiasCnt)
 			}
@@ -851,7 +855,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 
 	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, tnRoles)
 
-	tn := util.TestBuildTenant(t, dbSession, tnOrg, "Test Tenant", nil, tnu)
+	tn := util.TestBuildTenant(t, dbSession, "Test Tenant", tnOrg, nil, tnu)
 
 	st := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := util.TestBuildSite(t, dbSession, ip, "test-site2", cdbm.SiteStatusRegistered, nil, ipu)
@@ -904,7 +908,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	skgsa6 := util.TestBuildSSHKeyGroupSiteAssociation(t, dbSession, skg6.ID, st.ID, cutil.GetPtr("1137"), cdbm.SSHKeyGroupSiteAssociationStatusSynced, tnu.ID)
 	assert.NotNil(t, skgsa6)
 	// Set created earlier than the inventory receipt interval
-	_, err := dbSession.DB.Exec("UPDATE ssh_key_group_site_association SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), skgsa6.ID.String())
+	_, err := dbSession.DB.Exec("UPDATE ssh_key_group_site_association SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), skgsa6.ID.String())
 	assert.NoError(t, err)
 
 	// Build SSHKeyGroup7
@@ -916,7 +920,11 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	assert.NotNil(t, skgsa7)
 
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(dbSession)
-	skgsa7, err = skgsaDAO.UpdateFromParams(ctx, nil, skgsa7.ID, nil, nil, nil, cutil.GetPtr(cdbm.SSHKeyGroupSiteAssociationStatusError), cutil.GetPtr(true))
+	skgsa7, err = skgsaDAO.Update(ctx, nil, cdbm.SSHKeyGroupSiteAssociationUpdateInput{
+		ID:              skgsa7.ID,
+		Status:          cutil.GetPtr(cdbm.SSHKeyGroupSiteAssociationStatusError),
+		IsMissingOnSite: cutil.GetPtr(true),
+	})
 	assert.NoError(t, err)
 
 	// Build SSHKeyGroup8
@@ -931,24 +939,29 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	// Generate data for 34 Subnets reported from Site Agent while Cloud has 38 Subnets
 	pagedSSHKeyGroups := []*cdbm.SSHKeyGroup{}
 	pagedInvSSHKeyGroupIDs := []string{}
+	var pagedUnreportedSkgsa *cdbm.SSHKeyGroupSiteAssociation
 	for i := 0; i < 38; i++ {
 		keyGroup := util.TestBuildSSHKeyGroup(t, dbSession, fmt.Sprintf("test-sshkeygroup-paged-%d", i), tnOrg, cutil.GetPtr("description"), tn.ID, cutil.GetPtr("122346"), cdbm.SSHKeyGroupStatusSynced, tnu.ID)
 		// Update creation timestamp to be earlier than inventory processing interval
-		_, err = dbSession.DB.Exec("UPDATE sshkey_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), keyGroup.ID.String())
+		_, err = dbSession.DB.Exec("UPDATE sshkey_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), keyGroup.ID.String())
 		assert.NoError(t, err)
 		pagedSSHKeyGroups = append(pagedSSHKeyGroups, keyGroup)
 		pagedInvSSHKeyGroupIDs = append(pagedInvSSHKeyGroupIDs, keyGroup.ID.String())
 
 		skgsa := util.TestBuildSSHKeyGroupSiteAssociation(t, dbSession, keyGroup.ID, st2.ID, cutil.GetPtr("1138"), cdbm.SSHKeyGroupSiteAssociationStatusSynced, tnu.ID)
 		assert.NotNil(t, skgsa)
-		_, err := dbSession.DB.Exec("UPDATE ssh_key_group_site_association SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), skgsa.ID.String())
+		_, err := dbSession.DB.Exec("UPDATE ssh_key_group_site_association SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), skgsa.ID.String())
 		assert.NoError(t, err)
+		// The Site reports only the first 34, so this one is absent from every page.
+		if i == 37 {
+			pagedUnreportedSkgsa = skgsa
+		}
 	}
 
-	pagedCtrlSSHKeyGroups := []*cwssaws.TenantKeyset{}
+	pagedCtrlSSHKeyGroups := []*corev1.TenantKeyset{}
 	for i := 0; i < 34; i++ {
-		ctrlIns := &cwssaws.TenantKeyset{
-			KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+		ctrlIns := &corev1.TenantKeyset{
+			KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 				OrganizationId: pagedSSHKeyGroups[i].Org,
 				KeysetId:       pagedSSHKeyGroups[i].ID.String(),
 			},
@@ -973,22 +986,26 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	type args struct {
 		ctx                  context.Context
 		siteID               uuid.UUID
-		sshKeyGroupInventory *cwssaws.SSHKeyGroupInventory
+		sshKeyGroupInventory *corev1.SSHKeyGroupInventory
 	}
 
 	tests := []struct {
-		name                string
-		fields              fields
-		args                args
-		syncingKeyset       *cdbm.SSHKeyGroupSiteAssociation
-		outOfSyncKeyset     *cdbm.SSHKeyGroupSiteAssociation
-		deletingKeyset      *cdbm.SSHKeyGroupSiteAssociation
-		errorKeyset         *cdbm.SSHKeyGroupSiteAssociation
-		missingKeyset       *cdbm.SSHKeyGroupSiteAssociation
-		restoredKeyset      *cdbm.SSHKeyGroupSiteAssociation
-		deletedKeyset       *cdbm.SSHKeyGroupSiteAssociation
-		wantErr             bool
-		expectedAssocChange int
+		name            string
+		fields          fields
+		args            args
+		syncingKeyset   *cdbm.SSHKeyGroupSiteAssociation
+		outOfSyncKeyset *cdbm.SSHKeyGroupSiteAssociation
+		deletingKeyset  *cdbm.SSHKeyGroupSiteAssociation
+		errorKeyset     *cdbm.SSHKeyGroupSiteAssociation
+		missingKeyset   *cdbm.SSHKeyGroupSiteAssociation
+		restoredKeyset  *cdbm.SSHKeyGroupSiteAssociation
+		deletedKeyset   *cdbm.SSHKeyGroupSiteAssociation
+		// unreportedKeyset is an association the Site never reports, so whether it ends up
+		// flagged missing is decided purely by whether the page could run the sweep.
+		unreportedKeyset      *cdbm.SSHKeyGroupSiteAssociation
+		wantUnreportedMissing bool
+		wantErr               bool
+		expectedAssocChange   int
 	}{
 		{
 			name: "test SSHKeyGroupinventory processing error, non-existent Site",
@@ -1000,16 +1017,16 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: uuid.New(),
-				sshKeyGroupInventory: &cwssaws.SSHKeyGroupInventory{
-					TenantKeysets: []*cwssaws.TenantKeyset{
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: []*corev1.TenantKeyset{
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: "1234",
 							},
 							Version: "1234",
 						},
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: "1235",
 							},
 							Version: "1235",
@@ -1029,34 +1046,34 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st.ID,
-				sshKeyGroupInventory: &cwssaws.SSHKeyGroupInventory{
-					TenantKeysets: []*cwssaws.TenantKeyset{
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: []*corev1.TenantKeyset{
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: skgsa1.SSHKeyGroupID.String(),
 							},
 							Version: "1234",
 						},
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: skgsa2.SSHKeyGroupID.String(),
 							},
 							Version: "1234",
 						},
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: skgsa3.SSHKeyGroupID.String(),
 							},
 							Version: "1135",
 						},
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: skgsa5.SSHKeyGroupID.String(),
 							},
 							Version: "1136",
 						},
 						{
-							KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								KeysetId: skgsa7.SSHKeyGroupID.String(),
 							},
 							Version: "1138",
@@ -1075,7 +1092,9 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			expectedAssocChange: 3,
 		},
 		{
-			name: "test paged SSHKeyGroup inventory processing",
+			// An earlier page says nothing about what the Site is missing, even when it
+			// carries the full ID list, so nothing may be marked missing from it.
+			name: "test paged SSHKeyGroup inventory processing, earlier page",
 			fields: fields{
 				dbSession:      dbSession,
 				siteClientPool: tSiteClientPool,
@@ -1084,10 +1103,10 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st2.ID,
-				sshKeyGroupInventory: &cwssaws.SSHKeyGroupInventory{
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
 					TenantKeysets: pagedCtrlSSHKeyGroups[0:10],
 					Timestamp:     timestamppb.Now(),
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  4,
 						PageSize:    10,
@@ -1096,7 +1115,60 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 					},
 				},
 			},
-			expectedAssocChange: 4,
+			unreportedKeyset:      pagedUnreportedSkgsa,
+			wantUnreportedMissing: false,
+			expectedAssocChange:   0,
+		},
+		{
+			name: "test paged SSHKeyGroup inventory processing, last page",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st2.ID,
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: pagedCtrlSSHKeyGroups[30:34],
+					Timestamp:     timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 4,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+						ItemIds:     pagedInvSSHKeyGroupIDs[0:34],
+					},
+				},
+			},
+			unreportedKeyset:      pagedUnreportedSkgsa,
+			wantUnreportedMissing: true,
+			expectedAssocChange:   4,
+		},
+		{
+			// A final page with no list is a Site Agent that sends it elsewhere, which is
+			// not evidence that anything was removed from the Site.
+			name: "test paged SSHKeyGroup inventory processing, last page without item IDs",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st2.ID,
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: pagedCtrlSSHKeyGroups[30:34],
+					Timestamp:     timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 4,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+					},
+				},
+			},
+			expectedAssocChange: 0,
 		},
 	}
 	for _, tt := range tests {
@@ -1168,6 +1240,12 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 				assert.Equal(t, cdbm.SSHKeyGroupSiteAssociationStatusSynced, restoredKeyset.Status)
 			}
 
+			if tt.unreportedKeyset != nil {
+				unreportedKeyset, derr := sshKeyGroupDAO.GetByID(ctx, nil, tt.unreportedKeyset.ID, nil)
+				assert.NoError(t, derr)
+				assert.Equal(t, tt.wantUnreportedMissing, unreportedKeyset.IsMissingOnSite)
+			}
+
 			if tt.deletedKeyset != nil {
 				_, err = sshKeyGroupDAO.GetByID(ctx, nil, tt.deletedKeyset.ID, nil)
 				assert.Error(t, cdb.ErrDoesNotExist)
@@ -1191,7 +1269,7 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupViaSiteAgent(t *testing.T) {
 		ctx                        context.Context
 		siteID                     uuid.UUID
 		sshKeyGroupSiteAssociation *cdbm.SSHKeyGroupSiteAssociation
-		deleteRequest              *cwssaws.DeleteTenantKeysetRequest
+		deleteRequest              *corev1.DeleteTenantKeysetRequest
 	}
 
 	dbSession := util.TestInitDB(t)
@@ -1210,7 +1288,7 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupViaSiteAgent(t *testing.T) {
 
 	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, tnRoles)
 
-	tn := util.TestBuildTenant(t, dbSession, tnOrg, "Test Tenant", nil, tnu)
+	tn := util.TestBuildTenant(t, dbSession, "Test Tenant", tnOrg, nil, tnu)
 	assert.NotNil(t, tn)
 
 	st1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
@@ -1255,8 +1333,8 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupViaSiteAgent(t *testing.T) {
 				ctx:                        context.Background(),
 				siteID:                     st1.ID,
 				sshKeyGroupSiteAssociation: skgsa1,
-				deleteRequest: &cwssaws.DeleteTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				deleteRequest: &corev1.DeleteTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skgsa1.SSHKeyGroupID.String(),
 						OrganizationId: skg1.Org,
 					},
@@ -1369,7 +1447,7 @@ func TestSSHKeyAssociationNoPaginator(t *testing.T) {
 	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, tnRoles)
 	assert.NotNil(t, tnu)
 
-	tn := util.TestBuildTenant(t, dbSession, tnOrg, "Test Tenant", nil, tnu)
+	tn := util.TestBuildTenant(t, dbSession, "Test Tenant", tnOrg, nil, tnu)
 	assert.NotNil(t, tn)
 
 	site := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
@@ -1381,12 +1459,12 @@ func TestSSHKeyAssociationNoPaginator(t *testing.T) {
 
 	// Build number of ssh keys paginator + 1.
 	expectedKeysNumber := cdbp.DefaultLimit + 1
-	expectedPublicKeys := []*cwssaws.TenantPublicKey{}
+	expectedPublicKeys := []*corev1.TenantPublicKey{}
 	for i := 0; i < expectedKeysNumber; i++ {
 		name := fmt.Sprintf("test%v", i)
 		sshKey := util.TestBuildSSHKey(t, dbSession, name, tn, name, tnu)
 		assert.NotNil(t, sshKey)
-		expectedPublicKeys = append(expectedPublicKeys, &cwssaws.TenantPublicKey{
+		expectedPublicKeys = append(expectedPublicKeys, &corev1.TenantPublicKey{
 			PublicKey: name,
 			Comment:   &name,
 		})
@@ -1420,7 +1498,7 @@ func TestSSHKeyAssociationNoPaginator(t *testing.T) {
 	mtc.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			switch req := args.Get(3).(type) {
-			case *cwssaws.CreateTenantKeysetRequest:
+			case *corev1.CreateTenantKeysetRequest:
 				assert.Len(t, req.KeysetContent.PublicKeys, expectedKeysNumber)
 			default:
 				t.Fatalf("unexpected workflow request type %T", req)

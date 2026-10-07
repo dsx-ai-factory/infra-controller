@@ -32,7 +32,10 @@ pub async fn handle_validating(
     state: &mut Switch,
     _ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!("Validating Switch {:?}", switch_id);
+    tracing::info!(
+        switch_id = ?switch_id,
+        "Validating switch",
+    );
     let validating_state = match &state.controller_state.value {
         SwitchControllerState::Validating { validating_state } => validating_state,
         _ => unreachable!("handle_validating called with non-Validating state"),

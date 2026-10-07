@@ -30,7 +30,7 @@ Replace a SKU's component list from a file:
     $ nico-admin-cli sku replace ./skus.json --id DGX-H100-640GB
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: CreateSkuOptions,
+    pub(super) inner: CreateSkuOptions,
 }

@@ -9,7 +9,7 @@ How NICo components emit logs, where they go, what format they use and how to tu
 - All NICo components log to **stdout**. In Kubernetes the kubelet writes container stdout to
   files under `/var/log/pods/`, where a collector (typically an OpenTelemetry Collector DaemonSet)
   picks them up.
-- Most components use **logfmt** (key=value pairs). **nico-dns** uses JSON. **nico-ssh-console**
+- Most components, including **nico-dns**, use **logfmt** (key=value pairs). **nico-ssh-console**
   uses a compact single-line format. **nico-pxe** uses plain text.
 - Default log level is **INFO**. Override at startup with `RUST_LOG` or the `--debug` flag.
 - **nico-api** supports **runtime log-level changes** via `nico-admin-cli set log-filter`. Changes
@@ -36,7 +36,9 @@ sidecar - just configure your collector to read pod logs.
 
 > **Note**: nico-ssh-console is an exception - in addition to stdout, it writes **machine
 > console output** (BMC serial console streams) to local files. These are not service logs
-> but captured output from managed machines. See section 2.5 for details.
+<Note>
+nico-ssh-console is an exception - in addition to stdout, it writes **machine console output** (BMC serial console streams) to local files. These are not service logs but captured output from managed machines. See [Machine console logs](#24-machine-console-logs-nico-ssh-console) for details.
+</Note>
 
 ---
 
@@ -45,14 +47,18 @@ sidecar - just configure your collector to read pod logs.
 | Component | Binary | Log format | Notes |
 |-----------|--------|------------|-------|
 | **nico-api** | `carbide-api` | logfmt | Primary control plane. Supports runtime level changes. |
-| **nico-dns** | `carbide-dns` | JSON | DNS resolution service. |
-| **nico-dhcp** | `carbide-dhcp-server` | logfmt | DHCP server for PXE boot. |
-| **nico-pxe** | `carbide-pxe` | plain text | iPXE boot service. Minimal logging. |
+| **nico-dns** | `carbide-dns` | logfmt | DNS resolution service. |
+| **nico-dhcp** | Kea + `libdhcp.so` | Kea format | See [Kea DHCP format](#25-kea-dhcp-format-nico-dhcp). |
+| **nico-pxe** | `carbide` | plain text | iPXE boot service. Hand-rolled `println!`, no log levels. |
 | **nico-bmc-proxy** | `carbide-bmc-proxy` | logfmt | BMC credential proxy. |
-| **nico-hardware-health** | `carbide-hw-health` | logfmt | Hardware health monitoring. |
-| **nico-ssh-console** | `carbide-ssh-console-rs` | compact | SSH console access service. Also captures machine/DPU console output to files (see 2.5). |
+| **nico-hardware-health** | `forge-hw-health` | logfmt | Hardware health monitoring. |
+| **nico-ssh-console** | `ssh-console` | compact | SSH console access. Also captures machine/DPU console output to files (see [Machine console logs](#24-machine-console-logs-nico-ssh-console)). |
 | **nico-dsx-exchange-consumer** | `carbide-dsx-exchange-consumer` | logfmt | DSX message consumer. |
-| **nico-dpu-otel-agent** | `forge-dpu-otel-agent` | compact | DPU certificate renewal agent. |
+| **nico-dpu-otel-agent** | `forge-dpu-otel-agent` | full | mTLS cert renewal agent on DPUs. See note below. |
+
+<Note>
+`nico-dpu-otel-agent` currently ignores `RUST_LOG` due to a source bug (`fmt().init()` instead of `fmt::init()`). It logs at INFO level only until this is fixed. See [#3151](https://github.com/dsx-ai-factory/infra-controller/issues/3151).
+</Note>
 
 ### 2.1 logfmt format
 
@@ -60,12 +66,14 @@ Most NICo components use [logfmt](https://brandur.org/logfmt) - a line-oriented 
 space-separated `key=value` pairs, easy for both humans and machines to parse.
 
 **Event lines** — one per log call:
-```logfmt
+
+```text
 level=INFO component=nico-api span_id=0x4f… msg="Starting reconciliation" location="handlers/machine.rs:142"
 ```
 
 **Span lines** — emitted when a unit of work closes (`level=SPAN`), carrying timing data:
-```logfmt
+
+```text
 level=SPAN component=site-explorer span_id=0xf7… span_name=explore_site timing_elapsed_us=1523 timing_busy_ns=1200000 timing_idle_ns=323000
 ```
 
@@ -101,6 +109,7 @@ nico-api                       — API handlers, DB, startup: anything not in a 
 └── attestation_controller
 nico-bmc-proxy
 nico-dhcp
+nico-dns
 nico-dsx-exchange-consumer
 nico-fmds
 nico-hardware-health
@@ -113,6 +122,7 @@ nico-scout
 State-controller lines also carry a `controller=<name>` field with the same value.
 
 This enables filtering logs by component in your backend. For example, with Loki:
+
 ```logql
 {namespace="nico-system"} | logfmt | component="site-explorer"
 ```
@@ -124,22 +134,14 @@ This enables filtering logs by component in your backend. For example, with Loki
 
 Components that **do not** use the logfmt layer and carry no `component` field:
 
-| Component | Format | Notes |
-|-----------|--------|-------|
-| nico-dns | JSON | Uses tracing-subscriber JSON formatter |
-| nico-pxe | plain text | Hand-rolled `println!` logging |
-| nico-ssh-console | compact | Uses tracing-subscriber compact formatter |
-| nico-dpu-otel-agent | compact | Certificate renewal agent |
+| Component | Binary | Format | Notes |
+|-----------|--------|--------|-------|
+| nico-pxe | `carbide` | plain text | Hand-rolled `println!`, no log levels |
+| nico-ssh-console | `ssh-console` | compact | Uses tracing-subscriber compact formatter |
+| nico-dpu-otel-agent | `forge-dpu-otel-agent` | full | Default tracing-subscriber formatter. Ignores `RUST_LOG`. |
+| nico-dhcp | Kea + `libdhcp.so` | Kea | Production uses Kea logger, not Rust tracing (see [Kea DHCP format](#25-kea-dhcp-format-nico-dhcp)) |
 
-### 2.2 JSON format (nico-dns)
-
-nico-dns uses `tracing-subscriber`'s JSON formatter. Each line is a self-contained JSON object:
-
-```json
-{"timestamp":"2026-01-15T10:23:45.123Z","level":"INFO","target":"carbide_dns","message":"DNS query","query_type":"A","name":"host1.example.com"}
-```
-
-### 2.3 Compact format (nico-ssh-console)
+### 2.2 Compact format (nico-ssh-console)
 
 nico-ssh-console uses `tracing-subscriber`'s compact formatter - a human-readable single-line
 format similar to traditional log output:
@@ -148,12 +150,12 @@ format similar to traditional log output:
 2026-01-15T10:23:45.123Z  INFO carbide_ssh_console: Session started session_id=abc-123
 ```
 
-### 2.4 Plain text (nico-pxe)
+### 2.3 Plain text (nico-pxe)
 
 nico-pxe uses `println!` for startup messages and request logging middleware. Output is
 unstructured plain text.
 
-### 2.5 Machine console logs (nico-ssh-console)
+### 2.4 Machine console logs (nico-ssh-console)
 
 In addition to its own service logs (compact format on stdout), nico-ssh-console captures
 **machine and DPU serial console output** to local files. This is separate from the service's
@@ -187,8 +189,50 @@ hardware issues.
 > OpenTelemetry Collector sidecar (`lokiLogCollector.enabled: true`) that ships console logs
 > to Loki. The sidecar reads from `/var/log/consoles/*.log`, extracts the machine ID and BMC
 > IP from filenames, and exports to your Loki endpoint. To use a different backend, customize
-> the `configFiles.otelcolConfig` value in the chart. A separate document covers machine log
-> collection workflows in detail.
+> the `configFiles.otelcolConfig` value in the chart. See [Machine and DPU Logs](machine-dpu-logs.md)
+<Tip title="Centralizing console logs">
+The nico-ssh-console Helm chart includes an optional OpenTelemetry Collector sidecar (`lokiLogCollector.enabled: true`) that ships console logs to Loki. The sidecar reads from `/var/log/consoles/*.log`, extracts the machine ID and BMC IP from filenames, and exports to your Loki endpoint. To use a different backend, customize the `configFiles.otelcolConfig` value in the chart. See [Machine and DPU Logs](machine-dpu-logs.md) for detailed collection workflows.
+</Tip>
+
+### 2.5 Kea DHCP format (nico-dhcp)
+
+The nico-dhcp Helm chart runs [Kea DHCP](https://www.isc.org/kea/), with NICo's DHCP logic
+loaded as a Kea hook library (`libdhcp.so`). All logging from the hook routes through Kea's
+logger, meaning:
+
+- Log format follows **Kea's format**, not logfmt
+- Log levels are configured via **Kea's `loggers` config**, not `RUST_LOG`
+- Output goes to Kea's configured destinations (stdout by default in the container)
+
+Example Kea log output:
+
+To adjust log levels, modify the Kea configuration in the Helm chart's ConfigMap. The
+`loggers` section controls verbosity:
+
+```json
+{
+  "Dhcp4": {
+    "loggers": [
+      {
+        "name": "kea-dhcp4",
+        "severity": "INFO",
+        "debuglevel": 0,
+        "output_options": [
+          { "output": "stdout" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Set `severity` to `DEBUG` and increase `debuglevel` (0-99) for more verbose output from
+the NICo hook. The hook maps Rust log levels to Kea severity: `info` → INFO, `debug` →
+DEBUG/10, `trace` → DEBUG/99.
+
+<Tip title="Dev environment">
+The standalone `forge-dhcp-server` binary uses logfmt output and respects `RUST_LOG`. Use the standalone binary for local development and testing only.
+</Tip>
 
 ---
 
@@ -196,7 +240,8 @@ hardware issues.
 
 ### 3.1 At startup: RUST_LOG and --debug
 
-All components respect the `RUST_LOG` environment variable, which uses `tracing-subscriber`'s
+Most tracing-based components respect the `RUST_LOG` environment variable, which uses
+`tracing-subscriber`'s
 [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
 syntax:
 
@@ -211,12 +256,16 @@ RUST_LOG=info,carbide_api_core::handlers=debug,sqlx=warn
 RUST_LOG=info,carbide=debug,hyper=error
 ```
 
-Several binaries also accept a `--debug` flag that sets the default level to DEBUG (equivalent
-to `RUST_LOG=debug` if `RUST_LOG` is unset):
+**Exceptions**: nico-pxe uses hand-rolled `println!` with no level concept. nico-dpu-otel-agent
+currently ignores `RUST_LOG` due to a source bug (logs at INFO only). nico-dhcp uses Kea's
+logger config instead (see section 2.6).
+
+Three binaries accept a `--debug` flag that sets the default level to DEBUG:
 
 ```bash
-carbide-api run --debug -c /etc/carbide/config.toml
+carbide-api --debug run --config-path /etc/carbide/config.toml
 carbide-bmc-proxy --debug --config-path /etc/carbide/bmc-proxy.toml
+ssh-console --debug --config /etc/ssh-console/config.toml
 ```
 
 **Default log level** is INFO for all components.
@@ -251,6 +300,10 @@ nico-admin-cli set log-filter -f "trace,h2=warn,hyper=warn" --expiry 5min
 
 When the expiry elapses, the log filter **automatically reverts** to the startup value. This
 prevents accidentally leaving debug logging on and filling your storage.
+
+<Note>
+Expiry is checked every 15 minutes by an internal poll. A filter with `--expiry 5min` will actually revert at the next 15-minute poll cycle, not exactly at 5 minutes.
+</Note>
 
 #### How it works
 
@@ -295,26 +348,28 @@ reads pod log files and exports them to your backend. This is the standard Kuber
 and works with any OTLP-compatible backend: Grafana Loki, Elasticsearch, VictoriaLogs, Datadog,
 Splunk, etc.
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Node                                                                   │
-│  ┌──────────────┐    stdout    ┌──────────────┐                         │
-│  │   NICo Pod   │ ──────────▶  │  /var/log/   │                         │
-│  │  (nico-api)  │              │   pods/...   │                         │
-│  └──────────────┘              └──────┬───────┘                         │
-│                                       │                                 │
-│                                       ▼ filelog receiver                │
-│                              ┌────────────────────┐                     │
-│                              │   otel-collector   │                     │
-│                              │    (DaemonSet)     │                     │
-│                              └─────────┬──────────┘                     │
-└────────────────────────────────────────┼────────────────────────────────┘
-                                         │ OTLP / Loki API / etc.
-                                         ▼
-                              ┌────────────────────┐
-                              │   Logs Backend     │
-                              │ (Loki, ES, VL...)  │
-                              └────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Node["Node"]
+        subgraph NicoPod["NICo Pod"]
+            nicoApi["nico-api"]
+        end
+
+        logs["/var/log/pods/..."]
+
+        subgraph OtelDS["otel-collector (DaemonSet)"]
+            filelog["filelog receiver"]
+        end
+
+        nicoApi -->|"stdout"| logs
+        logs --> filelog
+    end
+
+    subgraph Backend["Logs Backend (Loki, ES, VL...)"]
+        storage["Log storage"]
+    end
+
+    filelog -->|"OTLP / Loki API / etc."| storage
 ```
 
 ### 4.1 Collector configuration
@@ -322,9 +377,6 @@ Splunk, etc.
 Below is a reference Helm values file for deploying the
 [OpenTelemetry Collector Helm chart](https://opentelemetry.io/docs/platforms/kubernetes/helm/collector/) to collect NICo logs.
 Adapt the exporter section for your backend.
-
-The `logsCollection` preset parses the Kubernetes container log format; the explicit
-`filelog` receiver below controls which pod log files are collected.
 
 ```yaml
 # values.yaml for opentelemetry-collector Helm chart
@@ -343,11 +395,12 @@ config:
   receivers:
     filelog:
       include:
-        # Adjust this pattern if your NICo namespace uses a different prefix
+        # Collect only NICo namespace logs
         - /var/log/pods/nico-*/*/*.log
       exclude:
         # Exclude collector's own logs to avoid feedback loops
         - /var/log/pods/*/opentelemetry-collector*/*.log
+      # The logsCollection preset configures parsing of container log format
 
   processors:
     memory_limiter:
@@ -359,7 +412,7 @@ config:
       send_batch_size: 1024
       timeout: 5s
 
-    # Add labels for collected NICo logs
+    # Add component label for NICo logs
     resource:
       attributes:
         - action: insert
@@ -424,9 +477,7 @@ processors:
             where IsMatch(body, "^level=")
 ```
 
-If you cannot use the transform processor, a minimal `filelog` receiver regex can extract
-`level` and `msg` while keeping the remaining key-value pairs in `rest`. Use the
-`ParseKeyValue` approach above for full field extraction.
+Or use the `key_value_parser` operator in the filelog receiver for NICo components specifically:
 
 ```yaml
 receivers:
@@ -435,9 +486,8 @@ receivers:
       - /var/log/pods/nico-*/*/*.log
     operators:
       - type: container
-      - type: regex_parser
+      - type: key_value_parser
         if: 'body matches "^level="'
-        regex: 'level=(?P<level>\w+)\s+(?:msg="(?P<msg>[^"]*)")?\s*(?P<rest>.*)'
         parse_to: attributes
 ```
 
@@ -486,10 +536,10 @@ easier maintenance. There are two approaches:
 
 **Option A: Patterns in chart files**
 
-Place patterns in a file within your chart package at `files/drop-patterns.txt`:
+Place patterns in a file within your chart package at `files/logs-drop-patterns.txt`:
 
 ```text
-# files/drop-patterns.txt
+# files/logs-drop-patterns.txt
 # Noisy DHCP messages from cross-network relay
 No network segment defined for relay address
 # DPU mlx5_core noise
@@ -590,10 +640,6 @@ service:
 
 For extremely high-volume logs where you only need a statistical sample:
 
-Log support in the OpenTelemetry `probabilistic_sampler` processor is alpha. Verify that
-your collector distribution supports log pipelines for this processor before relying on it
-in production.
-
 ```yaml
 processors:
   probabilistic_sampler:
@@ -633,7 +679,8 @@ processors:
 ```
 
 Query example:
-```logql
+
+```text
 {k8s_container_name="nico-api"} | logfmt | level="ERROR"
 ```
 
@@ -654,7 +701,7 @@ Use the Datadog exporter or OTLP endpoint. Datadog automatically parses common l
 |---------|-------|-----|
 | No logs from a component | Container not running, or stdout not captured | `kubectl logs <pod>` to verify. Check container status. |
 | Logs not reaching backend | Collector not running, or exporter misconfigured | Check collector logs: `kubectl logs -l app=opentelemetry-collector`. Verify exporter endpoint. |
-| Missing fields in backend | logfmt not parsed | Add a transform processor to parse logfmt, or use Loki's `logfmt` parser in queries. |
+| Missing fields in backend | logfmt not parsed | Add a transform processor to parse logfmt, or use `\| logfmt` operator in Loki queries. |
 | Too many DEBUG logs | `RUST_LOG` set too verbose, or runtime filter left on | Check `RUST_LOG` env var. For nico-api, runtime filter auto-expires; wait or set a less verbose filter. |
 | Log level change didn't take effect | Changed wrong component, or typo in filter | Runtime changes only work for nico-api. Verify filter syntax matches `EnvFilter` rules. |
 | Logs are truncated | Log line too long for collector buffer | Increase `max_log_size` in filelog receiver config. |
@@ -695,11 +742,15 @@ components at once.
 
 ### Checking current log level (nico-api)
 
-The current log filter is visible in nico-api's startup log and via the admin API. Look for:
+The startup log shows the initial log level. Look for lines like:
 
-```logfmt
-level=INFO msg="current log level: info,carbide=debug" location="setup.rs:142"
+```text
+level=INFO msg="current log level: INFO" location="setup.rs:142"
 ```
+
+Note that this shows the coarse `LevelFilter` (such as INFO), not the full directive string.
+There is currently no `get log-filter` command in nico-admin-cli to query the active filter
+at runtime.
 
 ---
 

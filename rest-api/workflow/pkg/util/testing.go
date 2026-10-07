@@ -6,6 +6,7 @@ package util
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -93,6 +94,20 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create Operating System Site Association table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.OperatingSystemSiteAssociation)(nil))
 	assert.Nil(t, err)
+	// create IpxeTemplate table (UNIQUE(name) applied by migration in production)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.IpxeTemplate)(nil))
+	assert.Nil(t, err)
+	_, err = dbSession.DB.Exec("ALTER TABLE ipxe_template DROP CONSTRAINT IF EXISTS ipxe_template_name_key")
+	assert.Nil(t, err)
+	_, err = dbSession.DB.Exec("ALTER TABLE ipxe_template ADD CONSTRAINT ipxe_template_name_key UNIQUE (name)")
+	assert.Nil(t, err)
+	// create IpxeTemplateSiteAssociation table (composite UNIQUE applied by migration in production)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.IpxeTemplateSiteAssociation)(nil))
+	assert.Nil(t, err)
+	_, err = dbSession.DB.Exec("ALTER TABLE ipxe_template_site_association DROP CONSTRAINT IF EXISTS ipxe_template_site_association_template_id_site_id_key")
+	assert.Nil(t, err)
+	_, err = dbSession.DB.Exec("ALTER TABLE ipxe_template_site_association ADD CONSTRAINT ipxe_template_site_association_template_id_site_id_key UNIQUE (ipxe_template_id, site_id)")
+	assert.Nil(t, err)
 	// create Machine table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Machine)(nil))
 	assert.Nil(t, err)
@@ -128,6 +143,12 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	assert.Nil(t, err)
 	// create InfiniBandInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.InfiniBandInterface)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXAttachment)(nil))
 	assert.Nil(t, err)
 	// create DpuExtensionService table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DpuExtensionService)(nil))
@@ -224,7 +245,7 @@ func TestBuildSite(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infrastructure
 }
 
 // TestBuildTenant build tenant
-func TestBuildTenant(t *testing.T, dbSession *cdb.Session, org string, orgDisplayName string, config *cdbm.TenantConfig, user *cdbm.User) *cdbm.Tenant {
+func TestBuildTenant(t *testing.T, dbSession *cdb.Session, orgDisplayName string, org string, config *cdbm.TenantConfig, user *cdbm.User) *cdbm.Tenant {
 	tenant := &cdbm.Tenant{
 		ID:             uuid.New(),
 		Name:           orgDisplayName,
@@ -270,6 +291,48 @@ func TestBuildSubnet(t *testing.T, dbSession *cdb.Session, tenant *cdbm.Tenant, 
 	_, err := dbSession.DB.NewInsert().Model(subnet).Exec(context.Background())
 	assert.Nil(t, err)
 	return subnet
+}
+
+// TestInventoryAgeUpdatedTimestamp backdates every row of a table past the inventory staleness
+// threshold. The inventory activities skip updating a row written more recently than that, so a
+// fixture that seeds rows and then feeds them a competing inventory has to age them first. Each
+// test builds its own schema, so ageing the whole table keeps the fixture setup to one call.
+// Pass a typed nil model, for example (*cdbm.Vpc)(nil).
+func TestInventoryAgeUpdatedTimestamp(ctx context.Context, t *testing.T, dbSession *cdb.Session, models ...any) {
+	t.Helper()
+
+	for _, model := range models {
+		query := dbSession.DB.NewUpdate().
+			Model(model).
+			Set("updated = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval)).
+			Where("1 = 1")
+
+		// Bun restricts an update on a soft-delete model to live rows, and a test that reconciles
+		// a deleted row still needs that row aged. Asking for deleted rows on a model without the
+		// field is an error, so only widen the scope where the field exists.
+		if dbSession.DB.Table(reflect.TypeOf(model).Elem()).SoftDeleteField != nil {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
+		assert.NoError(t, err)
+	}
+}
+
+// TestInventoryAgeDeletedTimestamp backdates a soft-deleted row's delete time past the inventory
+// staleness threshold. The inventory activities refuse to undelete a row deleted more recently
+// than that, so a fixture that soft-deletes a row and then feeds an inventory still reporting it
+// has to age the delete first. Pass a typed nil model, for example (*cdbm.Vpc)(nil).
+func TestInventoryAgeDeletedTimestamp(ctx context.Context, t *testing.T, dbSession *cdb.Session, model any, id any) {
+	t.Helper()
+
+	_, err := dbSession.DB.NewUpdate().
+		Model(model).
+		Set("deleted = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval)).
+		Where("id = ?", id).
+		WhereAllWithDeleted().
+		Exec(ctx)
+	assert.NoError(t, err)
 }
 
 // TestBuildInfiniBandPartition builds and returns an InfiniBandPartition
@@ -444,14 +507,56 @@ func TestBuildInfiniBandInterface(t *testing.T, dbSession *cdb.Session, instance
 	return ibi
 }
 
+// TestBuildSpectrumXPartition builds and returns a SpectrumXPartition
+func TestBuildSpectrumXPartition(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, vni *int, status cdbm.SpectrumXPartitionStatus, isMissingOnSite bool) *cdbm.SpectrumXPartition {
+	sxp := &cdbm.SpectrumXPartition{
+		ID:              uuid.New(),
+		Name:            name,
+		Description:     cutil.GetPtr("Test SpectrumX Partition"),
+		Org:             tenant.Org,
+		SiteID:          site.ID,
+		TenantID:        tenant.ID,
+		VNI:             vni,
+		Status:          status,
+		IsMissingOnSite: isMissingOnSite,
+	}
+
+	_, err := dbSession.DB.NewInsert().Model(sxp).Exec(context.Background())
+	assert.Nil(t, err)
+	return sxp
+}
+
+// TestBuildSpectrumXAttachment builds and returns a SpectrumXAttachment
+func TestBuildSpectrumXAttachment(t *testing.T, dbSession *cdb.Session, instanceID, siteID, spectrumXPartitionID uuid.UUID, device string, deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, status string, isMissingOnSite bool) *cdbm.SpectrumXAttachment {
+	sxa := &cdbm.SpectrumXAttachment{
+		ID:                   uuid.New(),
+		InstanceID:           instanceID,
+		SiteID:               siteID,
+		SpectrumXPartitionID: spectrumXPartitionID,
+		Device:               device,
+		DeviceInstance:       deviceInstance,
+		AttachmentType:       attachmentType,
+		Status:               status,
+		IsMissingOnSite:      isMissingOnSite,
+	}
+	_, err := dbSession.DB.NewInsert().Model(sxa).Exec(context.Background())
+	assert.Nil(t, err)
+	return sxa
+}
+
 // TestBuildDpuExtensionService build DPU Extension Service
 func TestBuildDpuExtensionService(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, serviceType string, version *string, versionInfo *cdbm.DpuExtensionServiceVersionInfo, activeVersions []string, status string, user *cdbm.User) *cdbm.DpuExtensionService {
 	desdDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
+	var dpuTarget *string
+	if serviceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+		dpuTarget = cutil.GetPtr(cdbm.DpuExtensionServiceDpuTargetAllActive)
+	}
 	des, err := desdDAO.Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
 		Name:           name,
 		SiteID:         site.ID,
 		TenantID:       tenant.ID,
 		ServiceType:    serviceType,
+		DpuTarget:      dpuTarget,
 		Version:        version,
 		VersionInfo:    versionInfo,
 		ActiveVersions: activeVersions,
@@ -542,7 +647,10 @@ func TestBuildMachineInterface(t *testing.T, dbSession *cdb.Session, machineID s
 func TestBuildMachineInstanceType(t *testing.T, dbSession *cdb.Session, m *cdbm.Machine, it *cdbm.InstanceType) *cdbm.MachineInstanceType {
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
 
-	mit, err := mitDAO.CreateFromParams(context.Background(), nil, m.ID, it.ID)
+	mit, err := mitDAO.Create(context.Background(), nil, cdbm.MachineInstanceTypeCreateInput{
+		MachineID:      m.ID,
+		InstanceTypeID: it.ID,
+	})
 	assert.Nil(t, err)
 
 	return mit
@@ -870,7 +978,7 @@ func TestTemporalSiteClientPool(t *testing.T) *sc.ClientPool {
 func TestBuildStatusDetailWithTime(t *testing.T, dbSession *cdb.Session, entityID string, status string, message *string, timestamp time.Time) *cdbm.StatusDetail {
 	// Create status detail using DAO
 	statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
-	statusDetail, err := statusDetailDAO.CreateFromParams(context.Background(), nil, entityID, status, message)
+	statusDetail, err := statusDetailDAO.Create(context.Background(), nil, cdbm.StatusDetailCreateInput{EntityID: entityID, Status: status, Message: message})
 	assert.NoError(t, err)
 
 	// Update the created timestamp directly in the database

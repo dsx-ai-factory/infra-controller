@@ -228,6 +228,66 @@ func TestCustomProcessor_ValidateAudiences_Failure(t *testing.T) {
 	}
 }
 
+func TestCustomProcessor_ClaimMappingAudiences(t *testing.T) {
+	tests := []struct {
+		name             string
+		mappingAudiences []string
+		tokenAudiences   any
+		wantCode         int
+	}{
+		{
+			name:             "mapping audience mismatch returns forbidden",
+			mappingAudiences: []string{"org-audience"},
+			tokenAudiences:   []string{"issuer-audience"},
+			wantCode:         http.StatusForbidden,
+		},
+		{
+			name:             "issuer and mapping audiences pass",
+			mappingAudiences: []string{"org-audience"},
+			tokenAudiences:   []string{"issuer-audience", "org-audience"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			processor, jwksConfig, privateKey, _, cleanup := setupTestEnvironment(t, []string{"issuer-audience"}, []string{"carbide"})
+			defer cleanup()
+
+			jwksConfig.ClaimMappings = []config.ClaimMapping{{
+				OrgName:   "acme",
+				Roles:     []string{"TENANT_ADMIN"},
+				Audiences: tt.mappingAudiences,
+			}}
+			claims := jwt.MapClaims{
+				"sub":   "mapping-audience-" + tt.name,
+				"iss":   "https://custom.example.com",
+				"aud":   tt.tokenAudiences,
+				"scope": "carbide",
+				"exp":   time.Now().Add(time.Hour).Unix(),
+				"iat":   time.Now().Unix(),
+			}
+			tokenString := createTestToken(t, privateKey, claims)
+
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodGet, "/org/acme/test", nil)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			c.SetParamNames("orgName")
+			c.SetParamValues("acme")
+
+			_, apiErr := processor.ProcessToken(c, tokenString, jwksConfig, zerolog.Nop())
+			if tt.wantCode == 0 {
+				require.Nil(t, apiErr)
+				return
+			}
+
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.wantCode, apiErr.Code)
+			assert.Contains(t, apiErr.Message, "not authorized for organization")
+		})
+	}
+}
+
 func TestCustomProcessor_ValidateScopes_Success(t *testing.T) {
 	tests := []struct {
 		name             string

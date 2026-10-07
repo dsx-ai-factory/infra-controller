@@ -31,6 +31,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
@@ -38,21 +39,19 @@ import (
 
 // CreateMachineInstanceTypeHandler is the API Handler for creating new Machine/InstanceType association
 type CreateMachineInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateMachineInstanceTypeHandler initializes and returns a new handler for creating Machine/Instance Type association
 func NewCreateMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateMachineInstanceTypeHandler {
 	return CreateMachineInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -69,7 +68,7 @@ func NewCreateMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 201 {object} model.APIMachineInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{instance_type_id}/machine [post]
 func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Create", c, cmith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -98,7 +97,7 @@ func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get Instance Type ID
 	itStrID := c.Param("instanceTypeId")
 
-	cmith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	itID, err := uuid.Parse(itStrID)
 	if err != nil {
@@ -218,7 +217,7 @@ func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
 			}
 
 			// check for association with any instance type
-			emits, _, derr := mitDAO.GetAll(ctx, tx, &machineID, nil, nil, nil, nil, nil)
+			emits, _, derr := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{MachineID: &machineID}, paginator.PageInput{}, nil)
 			if derr != nil {
 				slogger.Error().Err(derr).Msg("error retrieving Machine/InstanceType association from DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to check for existing Instance Type association for Machine: %v", machineID), nil)
@@ -230,7 +229,10 @@ func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
 			}
 
 			// Create Machine/InstanceType association
-			mit, derr := mitDAO.CreateFromParams(ctx, tx, machineID, itID)
+			mit, derr := mitDAO.Create(ctx, tx, cdbm.MachineInstanceTypeCreateInput{
+				MachineID:      machineID,
+				InstanceTypeID: itID,
+			})
 			if derr != nil {
 				slogger.Error().Err(derr).Msg("error creating Machine/InstanceType association")
 				return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to create Instance Type association for Machine: %v", machineID), nil)
@@ -318,19 +320,17 @@ func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
 
 // GetAllMachineInstanceTypeHandler is the API Handler for getting all Instance Types
 type GetAllMachineInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllMachineInstanceTypeHandler initializes and returns a new handler for getting all Instance Types
 func NewGetAllMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllMachineInstanceTypeHandler {
 	return GetAllMachineInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -349,7 +349,7 @@ func NewGetAllMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 200 {object} []model.APIMachineInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{instance_type_id}/machine [get]
 func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "GetAll", c, gamith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -393,7 +393,7 @@ func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get Instance Type ID
 	itStrID := c.Param("instanceTypeId")
 
-	gamith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	itID, err := uuid.Parse(itStrID)
 	if err != nil {
@@ -436,7 +436,13 @@ func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get all Machine/InstanceType associations
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(gamith.dbSession)
 
-	emits, total, err := mitDAO.GetAll(ctx, nil, nil, []uuid.UUID{itID}, nil, pageRequest.Offset, pageRequest.Limit, pageRequest.OrderBy)
+	emits, total, err := mitDAO.GetAll(ctx, nil, cdbm.MachineInstanceTypeFilterInput{
+		InstanceTypeIDs: []uuid.UUID{itID},
+	}, paginator.PageInput{
+		Offset:  pageRequest.Offset,
+		Limit:   pageRequest.Limit,
+		OrderBy: pageRequest.OrderBy,
+	}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Machine/InstanceType associations from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Machine/Instance Type associations", nil)
@@ -468,21 +474,19 @@ func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
 
 // DeleteMachineInstanceTypeHandler is the API Handler for deleting a Machine/InstanceType association
 type DeleteMachineInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteMachineInstanceTypeHandler initializes and returns a new handler for deleting a Machine/InstanceType association
 func NewDeleteMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteMachineInstanceTypeHandler {
 	return DeleteMachineInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -499,7 +503,7 @@ func NewDeleteMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 204
 // @Router /v2/org/{org}/nico/instance/type/{instance_type_id}/machine/{id} [delete]
 func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Delete", c, dmith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -573,7 +577,7 @@ func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
 
 	// Resolve the delete identifier from either the machine ID or the deprecated association ID.
 	machineOrAssociationID := c.Param("id")
-	dmith.tracerSpan.SetAttribute(handlerSpan, attribute.String("machineinstancetype_identifier", machineOrAssociationID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machineinstancetype_identifier", machineOrAssociationID))
 
 	// Look up the association first by deprecated association ID and then by machine ID.
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dmith.dbSession)
@@ -593,7 +597,10 @@ func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	}
 
 	if mit == nil {
-		mits, _, err := mitDAO.GetAll(ctx, nil, &machineOrAssociationID, []uuid.UUID{itID}, nil, nil, nil, nil)
+		mits, _, err := mitDAO.GetAll(ctx, nil, cdbm.MachineInstanceTypeFilterInput{
+			MachineID:       &machineOrAssociationID,
+			InstanceTypeIDs: []uuid.UUID{itID},
+		}, paginator.PageInput{}, nil)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Machine/InstanceType association by Machine ID from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Machine/Instance Type associations", nil)
@@ -648,7 +655,7 @@ func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
 		}
 
 		// Delete Machine/InstanceType association
-		derr = mitDAO.DeleteByID(ctx, tx, mit.ID, false)
+		derr = mitDAO.Delete(ctx, tx, mit.ID, false)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error deleting Machine/InstanceType association from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Machine/Instance Type association", nil)
@@ -752,5 +759,5 @@ func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	// Return response
 	logger.Info().Msg("finishing API handler")
 
-	return c.String(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

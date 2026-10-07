@@ -48,17 +48,37 @@ message DhcpConfig {
     repeated string carbide_ntpservers = 6;
     string carbide_provisioning_server_ipv4 = 7;
     string carbide_dhcp_server = 8;
+    repeated string carbide_nameservers_v6 = 9;
+    repeated string carbide_ntpservers_v6 = 10;
+    optional string carbide_dhcp_server_v6 = 11;
+    uint32 dhcpv6_preferred_lifetime_secs = 12;
+    uint32 dhcpv6_valid_lifetime_secs = 13;
+    // Absent preserves legacy omission; zero is a distinct explicit value.
+    optional uint32 dhcpv6_server_preference = 14;
+    // IPv6 address used to generate default DHCPv6 HTTP boot URLs. Omission
+    // disables generation; an explicit InterfaceInfo.booturl (even empty)
+    // takes precedence. Invalid or non-IPv6 addresses reject the update.
+    optional string carbide_provisioning_server_ipv6 = 15;
 }
 
 // Mirrors utils::models::dhcp::InterfaceInfo.
-// IPv4 addresses are encoded as dotted-decimal strings.
+// IPv4 addresses are encoded as dotted-decimal strings and are absent for
+// IPv6-only hosts. Address, gateway, and prefix are either all present or all
+// absent. IPv6 details are absent for v4-only hosts.
 message InterfaceInfo {
-    string address = 1;
-    string gateway = 2;
-    string prefix = 3;
+    optional string address = 1;
+    optional string gateway = 2;
+    optional string prefix = 3;
     string fqdn = 4;
     optional string booturl = 5;
     optional uint32 mtu = 6;
+    optional InterfaceInfoV6 ipv6 = 7;
+}
+
+message InterfaceInfoV6 {
+    // Absent for SLAAC-only entries; present for stateful /128.
+    optional string address = 1;
+    string prefix = 2;
 }
 
 // Mirrors utils::models::dhcp::HostConfig.

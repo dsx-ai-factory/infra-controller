@@ -21,7 +21,10 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn handle_assign_address(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn handle_assign_address(
+    args: Args,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
     let resp = api_client
         .0
         .assign_static_address(forgerpc::AssignStaticAddressRequest {

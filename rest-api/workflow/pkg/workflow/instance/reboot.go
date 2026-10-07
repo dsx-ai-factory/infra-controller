@@ -14,7 +14,7 @@ import (
 
 	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // RebootInstanceByID is a helper Temporal workflow to reboot a Machine associated with an Instance
@@ -42,9 +42,9 @@ func RebootInstanceByID(ctx workflow.Context, instanceID uuid.UUID, rebootWithCu
 
 	var instanceManager instanceActivity.ManageInstance
 
-	request := &cwssaws.InstancePowerRequest{
-		MachineId: &cwssaws.MachineId{
-			Id: instanceID.String(),
+	request := &corev1.InstancePowerRequest{
+		InstanceId: &corev1.InstanceId{
+			Value: instanceID.String(),
 		},
 		BootWithCustomIpxe:   rebootWithCustomIpxe,
 		ApplyUpdatesOnReboot: applyUpdatesOnReboot,

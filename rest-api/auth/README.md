@@ -31,6 +31,7 @@ issuers:
 - **Only two roles allowed:** `TENANT_ADMIN`, `PROVIDER_ADMIN`
 - **Audiences:** token needs at least one match → 401 on failure
 - **Scopes:** token needs all configured → 403 on failure (checks `scope`, `scopes`, `scp` claims)
+- **Mapping audiences:** each mapping may require any one exact `aud` match → 403 for that organization
 
 ---
 
@@ -135,6 +136,30 @@ claimMappings:
     rolesAttribute: "main_roles"
 ```
 
+### Shared Issuer with Per-Org Audiences
+
+Issuer-level and mapping-level `audiences` both use ANY-match semantics. When both are configured, the token must satisfy both gates. Mapping audience values are compared exactly and case-sensitively. Omit mapping `audiences` to preserve the existing unrestricted mapping behavior.
+
+```yaml
+issuers:
+  - name: shared-issuer
+    issuer: https://idp.example.com
+    jwks: https://idp.example.com/.well-known/jwks.json
+    origin: custom
+    audiences: ["nico-api"]
+    claimMappings:
+      - orgName: orgA
+        orgDisplayName: Organization A
+        isServiceAccount: true
+        audiences: ["clientA"]
+      - orgName: orgB
+        orgDisplayName: Organization B
+        roles: ["TENANT_ADMIN"]
+        audiences: ["clientB"]
+```
+
+A token with `aud: ["nico-api", "clientA"]` can access only `orgA`; a token with `aud: ["nico-api", "clientB"]` can access only `orgB`.
+
 ---
 
 ## Validation Rules
@@ -161,6 +186,7 @@ claimMappings:
 | Error | Solution |
 |-------|----------|
 | Token audience mismatch | Check `aud` claim; update `audiences` or remove to skip |
+| Organization audience mismatch | Check the selected claim mapping's `audiences`; token `aud` must match at least one |
 | Token scopes mismatch | Check `scope`/`scopes`/`scp` claim; ensure all required scopes present |
 | Invalid token | Verify `jwks` URL accessible; `issuer` matches `iss` claim exactly |
 | Invalid claim mapping | Add `roles`, `rolesAttribute`, or `isServiceAccount` |
@@ -218,7 +244,7 @@ Edit the `nico-rest-api-config` ConfigMap in `nico-rest` namespace:
 kubectl edit configmap nico-rest-api-config -n nico-rest
 ```
 
-If you applied the [kustomize manifests](https://github.com/NVIDIA/infra-controller/rest-api/blob/main/deploy/kustomize/base/api/configmap.yaml), there should already be a section for Keycloak auth.
+If you applied the [kustomize manifests](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/kustomize/base/api/configmap.yaml), there should already be a section for Keycloak auth.
 
 Edit the Keycloak configuration (or add if not present) section to match the following:
 
@@ -245,7 +271,7 @@ keycloak:
 
 Ensure the NICo REST API Deployment mounts the Keycloak client secret.
 
-If you applied the [kustomize manifests](https://github.com/NVIDIA/infra-controller/rest-api/blob/main/deploy/kustomize/base/api/deployment.yaml) without any changes, this step should not be needed. Verify and edit as needed.
+If you applied the [kustomize manifests](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/kustomize/base/api/deployment.yaml) without any changes, this step should not be needed. Verify and edit as needed.
 
 ```yaml
 spec:
@@ -278,7 +304,7 @@ kubectl logs -n nico-rest -l app.kubernetes.io/name=nico-rest-api --tail=50 | gr
 
 Expected log messages:
 
-```
+```text
 Creating new Keycloak configuration
 Keycloak configuration created successfully
 ```

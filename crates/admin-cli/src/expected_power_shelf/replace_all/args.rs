@@ -25,7 +25,7 @@ Replace all expected power shelves with the contents of a JSON file:
     $ nico-admin-cli expected-power-shelf replace-all --filename ./power-shelves.json
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long)]
-    pub filename: String,
+    pub(super) filename: String,
 }

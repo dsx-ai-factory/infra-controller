@@ -14,8 +14,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	subnetActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 type DeleteSubnetTestSuite struct {
@@ -37,8 +37,8 @@ func (s *DeleteSubnetTestSuite) Test_DeleteSubnetWorkflow_Success() {
 	var subnetManager subnetActivity.ManageSubnet
 
 	subnetID := uuid.New()
-	request := &cwssaws.NetworkSegmentDeletionRequest{
-		Id: &cwssaws.NetworkSegmentId{Value: subnetID.String()},
+	request := &corev1.NetworkSegmentDeletionRequest{
+		Id: &corev1.NetworkSegmentId{Value: subnetID.String()},
 	}
 
 	// Mock DeleteSubnetOnSite activity
@@ -56,8 +56,8 @@ func (s *DeleteSubnetTestSuite) Test_DeleteSubnetWorkflow_ActivityFails() {
 
 	subnetID := uuid.New()
 
-	request := &cwssaws.NetworkSegmentDeletionRequest{
-		Id: &cwssaws.NetworkSegmentId{Value: subnetID.String()},
+	request := &corev1.NetworkSegmentDeletionRequest{
+		Id: &corev1.NetworkSegmentId{Value: subnetID.String()},
 	}
 
 	// Mock DeleteSubnetOnSite activity failure

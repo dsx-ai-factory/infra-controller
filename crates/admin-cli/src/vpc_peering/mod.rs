@@ -19,9 +19,6 @@ mod create;
 mod delete;
 mod show;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 use prettytable::{Table, row};
 use rpc::forge::VpcPeering;
@@ -30,7 +27,7 @@ use crate::cfg::dispatch::Dispatch;
 use crate::errors::CarbideCliResult;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Create VPC peering.")]
     Create(create::Args),
     #[clap(about = "Show list of VPC peerings.")]

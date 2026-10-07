@@ -55,7 +55,7 @@ struct AgentConnection {
 // to the AgentConnection, and exposes an interface to show
 // current connections and send messages across them.
 #[derive(Clone)]
-pub struct ConnectionRegistry {
+pub(crate) struct ConnectionRegistry {
     // connections is used to map a machine_id to a scout
     // agent connection.
     connections: Arc<RwLock<HashMap<MachineId, AgentConnection>>>,
@@ -63,7 +63,7 @@ pub struct ConnectionRegistry {
 
 impl ConnectionRegistry {
     // new creates a new connection registry.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -72,7 +72,7 @@ impl ConnectionRegistry {
     // register adds a new scout agent connection to the registry,
     // provisioning data structures necessary for tracking the machine,
     // its singular connection, and active flows over the connection.
-    pub async fn register(
+    pub(crate) async fn register(
         &self,
         machine_id: MachineId,
         tx: mpsc::Sender<Result<ScoutStreamScoutBoundMessage, Status>>,
@@ -100,7 +100,10 @@ impl ConnectionRegistry {
                 };
 
                 let Some(response) = response else {
-                    tracing::info!("scout agent connection closed (machine_id={machine_id})");
+                    tracing::info!(
+                        %machine_id,
+                        "Scout agent connection closed",
+                    );
                     break;
                 };
 
@@ -115,12 +118,18 @@ impl ConnectionRegistry {
                 if let Some(sender) = flows.remove(&flow_uuid) {
                     if let Err(send_err) = sender.send(response) {
                         tracing::warn!(
-                            "error relaying flow response (machine_id={machine_id}, flow_uuid={flow_uuid}): {send_err:?}"
+                            %machine_id,
+                            %flow_uuid,
+                            error = ?send_err,
+                            "Failed to relay Scout flow response",
                         );
                     }
                 } else {
                     tracing::warn!(
-                        "dropping flow response for unknown flow_uuid (machine_id={machine_id}, flow_uuid={flow_uuid}): {response:?}"
+                        %machine_id,
+                        %flow_uuid,
+                        ?response,
+                        "Dropping response for unknown Scout flow",
                     );
                 }
             }
@@ -128,25 +137,32 @@ impl ConnectionRegistry {
 
         let mut connections = self.connections.write().await;
         connections.insert(machine_id, connection);
-        tracing::info!("registered scout agent connection for machine: {machine_id}");
+        tracing::info!(
+            %machine_id,
+            "Scout agent connection registered",
+        );
     }
 
     // unregister removes a scout agent connection from the registry.
-    pub async fn unregister(&self, machine_id: MachineId) -> bool {
+    pub(crate) async fn unregister(&self, machine_id: MachineId) -> bool {
         let mut connections = self.connections.write().await;
         if connections.remove(&machine_id).is_some() {
-            tracing::info!("unregistered scout agent connection for machine: {machine_id}");
+            tracing::info!(
+                %machine_id,
+                "Scout agent connection unregistered",
+            );
             true
         } else {
             tracing::info!(
-                "could not unregister scout agent connection for machine (not found): {machine_id}"
+                %machine_id,
+                "Scout agent connection was not registered",
             );
             false
         }
     }
 
     // send_request sends a request to a scout agent and waits for a response.
-    pub async fn send_request(
+    pub(crate) async fn send_request(
         &self,
         machine_id: MachineId,
         request: ScoutStreamScoutBoundMessage,
@@ -199,7 +215,9 @@ impl ConnectionRegistry {
 
         // And now the request to the scout agent.
         tracing::info!(
-            "sending request to scout agent (machine_id={machine_id}, flow_uuid={flow_uuid})"
+            %machine_id,
+            %flow_uuid,
+            "Sending request to Scout agent",
         );
 
         connection_tx.send(Ok(request)).await.map_err(|e| CarbideError::Internal {
@@ -221,18 +239,21 @@ impl ConnectionRegistry {
     }
 
     // is_connected checks if a machine is currently connected.
-    pub async fn is_connected(&self, machine_id: MachineId) -> bool {
+    pub(crate) async fn is_connected(&self, machine_id: MachineId) -> bool {
         let connections = self.connections.read().await;
         connections.contains_key(&machine_id)
     }
 
     // list_connected returns a list of all connected machines with connection info.
-    pub async fn list_connected(&self) -> Vec<(MachineId, std::time::SystemTime)> {
+    pub(crate) async fn list_connected(&self) -> Vec<(MachineId, std::time::SystemTime)> {
         let connections = self.connections.read().await;
         connections
             .iter()
             .map(|(machine_id, conn)| {
-                tracing::debug!("active scout stream connection: {}", conn.machine_id);
+                tracing::debug!(
+                    machine_id = %conn.machine_id,
+                    "active scout stream connection",
+                );
                 (*machine_id, conn.connected_at)
             })
             .collect()
@@ -247,13 +268,18 @@ fn extract_flow_uuid(
 ) -> Result<uuid::Uuid, ()> {
     let flow_uuid_pb = response.flow_uuid.as_ref().ok_or_else(|| {
         tracing::warn!(
-            "dropping flow response with empty flow_uuid (machine_id={machine_id}): {response:?}"
+            %machine_id,
+            ?response,
+            "Dropping Scout flow response with empty flow UUID",
         );
     })?;
 
     flow_uuid_pb.clone().try_into().map_err(|e| {
         tracing::warn!(
-            "failed to decode flow_uuid (machine_id={machine_id}): {flow_uuid_pb:?}: {e:?}"
+            %machine_id,
+            ?flow_uuid_pb,
+            error = ?e,
+            "Failed to decode Scout flow UUID",
         );
     })
 }

@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,10 +29,12 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{Router, get, post};
 use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar};
-use carbide_api_core::cfg::file::{CarbideConfig, ToolLink};
-use carbide_api_core::{Api, AuthContext, CarbideError, DefaultCredential};
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
+use carbide_api_core::cfg::file::ToolLink;
+use carbide_api_core::{AdminAdmissionControl, Api, AuthContext, CarbideError, DefaultCredential};
 use carbide_authn::middleware::Principal;
-use http::header::CONTENT_TYPE;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use http::{HeaderMap, Request, StatusCode};
 use itertools::Itertools;
 use oauth2::basic::{
@@ -42,9 +45,11 @@ use oauth2::{
     AuthUrl, Client, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
     PkceCodeChallenge, RedirectUrl, Scope, StandardRevocableToken, TokenUrl,
 };
+use rand::RngExt as _;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
 use tonic::service::AxumBody;
+use tower_http::csrf::CsrfLayer;
 use tower_http::normalize_path::NormalizePath;
 
 /// Implemented by every page struct whose template extends `base.html`.
@@ -52,14 +57,27 @@ use tower_http::normalize_path::NormalizePath;
 /// `Self::tools()`.
 ///
 /// The tool list itself is owned by `carbide-api-core` (it is derived from the
-/// parsed `CarbideConfig` during startup, via [`carbide_api_core::init_tools`]).
+/// parsed `CarbideConfig` during API Core configuration loading).
 /// This trait just surfaces it to templates.
-pub trait Base {
+trait Base {
     /// Configured external tool links rendered in the admin UI's
     /// "Tools" sidebar. Empty when no tools are configured or
-    /// when `carbide_api_core::init_tools` has not been called (e.g. unit tests).
+    /// before API Core configuration loading has initialized them (e.g. unit tests).
     fn tools() -> &'static [ToolLink] {
         carbide_api_core::configured_tools()
+    }
+
+    /// Site name rendered in the sidebar header as "NICo • <site>". Falls
+    /// back to "local" when the config doesn't set `sitename`.
+    fn site_name() -> &'static str {
+        carbide_api_core::configured_site_name().unwrap_or("local")
+    }
+
+    /// URL template for the "Logs" link on machine and endpoint detail pages.
+    /// The placeholder `{search}` is replaced with the machine ID or BMC IP
+    /// by JavaScript. Empty when not configured.
+    fn logs_link_template() -> &'static str {
+        carbide_api_core::configured_logs_link_template()
     }
 }
 
@@ -67,24 +85,24 @@ pub trait Base {
 /// in entity detail pages. Render with `{{ metadata_detail|safe }}`.
 #[derive(Template)]
 #[template(path = "metadata_details.html")]
-pub(crate) struct MetadataDetail {
-    pub metadata: rpc::forge::Metadata,
-    pub metadata_version: String,
+struct MetadataDetail {
+    metadata: rpc::forge::Metadata,
+    metadata_version: String,
 }
 
 /// Reusable template for rendering aggregate health details in entity detail
 /// pages. Render with `{{ health_detail|safe }}`.
 #[derive(Template)]
 #[template(path = "health_detail.html")]
-pub(crate) struct HealthDetail {
-    pub health_reports_url: String,
-    pub health_reports_link_text: &'static str,
-    pub health: health_report::HealthReport,
-    pub health_sources: Vec<String>,
+struct HealthDetail {
+    health_reports_url: String,
+    health_reports_link_text: &'static str,
+    health: health_report::HealthReport,
+    health_sources: Vec<String>,
 }
 
 impl HealthDetail {
-    pub(crate) fn new(
+    fn new(
         health_reports_url: String,
         health_reports_link_text: &'static str,
         health: Option<rpc::health::HealthReport>,
@@ -111,13 +129,13 @@ impl HealthDetail {
 /// Render with `{{ state_display|safe }}`.
 #[derive(Debug, Clone, PartialEq, Eq, Template)]
 #[template(path = "state_display.html")]
-pub(crate) struct StateDisplay {
-    pub state: String,
-    pub time_in_state_above_sla: bool,
+struct StateDisplay {
+    state: String,
+    time_in_state_above_sla: bool,
 }
 
 impl StateDisplay {
-    pub fn from_lifecycle(lifecycle: Option<&forgerpc::LifecycleStatus>) -> Self {
+    fn from_lifecycle(lifecycle: Option<&forgerpc::LifecycleStatus>) -> Self {
         let state = lifecycle
             .map(|lifecycle| lifecycle.state.clone())
             .filter(|state| !state.is_empty())
@@ -139,29 +157,29 @@ impl StateDisplay {
 /// Render with `{{ state_sla_detail|safe }}`.
 #[derive(Template)]
 #[template(path = "state_sla_details.html")]
-pub(crate) struct StateSlaDetail {
-    pub state_sla: String,
-    pub time_in_state_above_sla: bool,
-    pub state_reason: Option<rpc::forge::ControllerStateReason>,
+struct StateSlaDetail {
+    state_sla: String,
+    time_in_state_above_sla: bool,
+    state_reason: Option<rpc::forge::ControllerStateReason>,
 }
 
 /// Reusable template for rendering lifecycle fields.
 /// Render with `{{ lifecycle_detail|safe }}`.
 #[derive(Template)]
 #[template(path = "lifecycle_detail.html")]
-pub(crate) struct LifecycleDetail {
-    pub state_display: StateDisplay,
-    pub associated_instance_id: Option<String>,
-    pub json_state: Option<String>,
-    pub version: String,
-    pub time_in_state: String,
-    pub state_sla: String,
-    pub time_in_state_above_sla: bool,
-    pub state_reason: Option<rpc::forge::ControllerStateReason>,
+struct LifecycleDetail {
+    state_display: StateDisplay,
+    associated_instance_id: Option<String>,
+    json_state: Option<String>,
+    version: String,
+    time_in_state: String,
+    state_sla: String,
+    time_in_state_above_sla: bool,
+    state_reason: Option<rpc::forge::ControllerStateReason>,
 }
 
 impl LifecycleDetail {
-    pub fn new(
+    fn new(
         state: String,
         version: String,
         state_reason: Option<forgerpc::ControllerStateReason>,
@@ -219,7 +237,9 @@ fn format_state_sla(sla: Option<&forgerpc::StateSla>) -> String {
 // `#[crate::sqlx_test]` in the admin-UI tests. These tests do not support
 // `fixtures(...)`; use explicit setup helpers instead.
 #[cfg(test)]
-pub(crate) use carbide_macros::sqlx_test;
+use carbide_macros::sqlx_test;
+use carbide_utils::none_if_empty::NoneIfEmpty;
+
 #[cfg(test)]
 mod tests;
 
@@ -227,6 +247,8 @@ mod action_status;
 mod attestation;
 mod auth;
 mod compute_allocation;
+mod configuration;
+mod console_logs;
 mod domain;
 mod dpa;
 mod dpu_versions;
@@ -236,6 +258,7 @@ mod expected_rack;
 mod expected_switch;
 mod explored_endpoint;
 mod filters;
+mod firmware;
 mod health;
 mod health_history;
 mod ib_fabric;
@@ -248,7 +271,7 @@ mod ipxe_template;
 mod logs;
 mod machine;
 mod machine_validation;
-pub mod managed_host;
+mod managed_host;
 mod network_device;
 mod network_security_group;
 mod network_segment;
@@ -256,13 +279,14 @@ mod network_status;
 mod nmxc_browser;
 mod nvlink;
 mod operating_system;
-pub(crate) mod pagination;
+mod pagination;
 mod power_shelf;
 mod rack;
 mod redfish_actions;
 mod redfish_browser;
 mod resource_pool;
 mod search;
+mod site_explorer_run_status;
 mod sku;
 mod spx_partition;
 mod state_history;
@@ -273,6 +297,11 @@ mod ufm_browser;
 mod vpc;
 
 const AUTH_TYPE_ENV: &str = "CARBIDE_WEB_AUTH_TYPE";
+const BASIC_AUTH_PASSWORD_ENV: &str = "CARBIDE_WEB_BASIC_AUTH_PASSWORD";
+const BASIC_AUTH_USERNAME: &str = "admin";
+const BASIC_AUTH_REALM: &str = "Basic realm=\"NICo\"";
+const TEMPORARY_BASIC_AUTH_REALM: &str =
+    "Basic realm=\"NICo - check service logs for the random admin password\"";
 const AUTH_CALLBACK_ROOT: &str = "auth-callback";
 
 // Details https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/Overview/appId/5ae5fa35-be8e-44cc-be7b-01ff76af5315/isMSAApp~/false
@@ -294,11 +323,12 @@ const SORTABLE_JS: &str = include_str!("../templates/static/sortable.min.js");
 const SORTABLE_CSS: &str = include_str!("../templates/static/sortable.min.css");
 const CARBIDE_CSS: &str = include_str!("../templates/static/carbide.css");
 const TABS_JS: &str = include_str!("../templates/static/tabs.js");
+const TABLE_FILTER_JS: &str = include_str!("../templates/static/table_filter.js");
 
 // It would appear the oauth2 author read about the typestate pattern and decided making
 // everyone declare 10 type parameters when storing a Client sounds like a great idea.
 // https://github.com/ramosbugs/oauth2-rs/blob/main/UPGRADE.md#add-typestate-generic-types-to-client
-pub(crate) type Oauth2ClientWithPropertiesSet = Client<
+type Oauth2ClientWithPropertiesSet = Client<
     BasicErrorResponse,
     BasicTokenResponse,
     BasicTokenIntrospectionResponse,
@@ -311,8 +341,7 @@ pub(crate) type Oauth2ClientWithPropertiesSet = Client<
     EndpointSet,
 >;
 
-#[derive(Clone)]
-pub(crate) struct Oauth2Layer {
+struct Oauth2Layer {
     client: Oauth2ClientWithPropertiesSet,
     http_client: reqwest::Client,
     private_cookiejar_key: Key,
@@ -320,15 +349,82 @@ pub(crate) struct Oauth2Layer {
     allowed_access_groups_ids_to_name: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum WebAuthMode {
+    #[default]
+    Basic,
+    OAuth2,
+    None,
+}
+
+impl FromStr for WebAuthMode {
+    type Err = eyre::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "basic" => Ok(Self::Basic),
+            "oauth2" => Ok(Self::OAuth2),
+            "none" => Ok(Self::None),
+            other => Err(eyre::eyre!(
+                "unknown {AUTH_TYPE_ENV}={other:?}: expected \"basic\", \"oauth2\", or \"none\""
+            )),
+        }
+    }
+}
+
+enum WebAuth {
+    Basic {
+        password: String,
+        challenge: &'static str,
+    },
+    OAuth2(Arc<Oauth2Layer>),
+    None,
+}
+
+impl WebAuth {
+    fn basic(configured_password: Option<String>) -> Self {
+        match configured_password {
+            Some(password) => WebAuth::Basic {
+                password,
+                challenge: BASIC_AUTH_REALM,
+            },
+            None => {
+                let password: String = rand::rng()
+                    .sample_iter(&rand::distr::Alphanumeric)
+                    .take(32)
+                    .map(char::from)
+                    .collect();
+                tracing::warn!(
+                    username = BASIC_AUTH_USERNAME,
+                    password = %password,
+                    "{BASIC_AUTH_PASSWORD_ENV} is not configured; generated a temporary WebUI Basic Auth password for this process. This password is not persisted and changes on every launch. Configure a permanent password by setting {BASIC_AUTH_PASSWORD_ENV} to a non-empty value."
+                );
+                WebAuth::Basic {
+                    password,
+                    challenge: TEMPORARY_BASIC_AUTH_REALM,
+                }
+            }
+        }
+    }
+}
+
 /// All the URLs in the admin interface. Nested under /admin in api.rs.
-pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
-    // `CARBIDE_WEB_AUTH_TYPE`: `none` (default) = no in-process auth — protect the admin UI with
-    // network policy, or a reverse proxy (OAuth2 Proxy, etc.). `oauth2` = Entra / OIDC via env.
-    let auth_type = env::var(AUTH_TYPE_ENV)
-        .unwrap_or_else(|_| "none".to_string())
-        .to_lowercase();
-    let oauth_extension_layer = match auth_type.as_str() {
-        "oauth2" => {
+pub fn routes(
+    api: Arc<Api>,
+    admission: Option<AdminAdmissionControl>,
+) -> eyre::Result<NormalizePath<Router>> {
+    let auth_mode =
+        env::var(AUTH_TYPE_ENV).map_or(Ok(WebAuthMode::default()), |value| value.parse())?;
+    routes_with_auth_mode(api, auth_mode, admission)
+}
+
+fn routes_with_auth_mode(
+    api: Arc<Api>,
+    auth_mode: WebAuthMode,
+    admission: Option<AdminAdmissionControl>,
+) -> eyre::Result<NormalizePath<Router>> {
+    let web_auth = match auth_mode {
+        WebAuthMode::OAuth2 => {
             // Get our cookiejar key so we can add it as an extension.
             let private_cookiejar_key = Key::try_from(
                 env::var(CARBIDE_WEB_PRIVATE_COOKIEJAR_KEY_ENV)
@@ -389,31 +485,29 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
                 builder.build()?
             };
 
-            Some(Oauth2Layer {
+            WebAuth::OAuth2(Arc::new(Oauth2Layer {
                 client,
                 private_cookiejar_key,
                 allowed_access_groups_filter,
                 allowed_access_groups_ids_to_name,
                 http_client,
-            })
+            }))
         }
-        "none" | "" => {
+        WebAuthMode::None => {
             tracing::warn!(
-                "{}: admin web UI has no in-process authentication; restrict access with network policy, a private network, or an authenticating reverse proxy (for example OAuth2 Proxy)",
-                AUTH_TYPE_ENV
+                auth_type_env_var = AUTH_TYPE_ENV,
+                "admin web UI has no in-process authentication; restrict access with network policy, a private network, or an authenticating reverse proxy (for example OAuth2 Proxy)",
             );
-            None
+            WebAuth::None
         }
-        "basic" => {
-            return Err(eyre::eyre!(
-                "{AUTH_TYPE_ENV}=basic is not supported. Use \"none\" (default; secure the UI with network controls or an auth proxy) or \"oauth2\" (SSO via Entra)."
-            ));
+        WebAuthMode::Basic => {
+            WebAuth::basic(env::var(BASIC_AUTH_PASSWORD_ENV).ok().none_if_empty())
         }
-        other => {
-            return Err(eyre::eyre!(
-                "unknown {AUTH_TYPE_ENV}={other:?}: expected \"none\" or \"oauth2\""
-            ));
-        }
+    };
+
+    let oauth_extension_layer = match &web_auth {
+        WebAuth::OAuth2(layer) => Some(Arc::clone(layer)),
+        WebAuth::Basic { .. } | WebAuth::None => None,
     };
 
     Ok(NormalizePath::trim_trailing_slash(
@@ -502,6 +596,8 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
                 "/explored-endpoint/{endpoint_ip}/enable-lockdown",
                 post(explored_endpoint::enable_lockdown),
             )
+            .route("/firmware", get(firmware::show_html))
+            .route("/firmware.json", get(firmware::show_json))
             .route("/host", get(machine::show_hosts_html))
             .route("/host.json", get(machine::show_hosts_json))
             .route("/ib-partition", get(ib_partition::show_html))
@@ -555,6 +651,14 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
             .route("/machine.json", get(machine::show_all_json))
             .route("/machine/{machine_id}", get(machine::detail))
             .route(
+                "/machine/{machine_id}/console-logs",
+                get(console_logs::page),
+            )
+            .route(
+                "/machine/{machine_id}/console-logs/stream",
+                get(console_logs::stream),
+            )
+            .route(
                 "/machine/{machine_id}/maintenance",
                 post(machine::maintenance),
             )
@@ -564,17 +668,21 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
             )
             .route("/machine/{machine_id}/sku", post(machine::sku))
             .route(
-                "/machine/{machine_id}/set-dpu-first-boot-order",
-                post(machine::set_dpu_first_boot_order),
+                "/machine/{machine_id}/boot-interface",
+                post(machine::set_desired_boot_interface),
+            )
+            .route(
+                "/machine/{machine_id}/boot-interface/reconcile",
+                post(machine::reconcile_boot_interface),
             )
             .route("/machine/{machine_id}/health", get(health::machine_health))
             .route(
                 "/machine/{machine_id}/health-history",
-                get(health_history::show_health_history),
+                get(health_history::show_machine_health_history),
             )
             .route(
                 "/machine/{machine_id}/health-history.json",
-                get(health_history::show_health_history_json),
+                get(health_history::show_machine_health_history_json),
             )
             .route(
                 "/machine/{machine_id}/state-history",
@@ -600,6 +708,14 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
                 post(health::remove_power_shelf_health_report),
             )
             .route(
+                "/power-shelf/{power_shelf_id}/health-history",
+                get(health_history::show_power_shelf_health_history),
+            )
+            .route(
+                "/power-shelf/{power_shelf_id}/health-history.json",
+                get(health_history::show_power_shelf_health_history_json),
+            )
+            .route(
                 "/power-shelf/{power_shelf_id}/state-history",
                 get(state_history::show_power_shelf_state_history),
             )
@@ -620,6 +736,14 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
                 post(health::remove_rack_health_report),
             )
             .route(
+                "/rack/{rack_id}/health-history",
+                get(health_history::show_rack_health_history),
+            )
+            .route(
+                "/rack/{rack_id}/health-history.json",
+                get(health_history::show_rack_health_history_json),
+            )
+            .route(
                 "/rack/{rack_id}/state-history",
                 get(state_history::show_rack_state_history),
             )
@@ -638,6 +762,14 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
             .route(
                 "/switch/{switch_id}/health/remove-report",
                 post(health::remove_switch_health_report),
+            )
+            .route(
+                "/switch/{switch_id}/health-history",
+                get(health_history::show_switch_health_history),
+            )
+            .route(
+                "/switch/{switch_id}/health-history.json",
+                get(health_history::show_switch_health_history_json),
             )
             .route(
                 "/switch/{switch_id}/state-history",
@@ -681,7 +813,7 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
             )
             .route(
                 "/machine/{machine_id}/attestation-submit-report-promotion",
-                get(attestation::submit_report_promotion),
+                post(attestation::submit_report_promotion),
             )
             .route("/managed-host", get(managed_host::show_html))
             .route("/managed-host.json", get(managed_host::show_all_json))
@@ -809,28 +941,42 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
             .route("/logs", get(logs::page))
             .route("/logs/{source}/stream", get(logs::stream))
             .route("/logs/{source}/history", get(logs::history))
-            .layer(axum::middleware::from_fn(auth_oauth2))
+            // Admission is intentionally inside web authentication: OAuth
+            // identity is established before fair scheduling classifies the
+            // client. Axum runs the later web-auth layer first.
+            .layer(axum::middleware::from_fn_with_state(
+                admission,
+                AdminAdmissionControl::middleware,
+            ))
+            .layer(axum::middleware::from_fn(web_auth_middleware_fn))
+            .layer(CsrfLayer::new())
+            .layer(Extension(Arc::new(web_auth)))
             .layer(Extension(oauth_extension_layer))
             .with_state(api),
     ))
 }
 
-pub async fn auth_oauth2(
+async fn web_auth_middleware_fn(
     headers: HeaderMap,
     mut req: Request<AxumBody>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let oauth_extension_layer = match req.extensions().get::<Option<Oauth2Layer>>() {
+    let oauth_extension_layer = match req.extensions().get::<Arc<WebAuth>>().map(AsRef::as_ref) {
         None => {
-            tracing::error!("failed to find oauth2 extension layer");
+            tracing::error!("failed to find web authentication extension layer");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
-        Some(o) => match o {
-            None => {
+        Some(WebAuth::None) => return Ok(next.run(req).await),
+        Some(WebAuth::Basic {
+            password,
+            challenge,
+        }) => {
+            if basic_credentials_are_valid(&headers, password) {
                 return Ok(next.run(req).await);
             }
-            Some(oa) => oa.to_owned(),
-        },
+            return Ok((StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, *challenge)]).into_response());
+        }
+        Some(WebAuth::OAuth2(layer)) => Arc::clone(layer),
     };
 
     // /auth-callback should pass through because that's
@@ -864,7 +1010,7 @@ pub async fn auth_oauth2(
         let now_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| {
-                tracing::error!(%e, "failed to get system time for oauth2 expiration check");
+                tracing::error!(error = %e, "failed to get system time for oauth2 expiration check");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
             .as_secs();
@@ -933,22 +1079,207 @@ pub async fn auth_oauth2(
         .into_response())
 }
 
+fn basic_credentials_are_valid(headers: &HeaderMap, configured_password: &str) -> bool {
+    let Some((scheme, encoded)) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+    else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("basic") || encoded.is_empty() {
+        return false;
+    }
+    let Ok(credentials) = BASE64_STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Ok(credentials) = String::from_utf8(credentials) else {
+        return false;
+    };
+    let Some((username, password)) = credentials.split_once(':') else {
+        return false;
+    };
+
+    username == BASIC_AUTH_USERNAME && password == configured_password
+}
+
+#[cfg(test)]
+mod web_auth_tests {
+    use axum::body::Body;
+    use carbide_test_support::{Case, Outcome, check_cases, value_scenarios};
+    use http::Request;
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    #[test]
+    fn auth_mode_parsing() {
+        check_cases(
+            [
+                Case {
+                    scenario: "basic",
+                    input: "basic",
+                    expect: Outcome::Yields(WebAuthMode::Basic),
+                },
+                Case {
+                    scenario: "oauth2",
+                    input: "oauth2",
+                    expect: Outcome::Yields(WebAuthMode::OAuth2),
+                },
+                Case {
+                    scenario: "none",
+                    input: "none",
+                    expect: Outcome::Yields(WebAuthMode::None),
+                },
+                Case {
+                    scenario: "case insensitive",
+                    input: "BASIC",
+                    expect: Outcome::Yields(WebAuthMode::Basic),
+                },
+                Case {
+                    scenario: "empty",
+                    input: "",
+                    expect: Outcome::Fails,
+                },
+                Case {
+                    scenario: "unknown",
+                    input: "saml",
+                    expect: Outcome::Fails,
+                },
+            ],
+            |value| value.parse::<WebAuthMode>().map_err(drop),
+        );
+        assert_eq!(WebAuthMode::default(), WebAuthMode::Basic);
+    }
+
+    #[test]
+    fn basic_credentials() {
+        value_scenarios!(run = |header: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(header) = header {
+                headers.insert(AUTHORIZATION, header.parse().unwrap());
+            }
+            basic_credentials_are_valid(&headers, "correct-password")
+        };
+            "accepted" {
+                Some("Basic YWRtaW46Y29ycmVjdC1wYXNzd29yZA==") => true,
+                Some("basic YWRtaW46Y29ycmVjdC1wYXNzd29yZA==") => true,
+            }
+            "rejected" {
+                Some("Basic dXNlcjpjb3JyZWN0LXBhc3N3b3Jk") => false,
+                Some("Basic YWRtaW46d3Jvbmc=") => false,
+                None => false,
+                Some("Bearer token") => false,
+                Some("Basic not-base64") => false,
+                Some("Basic YWRtaW4=") => false,
+            }
+        );
+        assert!(!basic_credentials_are_valid(&HeaderMap::new(), ""));
+    }
+
+    fn auth_test_router(auth: WebAuth) -> Router {
+        Router::new()
+            .route("/", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(axum::middleware::from_fn(web_auth_middleware_fn))
+            .layer(Extension(Arc::new(auth)))
+    }
+
+    #[tokio::test]
+    async fn valid_basic_credentials_reach_the_ui() {
+        let response = auth_test_router(WebAuth::basic(Some("secret".to_string())))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(AUTHORIZATION, "Basic YWRtaW46c2VjcmV0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn invalid_basic_credentials_receive_a_challenge() {
+        let response = auth_test_router(WebAuth::basic(Some("secret".to_string())))
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[WWW_AUTHENTICATE], BASIC_AUTH_REALM);
+    }
+
+    #[tokio::test]
+    async fn empty_basic_configuration_generates_a_usable_temporary_password() {
+        let auth = WebAuth::basic(None);
+        let WebAuth::Basic {
+            password,
+            challenge,
+        } = &auth
+        else {
+            panic!("basic_auth must return Basic authentication");
+        };
+        assert_eq!(password.len(), 32);
+        assert!(
+            password
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        );
+        assert_eq!(*challenge, TEMPORARY_BASIC_AUTH_REALM);
+
+        let credentials = BASE64_STANDARD.encode(format!("{BASIC_AUTH_USERNAME}:{password}"));
+        let response = auth_test_router(auth)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(AUTHORIZATION, format!("Basic {credentials}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn temporary_password_challenge_points_to_the_logs() {
+        let response = auth_test_router(WebAuth::basic(None))
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[WWW_AUTHENTICATE],
+            TEMPORARY_BASIC_AUTH_REALM
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_none_reaches_the_ui() {
+        let response = auth_test_router(WebAuth::None)
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+}
+
 #[derive(Template)]
 #[template(path = "index.html")]
 struct Index {
     version: &'static str,
-    agent_upgrade_policy: &'static str,
-    log_filter: String,
-    site_explorer_enabled: String,
-    create_machines: String,
-    carbide_config: CarbideConfig,
-    bmc_proxy: String,
+    config: configuration::ConfigPageView,
     missing_default_credentials: Vec<DefaultCredential>,
 }
 
 impl Base for Index {}
 
-pub async fn root(state: AxumState<Arc<Api>>) -> impl IntoResponse {
+async fn root(state: AxumState<Arc<Api>>) -> impl IntoResponse {
     let request = tonic::Request::new(forgerpc::DpuAgentUpgradePolicyRequest { new_policy: None });
     use forgerpc::AgentUpgradePolicy::*;
     let agent_upgrade_policy = match state
@@ -962,7 +1293,7 @@ pub async fn root(state: AxumState<Arc<Api>>) -> impl IntoResponse {
         Ok(x) if x == UpDown as i32 => "Upgrade and Downgrade",
         Ok(_) => "Unknown",
         Err(err) => {
-            tracing::error!(%err, "dpu_agent_upgrade_policy_action");
+            tracing::error!(error = %err, "dpu_agent_upgrade_policy_action");
             return (StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string()));
         }
     };
@@ -983,24 +1314,49 @@ pub async fn root(state: AxumState<Arc<Api>>) -> impl IntoResponse {
         .load()
         .as_ref()
         .clone()
-        .map(|p| p.to_string())
-        .unwrap_or("<None>".to_string());
+        .map(|p| p.to_string());
+    let tracing_enabled = state
+        .dynamic_settings
+        .tracing_enabled
+        .load(Ordering::Relaxed)
+        .to_string();
 
-    let index = Index {
-        version: carbide_version::v!(build_version),
+    let live_settings = configuration::LiveSettings {
         log_filter: state.log_filter_string(),
-        agent_upgrade_policy,
         site_explorer_enabled,
         create_machines,
-        carbide_config: state.runtime_config.redacted(),
         bmc_proxy,
+        tracing_enabled,
+        dpu_agent_upgrade_policy: agent_upgrade_policy.to_string(),
+    };
+
+    let effective = match serde_json::to_value(state.runtime_config.redacted()) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::error!(error = %err, "serializing runtime config");
+            return (StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string()));
+        }
+    };
+    let config = configuration::build_config_page(
+        carbide_api_core::cfg::CONFIG_REFERENCE_MD,
+        &effective,
+        &state.runtime_config.explicit_value_paths(),
+        live_settings,
+    );
+
+    let index = Index {
+        version: match carbide_version::v!(build_version) {
+            "" => "dev",
+            version => version,
+        },
+        config,
         missing_default_credentials: state.missing_default_credentials().await,
     };
 
     (StatusCode::OK, Html(index.render().unwrap()))
 }
 
-pub async fn static_data(
+async fn static_data(
     _state: AxumState<Arc<Api>>,
     AxumPath(filename): AxumPath<String>,
 ) -> Response {
@@ -1018,12 +1374,18 @@ pub async fn static_data(
             (StatusCode::OK, [(CONTENT_TYPE, "text/css")], CARBIDE_CSS).into_response()
         }
         "tabs.js" => (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], TABS_JS).into_response(),
+        "table_filter.js" => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/javascript")],
+            TABLE_FILTER_JS,
+        )
+            .into_response(),
         _ => (StatusCode::NOT_FOUND, "No such file").into_response(),
     }
 }
 
 /// Creates a response that describes that `resource` was not found
-pub(crate) fn not_found_response(resource: String) -> Response {
+fn not_found_response(resource: String) -> Response {
     (
         StatusCode::NOT_FOUND,
         Html(format!("Not found: {resource}")),
@@ -1031,6 +1393,57 @@ pub(crate) fn not_found_response(resource: String) -> Response {
         .into_response()
 }
 
-pub(crate) fn invalid_machine_id() -> String {
+fn invalid_machine_id() -> String {
     "INVALID_MACHINE".to_string()
+}
+
+#[cfg(test)]
+mod index_template_tests {
+    use super::*;
+
+    /// Renders the Configuration page template against the real reference doc
+    /// to catch template/view-model mismatches without a running server.
+    #[test]
+    fn index_renders_config_page() {
+        let effective = serde_json::json!({
+            "listen": "[::]:1079",
+            "asn": 65001,
+            "attestation_enabled": false,
+        });
+        let mut explicit = std::collections::BTreeMap::new();
+        explicit.insert("asn".to_string(), "site-config.toml".to_string());
+        let live_settings = configuration::LiveSettings {
+            log_filter: "info".to_string(),
+            site_explorer_enabled: "true".to_string(),
+            create_machines: "false".to_string(),
+            bmc_proxy: None,
+            tracing_enabled: "false".to_string(),
+            dpu_agent_upgrade_policy: "Off".to_string(),
+        };
+        let config = configuration::build_config_page(
+            carbide_api_core::cfg::CONFIG_REFERENCE_MD,
+            &effective,
+            &explicit,
+            live_settings,
+        );
+
+        let index = Index {
+            version: "test-version",
+            config,
+            missing_default_credentials: Vec::new(),
+        };
+        let html = index.render().expect("index template renders");
+
+        // Tab navigation with the first group tab active.
+        assert!(html.contains(r#"id="tab-networking""#));
+        // The overridden option shows its value and source tag.
+        assert!(html.contains("65001"));
+        assert!(html.contains("site-config.toml"));
+        // Runtime settings are folded in and tagged.
+        assert!(html.contains(r#"class="config-runtime""#));
+        assert!(html.contains("log_filter"));
+        // Catalog rendering is present.
+        assert!(html.contains("attestation_enabled"));
+        assert!(html.contains("site_explorer"));
+    }
 }

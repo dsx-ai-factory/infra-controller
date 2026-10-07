@@ -29,13 +29,21 @@ jobs:
   # PREPARE - Validate source images exist
   # ============================================================================
   prepare:
+    # Production promotion never runs outside the canonical repo.
+    if: github.repository == 'dsx-ai-factory/infra-controller'
     runs-on: linux-amd64-cpu4
     outputs:
       version: ${{ inputs.version }}
       helm_version: ${{ steps.version.outputs.helm_version }}
+      image_registry: ${{ steps.registry.outputs.registry }}
+      registry_host: ${{ steps.registry.outputs.registry_host }}
+      prod_image_registry: ${{ steps.registry.outputs.prod_registry }}
+      prod_registry_path: ${{ steps.registry.outputs.prod_registry_path }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Calculate Helm chart version
         id: version
@@ -50,14 +58,32 @@ jobs:
           echo "helm_version=${HELM_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Promoting chart version ${HELM_VERSION} from release ${VERSION}"
 
+      - name: Resolve container registries
+        id: registry
+        # promotion only runs in the canonical repo; endpoints are constants so
+        # repository variables can never redirect staging/production credentials
+        run: |
+          set -euo pipefail
+          REGISTRY="nvcr.io/0837451325059433/carbide-dev"
+          PROD_REGISTRY="nvcr.io/0837451325059433/carbide"
+          {
+            echo "registry=${REGISTRY}"
+            echo "registry_host=${REGISTRY%%/*}"
+            echo "prod_registry=${PROD_REGISTRY}"
+            echo "prod_registry_path=${PROD_REGISTRY#*/}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Container registry: ${REGISTRY} (prod: ${PROD_REGISTRY})"
+
       - name: Login to NVCR
         uses: ./.github/actions/docker-auth
         with:
+          registry: ${{ steps.registry.outputs.registry_host }}
           username: ${{ secrets.NVCR_USERNAME }}
           token: ${{ secrets.NVCR_TOKEN }}
 
       - name: Validate source images exist
         env:
+          REGISTRY: ${{ steps.registry.outputs.registry }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -67,9 +93,9 @@ jobs:
           echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
 
           IMAGES=(
-            "nvcr.io/0837451325059433/carbide-dev/nvmetal-carbide:${VERSION}"
-            "nvcr.io/0837451325059433/carbide-dev/carbide-release-artifacts-aarch64:${VERSION}"
-            "nvcr.io/0837451325059433/carbide-dev/carbide-release-artifacts-x86_64:${VERSION}"
+            "${REGISTRY}/nvmetal-carbide:${VERSION}"
+            "${REGISTRY}/carbide-release-artifacts-aarch64:${VERSION}"
+            "${REGISTRY}/carbide-release-artifacts-x86_64:${VERSION}"
           )
 
           FAILED=0
@@ -123,11 +149,11 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: NVIDIA/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
     with:
-      source: nvcr.io/0837451325059433/carbide-dev/nvmetal-carbide
+      source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
-      destination: nvcr.io/0837451325059433/carbide/nvmetal-carbide
+      destination: ${{ needs.prepare.outputs.prod_image_registry }}/nvmetal-carbide
       destination_tag: ${{ needs.prepare.outputs.version }}
     secrets:
       SOURCE_USERNAME: ${{ secrets.NVCR_USERNAME }}
@@ -142,11 +168,11 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: NVIDIA/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
     with:
-      source: nvcr.io/0837451325059433/carbide-dev/carbide-release-artifacts-aarch64
+      source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-aarch64
       source_tag: ${{ needs.prepare.outputs.version }}
-      destination: nvcr.io/0837451325059433/carbide/carbide-release-artifacts-aarch64
+      destination: ${{ needs.prepare.outputs.prod_image_registry }}/carbide-release-artifacts-aarch64
       destination_tag: ${{ needs.prepare.outputs.version }}
     secrets:
       SOURCE_USERNAME: ${{ secrets.NVCR_USERNAME }}
@@ -161,11 +187,11 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: NVIDIA/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
     with:
-      source: nvcr.io/0837451325059433/carbide-dev/carbide-release-artifacts-x86_64
+      source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-x86_64
       source_tag: ${{ needs.prepare.outputs.version }}
-      destination: nvcr.io/0837451325059433/carbide/carbide-release-artifacts-x86_64
+      destination: ${{ needs.prepare.outputs.prod_image_registry }}/carbide-release-artifacts-x86_64
       destination_tag: ${{ needs.prepare.outputs.version }}
     secrets:
       SOURCE_USERNAME: ${{ secrets.NVCR_USERNAME }}
@@ -184,14 +210,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Package and push Helm prereqs chart to production NGC
-        uses: NVIDIA/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
           app-version: ${{ needs.prepare.outputs.version }}
           lint: 'false'
           ngc-key: ${{ secrets.NVCR_PROD_TOKEN }}
-          ngc-path: 0837451325059433/carbide
+          ngc-path: ${{ needs.prepare.outputs.prod_registry_path }}
           ngc-duplicate: fail

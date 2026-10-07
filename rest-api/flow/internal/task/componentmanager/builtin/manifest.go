@@ -27,7 +27,7 @@ import (
 // file. A configured file is authoritative and does not merge with this map.
 func defaultServiceComponentManagers() map[devicetypes.ComponentType]string {
 	return map[devicetypes.ComponentType]string{
-		devicetypes.ComponentTypeCompute:    computenicolegacy.ImplementationName,
+		devicetypes.ComponentTypeCompute:    computenico.ImplementationName,
 		devicetypes.ComponentTypeNVSwitch:   nvswitchnico.ImplementationName,
 		devicetypes.ComponentTypePowerShelf: powershelfnico.ImplementationName,
 	}

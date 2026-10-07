@@ -34,7 +34,7 @@ pub const FIXTURE_DHCP_RELAY_ADDRESS: &str = "192.0.2.1";
 // the test logic before changing it, as at least one test relies on this list
 // _excluding_ certain address space.
 lazy_static! {
-    pub static ref TEST_SITE_PREFIXES: Vec<IpNetwork> = vec![
+    pub(crate) static ref TEST_SITE_PREFIXES: Vec<IpNetwork> = vec![
         IpNetwork::new(
             FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY.network(),
             FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY.prefix(),
@@ -103,7 +103,7 @@ lazy_static! {
     ];
 }
 
-pub fn default_test_eth_virt_data() -> EthVirtData {
+pub(crate) fn default_test_eth_virt_data() -> EthVirtData {
     let site_fabric_networks = TEST_SITE_PREFIXES.iter().copied().collect::<Vec<_>>();
     let site_fabric_prefixes = { SiteFabricPrefixList::from_ipnetwork_vec(site_fabric_networks) };
     EthVirtData {

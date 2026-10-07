@@ -24,7 +24,7 @@ use super::iface::{Filter, GetPartitionOptions, IBFabricRawResponse};
 use super::{IBFabric, IBFabricConfig, IBFabricVersions};
 use crate::errors::IbError;
 
-pub struct DisableIBFabric {}
+pub(super) struct DisableIBFabric {}
 
 #[async_trait]
 impl IBFabric for DisableIBFabric {
@@ -153,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_fabric_rejects_operations() {
-        let disabled = "Failed to call IBFabricManager: ib fabric is disabled".to_string();
+        let disabled = "failed to call IBFabricManager: ib fabric is disabled".to_string();
         check_cases_async(
             [
                 Case {

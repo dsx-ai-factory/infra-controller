@@ -30,7 +30,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 use crate::vpc_prefix::common::{VpcPrefixSelector, get_by_ids, match_all, search};
 
-pub async fn show(
+pub(super) async fn show(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -53,7 +53,7 @@ enum ShowMethod {
     Search(rpc::forge::VpcPrefixSearchQuery),
 }
 
-pub enum ShowOutput {
+pub(in crate::vpc_prefix) enum ShowOutput {
     One {
         vpc_prefix: VpcPrefix,
         history: Vec<StateHistoryRecord>,
@@ -62,7 +62,7 @@ pub enum ShowOutput {
 }
 
 impl ShowOutput {
-    pub fn as_slice(&self) -> &[VpcPrefix] {
+    fn as_slice(&self) -> &[VpcPrefix] {
         match self {
             ShowOutput::One { vpc_prefix, .. } => std::slice::from_ref(vpc_prefix),
             ShowOutput::Many(vpc_prefixes) => vpc_prefixes.as_slice(),
@@ -129,7 +129,7 @@ async fn fetch(
 
 impl ShowOutput {
     /// Format the output data as bytes (probably UTF-8 text).
-    pub fn format_output(&self, format: OutputFormat) -> Vec<u8> {
+    fn format_output(&self, format: OutputFormat) -> Vec<u8> {
         match format {
             OutputFormat::Json => {
                 serde_json::to_vec_pretty(self).expect("Could not serialize as JSON")
@@ -145,7 +145,7 @@ impl ShowOutput {
     }
 
     /// Format the output data and write it to the specified destination.
-    pub fn write_output(
+    pub(in crate::vpc_prefix) fn write_output(
         &self,
         format: OutputFormat,
         destination: Destination,

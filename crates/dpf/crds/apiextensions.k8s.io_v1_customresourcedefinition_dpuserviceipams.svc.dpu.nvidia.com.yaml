@@ -163,12 +163,10 @@ spec:
                       the routes list if true.
                     type: boolean
                   excludeRanges:
-                    description: ExcludeRanges is a list of IP ranges that should
-                      be excluded from the allocation.
+                    description: |-
+                      ExcludeRanges is a list of IP ranges that should be excluded from the allocation.
+                      startIP and endIP are part of the Excluded range.
                     items:
-                      description: |-
-                        ExcludeRange contains range of IP addresses to exclude from allocation
-                        startIP and endIP are part of the Excluded range.
                       properties:
                         endIP:
                           description: EndIP is the end of the range.
@@ -217,6 +215,14 @@ spec:
                       - dst
                       type: object
                     type: array
+                  subnetsPerDPUCluster:
+                    description: |-
+                      SubnetsPerDPUCluster is the number of PrefixSize-sized subnets each DPUCluster should receive.
+                      When specified, the controller will take care of assigning non-overlapping subnets part of the Network in each
+                      DPUCluster that the DPUServiceIPAM is targeting. Leave empty in case you want the whole Network to be consumed
+                      by a single DPUCluster.
+                    format: int32
+                    type: integer
                 required:
                 - network
                 - prefixSize
@@ -226,18 +232,24 @@ spec:
                   IPV4Subnet is the configuration related to splitting a subnet into blocks per node. In this setup, there is a
                   single gateway.
                 properties:
+                  blocksPerDPUCluster:
+                    description: |-
+                      BlocksPerDPUCluster is the number of PerNodeIPCount-sized blocks each DPUCluster should receive.
+                      When specified, the controller will take care of assigning non-overlapping IP blocks part of the Subnet in each
+                      DPUCluster that the DPUServiceIPAM is targeting. Leave empty in case you want the whole Subnet to be consumed by
+                      a single DPUCluster.
+                    format: int32
+                    type: integer
                   defaultGateway:
                     description: |-
                       if true, add gateway as default gateway in the routes list
                       DefaultGateway adds gateway as default gateway in the routes list if true.
                     type: boolean
                   excludeRanges:
-                    description: ExcludeRanges is a list of IP ranges that should
-                      be excluded from the allocation.
+                    description: |-
+                      ExcludeRanges is a list of IP ranges that should be excluded from the allocation.
+                      startIP and endIP are part of the Excluded range.
                     items:
-                      description: |-
-                        ExcludeRange contains range of IP addresses to exclude from allocation
-                        startIP and endIP are part of the Excluded range.
                       properties:
                         endIP:
                           description: EndIP is the end of the range.
@@ -444,6 +456,40 @@ spec:
                   - type
                   type: object
                 type: array
+              dpuClusterAllocations:
+                description: DPUClusterAllocations contains the IPV4Network/IPV4Subnet
+                  allocations per DPUCluster as calculated by the controller.
+                items:
+                  description: DPUClusterAllocation contains the IP range allocations
+                    for a specific DPUCluster.
+                  properties:
+                    dpuCluster:
+                      description: DPUCluster is the NamespacedName of the DPUCluster
+                        in the format `<namespace>/<name>`.
+                      type: string
+                    ipRanges:
+                      description: IPRanges contains the IP ranges allocated to this
+                        DPUCluster.
+                      items:
+                        properties:
+                          endIP:
+                            description: EndIP is the end of the range.
+                            type: string
+                          startIP:
+                            description: StartIP is the start of the range.
+                            type: string
+                        required:
+                        - endIP
+                        - startIP
+                        type: object
+                      type: array
+                  required:
+                  - dpuCluster
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - dpuCluster
+                x-kubernetes-list-type: map
               observedGeneration:
                 description: ObservedGeneration records the Generation observed on
                   the object the last time it was patched.

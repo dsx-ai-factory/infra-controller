@@ -1,0 +1,641 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+//! Generates the `docs/manuals/nico-admin-cli` markdown reference from the live clap command tree.
+//!
+//! The per-command pages are derived from the same man pages the
+//! `generate-man` subcommand produces: we render every command's roff man page
+//! with `clap_mangen`, convert each to GitHub-flavored markdown with `pandoc`,
+//! and reorganize them into one directory per top-level command. Using the man
+//! pages (rather than hand-walking clap's `about`/`after_long_help`) is what
+//! gives each page its full SYNOPSIS and per-flag OPTIONS detail.
+//!
+//! Layout: `commands/<command>/<command>.md` is the base page for a top-level
+//! command, and each (flattened) descendant gets `commands/<command>/<command>-<sub>.md`
+//! beside it, cross-linked via a breadcrumb and a Subcommands table. The four
+//! domain index pages (Hardware/Network/Tenant/Admin) are written from
+//! [`crate::cfg::cli_options::domain_for_command`]. The hand-authored
+//! `README.md` overview is not touched.
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+use clap::{Command, CommandFactory};
+
+use crate::cfg::cli_options::{CliDomain, CliOptions, domain_for_command};
+use crate::errors::{CarbideCliError, CarbideCliResult};
+
+const BIN: &str = "nico-admin-cli";
+const DOMAINS: [CliDomain; 4] = [
+    CliDomain::Hardware,
+    CliDomain::Network,
+    CliDomain::Tenant,
+    CliDomain::Admin,
+];
+
+pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
+    let root = CliOptions::command().name(BIN);
+
+    // Render every command's roff man page into a scratch directory. clap_mangen
+    // names each file by the full command path joined with '-' (e.g.
+    // `nico-admin-cli-vpc-show.1`), which we reconstruct per node below.
+    let man_dir = std::env::temp_dir().join("nico-admin-cli-cli-docs-man");
+    let _ = std::fs::remove_dir_all(&man_dir);
+    std::fs::create_dir_all(&man_dir)?;
+    clap_mangen::generate_to(root.clone(), &man_dir)?;
+
+    // One directory per top-level command, holding that command's page plus a
+    // page for each (flattened) descendant. Rebuilt from scratch so a renamed or
+    // removed command can't leave a stale page behind.
+    let commands_dir = out_dir.join("commands");
+    let _ = std::fs::remove_dir_all(&commands_dir);
+    std::fs::create_dir_all(&commands_dir)?;
+
+    // (name, one-line description, domain) for every visible top-level command,
+    // used to build the domain index pages.
+    let mut top_level: Vec<(String, String, CliDomain)> = Vec::new();
+
+    for sub in root.get_subcommands() {
+        if sub.is_hide_set() || sub.get_name() == "help" {
+            continue;
+        }
+        let name = sub.get_name().to_string();
+        let about = first_line(&styled(sub.get_about()));
+        let domain = domain_for_command(&name).ok_or_else(|| {
+            CarbideCliError::GenericError(format!(
+                "command `{name}` has no CLI-docs domain; add it to \
+                 crates/admin-cli/cli_domains.yaml"
+            ))
+        })?;
+
+        let dir = commands_dir.join(&name);
+        std::fs::create_dir_all(&dir)?;
+        render_node(
+            sub,
+            vec![BIN.to_string(), name.clone()],
+            domain,
+            &man_dir,
+            &dir,
+        )?;
+
+        top_level.push((name, about, domain));
+    }
+
+    top_level.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for domain in DOMAINS {
+        let rows: Vec<&(String, String, CliDomain)> =
+            top_level.iter().filter(|c| c.2 == domain).collect();
+        std::fs::write(
+            out_dir.join(format!("{}.md", slug(domain))),
+            render_domain_index(domain, &rows),
+        )?;
+    }
+
+    let _ = std::fs::remove_dir_all(&man_dir);
+    Ok(())
+}
+
+/// Writes the markdown page for `cmd` (whose full path from the binary is
+/// `path`, e.g. `["nico-admin-cli", "vpc", "show"]`) and recurses into its
+/// visible subcommands. Every page for one top-level command lives flat in
+/// `dir`, named by the path below the binary joined with '-' (so `vpc show`
+/// becomes `vpc-show.md`).
+fn render_node(
+    cmd: &Command,
+    path: Vec<String>,
+    domain: CliDomain,
+    man_dir: &Path,
+    dir: &Path,
+) -> CarbideCliResult<()> {
+    // The man page body, minus the sections we re-render ourselves: SUBCOMMANDS
+    // (we emit a linked table) and EXTRA (the after_long_help examples, which
+    // roff mangles — we re-render them from the clap command instead).
+    let man_file = man_dir.join(format!("{}.1", path.join("-")));
+    let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
+    let body = clean_pandoc_markdown(&format_markdown_links(&body));
+    let body = if is_machine_validation_log_command(&path) {
+        let usage = cmd.clone().render_usage().to_string();
+        replace_synopsis(&body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
+    } else {
+        body
+    };
+
+    let children: Vec<&Command> = cmd
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+        .collect();
+
+    std::fs::write(
+        dir.join(format!("{}.md", stem(&path))),
+        render_command_page(cmd, &path, domain, &body, &children),
+    )?;
+
+    for child in &children {
+        let mut child_path = path.clone();
+        child_path.push(child.get_name().to_string());
+        render_node(child, child_path, domain, man_dir, dir)?;
+    }
+    Ok(())
+}
+
+fn render_command_page(
+    cmd: &Command,
+    path: &[String],
+    domain: CliDomain,
+    body: &str,
+    children: &[&Command],
+) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "# `{}`\n", path.join(" "));
+    let _ = writeln!(s, "{}\n", breadcrumb(path, domain));
+
+    // SYNOPSIS / DESCRIPTION / OPTIONS lifted from the man page.
+    let _ = writeln!(s, "{}\n", body.trim_end());
+
+    if let Some(examples) = example_commands(cmd) {
+        let _ = writeln!(s, "## Examples\n");
+        let _ = writeln!(s, "```sh\n{examples}\n```\n");
+    }
+
+    if !children.is_empty() {
+        let _ = writeln!(s, "## Subcommands\n");
+        let _ = writeln!(s, "| Subcommand | Description |");
+        let _ = writeln!(s, "|---|---|");
+        // Children live beside this page; their stem extends this command's.
+        let prefix = stem(path);
+        for child in children {
+            let child_name = child.get_name();
+            let _ = writeln!(
+                s,
+                "| [`{child_name}`](./{prefix}-{child_name}.md) | {} |",
+                first_line(&styled(child.get_about()))
+            );
+        }
+        let _ = writeln!(s);
+    }
+
+    let _ = writeln!(s, "---\n");
+    let _ = writeln!(
+        s,
+        "**Related:** [{} commands](../../{}.md) · [CLI reference index](../../README.md)",
+        domain.title(),
+        slug(domain),
+    );
+    s
+}
+
+fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)]) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "# CLI reference — {}\n", domain.title());
+    let _ = writeln!(s, "{}\n", intro(domain));
+    let _ = writeln!(
+        s,
+        "For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). \
+         Browse all command groups in the [CLI reference index](./README.md).\n"
+    );
+    let _ = writeln!(s, "| Command | Description |");
+    let _ = writeln!(s, "|---|---|");
+    for (name, about, _) in rows {
+        let about = if about.is_empty() {
+            String::new()
+        } else if about.ends_with('.') {
+            about.clone()
+        } else {
+            format!("{about}.")
+        };
+        let _ = writeln!(s, "| [`{name}`](./commands/{name}/{name}.md) | {about} |");
+    }
+    s
+}
+
+// ---- helpers ----
+
+/// The page stem for a command path: the path below the binary joined with '-'
+/// (`["nico-admin-cli", "vpc", "show"]` -> `"vpc-show"`). Both the file name
+/// and the in-directory links use this.
+fn stem(path: &[String]) -> String {
+    path[1..].join("-")
+}
+
+/// A one-line navigation trail: the domain index, then each ancestor command as
+/// a link, then the current command in bold.
+fn breadcrumb(path: &[String], domain: CliDomain) -> String {
+    let mut parts = vec![format!(
+        "[{} commands](../../{}.md)",
+        domain.title(),
+        slug(domain)
+    )];
+    // Ancestors are everything between the binary and this command; each links
+    // to its own page (which shares this directory).
+    for depth in 2..path.len() {
+        let ancestor = &path[depth - 1];
+        let ancestor_stem = path[1..depth].join("-");
+        parts.push(format!("[{ancestor}](./{ancestor_stem}.md)"));
+    }
+    parts.push(format!(
+        "**{}**",
+        path.last()
+            .expect("a command path always has at least the binary")
+    ));
+    format!("*{}*", parts.join(" › "))
+}
+
+/// Removes the named top-level (`## `) sections from pandoc's markdown, heading
+/// included, up to the next `## ` heading or end of document. Matching is
+/// case-insensitive on the section title (man sections are single words like
+/// `SUBCOMMANDS`).
+fn strip_sections(md: &str, names: &[&str]) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in md.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            skipping = names.iter().any(|n| heading.trim().eq_ignore_ascii_case(n));
+            if skipping {
+                continue;
+            }
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Turns documentation references used in terminal help into links that render
+/// correctly in generated command-reference pages. Terminal help keeps the
+/// plain reference, while the Markdown reference gains a reader-friendly label.
+fn format_markdown_links(md: &str) -> String {
+    md.replace(
+        "docs/configuration/templated-ipxe-operating-systems.md",
+        "[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)",
+    )
+    .replace(
+        "https://docs.rs/duration-str/latest/duration_str/",
+        "[duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)",
+    )
+    .replace(
+        "https://grafana.example.com",
+        "[https://grafana.example.com](https://grafana.example.com)",
+    )
+    .replace(
+        "https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md",
+        "[primary-interface command documentation](https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md)",
+    )
+    .replace(
+        "https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home",
+        "[Phone-home](../../../../configuration/tenant_management.md#phone-home)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/3706",
+        "[PR #3706](https://github.com/dsx-ai-factory/infra-controller/pull/3706)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/6359",
+        "[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)",
+    )
+    .replace(
+        "https://host:50051",
+        "[https://host:50051](https://host:50051)",
+    )
+}
+
+/// Cleans up Pandoc's literal-oriented GFM rendering of a man page.
+///
+/// Pandoc escapes the brackets, angle brackets, pipes, and backticks used by
+/// clap's command syntax. Those escapes render correctly, but make every page
+/// unnecessarily difficult to read in source form. Render the synopsis and
+/// option signatures as code, where the punctuation is naturally literal,
+/// and remove the remaining safe escapes from prose.
+fn clean_pandoc_markdown(md: &str) -> String {
+    let mut out = String::new();
+    let mut section = "";
+    let mut synopsis_open = false;
+    let mut in_inline_code = false;
+
+    for line in md.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if synopsis_open {
+                out.push_str("```\n\n");
+                synopsis_open = false;
+            }
+
+            section = heading.trim();
+            out.push_str(line);
+            out.push_str("\n\n");
+            if section.eq_ignore_ascii_case("SYNOPSIS") {
+                out.push_str("```text\n");
+                synopsis_open = true;
+            }
+            continue;
+        }
+
+        if synopsis_open {
+            if !line.is_empty() {
+                out.push_str(&plain_cli_syntax(line));
+                out.push('\n');
+            }
+            continue;
+        }
+
+        if section.eq_ignore_ascii_case("OPTIONS") && line.starts_with("**") && line.ends_with("  ")
+        {
+            let signature = plain_cli_syntax(line.trim_end());
+            let _ = writeln!(out, "`{signature}`\n");
+            continue;
+        }
+
+        let had_hard_break = line.ends_with("  ");
+        let line = line.trim_end_matches(' ');
+        let line = line.strip_suffix('\\').unwrap_or(line);
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&clean_pandoc_prose(line, &mut in_inline_code));
+            out.push('\n');
+            if had_hard_break {
+                out.push('\n');
+            }
+        }
+    }
+
+    if synopsis_open {
+        out.push_str("```\n");
+    }
+
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out
+}
+
+fn plain_cli_syntax(line: &str) -> String {
+    line.replace("**", "")
+        .replace('*', "")
+        .replace("\\[", "[")
+        .replace("\\]", "]")
+        .replace("\\<", "<")
+        .replace("\\>", ">")
+        .replace("\\|", "|")
+        .replace("\\`", "`")
+}
+
+/// `clap_mangen` does not preserve the explicit usage for the Machine
+/// Validation log commands. Render their synopsis from clap's runtime command
+/// tree so required values and paired selectors remain visible in the generated
+/// reference.
+fn is_machine_validation_log_command(path: &[String]) -> bool {
+    path.get(1).is_some_and(|part| part == "machine-validation")
+        && path.get(2).is_some_and(|part| part == "logs")
+}
+
+fn replace_synopsis(markdown: &str, usage: &str) -> String {
+    const SYNOPSIS: &str = "## SYNOPSIS\n\n";
+    let Some(start) = markdown.find(SYNOPSIS) else {
+        return markdown.to_owned();
+    };
+    let content_start = start + SYNOPSIS.len();
+    let Some(next_section) = markdown[content_start..].find("\n## ") else {
+        return markdown.to_owned();
+    };
+    let content_end = content_start + next_section;
+    format!(
+        "{}{}{}{}\n```\n{}",
+        &markdown[..start],
+        SYNOPSIS,
+        "```text\n",
+        usage,
+        &markdown[content_end..]
+    )
+}
+
+/// Removes Pandoc escapes that are unnecessary in normal prose. Escaped angle
+/// brackets are converted to code spans so placeholders cannot be interpreted
+/// as HTML. Angle brackets already inside an escaped backtick pair stay in the
+/// surrounding code span.
+fn clean_pandoc_prose(line: &str, in_inline_code: &mut bool) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+
+    while let Some(pos) = rest.find('\\') {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+
+        if let Some(after) = rest.strip_prefix("\\`") {
+            out.push('`');
+            *in_inline_code = !*in_inline_code;
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\<") {
+            if let Some(end) = after.find("\\>") {
+                let value = after[..end].trim_matches('*').replace("\\|", "|");
+                if *in_inline_code {
+                    let _ = write!(out, "<{value}>");
+                } else {
+                    let _ = write!(out, "`<{value}>`");
+                }
+                rest = &after[end + 2..];
+            } else if *in_inline_code {
+                out.push('<');
+                rest = after;
+            } else {
+                out.push_str("\\<");
+                rest = after;
+            }
+        } else if let Some(after) = rest.strip_prefix("\\>") {
+            out.push('>');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\[") {
+            out.push('[');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\]") {
+            out.push(']');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\|") {
+            out.push('|');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\#") {
+            out.push_str("`#`");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\*") {
+            out.push_str("`*`");
+            rest = after;
+        } else {
+            out.push('\\');
+            rest = &rest[1..];
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Converts a roff man page to GitHub-flavored markdown via pandoc, demoting the
+/// man page's `# NAME`/`# OPTIONS`/… sections to `## ` so each generated page
+/// can own the `# ` title (the full command invocation).
+fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
+    let mut pandoc = pandoc::new();
+    pandoc.add_input(man_file);
+    pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());
+    pandoc.set_output_format(pandoc::OutputFormat::Other("gfm".to_string()), Vec::new());
+    // Keep list spacing consistent across Pandoc versions and with Markdown lint.
+    pandoc.add_option(pandoc::PandocOption::TabStop(2));
+    pandoc.add_option(pandoc::PandocOption::ShiftHeadingLevelBy(1));
+    pandoc.set_output(pandoc::OutputKind::Pipe);
+
+    match pandoc.execute() {
+        Ok(pandoc::PandocOutput::ToBuffer(markdown)) => Ok(markdown),
+        Ok(_) => Err(CarbideCliError::GenericError(format!(
+            "pandoc returned non-text output converting man page {}",
+            man_file.display()
+        ))),
+        Err(err) => Err(CarbideCliError::GenericError(format!(
+            "while converting man page {} to markdown with pandoc: {err}",
+            man_file.display()
+        ))),
+    }
+}
+
+// A clap `StyledStr` rendered to plain text.
+fn styled(s: Option<&clap::builder::StyledStr>) -> String {
+    s.map(|s| s.to_string()).unwrap_or_default()
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+// The example command lines from a command's `after_long_help` EXAMPLES block:
+// the lines beginning with the `$ ` shell prompt, with the prompt stripped.
+fn example_commands(cmd: &Command) -> Option<String> {
+    let help = cmd.get_after_long_help()?.to_string();
+    let cmds: Vec<String> = help
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("$ "))
+        .map(str::to_string)
+        .collect();
+    (!cmds.is_empty()).then(|| cmds.join("\n"))
+}
+
+fn slug(d: CliDomain) -> &'static str {
+    match d {
+        CliDomain::Hardware => "hardware",
+        CliDomain::Network => "network",
+        CliDomain::Tenant => "tenant",
+        CliDomain::Admin => "admin",
+    }
+}
+
+fn intro(d: CliDomain) -> &'static str {
+    match d {
+        CliDomain::Hardware => {
+            "Live hardware and lifecycle operations: machines, BMC, DPUs, firmware \
+             and component lifecycle, attestation, low-level passthrough (Redfish, \
+             RMS, MLX), and operator utilities."
+        }
+        CliDomain::Network => {
+            "VPCs, peerings, prefixes, network segments and devices, security groups, \
+             IB/NVLink fabric partitions, IP/domain lookups, and resource pools."
+        }
+        CliDomain::Tenant => {
+            "Tenants and tenant keysets, instances and instance types, compute \
+             allocations, the declarative `expected-*` inventory, operating systems \
+             and OS images, iPXE templates, extension services, and the site explorer."
+        }
+        CliDomain::Admin => "CLI and system utilities.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_pandoc_markdown, format_markdown_links, replace_synopsis};
+
+    #[test]
+    fn repository_doc_paths_become_links_in_generated_markdown() {
+        let markdown = "See docs/configuration/templated-ipxe-operating-systems.md.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)."
+        );
+    }
+
+    #[test]
+    fn bare_urls_become_valid_markdown_links() {
+        let markdown = "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, https://host:50051, or https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), [https://host:50051](https://host:50051), or [Phone-home](../../../../configuration/tenant_management.md#phone-home)."
+        );
+    }
+
+    #[test]
+    fn pandoc_escapes_are_replaced_with_markdown_code() {
+        let markdown = concat!(
+            r#"## SYNOPSIS
+
+**nico-admin-cli example** \<**--name**\> \[**--kind**\]
+
+## OPTIONS
+
+**--name** *\<NAME\>* \[default: example\]"#,
+            "  \n",
+            r#"Name containing \<VALUE\>.\
+
+\
+*Possible values:*
+
+- a\|b
+
+An inline \`HostInband\` value and \`mac=\<mac\>\` selector.
+"#,
+        );
+
+        assert_eq!(
+            clean_pandoc_markdown(markdown),
+            r#"## SYNOPSIS
+
+```text
+nico-admin-cli example <--name> [--kind]
+```
+
+## OPTIONS
+
+`--name <NAME> [default: example]`
+
+Name containing `<VALUE>`.
+
+*Possible values:*
+
+- a|b
+
+An inline `HostInband` value and `mac=<mac>` selector.
+"#
+        );
+    }
+
+    #[test]
+    fn explicit_usage_replaces_the_man_page_synopsis() {
+        let markdown =
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nold usage\n```\n\n## DESCRIPTION\n\ntext\n";
+
+        assert_eq!(
+            replace_synopsis(markdown, "nico-admin-cli logs --id <ID>"),
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nnico-admin-cli logs --id <ID>\n```\n\n## DESCRIPTION\n\ntext\n"
+        );
+    }
+}

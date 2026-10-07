@@ -21,7 +21,7 @@ use serde_json::json;
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
 
-pub fn resource<'a>(system_id: &str) -> redfish::Resource<'a> {
+pub(crate) fn resource<'a>(system_id: &str) -> redfish::Resource<'a> {
     let odata_id = format!(
         "{}/Bios",
         redfish::computer_system::resource(system_id).odata_id
@@ -34,26 +34,33 @@ pub fn resource<'a>(system_id: &str) -> redfish::Resource<'a> {
     }
 }
 
-pub fn change_password_target(resource: &redfish::Resource<'_>) -> String {
+pub(super) fn change_password_target(resource: &redfish::Resource<'_>) -> String {
     format!("{}/Actions/Bios.ChangePassword", resource.odata_id)
 }
 
-pub fn builder(resource: &redfish::Resource) -> BiosBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> BiosBuilder {
     BiosBuilder {
         value: resource.json_patch(),
     }
 }
 
-pub struct BiosBuilder {
+pub(crate) struct BiosBuilder {
     value: serde_json::Value,
 }
 
 impl BiosBuilder {
-    pub fn attributes(self, value: serde_json::Value) -> Self {
+    pub(crate) fn attributes(self, value: serde_json::Value) -> Self {
         self.apply_patch(json!({"Attributes": value}))
     }
 
-    pub fn build(self) -> serde_json::Value {
+    /// libredfish's HPE `Bios` model requires `@odata.context` (real iLOs
+    /// always send it); without it the machine controller's lockdown check
+    /// fails to deserialize the response.
+    pub(crate) fn odata_context(self, value: &str) -> Self {
+        self.apply_patch(json!({"@odata.context": value}))
+    }
+
+    pub(crate) fn build(self) -> serde_json::Value {
         self.value
     }
 

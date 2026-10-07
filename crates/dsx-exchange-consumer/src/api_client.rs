@@ -117,9 +117,9 @@ impl RackHealthReportSink for ConsoleRackHealthSink {
     ) -> Result<(), DsxConsumerError> {
         tracing::info!(
             rack_id = %rack_id,
-            "Inserting rack health override: {} successes and {} alerts",
-            report.successes.len(),
-            report.alerts.len()
+            success_count = report.successes.len(),
+            alert_count = report.alerts.len(),
+            "Inserting rack health override"
         );
         for alert in &report.alerts {
             tracing::warn!(rack_id = %rack_id, alert = ?alert, "Rack health alert");
@@ -141,7 +141,7 @@ impl RackHealthReportSink for ConsoleRackHealthSink {
 fn parse_rack_id(rack_id: &str) -> Result<RackId, DsxConsumerError> {
     RackId::from_str(rack_id).map_err(|e| {
         DsxConsumerError::Api(tonic::Status::invalid_argument(format!(
-            "Invalid rack ID: {e}"
+            "invalid rack ID: {e}"
         )))
     })
 }

@@ -32,9 +32,9 @@ Check whether infinite boot is enabled on a machine:
     --machine 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: InfiniteBootArgs,
+    inner: InfiniteBootArgs,
 }
 
 impl From<Args> for forgerpc::IsInfiniteBootEnabledRequest {

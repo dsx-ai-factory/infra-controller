@@ -19,7 +19,10 @@ NICo treats each managed host as a host server paired with one or more BlueField
 
 ### `dpu-agent`
 
-The DPU agent runs as a daemon on the DPU. In service names and logs it appears as `nico-dpu-agent`; in the documentation it is usually referred to as `dpu-agent`.
+The DPU agent runs as a daemon on the DPU. A systemd deployment uses
+`forge-dpu-agent.service`. A DPF deployment runs the `nico-dpu-agent` container,
+and centralized logs identify it as `nico-dpu-agent`. This documentation uses
+`dpu-agent` when the distinction does not matter.
 
 The agent periodically calls `GetManagedHostNetworkConfig` to fetch the desired configuration from NICo Core. It applies the configuration locally, runs health checks, and reports status back with `RecordDpuNetworkStatus`. The report includes applied configuration versions and DPU health.
 
@@ -40,7 +43,28 @@ This is a security benefit: the DPU enforces host isolation before the host rece
 
 ### NICo Metadata Service
 
-The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. Tenants can use MDS to retrieve information such as the Machine ID and boot or operating system metadata for their instance. MDS runs on the DPU rather than on the host, so its responses are trusted independently of the host OS.
+The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. It runs on the DPU rather than on the host, so its responses are trusted independently of the host OS. The integrated endpoint in `dpu-agent` and the standalone FMDS service expose the same metadata paths and status behavior.
+
+List the available categories at `/latest/meta-data` or `/latest/meta-data/`. The response contains these names:
+
+| Metadata path | Value |
+|---|---|
+| `/latest/meta-data/hostname` | Hostname selected for the instance. |
+| `/latest/meta-data/instance-name` | The instance's `metadata.name` value. |
+| `/latest/meta-data/sitename` | NICo site name. |
+| `/latest/meta-data/machine-id` | Managed machine identifier. |
+| `/latest/meta-data/instance-id` | Instance identifier. |
+| `/latest/meta-data/asn` | Autonomous system number assigned to the instance. |
+| `/latest/meta-data/public-ipv4` | Public IPv4 metadata. |
+| `/latest/meta-data/public-ipv6` | Public IPv6 metadata. |
+
+For example, from a tenant instance:
+
+```bash
+curl -fsS http://169.254.169.254/latest/meta-data/instance-name
+```
+
+`instance-name` is independent of `hostname`; adding or changing the instance name does not change the hostname endpoint. If the instance metadata has no nonempty name, both the integrated and standalone services return HTTP 404 with `instance name not available`. The category remains present in the metadata index so clients can discover the supported contract.
 
 ### HBN and Containerized Cumulus
 
@@ -59,7 +83,7 @@ DPU OS installation happens as part of the managed host state machine after Site
 NICo uses two different BFB images. They are not interchangeable:
 
 - **NICo BFB**: The image installed during the managed host state machine and reprovisioning. It is built from the vanilla DOCA BFB and customized with NICo services: `dpu-agent`, the DPU DHCP server, MDS, HBN installer and configuration, NICo root CA, and scout. This is the image that makes the DPU a fully managed component. For build instructions, see [Building NICo Containers](../manuals/building_nico_containers.md#building-the-dpu-bfb).
-- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used only for pre-ingestion recovery via rshim (`copy-bfb-to-dpu-rshim`) to return a DPU to a clean factory state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
+- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used for pre-ingestion recovery using rshim (`copy-bfb-to-dpu-rshim`) or [between-install decommissioning](../decommissioning/hosts.md) to return a DPU to a clean pre-ingestion state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
 
 ### How NICo Chooses the Install Method
 
@@ -108,8 +132,8 @@ Because there is no Redfish task to poll, NICo monitors the network install indi
 During normal ingestion no manual action is required. Operators can monitor the state with:
 
 ```bash
-nico-admin-cli -c <api-url> managed-host show --all
-nico-admin-cli -c <api-url> managed-host show <machine-id>
+nico-admin-cli -a <api-url> managed-host show --all
+nico-admin-cli -a <api-url> managed-host show <machine-id>
 ```
 
 For Redfish BFB installs, the handler outcome reports install percentage. For UEFI HTTP Boot installs, the handler outcome reports DPU discovery and reboot status.
@@ -125,9 +149,9 @@ Most DPU OS installation failures are diagnosed from the managed host state, `ni
 | Task exception or unknown state | Redfish | Unexpected Redfish task status. | Inspect the Redfish task messages in `nico-api` logs and confirm the BFB URL served by `nico-pxe`. |
 | rshim ownership conflict | rshim (SCP) | Host holds rshim and the DPU BMC cannot initiate the copy. | Use `--pre-copy-powercycle` when installing a fresh BFB via rshim to release host control first. |
 | DPU never becomes reachable after reboot | UEFI HTTP | DPU failed to PXE boot or kickstart failed. | Check `nico-pxe` logs for the DPU's PXE request. Verify the DPU boot order is set to UEFI HTTP. Check `nico-api` logs for the DPU BMC IP. |
-| Stuck in `WaitingForNetworkInstall` | UEFI HTTP | DPU booted but did not install the OS or `dpu-agent` did not start. | SSH to the DPU via its BMC/rshim and check `journalctl -fu nico-dpu-agent`. NICo reboots the DPU automatically if it does not appear within the reboot timeout. |
+| Stuck in `WaitingForNetworkInstall` | UEFI HTTP | DPU booted but did not install the OS or `dpu-agent` did not start. | SSH to a systemd DPU through its BMC or rshim and check `journalctl -fu forge-dpu-agent.service`. For DPF, inspect the `nico-dpu-agent` container logs. NICo reboots the DPU automatically if it does not appear within the reboot timeout. |
 
-For the manual rshim recovery command (which installs the preingestion BFB, not the NICo BFB) and additional pairing troubleshooting, see [DPU-Related Issues: Installing a Fresh DPU OS](../provisioning/ingesting-hosts.md#dpu-related-issues-installing-a-fresh-dpu-os). For the full DPU troubleshooting workflow, see [`WaitingForNetworkConfig` and DPU health](../playbooks/stuck_objects/waiting_for_network_config.md).
+[DPU-Related Issues: Installing a Fresh DPU OS](../provisioning/ingesting-hosts.md#dpu-related-issues-installing-a-fresh-dpu-os) documents the manual rshim recovery command (which installs the preingestion BFB, not the NICo BFB) and additional pairing troubleshooting. For the full DPU troubleshooting workflow, refer to [Waiting for Network Configuration and DPU Health](../playbooks/stuck_objects/waiting_for_network_config.md).
 
 ## Firmware Upgrades
 
@@ -164,8 +188,24 @@ A DPU update is treated as a host-level maintenance event because the host and i
 Operators can inspect DPU firmware status with:
 
 ```bash
-nico-admin-cli -c <api-url> dpu versions
+nico-admin-cli -a <api-url> dpu versions
 ```
+
+### Auditing NIC Firmware Across the Site
+
+A BlueField operating in NIC mode runs with its Arm OS down, so it cannot report its own NIC firmware and never appears in the `dpu versions` inventory. Site exploration already captures each host BMC's Redfish PCIe inventory, and `site-explorer mlx-devices` reports every BlueField and SuperNIC from that view - part number, serial, NIC firmware, and the mode the device's own BMC reports - so cards in NIC mode stay visible to firmware audits:
+
+```bash
+nico-admin-cli -a <api-url> site-explorer mlx-devices
+```
+
+You can filter to devices operating as NICs whose firmware is below a desired version:
+
+```bash
+nico-admin-cli -a <api-url> site-explorer mlx-devices --nic-mode-only --expected-version 32.42.1000
+```
+
+`--host <bmc-ip>` restricts the report to one host BMC. The report's `DPU BMC IP` column gives the address to target for an upgrade; a device whose DPU BMC has not been explored yet still appears, without the mode and DPU BMC fields. Refer to the [mlx-devices CLI reference](../manuals/nico-admin-cli/commands/site-explorer/site-explorer-mlx-devices.md) for the full flag and output list.
 
 ## Containerized Cumulus and NVUE
 
@@ -178,9 +218,14 @@ After the DPU OS is installed, the `dpu-agent` keeps HBN configured by applying 
 
 ### Configuration Versioning
 
-Configuration is versioned. NICo maintains separate version numbers for `managedhost_network_config` (site controller lifecycle changes) and `instance_network_config` (tenant-driven changes). NICo only considers the DPU synchronized when the DPU reports the expected versions for both and reports itself healthy.
+Configuration is versioned. NICo maintains separate version numbers for `managedhost_network_config` (site controller lifecycle changes) and `instance_network_config` (tenant-driven changes). NICo considers the network configuration synchronized when the DPU reports the expected versions for both. Health classifications and primary p0 readiness determine whether normal instance provisioning can advance.
 
-After any configuration change, the `dpu-agent` raises a `PostConfigCheckWait` alert for approximately 30 seconds. This brief hold gives the DPU time to verify that the new configuration is stable (BGP sessions re-establish, services restart) before NICo treats it as applied.
+After an agent iteration changes HBN or reloads local DHCP in ContainerExec
+mode, `dpu-agent` adds a `PostConfigCheckWait` alert to one health report. NICo
+waits for the next health sample before it acts on the new configuration
+version. This is not a fixed timer. Refer to
+[DPU ToR Uplink Health](dpu_configuration.md#dpu-tor-uplink-health) for the
+complete behavior.
 
 ### Isolation Behavior
 
@@ -196,7 +241,7 @@ The `dpu-agent` runs periodic health checks and includes the results in every `R
 
 | Health probe | What it checks |
 |---|---|
-| BGP peering | Sessions established to all configured TOR and route server peers. |
+| BGP peering | p0 and p1 ToR transport sessions, route server peers, and FRR IPv6 unicast address families when required for FNN. |
 | Required services | Mandatory DPU services (HBN container, DHCP, etc.) are running. |
 | Restricted mode | DPU is not in an unexpected restricted mode. |
 | Disk utilization | DPU filesystem usage is below the configured threshold. |
@@ -207,17 +252,32 @@ The `dpu-agent` runs periodic health checks and includes the results in every `R
 
 NICo uses DPU health to gate state transitions and allocation:
 
-- If the DPU has not recently reported that it is up, healthy, and synchronized to the desired configuration, the managed host state does not advance.
+- If a required DPU has not reported a current observation, or its reported
+  versions do not match the desired configuration, the managed host state does
+  not advance.
 - If the health report contains alerts with the `PreventAllocations` classification, the host is not available for new tenant allocation.
+- Alerts with `PreventHostStateChanges` block the host transitions that enforce
+  that classification.
+- During normal instance provisioning, a p0 `BgpPeeringTor` transport alert also blocks
+  PXE readiness. A lone p1 failure does not prevent allocation or block host
+  state transitions.
 - If the `dpu-agent` stops sending reports entirely, NICo records a `HeartbeatTimeout` health alert against `nico-dpu-agent`.
+
+The ToR transport policy applies to both DPF agents that use NVUE and non-DPF
+agents that use FRR. The FRR path also checks IPv6 unicast negotiation when it
+is required for an FNN configuration with an IPv6 loopback. Refer to
+[DPU ToR Uplink Health](dpu_configuration.md#dpu-tor-uplink-health) for the
+configuration values, classifications, and transport state matrix.
 
 ### Investigating Unhealthy DPUs
 
 When a DPU becomes unhealthy, inspect the managed host state and DPU health report:
 
 ```bash
-nico-admin-cli -c <api-url> managed-host show <machine-id>
-nico-admin-cli -c <api-url> machine network status
+nico-admin-cli -a <api-url> managed-host show <machine-id>
+nico-admin-cli -a <api-url> dpu network status
+nico-admin-cli -a <api-url> dpu network config --machine-id <dpu-machine-id>
+nico-admin-cli -a <api-url> dpu health-report show <dpu-machine-id>
 ```
 
 Key fields to check in the output:
@@ -226,7 +286,7 @@ Key fields to check in the output:
 - **Last seen**: when the DPU last reported to NICo. A stale timestamp suggests the DPU agent has crashed or the DPU is offline.
 - **State SLA**: if the host has been in its current state longer than the SLA, the output shows `In State > SLA: true` with the breach reason.
 
-For the full troubleshooting workflow, including how to check logs via Grafana/Loki, verify DPU liveliness, restart the agent, and diagnose specific health probe alerts, see [`WaitingForNetworkConfig` and DPU health](../playbooks/stuck_objects/waiting_for_network_config.md).
+[Waiting for Network Configuration and DPU Health](../playbooks/stuck_objects/waiting_for_network_config.md) documents the full troubleshooting workflow. This workflow includes how to check logs using Grafana or Loki, verify DPU liveliness, restart the agent, and diagnose specific health probe alerts.
 
 ## DPU Reprovisioning
 
@@ -252,18 +312,42 @@ Automatic DPU reprovisioning is triggered when Machine Update Manager selects an
 The API requires a `HostUpdateInProgress` health alert on the host before it accepts a reprovisioning request. Use `--update-message` to apply this alert:
 
 ```bash
-nico-admin-cli -c <api-url> dpu reprovision set \
+nico-admin-cli -a <api-url> dpu reprovision set \
   --id <host-or-dpu-machine-id> \
   --update-message "<maintenance-reference>"
 ```
 
 Firmware is always verified and updated during reprovisioning regardless of whether `--update-firmware` is passed. The `--update-firmware` flag is accepted but deprecated.
 
+REST callers must create the same health precondition before starting reprovisioning:
+
+```bash
+curl -X PUT "${BASE_URL}/v2/org/${ORG}/nico/machine/${MACHINE_ID}/health-report" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "maintenance.dpu-reprovision",
+    "mode": "Merge",
+    "alerts": [{
+      "id": "HostUpdateInProgress",
+      "message": "DPU reprovisioning in progress",
+      "classifications": ["PreventAllocations"]
+    }]
+  }'
+
+curl -X PATCH "${BASE_URL}/v2/org/${ORG}/nico/machine/${MACHINE_ID}/dpu/reprovision" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"Set"}'
+```
+
+Use `Set` mode in the PATCH operation to start reprovisioning and `Clear` to remove a pending request. `Restart` mode accepts a host ID only, and restarts DPUs that already have a reprovisioning request. If an Instance is attached to the Machine, also pass `"acknowledgeAttachedInstance": true`. The REST `updateFirmware` field is accepted for compatibility, but firmware is always verified and updated during reprovisioning.
+
 ### Monitoring Reprovisioning Progress
 
 ```bash
-nico-admin-cli -c <api-url> dpu reprovision list
-nico-admin-cli -c <api-url> managed-host show <machine-id>
+nico-admin-cli -a <api-url> dpu reprovision list
+nico-admin-cli -a <api-url> managed-host show <machine-id>
 ```
 
 The `managed-host show` output displays the current reprovisioning substate, percent complete for BFB installation (when available), and any handler errors.
@@ -273,13 +357,13 @@ The `managed-host show` output displays the current reprovisioning substate, per
 To restart a DPU reprovisioning flow for all DPUs on a host:
 
 ```bash
-nico-admin-cli -c <api-url> dpu reprovision restart --id <host-machine-id>
+nico-admin-cli -a <api-url> dpu reprovision restart --id <host-machine-id>
 ```
 
 To clear a pending reprovisioning request that has not started:
 
 ```bash
-nico-admin-cli -c <api-url> dpu reprovision clear --id <host-or-dpu-machine-id>
+nico-admin-cli -a <api-url> dpu reprovision clear --id <host-or-dpu-machine-id>
 ```
 
 For the complete reprovisioning state machine, see [DPU Reprovision State Details](../architecture/state_machines/managedhost.md#dpu-reprovision-state-details-dpureprovisionstate).

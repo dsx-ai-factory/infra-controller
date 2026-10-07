@@ -1,0 +1,51 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.derives;
+
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
+message AnnotatedMessage {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+
+  oneof payload {
+    string text = 1;
+    uint64 number = 2;
+  }
+}
+
+enum AnnotatedEnum {
+  option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.enum_derive) = "serde::Deserialize";
+
+  ANNOTATED_ENUM_UNSPECIFIED = 0;
+  ANNOTATED_ENUM_ENABLED = 1;
+}
+
+message UnannotatedMessage {
+  oneof payload {
+    string text = 1;
+  }
+}
+
+enum UnannotatedEnum {
+  UNANNOTATED_ENUM_UNSPECIFIED = 0;
+}
+
+message AnnotatedParentOnly {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+
+  message NestedMessage {}
+
+  enum NestedEnum {
+    NESTED_ENUM_UNSPECIFIED = 0;
+  }
+
+  oneof payload {
+    string text = 1;
+  }
+}

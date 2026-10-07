@@ -1,0 +1,58 @@
+<div class="site-explorer-run-status{% match last_run %}{% when Some with (run) %} {{ run.status_class }}{% when None %} warning{% endmatch %}">
+	<div class="site-explorer-run-status-header">
+		<div class="site-explorer-run-status-title">Last Site Explorer Run</div>
+		{% match last_run %}
+		{% when Some with (run) %}
+		<span class="bubble {{ run.status_class }}">{{ run.status_label }}</span>
+		{% when None %}
+		<span class="bubble warning">No Run</span>
+		{% endmatch %}
+	</div>
+
+	{% match last_run %}
+	{% when Some with (run) %}
+	<dl class="site-explorer-run-status-grid">
+		<div>
+			<dt>Started</dt>
+			<dd>{{ run.started_at }}</dd>
+		</div>
+		<div>
+			<dt>Finished</dt>
+			<dd>{{ run.finished_at }}</dd>
+		</div>
+		<div>
+			<dt>Attempted</dt>
+			<dd>{{ run.endpoint_explorations }}</dd>
+		</div>
+		<div>
+			<dt>Successful</dt>
+			<dd>{{ run.endpoint_explorations_success }}</dd>
+		</div>
+		<div>
+			<dt>Errored</dt>
+			<dd>{{ run.endpoint_explorations_failed }}</dd>
+		</div>
+		{% if !run.failure_category.is_empty() %}
+		<div>
+			<dt>Failure Category</dt>
+			<dd>{{ run.failure_category }}</dd>
+		</div>
+		{% endif %}
+		<div>
+			<dt>Last Successful</dt>
+			<dd>{{ run.last_successful_finished_at }}</dd>
+		</div>
+		<div>
+			<dt>Last Failed</dt>
+			<dd>{{ run.last_failed_finished_at }}</dd>
+		</div>
+	</dl>
+	{% if !run.error.is_empty() %}
+	<div class="site-explorer-run-error">
+		<pre><code>{{ run.error }}</code></pre>
+	</div>
+	{% endif %}
+	{% when None %}
+	<p class="site-explorer-run-empty">No Site Explorer iteration has been recorded yet.</p>
+	{% endmatch %}
+</div>

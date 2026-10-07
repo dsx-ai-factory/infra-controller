@@ -46,28 +46,28 @@ List instances of an instance type:
     $ nico-admin-cli instance show --instance-type-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(""),
         help = "The instance ID to query, leave empty for all (default)"
     )]
-    pub id: String,
+    pub(crate) id: String,
 
     #[clap(short, long, action)]
-    pub extrainfo: bool,
+    pub(crate) extrainfo: bool,
 
     #[clap(short, long, help = "The Tenant Org ID to query")]
-    pub tenant_org_id: Option<String>,
+    pub(crate) tenant_org_id: Option<String>,
 
     #[clap(short, long, help = "The VPC ID to query.")]
-    pub vpc_id: Option<String>,
+    pub(crate) vpc_id: Option<String>,
 
     #[clap(long, help = "The key of label instance to query")]
-    pub label_key: Option<String>,
+    pub(crate) label_key: Option<String>,
 
     #[clap(long, help = "The value of label instance to query")]
-    pub label_value: Option<String>,
+    pub(crate) label_value: Option<String>,
 
     #[clap(long, help = "The instance type ID to query.")]
-    pub instance_type_id: Option<String>,
+    pub(crate) instance_type_id: Option<String>,
 }

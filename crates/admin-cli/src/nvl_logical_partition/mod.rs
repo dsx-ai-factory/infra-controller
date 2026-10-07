@@ -19,15 +19,12 @@ mod create;
 mod delete;
 mod show;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Display logical partition information")]
     Show(show::Args),
     #[clap(about = "Create logical partition")]

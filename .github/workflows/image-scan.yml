@@ -1,0 +1,198 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Grype vulnerability scans of the images main publishes.
+#
+# These ran inside the build job in docker-build.yml. They are advisory
+# (fail-build is false and nothing consumes their result), but they sat on Core
+# CI's critical path, where the last job a run waits on spent 24 of its 38
+# minutes fetching an 8 GB image back out of the registry and scanning it.
+# Running them after the workflow finishes covers the same images without Core CI
+# waiting on them.
+#
+# The contract: docker-build.yml's "Record the pushed image as a scan target"
+# step uploads one scan-target-<image> artifact per image, holding the image
+# reference and the runner label that built it. This workflow makes those its
+# matrix, so scan: true at the ci.yaml call site remains the only place deciding
+# which images are covered. Only main records targets, so only main scans.
+#
+# Editing note: workflow_run triggers are read from the default branch, so
+# changes here take effect only once merged and cannot be exercised by a pull
+# request.
+
+name: NICo Image Scan
+
+on:
+  workflow_run:
+    workflows: ["NICo Core CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  # Required to list and download the triggering run's artifacts.
+  actions: read
+
+jobs:
+  collect:
+    # workflow_run fires for every ref Core CI ran on, including pull requests,
+    # and those record no targets. Checked here so the common case costs one
+    # skipped job rather than an artifact listing.
+    if: ${{ github.event.workflow_run.head_branch == 'main' }}
+    runs-on: linux-amd64-cpu4
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
+    steps:
+      # Deliberately not gated on the triggering run's conclusion. A target only
+      # exists for an image that built and pushed successfully, so one unrelated
+      # failing job elsewhere in Core CI is no reason to stop scanning the images
+      # that did publish.
+      - name: Look for scan targets
+        id: present
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          count=$(gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '[.artifacts[] | select(.name | startswith("scan-target-"))] | length' \
+            | jq -s 'add // 0')
+          printf 'count=%s\n' "${count}" >> "$GITHUB_OUTPUT"
+          if [ "${count}" -eq 0 ]; then
+            echo "::notice::Core CI run ${RUN_ID} recorded no scan targets; nothing to scan."
+          fi
+
+      # Skipped when there is nothing to fetch: download-artifact fails outright
+      # on a pattern that matches no artifact.
+      - name: Download the scan targets
+        if: ${{ steps.present.outputs.count != '0' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scan-target-*
+          path: targets
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the scan matrix
+        id: matrix
+        env:
+          COUNT: ${{ steps.present.outputs.count }}
+        run: |
+          set -euo pipefail
+          if [ "${COUNT}" = '0' ]; then
+            printf 'targets=[]\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Each artifact expands to its own directory holding one
+          # scan-target.json; -s folds the objects into the array the matrix
+          # takes. Sorted so the job list is stable between runs.
+          targets=$(find targets -name scan-target.json -exec cat {} + | jq -sc 'sort_by(.key)')
+          printf 'targets=%s\n' "${targets}" >> "$GITHUB_OUTPUT"
+          jq -r '.[] | "\(.key)\t\(.image)\t\(.runner)"' <<<"${targets}"
+
+  scan:
+    needs: collect
+    if: ${{ needs.collect.outputs.targets != '[]' }}
+    strategy:
+      # The images are independent, and a scan that fails should not hide the
+      # results for the rest.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.collect.outputs.targets) }}
+    # The label the image was built on. A single-platform manifest can only be
+    # pulled by a host of that architecture.
+    runs-on: ${{ matrix.target.runner }}
+    # Generous against the largest image: the boot-artifacts carrier has taken
+    # 24 minutes to fetch and scan. Present so a hung scan cannot occupy a
+    # self-hosted runner for the six-hour default.
+    timeout-minutes: 60
+    steps:
+      - name: Resolve the registry host
+        id: registry
+        env:
+          IMAGE: ${{ matrix.target.image }}
+        run: printf 'host=%s\n' "${IMAGE%%/*}" >> "$GITHUB_OUTPUT"
+
+      # Same credentials and fallback order docker-build.yml pushed with, so
+      # anything it could publish, this can read back.
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          password: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # security-container-scan inspects the local Docker daemon and never pulls
+      # for itself; without this the scan reports "local docker image not found"
+      # and silently skips.
+      - name: Pull the image
+        env:
+          IMAGE: ${{ matrix.target.image }}
+        run: docker pull "${IMAGE}"
+
+      - name: Grype vulnerability scan
+        id: scan
+        continue-on-error: true
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@aa4e470cc53f3886545c7d72a984eb81f1d203e2 # v1.16.2
+        with:
+          image: ${{ matrix.target.image }}
+          fail-on: critical
+          fail-build: 'false'
+          write-summary: 'false'
+          # Named after the Core CI run rather than this one, which is what makes
+          # a report traceable back to the build that produced the image.
+          artifact-name: grype-${{ matrix.target.key }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          sbom-artifact-name: sbom-${{ matrix.target.key }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+
+      # fail-build stays false, preserving the policy the scan already had: this
+      # change is about when the scan runs, not about converting pre-existing
+      # findings into red checks. Since nothing downstream waits on this
+      # workflow any more, tightening that is now a decision on its own.
+      # Meanwhile the status is at least stated, rather than being knowable only
+      # by opening the artifact.
+      - name: Report the scan status
+        if: ${{ !cancelled() }}
+        env:
+          KEY: ${{ matrix.target.key }}
+          IMAGE: ${{ matrix.target.image }}
+          STATUS: ${{ steps.scan.outputs.status }}
+          DETAIL: ${{ steps.scan.outputs.detail }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          status="${STATUS:-unknown}"
+          # Counts and statuses only. This summary is public on a public
+          # repository, so which CVE affects which shipped image stays in the
+          # artifact rather than being published as a checklist.
+          {
+            printf '### %s\n\n' "${KEY}"
+            printf -- '- Image: %s\n' "${IMAGE}"
+            printf -- '- Commit: %s\n' "${SHA}"
+            printf -- '- Status: %s\n' "${status}"
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ "${status}" != 'ok' ]; then
+            echo "::warning::${KEY}: Grype status ${status} (${DETAIL:-no detail reported})"
+          fi
+
+      # These runners are self-hosted, so the daemon keeps whatever a job leaves
+      # behind. Nothing here reuses the image, and the boot-artifacts carrier
+      # alone is 8 GB, so every scan would otherwise add to the disk until it
+      # ran out. Untagging is enough: the layers become unreferenced and the
+      # daemon reclaims them.
+      - name: Remove the pulled image
+        if: ${{ always() }}
+        env:
+          IMAGE: ${{ matrix.target.image }}
+        run: docker image rm "${IMAGE}" || true

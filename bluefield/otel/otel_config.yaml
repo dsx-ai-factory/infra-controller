@@ -14,13 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
----
 extensions:
   file_storage/cursors:
     directory: /var/lib/otelcol-contrib/cursors
     fsync: true
 
 receivers:
+  # OTLP receiver for DPU workloads to emit tracing spans
+  otlp/workloads:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+
   filelog/doca:
     include:
       - /var/log/doca/hbn/frr/frr.log
@@ -240,6 +245,9 @@ processors:
   batch/metrics-disk:
     send_batch_size: 8192
     timeout: 75s
+  batch/traces:
+    send_batch_size: 8192
+    timeout: 5s
   fileresource:
     file_paths:
       - /run/otelcol-contrib/machine-id
@@ -322,6 +330,11 @@ processors:
       - key: component
         value: transceiver-exporter
         action: upsert
+  resource/traces-workloads:
+    attributes:
+      - key: component
+        value: dpu-workloads
+        action: upsert
   resource/punt-stats:
     attributes:
       - key: component
@@ -400,6 +413,16 @@ exporters:
 
 service:
   pipelines:
+    # Traces pipeline for DPU workloads (eg, ovnkube-node)
+    traces/workloads:
+      receivers: [otlp/workloads]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/traces-workloads
+        - batch/traces
+      exporters: [otlp/site]
     logs/journald:
       receivers: [journald/forge-dpu-agent]
       processors:

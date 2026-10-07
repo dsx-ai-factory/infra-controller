@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn lockdown_status(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn lockdown_status(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let response = api_client.0.lockdown_status(args).await?;
     // Convert status enum to string
     let status_str = match response.status {

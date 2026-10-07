@@ -91,6 +91,23 @@ Look for:
 - NIC or DPU pairing problems
 - SKU or validation input mismatch
 
+### Check the Scout version
+
+NICo records the build version of Scout most recently observed during machine
+discovery. Use this value to determine whether ingestion or validation failures
+may correlate with a specific Scout release:
+
+```bash
+nico-admin-cli -a <api-url> -f json machine show <host-machine-id> \
+  | jq -r '.status.last_scout_observed_version // "unknown"'
+```
+
+The `last_scout_observed_version` value is updated whenever Scout registers the
+host during discovery and remains associated with the machine after assignment.
+It identifies the last discovery image, not necessarily a currently running agent.
+The value is `null` for machines that have not completed discovery with a Scout
+version that reports it, and a later Scout discovery replaces the stored value.
+
 ## Validation and SKU
 
 After discovery, ingestion may block on validation.

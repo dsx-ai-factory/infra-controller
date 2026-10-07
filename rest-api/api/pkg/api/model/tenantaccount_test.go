@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -107,6 +108,157 @@ func TestAPITenantAccountUpdateRequest_Validate(t *testing.T) {
 	}
 }
 
+// TestAPITenantAccountUpdateRequest_SiteCapabilitiesPresence verifies binding
+// distinguishes an omitted or JSON-null siteCapabilities payload (absent) from a
+// supplied-but-empty array (present), and that a supplied empty array fails
+// validation so the handler can reject it with HTTP 400.
+func TestAPITenantAccountUpdateRequest_SiteCapabilitiesPresence(t *testing.T) {
+	tests := []struct {
+		desc          string
+		body          string
+		wantPresent   bool
+		wantCapsError bool
+	}{
+		{
+			desc:        "omitted payload is absent",
+			body:        `{}`,
+			wantPresent: false,
+		},
+		{
+			desc:        "explicit null payload is absent",
+			body:        `{"siteCapabilities": null}`,
+			wantPresent: false,
+		},
+		{
+			desc:          "empty array payload is present but invalid",
+			body:          `{"siteCapabilities": []}`,
+			wantPresent:   true,
+			wantCapsError: true,
+		},
+		{
+			desc:          "populated payload is present and valid",
+			body:          `{"siteCapabilities": [{"siteIds": [], "targetedInstanceCreation": true}]}`,
+			wantPresent:   true,
+			wantCapsError: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			var req APITenantAccountUpdateRequest
+			err := json.Unmarshal([]byte(tc.body), &req)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantPresent, req.HasSiteCapabilities())
+			if req.HasSiteCapabilities() {
+				capsErr := req.SiteCapabilities.Validate()
+				assert.Equal(t, tc.wantCapsError, capsErr != nil)
+			}
+		})
+	}
+}
+
+func TestAPITenantAccountSiteCapabilitiesUpdateRequest_Validate(t *testing.T) {
+	siteID := uuid.New().String()
+	otherSiteID := uuid.New().String()
+
+	tests := []struct {
+		desc      string
+		caps      APITenantAccountSiteCapabilitiesUpdateRequest
+		expectErr bool
+	}{
+		{
+			desc:      "rejects empty capability list",
+			caps:      APITenantAccountSiteCapabilitiesUpdateRequest{},
+			expectErr: true,
+		},
+		{
+			desc: "rejects omitted targetedInstanceCreation",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "accepts omitted siteIds for account capability",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(true)},
+			},
+		},
+		{
+			desc: "accepts empty siteIds for account capability",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{
+					SiteIDs:                  []string{},
+					TargetedInstanceCreation: cutil.GetPtr(false),
+				},
+			},
+		},
+		{
+			desc: "accepts account capability and site overrides",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(true)},
+				{
+					SiteIDs:                  []string{siteID, otherSiteID},
+					TargetedInstanceCreation: cutil.GetPtr(false),
+				},
+			},
+		},
+		{
+			desc: "rejects request without account capability",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{
+					SiteIDs:                  []string{siteID},
+					TargetedInstanceCreation: cutil.GetPtr(true),
+				},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "rejects multiple account capabilities",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(true)},
+				{
+					SiteIDs:                  []string{},
+					TargetedInstanceCreation: cutil.GetPtr(false),
+				},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "rejects invalid site ID",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(true)},
+				{
+					SiteIDs:                  []string{"not-a-uuid"},
+					TargetedInstanceCreation: cutil.GetPtr(false),
+				},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "rejects duplicate site IDs across entries",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(true)},
+				{
+					SiteIDs:                  []string{siteID},
+					TargetedInstanceCreation: cutil.GetPtr(false),
+				},
+				{
+					SiteIDs:                  []string{siteID},
+					TargetedInstanceCreation: cutil.GetPtr(true),
+				},
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := tc.caps.Validate()
+			assert.Equal(t, tc.expectErr, err != nil)
+		})
+	}
+}
+
 func TestAPITenantAccountNew(t *testing.T) {
 	dbObj := &cdbm.TenantAccount{
 		ID:                        uuid.New(),
@@ -163,11 +315,91 @@ func TestAPITenantAccountNew(t *testing.T) {
 	for _, s := range dbsds {
 		msh = append(msh, NewAPIStatusDetail(s))
 	}
+
+	providerID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	otherProviderID := uuid.MustParse("22222222-2222-4222-8222-222222222222")
+	tenantID := uuid.MustParse("33333333-3333-4333-8333-333333333333")
+	siteEnabledA := uuid.MustParse("a0000000-0000-4000-8000-000000000001")
+	siteEnabledB := uuid.MustParse("b0000000-0000-4000-8000-000000000002")
+	siteMatchesAccountDefault := uuid.MustParse("c0000000-0000-4000-8000-000000000003")
+	siteOtherProvider := uuid.MustParse("d0000000-0000-4000-8000-000000000004")
+	siteDisabledA := uuid.MustParse("a0000000-0000-4000-8000-000000000010")
+	siteDisabledB := uuid.MustParse("b0000000-0000-4000-8000-000000000011")
+
+	dbObjWithSiteCapabilities := &cdbm.TenantAccount{
+		ID:                        uuid.New(),
+		TenantID:                  &tenantID,
+		TenantOrg:                 "testOrg",
+		InfrastructureProviderID:  providerID,
+		InfrastructureProviderOrg: "testIPOrg",
+		Status:                    cdbm.TenantAccountStatusReady,
+		Config:                    cdbm.TenantAccountConfig{TargetedInstanceCreation: false},
+		Created:                   cdb.GetCurTime(),
+		Updated:                   cdb.GetCurTime(),
+	}
+	dbObjWithDisabledOverrides := &cdbm.TenantAccount{
+		ID:                        uuid.New(),
+		TenantID:                  &tenantID,
+		TenantOrg:                 "testOrg",
+		InfrastructureProviderID:  providerID,
+		InfrastructureProviderOrg: "testIPOrg",
+		Status:                    cdbm.TenantAccountStatusReady,
+		Config:                    cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
+		Created:                   cdb.GetCurTime(),
+		Updated:                   cdb.GetCurTime(),
+	}
+
+	accountDefaultFalseTenantSites := []cdbm.TenantSite{
+		{
+			SiteID: siteEnabledB,
+			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)},
+		},
+		{
+			SiteID: siteEnabledA,
+			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)},
+		},
+		{
+			SiteID: siteMatchesAccountDefault,
+			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)},
+		},
+		{
+			SiteID: siteOtherProvider,
+			Site:   &cdbm.Site{InfrastructureProviderID: otherProviderID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)},
+		},
+		{
+			SiteID: uuid.MustParse("e0000000-0000-4000-8000-000000000005"),
+			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
+			Config: cdbm.TenantSiteConfig{},
+		},
+	}
+	accountDefaultTrueTenantSites := []cdbm.TenantSite{
+		{
+			SiteID: siteDisabledB,
+			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)},
+		},
+		{
+			SiteID: siteDisabledA,
+			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)},
+		},
+		{
+			SiteID: siteOtherProvider,
+			Site:   &cdbm.Site{InfrastructureProviderID: otherProviderID},
+			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)},
+		},
+	}
+
 	tests := []struct {
-		desc   string
-		dbObj  *cdbm.TenantAccount
-		sdObj  []cdbm.StatusDetail
-		apiObj *APITenantAccount
+		desc        string
+		dbObj       *cdbm.TenantAccount
+		sdObj       []cdbm.StatusDetail
+		tenantSites []cdbm.TenantSite
+		apiObj      *APITenantAccount
 	}{
 		{
 			desc:  "success with TenantContact nil",
@@ -185,6 +417,12 @@ func TestAPITenantAccountNew(t *testing.T) {
 				StatusHistory:             msh,
 				Created:                   dbObj.Created,
 				Updated:                   dbObj.Updated,
+				SiteCapabilities: []APITenantAccountSiteCapability{
+					{
+						SiteIDs:                  []string{},
+						TargetedInstanceCreation: false,
+					},
+				},
 			},
 		},
 		{
@@ -203,6 +441,12 @@ func TestAPITenantAccountNew(t *testing.T) {
 				StatusHistory:             msh,
 				Created:                   dbObj2.Created,
 				Updated:                   dbObj2.Updated,
+				SiteCapabilities: []APITenantAccountSiteCapability{
+					{
+						SiteIDs:                  []string{},
+						TargetedInstanceCreation: false,
+					},
+				},
 			},
 		},
 		{
@@ -224,12 +468,76 @@ func TestAPITenantAccountNew(t *testing.T) {
 				StatusHistory:              []APIStatusDetail{},
 				Created:                    dbObj.Created,
 				Updated:                    dbObj.Updated,
+				SiteCapabilities: []APITenantAccountSiteCapability{
+					{
+						SiteIDs:                  []string{},
+						TargetedInstanceCreation: false,
+					},
+				},
+			},
+		},
+		{
+			desc:        "siteCapabilities derive false account default, enabled overrides, and provider filtering",
+			dbObj:       dbObjWithSiteCapabilities,
+			sdObj:       dbsds,
+			tenantSites: accountDefaultFalseTenantSites,
+			apiObj: &APITenantAccount{
+				ID:                        dbObjWithSiteCapabilities.ID.String(),
+				InfrastructureProviderID:  providerID.String(),
+				InfrastructureProviderOrg: dbObjWithSiteCapabilities.InfrastructureProviderOrg,
+				TenantID:                  cutil.GetPtr(tenantID.String()),
+				TenantOrg:                 dbObjWithSiteCapabilities.TenantOrg,
+				TenantContact:             nil,
+				AllocationCount:           2,
+				Status:                    dbObjWithSiteCapabilities.Status,
+				StatusHistory:             msh,
+				Created:                   dbObjWithSiteCapabilities.Created,
+				Updated:                   dbObjWithSiteCapabilities.Updated,
+				SiteCapabilities: []APITenantAccountSiteCapability{
+					{
+						SiteIDs:                  []string{},
+						TargetedInstanceCreation: false,
+					},
+					{
+						SiteIDs:                  []string{siteEnabledA.String(), siteEnabledB.String()},
+						TargetedInstanceCreation: true,
+					},
+				},
+			},
+		},
+		{
+			desc:        "siteCapabilities derive true account default, disabled overrides sorted before other provider sites are dropped",
+			dbObj:       dbObjWithDisabledOverrides,
+			sdObj:       dbsds,
+			tenantSites: accountDefaultTrueTenantSites,
+			apiObj: &APITenantAccount{
+				ID:                        dbObjWithDisabledOverrides.ID.String(),
+				InfrastructureProviderID:  providerID.String(),
+				InfrastructureProviderOrg: dbObjWithDisabledOverrides.InfrastructureProviderOrg,
+				TenantID:                  cutil.GetPtr(tenantID.String()),
+				TenantOrg:                 dbObjWithDisabledOverrides.TenantOrg,
+				TenantContact:             nil,
+				AllocationCount:           2,
+				Status:                    dbObjWithDisabledOverrides.Status,
+				StatusHistory:             msh,
+				Created:                   dbObjWithDisabledOverrides.Created,
+				Updated:                   dbObjWithDisabledOverrides.Updated,
+				SiteCapabilities: []APITenantAccountSiteCapability{
+					{
+						SiteIDs:                  []string{},
+						TargetedInstanceCreation: true,
+					},
+					{
+						SiteIDs:                  []string{siteDisabledA.String(), siteDisabledB.String()},
+						TargetedInstanceCreation: false,
+					},
+				},
 			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got := NewAPITenantAccount(tc.dbObj, tc.sdObj, 2)
+			got := NewAPITenantAccount(tc.dbObj, tc.sdObj, 2, tc.tenantSites)
 			assert.Equal(t, tc.apiObj.ID, got.ID)
 			assert.Equal(t, tc.apiObj.InfrastructureProviderID, got.InfrastructureProviderID)
 			assert.Equal(t, tc.apiObj.InfrastructureProviderOrg, got.InfrastructureProviderOrg)
@@ -240,6 +548,7 @@ func TestAPITenantAccountNew(t *testing.T) {
 			assert.Equal(t, tc.apiObj.Status, got.Status)
 			assert.Equal(t, tc.apiObj.StatusHistory, got.StatusHistory)
 			assert.NotNil(t, got.StatusHistory)
+			assert.Equal(t, tc.apiObj.SiteCapabilities, got.SiteCapabilities)
 		})
 	}
 }

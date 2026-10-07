@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer`
 
-_[Tenant commands](../../tenant.md) › **site-explorer**_
+*[Tenant commands](../../tenant.md) › **site-explorer***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-site-explorer - Site explorer functions
 
 ## SYNOPSIS
 
-**nico-admin-cli site-explorer** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli site-explorer [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,24 +19,26 @@ Site explorer functions
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary id
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Subcommands
@@ -42,6 +46,7 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`get-report`](./site-explorer-get-report.md) | Retrieves the latest site exploration report |
+| [`mlx-devices`](./site-explorer-mlx-devices.md) | Report Mellanox/BlueField device NIC firmware from explored Redfish data. |
 | [`explore`](./site-explorer-explore.md) | Asks carbide-api to explore a single host and prints the report. Does not store it. |
 | [`re-explore`](./site-explorer-re-explore.md) | Asks carbide-api to explore a single host in the next exploration cycle. The results will be stored. |
 | [`refresh`](./site-explorer-refresh.md) | Immediately probes a BMC endpoint and persists the report. |
@@ -54,4 +59,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**Related:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)

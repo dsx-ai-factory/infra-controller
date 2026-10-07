@@ -19,7 +19,7 @@ use std::ffi::CString;
 use libc::{c_char, c_int};
 use log::{Level, Metadata, Record};
 
-pub struct KeaLogger;
+pub(super) struct KeaLogger;
 
 // Kea stops at level DEBUG, but splits that into 100 'debuglevel' values, so arbitrarity assign
 // one to Log::Debug and one to Log::Trace.
@@ -46,6 +46,9 @@ impl log::Log for KeaLogger {
     // Manually map Rust 'log' levels (log/src/lib.rs) to Kea Severity (logger_level.h) because
     // the enum int values don't match and run in different directions.
     fn enabled(&self, metadata: &Metadata) -> bool {
+        // SAFETY: Initial lint enablement: this C++ boundary needs owner review.
+        // The linked matching-ABI probes access only Kea's process-lifetime
+        // logger and must not unwind into Rust.
         unsafe {
             use Level::*;
             match metadata.level() {
@@ -68,15 +71,20 @@ impl log::Log for KeaLogger {
                 record.args()
             ))
             .unwrap();
+            let text_ptr = text.as_ptr();
 
+            // SAFETY: Initial lint enablement: this C++ boundary needs owner
+            // review. `text_ptr` remains NUL-terminated and live until the
+            // synchronous matching-ABI logger call returns; C++ only reads it
+            // and must not unwind into Rust.
             unsafe {
                 use Level::*;
                 match record.metadata().level() {
-                    Trace => kea_log_generic_debug(KEA_DEBUGLEVEL_TRACE, text.into_raw()),
-                    Debug => kea_log_generic_debug(KEA_DEBUGLEVEL_DEBUG, text.into_raw()),
-                    Info => kea_log_generic_info(text.into_raw()),
-                    Warn => kea_log_generic_warn(text.into_raw()),
-                    Error => kea_log_generic_error(text.into_raw()),
+                    Trace => kea_log_generic_debug(KEA_DEBUGLEVEL_TRACE, text_ptr),
+                    Debug => kea_log_generic_debug(KEA_DEBUGLEVEL_DEBUG, text_ptr),
+                    Info => kea_log_generic_info(text_ptr),
+                    Warn => kea_log_generic_warn(text_ptr),
+                    Error => kea_log_generic_error(text_ptr),
                 }
             }
         }

@@ -28,12 +28,16 @@ use tracing::instrument;
 
 use crate::configuring::handle_configuring;
 use crate::context::PowerShelfStateHandlerContextObjects;
+use crate::decommissioning::handle_decommissioning;
 use crate::deleting::handle_deleting;
 use crate::error_state::handle_error;
 use crate::fetching_data::handle_fetching_data;
 use crate::initializing::handle_initializing;
 use crate::maintenance::handle_maintenance;
 use crate::ready::handle_ready;
+use crate::reprovisioning::handle_reprovisioning;
+use crate::rotating_bmc::handle_rotating_bmc;
+use crate::write_ops::PersistPowerShelfHealthHistory;
 
 /// The actual PowerShelf State handler (structure mirrors SwitchStateHandler).
 #[derive(Debug, Default, Clone)]
@@ -43,12 +47,12 @@ impl PowerShelfStateHandler {
     fn record_metrics(
         &self,
         state: &PowerShelf,
+        aggregate_health: &health_report::HealthReport,
         ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     ) {
-        let aggregate_health = derive_power_shelf_aggregate_health(&state.health_reports);
         ctx.metrics.health.populate(
             state.id.to_string(),
-            &aggregate_health,
+            aggregate_health,
             &state.health_reports,
         );
         ctx.services.per_object_metrics_registry.record(
@@ -57,6 +61,21 @@ impl PowerShelfStateHandler {
             &ctx.metrics.health.health_alert_classifications,
             vec![],
         );
+    }
+
+    /// Persists a snapshot of the power shelf's aggregate health so it appears in
+    /// the health history timeline. Deduplication of unchanged observations is
+    /// handled in the database layer.
+    fn record_health_history(
+        &self,
+        state: &PowerShelf,
+        aggregate_health: &health_report::HealthReport,
+        ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
+    ) {
+        ctx.pending_db_writes.push(PersistPowerShelfHealthHistory {
+            power_shelf_id: state.id,
+            health_report: aggregate_health.clone(),
+        });
     }
 
     /// Attempts a state transition by delegating to the appropriate state handler.
@@ -79,9 +98,18 @@ impl PowerShelfStateHandler {
                 handle_configuring(power_shelf_id, state, ctx).await
             }
             PowerShelfControllerState::Ready => handle_ready(power_shelf_id, state, ctx).await,
+            PowerShelfControllerState::RotatingBmc { retry_count } => {
+                handle_rotating_bmc(power_shelf_id, state, *retry_count, ctx).await
+            }
             PowerShelfControllerState::Maintenance { .. } => {
                 handle_maintenance(power_shelf_id, state, ctx).await
             }
+            PowerShelfControllerState::ReProvisioning { .. } => {
+                handle_reprovisioning(power_shelf_id, state, ctx).await
+            }
+            PowerShelfControllerState::Decommissioning {
+                decommissioning_state,
+            } => handle_decommissioning(power_shelf_id, state, decommissioning_state, ctx).await,
             PowerShelfControllerState::Deleting => {
                 handle_deleting(power_shelf_id, state, ctx).await
             }
@@ -107,7 +135,9 @@ impl StateHandler for PowerShelfStateHandler {
         _controller_state: &PowerShelfControllerState,
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-        self.record_metrics(state, ctx);
+        let aggregate_health = derive_power_shelf_aggregate_health(&state.health_reports);
+        self.record_metrics(state, &aggregate_health, ctx);
+        self.record_health_history(state, &aggregate_health, ctx);
         self.attempt_state_transition(power_shelf_id, state, ctx)
             .await
     }

@@ -35,34 +35,34 @@ Update with optimistic concurrency on the record version:
     --description \"DGX H100 640GB\" --version 3
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "Instance type ID to update")]
-    pub id: String,
+    pub(super) id: String,
 
     #[clap(short = 'n', long, help = "Name of the instance type")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
 
     #[clap(short = 'd', long, help = "Description of the instance type")]
-    pub description: Option<String>,
+    pub(super) description: Option<String>,
 
     #[clap(
         short = 'l',
         long,
         help = "JSON map of simple key:value pairs to be applied as labels to the instance type - will COMPLETELY overwrite any existing labels"
     )]
-    pub labels: Option<String>,
+    pub(super) labels: Option<String>,
 
     #[clap(
         short = 'f',
         long,
         help = "Optional, JSON array containing a set of instance type capability filters - will COMPLETELY overwrite any existing filters"
     )]
-    pub desired_capabilities: Option<String>,
+    pub(super) desired_capabilities: Option<String>,
 
     #[clap(
         short = 'v',
         long,
         help = "Optional, version to use for comparison when performing the update, which will be rejected if the actual version of the record does not match the value of this parameter"
     )]
-    pub version: Option<String>,
+    pub(super) version: Option<String>,
 }

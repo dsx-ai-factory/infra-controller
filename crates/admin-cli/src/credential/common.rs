@@ -19,10 +19,20 @@ use clap::{Parser, ValueEnum};
 
 use crate::errors::CarbideCliError;
 
-pub const DEFAULT_IB_FABRIC_NAME: &str = "default";
+pub(super) const DEFAULT_IB_FABRIC_NAME: &str = "default";
+
+/// Maps a failed-precondition response to the operator-facing UFM command
+/// error, while preserving the standard API error mapping for other statuses.
+pub(super) fn map_ufm_credential_api_error(status: tonic::Status) -> CarbideCliError {
+    if status.code() == tonic::Code::FailedPrecondition {
+        CarbideCliError::UfmCredentialCommandUnavailable(status.message().to_string())
+    } else {
+        status.into()
+    }
+}
 
 #[derive(ValueEnum, Parser, Debug, Clone)]
-pub enum BmcCredentialType {
+pub(super) enum BmcCredentialType {
     // Site Wide BMC Root Account Credentials
     SiteWideRoot,
     // BMC Specific Root Credentials
@@ -43,9 +53,44 @@ impl From<BmcCredentialType> for rpc::forge::CredentialType {
 }
 
 #[derive(ValueEnum, Parser, Debug, Clone)]
-pub enum UefiCredentialType {
+pub(super) enum UefiCredentialType {
     Dpu,
     Host,
+}
+
+/// Credential families an operator can target for site-wide rotation. These map
+/// 1:1 onto `rpc::forge::RotationCredentialType` (minus its proto3 `Unspecified`
+/// zero value).
+///
+/// NVOS is listed because the server can stage site-wide NVOS targets. Device
+/// convergence depends on the switch-controller and component-manager path.
+///
+/// DpuUefi is the DPU *UEFI* password; DpuBmcService is the BF4 DPU *BMC*
+/// `service` account -- distinct credentials on the same device. Only BF4 DPUs
+/// expose the `service` account, so a `dpu-bmc-service` rotation converges just
+/// the BF4 DPU BMCs.
+#[derive(ValueEnum, Parser, Debug, Clone)]
+pub(super) enum RotationCredentialKind {
+    Bmc,
+    HostUefi,
+    DpuUefi,
+    Nvos,
+    LockdownIkm,
+    DpuBmcService,
+}
+
+impl From<RotationCredentialKind> for rpc::forge::RotationCredentialType {
+    fn from(kind: RotationCredentialKind) -> Self {
+        use rpc::forge::RotationCredentialType::*;
+        match kind {
+            RotationCredentialKind::Bmc => RotationBmc,
+            RotationCredentialKind::HostUefi => RotationHostUefi,
+            RotationCredentialKind::DpuUefi => RotationDpuUefi,
+            RotationCredentialKind::Nvos => RotationNvos,
+            RotationCredentialKind::LockdownIkm => RotationLockdownIkm,
+            RotationCredentialKind::DpuBmcService => RotationDpuBmcService,
+        }
+    }
 }
 
 impl From<UefiCredentialType> for rpc::forge::CredentialType {
@@ -58,13 +103,13 @@ impl From<UefiCredentialType> for rpc::forge::CredentialType {
     }
 }
 
-pub fn url_validator(url: String) -> Result<String, CarbideCliError> {
+pub(super) fn url_validator(url: String) -> Result<String, CarbideCliError> {
     let addr = tonic::transport::Uri::try_from(&url)
         .map_err(|_| CarbideCliError::GenericError("invalid url".to_string()))?;
     Ok(addr.to_string())
 }
 
-pub fn password_validator(s: String) -> Result<String, CarbideCliError> {
+pub(super) fn password_validator(s: String) -> Result<String, CarbideCliError> {
     // TODO: check password according BMC pwd rule.
     if s.is_empty() {
         return Err(CarbideCliError::GenericError("invalid input".to_string()));

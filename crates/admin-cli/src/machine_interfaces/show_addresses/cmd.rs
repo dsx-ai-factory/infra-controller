@@ -31,7 +31,7 @@ struct AddressRow {
     allocation_type: String,
 }
 
-pub async fn handle_show_addresses(
+pub(super) async fn handle_show_addresses(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

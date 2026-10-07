@@ -15,6 +15,7 @@ type CoreGrpcInterface interface {
 	// List all the apis of Carbide here
 	Init()
 	Start()
+	RegisterSubscriber() error
 	CreateGrpcClient() error
 	GetGrpcClient() *client.CoreGrpcClient
 	UpdateGrpcClientState(err error)

@@ -29,10 +29,10 @@ Show details for one switch:
     $ nico-admin-cli switch show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(None),
         help = "The switch ID to query. Omit to show all switches."
     )]
-    pub switch_id: Option<SwitchId>,
+    pub(super) switch_id: Option<SwitchId>,
 }

@@ -32,7 +32,10 @@ async fn update_bmc_network_into_topologies(
             "BMC Info in machine_topologies does not have a MAC address for machine {machine_id}"
         )));
     }
-    tracing::info!("put bmc_info: {:?}", bmc_info);
+    tracing::info!(
+        bmc_info = ?bmc_info,
+        "Updating BMC info",
+    );
 
     // A entry with same machine id is already created by discover_machine call.
     // Just update json by adding a ipmi_ip entry.
@@ -88,8 +91,12 @@ pub async fn update_bmc_network_into_machine_interfaces(
         )));
     }
 
-    crate::machine_interface::associate_bmc_interface_with_machine(&interface.id, machine_id, txn)
-        .await?;
+    crate::machine_interface::associate_bmc_interface(
+        &interface.id,
+        model::machine_interface_address::MachineInterfaceAssociation::Machine(*machine_id),
+        txn,
+    )
+    .await?;
     bmc_info.machine_interface_id = Some(interface.id);
 
     update_bmc_network_into_topologies(txn, machine_id, bmc_info).await
@@ -119,10 +126,10 @@ pub async fn enrich_mac_address(
             let bmc_mac_address = bmc_machine_interface.mac_address;
 
             tracing::info!(
-                "{} is enriching BMC Info for machine {} with a BMC mac address of {:#?}",
-                caller,
-                machine_id,
-                bmc_machine_interface.mac_address,
+                caller = %caller,
+                machine_id = %machine_id,
+                mac_address = ?bmc_machine_interface.mac_address,
+                "Enriching BMC information",
             );
             bmc_info.mac = Some(bmc_mac_address);
             bmc_info.machine_interface_id = Some(bmc_machine_interface.id);
@@ -132,9 +139,10 @@ pub async fn enrich_mac_address(
         } else {
             // This should never happen. Should we return an error here?
             tracing::info!(
-                "{} failed to enrich the BMC Info for machine {} with a MAC: cannot cannot find a machine interface with IP address {bmc_ip_address}",
-                caller,
-                machine_id
+                caller = %caller,
+                machine_id = %machine_id,
+                bmc_ip_address = %bmc_ip_address,
+                "Failed to enrich BMC information: machine interface not found",
             );
         }
     }

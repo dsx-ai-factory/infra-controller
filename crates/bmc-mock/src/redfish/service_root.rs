@@ -25,10 +25,10 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::redfish;
 use crate::redfish::Builder;
+use crate::{Callbacks, redfish};
 
-pub fn resource<'a>() -> redfish::Resource<'a> {
+pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
         odata_id: Cow::Borrowed("/redfish/v1"),
         odata_type: Cow::Borrowed("#ServiceRoot.v1_10_0.ServiceRoot"),
@@ -37,11 +37,11 @@ pub fn resource<'a>() -> redfish::Resource<'a> {
     }
 }
 
-pub fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
-    r.route(&resource().odata_id, get(get_service_root))
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    r.route(&resource().odata_id, get(get_service_root::<C>))
 }
 
-pub fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
+fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
     ServiceRootBuilder {
         value: resource.json_patch().patch(json!({
             "Links": {
@@ -53,9 +53,10 @@ pub fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
     }
 }
 
-async fn get_service_root(State(state): State<BmcState>) -> Response {
-    builder(&resource())
+async fn get_service_root<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
+    let builder = builder(&resource())
         .redfish_version(state.bmc_redfish_version)
+        .protocol_features()
         .maybe_with(
             ServiceRootBuilder::vendor,
             &state.bmc_vendor.service_root_value(),
@@ -63,15 +64,34 @@ async fn get_service_root(State(state): State<BmcState>) -> Response {
         .maybe_with(ServiceRootBuilder::product, &state.bmc_product)
         .account_service(&redfish::account_service::resource())
         .session_service(&redfish::session_service::service_resource())
-        .chassis_collection(&redfish::chassis::collection())
-        .system_collection(&redfish::computer_system::collection())
+        .chassis_collection(&redfish::chassis::collection());
+    // Delta power shelves advertise no `Systems` collection (see `BmcState`).
+    let builder = if state.exposes_computer_systems {
+        builder.system_collection(&redfish::computer_system::collection())
+    } else {
+        builder
+    };
+    let builder = if state.event_service.is_some() {
+        builder.event_service(&redfish::event_service::resource())
+    } else {
+        builder
+    };
+    // Attestation clients read this link to decide whether the BMC has
+    // anything to attest, so only a configured collection is advertised.
+    let builder = if state.component_integrities.is_some() {
+        builder.component_integrity_collection(&redfish::component_integrity::collection())
+    } else {
+        builder
+    };
+    builder
         .manager_collection(&redfish::manager::collection())
         .update_service(&redfish::update_service::resource())
+        .telemetry_service(&redfish::telemetry_service::resource())
         .build()
         .into_ok_response()
 }
 
-pub struct ServiceRootBuilder {
+struct ServiceRootBuilder {
     value: serde_json::Value,
 }
 
@@ -84,43 +104,64 @@ impl Builder for ServiceRootBuilder {
 }
 
 impl ServiceRootBuilder {
-    pub fn build(self) -> serde_json::Value {
+    fn build(self) -> serde_json::Value {
         self.value
     }
 
-    pub fn redfish_version(self, v: &str) -> Self {
+    fn redfish_version(self, v: &str) -> Self {
         self.add_str_field("RedfishVersion", v)
     }
 
-    pub fn vendor(self, v: &str) -> Self {
+    /// The query options a client may rely on. `$filter` is served on every
+    /// collection by `query_router`; `$expand` is left unadvertised, since
+    /// nv-redfish reads the advertisement literally and the expander's
+    /// `$levels` grammar has been served to clients that ask for it on their
+    /// own terms.
+    fn protocol_features(self) -> Self {
+        self.apply_patch(json!({"ProtocolFeaturesSupported": {"FilterQuery": true}}))
+    }
+
+    fn vendor(self, v: &str) -> Self {
         self.add_str_field("Vendor", v)
     }
 
-    pub fn product(self, v: &str) -> Self {
+    fn product(self, v: &str) -> Self {
         self.add_str_field("Product", v)
     }
 
-    pub fn account_service(self, v: &redfish::Resource<'_>) -> Self {
+    fn account_service(self, v: &redfish::Resource<'_>) -> Self {
         self.apply_patch(v.nav_property("AccountService"))
     }
 
-    pub fn session_service(self, v: &redfish::Resource<'_>) -> Self {
+    fn session_service(self, v: &redfish::Resource<'_>) -> Self {
         self.apply_patch(v.nav_property("SessionService"))
     }
 
-    pub fn chassis_collection(self, v: &redfish::Collection<'_>) -> Self {
+    fn chassis_collection(self, v: &redfish::Collection<'_>) -> Self {
         self.apply_patch(v.nav_property("Chassis"))
     }
 
-    pub fn system_collection(self, v: &redfish::Collection<'_>) -> Self {
+    fn system_collection(self, v: &redfish::Collection<'_>) -> Self {
         self.apply_patch(v.nav_property("Systems"))
     }
 
-    pub fn manager_collection(self, v: &redfish::Collection<'_>) -> Self {
+    fn manager_collection(self, v: &redfish::Collection<'_>) -> Self {
         self.apply_patch(v.nav_property("Managers"))
     }
 
-    pub fn update_service(self, v: &redfish::Resource<'_>) -> Self {
+    fn component_integrity_collection(self, v: &redfish::Collection<'_>) -> Self {
+        self.apply_patch(v.nav_property("ComponentIntegrity"))
+    }
+
+    fn update_service(self, v: &redfish::Resource<'_>) -> Self {
         self.apply_patch(v.nav_property("UpdateService"))
+    }
+
+    fn event_service(self, v: &redfish::Resource<'_>) -> Self {
+        self.apply_patch(v.nav_property("EventService"))
+    }
+
+    fn telemetry_service(self, v: &redfish::Resource<'_>) -> Self {
+        self.apply_patch(v.nav_property("TelemetryService"))
     }
 }

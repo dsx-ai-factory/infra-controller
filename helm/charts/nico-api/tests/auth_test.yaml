@@ -50,3 +50,102 @@ tests:
       - matchRegex:
           path: data["casbin-policy.csv"]
           pattern: 'g, spiffe-service-id/carbide-dns, nico-dns'
+
+  - it: strips stale spiffe_trust_domain from the site TOML (issue 3666)
+    documentIndex: 1
+    set:
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [auth.trust]
+          spiffe_trust_domain = "forge.local"
+          some_other_key = "preserved"
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'spiffe_trust_domain'
+      - matchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'some_other_key = "preserved"'
+
+  - it: leaves site TOML untouched when spiffe_trust_domain is absent
+    documentIndex: 1
+    set:
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [auth.trust]
+          some_other_key = "value"
+    asserts:
+      - matchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'some_other_key = "value"'
+      - notMatchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'spiffe_trust_domain'
+
+  - it: also strips single-quoted spiffe_trust_domain (TOML literal string form)
+    documentIndex: 1
+    set:
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [auth.trust]
+          spiffe_trust_domain = 'forge.local'
+          other_key = "kept"
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'spiffe_trust_domain'
+      - matchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'other_key = "kept"'
+
+  - it: also strips spiffe_trust_domain with an inline TOML comment
+    documentIndex: 1
+    set:
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [auth.trust]
+          spiffe_trust_domain = "forge.local" # migrated from carbide
+          other_key = "kept"
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'spiffe_trust_domain'
+      - matchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'other_key = "kept"'
+
+  - it: round-trip — built-in config uses global.spiffe.trustDomain not the stale site value
+    documentIndex: 0
+    set:
+      global:
+        spiffe:
+          trustDomain: nico.local
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [auth.trust]
+          spiffe_trust_domain = "forge.local"
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'spiffe_trust_domain = "nico\.local"'
+
+  - it: round-trip — site config does not contain spiffe_trust_domain after stripping
+    documentIndex: 1
+    set:
+      global:
+        spiffe:
+          trustDomain: nico.local
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [auth.trust]
+          spiffe_trust_domain = "forge.local"
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-site-config.toml"]
+          pattern: 'spiffe_trust_domain'

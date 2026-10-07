@@ -43,10 +43,21 @@ pub(crate) async fn grow(
             .map_err(|e: toml::de::Error| CarbideError::InvalidArgument(e.to_string()))?;
         pools.insert(name, d);
     }
+    let reconcile_dpu_loopbacks = pools.contains_key(model::resource_pool::common::LOOPBACK_IP_V6);
     use db::resource_pool::DefineResourcePoolError as DE;
     match db::resource_pool::define_all_from(&mut txn, &pools).await {
         Ok(()) => {
             txn.commit().await?;
+            if reconcile_dpu_loopbacks {
+                // The backfill opens one transaction per DPU, so publish the
+                // new pool rows before it starts reconciliation.
+                db::machine::update_dpu_loopback_ips_v6(
+                    &api.database_connection,
+                    &api.common_pools,
+                )
+                .await
+                .map_err(CarbideError::from)?;
+            }
             Ok(Response::new(rpc::GrowResourcePoolResponse {}))
         }
         Err(DE::InvalidArgument(msg)) => Err(CarbideError::InvalidArgument(msg).into()),

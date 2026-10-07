@@ -7,9 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -101,7 +100,7 @@ func TestManageExpectedSwitchInventory_DiscoverExpectedSwitchInventory(t *testin
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.ExpectedSwitchInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.ExpectedSwitchInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -110,12 +109,12 @@ func TestManageExpectedSwitchInventory_DiscoverExpectedSwitchInventory(t *testin
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.ExpectedSwitches))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -131,7 +130,7 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedSwitch
+		request *corev1.ExpectedSwitch
 	}
 	tests := []struct {
 		name    string
@@ -146,8 +145,8 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-switch-001"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-switch-001"},
 					BmcMacAddress:      "00:11:22:33:44:55",
 					SwitchSerialNumber: "SWITCH-123456789",
 				},
@@ -161,8 +160,8 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-switch-002"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-switch-002"},
 					BmcMacAddress:      "",
 					SwitchSerialNumber: "SWITCH-123456789",
 				},
@@ -176,8 +175,8 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-switch-003"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-switch-003"},
 					BmcMacAddress:      "00:11:22:33:44:55",
 					SwitchSerialNumber: "",
 				},
@@ -191,7 +190,7 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
+				request: &corev1.ExpectedSwitch{
 					ExpectedSwitchId:   nil,
 					BmcMacAddress:      "00:11:22:33:44:55",
 					SwitchSerialNumber: "SWITCH-123456789",
@@ -206,8 +205,8 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-switch-004"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-switch-004"},
 					BmcMacAddress:      "",
 					SwitchSerialNumber: "",
 				},
@@ -228,7 +227,7 @@ func TestManageExpectedSwitch_CreateExpectedSwitchOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageExpectedSwitch(tt.fields.coreGrpcAtomicClient, nil)
+			mm := NewManageExpectedSwitch(tt.fields.coreGrpcAtomicClient)
 			err := mm.CreateExpectedSwitchOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -250,7 +249,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedSwitch
+		request *corev1.ExpectedSwitch
 	}
 	tests := []struct {
 		name    string
@@ -265,8 +264,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-update-001"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-update-001"},
 					BmcMacAddress:      "00:11:22:33:44:55",
 					SwitchSerialNumber: "SWITCH-123456789",
 				},
@@ -280,7 +279,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
+				request: &corev1.ExpectedSwitch{
 					ExpectedSwitchId:   nil,
 					BmcMacAddress:      "00:11:22:33:44:55",
 					SwitchSerialNumber: "SWITCH-123456789",
@@ -295,8 +294,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-update-002"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-update-002"},
 					BmcMacAddress:      "",
 					SwitchSerialNumber: "SWITCH-123456789",
 				},
@@ -310,8 +309,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-update-003"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-update-003"},
 					BmcMacAddress:      "00:11:22:33:44:55",
 					SwitchSerialNumber: "",
 				},
@@ -325,8 +324,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitch{
-					ExpectedSwitchId:   &cwssaws.UUID{Value: "test-update-004"},
+				request: &corev1.ExpectedSwitch{
+					ExpectedSwitchId:   &corev1.UUID{Value: "test-update-004"},
 					BmcMacAddress:      "",
 					SwitchSerialNumber: "",
 				},
@@ -347,7 +346,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageExpectedSwitch(tt.fields.coreGrpcAtomicClient, nil)
+			mm := NewManageExpectedSwitch(tt.fields.coreGrpcAtomicClient)
 			err := mm.UpdateExpectedSwitchOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -369,7 +368,7 @@ func TestManageExpectedSwitch_DeleteExpectedSwitchOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.ExpectedSwitchRequest
+		request *corev1.ExpectedSwitchRequest
 	}
 	tests := []struct {
 		name    string
@@ -384,8 +383,8 @@ func TestManageExpectedSwitch_DeleteExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitchRequest{
-					ExpectedSwitchId: &cwssaws.UUID{Value: "test-delete-001"},
+				request: &corev1.ExpectedSwitchRequest{
+					ExpectedSwitchId: &corev1.UUID{Value: "test-delete-001"},
 					BmcMacAddress:    "00:11:22:33:44:55",
 				},
 			},
@@ -398,7 +397,7 @@ func TestManageExpectedSwitch_DeleteExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitchRequest{
+				request: &corev1.ExpectedSwitchRequest{
 					ExpectedSwitchId: nil,
 					BmcMacAddress:    "00:11:22:33:44:55",
 				},
@@ -412,8 +411,8 @@ func TestManageExpectedSwitch_DeleteExpectedSwitchOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.ExpectedSwitchRequest{
-					ExpectedSwitchId: &cwssaws.UUID{Value: "test-delete-002"},
+				request: &corev1.ExpectedSwitchRequest{
+					ExpectedSwitchId: &corev1.UUID{Value: "test-delete-002"},
 					BmcMacAddress:    "",
 				},
 			},
@@ -433,7 +432,7 @@ func TestManageExpectedSwitch_DeleteExpectedSwitchOnSite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageExpectedSwitch(tt.fields.coreGrpcAtomicClient, nil)
+			mm := NewManageExpectedSwitch(tt.fields.coreGrpcAtomicClient)
 			err := mm.DeleteExpectedSwitchOnSite(tt.args.ctx, tt.args.request)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -445,71 +444,8 @@ func TestManageExpectedSwitch_DeleteExpectedSwitchOnSite(t *testing.T) {
 }
 
 func TestManageExpectedSwitch_CreateExpectedSwitchOnFlow(t *testing.T) {
-	t.Run("nil Flow client skips gracefully", func(t *testing.T) {
-		mm := ManageExpectedSwitch{flowGrpcAtomicClient: nil}
-		err := mm.CreateExpectedSwitchOnFlow(context.Background(), &cwssaws.ExpectedSwitch{
-			ExpectedSwitchId: &cwssaws.UUID{Value: uuid.NewString()}, BmcMacAddress: "00:11:22:33:44:55", SwitchSerialNumber: "SW001",
-		})
-		assert.NoError(t, err)
-	})
+	manager := NewManageExpectedSwitch(nil)
 
-	t.Run("nil Flow client connection skips gracefully", func(t *testing.T) {
-		mm := ManageExpectedSwitch{flowGrpcAtomicClient: cClient.NewFlowGrpcAtomicClient(&cClient.FlowGrpcClientConfig{})}
-		err := mm.CreateExpectedSwitchOnFlow(context.Background(), &cwssaws.ExpectedSwitch{
-			ExpectedSwitchId: &cwssaws.UUID{Value: uuid.NewString()}, BmcMacAddress: "00:11:22:33:44:55", SwitchSerialNumber: "SW001",
-		})
-		assert.NoError(t, err)
-	})
-}
-
-func Test_expectedSwitchToFlowComponent(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-	int32Ptr := func(i int32) *int32 { return &i }
-
-	t.Run("maps all fields correctly", func(t *testing.T) {
-		es := &cwssaws.ExpectedSwitch{
-			ExpectedSwitchId:   &cwssaws.UUID{Value: "es-001"},
-			BmcMacAddress:      "AA:BB:CC:DD:EE:FF",
-			SwitchSerialNumber: "SW-001",
-			RackId:             &cwssaws.RackId{Id: "rack-001"},
-			Name:               strPtr("nvl-switch-1"),
-			Manufacturer:       strPtr("NVIDIA"),
-			Model:              strPtr("NVL-400"),
-			Description:        strPtr("NVLink switch"),
-			SlotId:             int32Ptr(4),
-			TrayIdx:            int32Ptr(1),
-			HostId:             int32Ptr(0),
-		}
-		component := expectedSwitchToFlowComponent(es)
-		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH, component.Type)
-		assert.Equal(t, "es-001", component.Info.Id.Id)
-		assert.Equal(t, "SW-001", component.Info.SerialNumber)
-		assert.Equal(t, "nvl-switch-1", component.Info.Name)
-		assert.Equal(t, "NVIDIA", component.Info.Manufacturer)
-		assert.Equal(t, "NVL-400", *component.Info.Model)
-		assert.Equal(t, "NVLink switch", *component.Info.Description)
-		assert.Equal(t, "es-001", component.ComponentId)
-		assert.NotNil(t, component.Position)
-		assert.Equal(t, int32(4), component.Position.SlotId)
-		assert.Equal(t, int32(1), component.Position.TrayIdx)
-		if assert.Len(t, component.Bmcs, 1) {
-			assert.Equal(t, "AA:BB:CC:DD:EE:FF", component.Bmcs[0].MacAddress)
-		}
-		assert.NotNil(t, component.RackId)
-		assert.Equal(t, "rack-001", component.RackId.Id)
-	})
-
-	t.Run("handles minimal fields (nil optionals)", func(t *testing.T) {
-		es := &cwssaws.ExpectedSwitch{
-			ExpectedSwitchId: &cwssaws.UUID{Value: "es-002"}, BmcMacAddress: "11:22:33:44:55:66",
-			SwitchSerialNumber: "SW-002",
-		}
-		component := expectedSwitchToFlowComponent(es)
-		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH, component.Type)
-		assert.Empty(t, component.Info.Name)
-		assert.Empty(t, component.Info.Manufacturer)
-		assert.Nil(t, component.Info.Model)
-		assert.Nil(t, component.Position)
-		assert.Nil(t, component.RackId)
-	})
+	assert.NoError(t, manager.CreateExpectedSwitchOnFlow(context.Background(), nil))
+	assert.NoError(t, manager.CreateExpectedSwitchOnFlow(context.Background(), &corev1.ExpectedSwitch{}))
 }

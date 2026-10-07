@@ -12,7 +12,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 var (
@@ -55,9 +55,9 @@ func (anlpcr *APINVLinkLogicalPartitionCreateRequest) Validate() error {
 // The method trusts that the request has already been Validated and
 // that the handler has performed any cross-context checks Validate
 // cannot see.
-func (anlpcr *APINVLinkLogicalPartitionCreateRequest) ToProto(nvllp *cdbm.NVLinkLogicalPartition) *cwssaws.NVLinkLogicalPartitionCreationRequest {
+func (anlpcr *APINVLinkLogicalPartitionCreateRequest) ToProto(nvllp *cdbm.NVLinkLogicalPartition) *corev1.NVLinkLogicalPartitionCreationRequest {
 	entityProto := nvllp.ToProto()
-	return &cwssaws.NVLinkLogicalPartitionCreationRequest{
+	return &corev1.NVLinkLogicalPartitionCreationRequest{
 		Id:     entityProto.Id,
 		Config: entityProto.Config,
 	}
@@ -92,9 +92,9 @@ func (anlpur *APINVLinkLogicalPartitionUpdateRequest) Validate() error {
 // The method trusts that the request has already been Validated and
 // that the handler has performed any cross-context checks Validate
 // cannot see.
-func (anlpur *APINVLinkLogicalPartitionUpdateRequest) ToProto(nvllp *cdbm.NVLinkLogicalPartition) *cwssaws.NVLinkLogicalPartitionUpdateRequest {
+func (anlpur *APINVLinkLogicalPartitionUpdateRequest) ToProto(nvllp *cdbm.NVLinkLogicalPartition) *corev1.NVLinkLogicalPartitionUpdateRequest {
 	entityProto := nvllp.ToProto()
-	return &cwssaws.NVLinkLogicalPartitionUpdateRequest{
+	return &corev1.NVLinkLogicalPartitionUpdateRequest{
 		Id:     entityProto.Id,
 		Config: entityProto.Config,
 	}

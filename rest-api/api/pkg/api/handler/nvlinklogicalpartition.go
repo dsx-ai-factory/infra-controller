@@ -17,23 +17,25 @@ import (
 	temporalClient "go.temporal.io/sdk/client"
 	tp "go.temporal.io/sdk/temporal"
 
+	goset "github.com/deckarep/golang-set/v2"
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	goset "github.com/deckarep/golang-set/v2"
-	validation "github.com/go-ozzo/ozzo-validation/v4"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 
 	wfutil "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
@@ -43,21 +45,19 @@ import (
 
 // CreateNVLinkLogicalPartitionHandler is the API Handler for creating new NVLinkLogicalPartition
 type CreateNVLinkLogicalPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateNVLinkLogicalPartitionHandler initializes and returns a new handler for creating NVLinkLogicalPartition
 func NewCreateNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateNVLinkLogicalPartitionHandler {
 	return CreateNVLinkLogicalPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -73,7 +73,7 @@ func NewCreateNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalC
 // @Success 201 {object} model.APINVLinkLogicalPartition
 // @Router /v2/org/{org}/nico/nvlink-logical-partition [post]
 func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Create", c, cibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -193,7 +193,7 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 	var nvllp *cdbm.NVLinkLogicalPartition
 	var ssd *cdbm.StatusDetail
-	var protoNvllp *cwssaws.NVLinkLogicalPartition
+	var protoNvllp *corev1.NVLinkLogicalPartition
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that
 	// the DB tx unwinds before we make the second remote call. nil means
@@ -221,14 +221,13 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		}
 
 		// create the status detail record
-		ssd, derr = sdDAO.CreateFromParams(ctx, tx, nvllp.ID.String(), string(cdbm.NVLinkLogicalPartitionStatusPending),
-			cutil.GetPtr("received NVLink Logical Partition creation request, pending"))
+		ssd, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: nvllp.ID.String(), Status: string(cdbm.NVLinkLogicalPartitionStatusPending), Message: cutil.GetPtr("received NVLink Logical Partition creation request, pending")})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for NVLink Logical Partition", nil)
 		}
 		if ssd == nil {
-			logger.Error().Msg("Status Detail DB entry not returned from CreateFromParams")
+			logger.Error().Msg("Status Detail DB entry not returned from Create")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to get new Status Detail for NVLink Logical Partition", nil)
 		}
 
@@ -333,19 +332,17 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 // GetAllNVLinkLogicalPartitionHandler is the API Handler for getting all NVLinkLogicalPartitions
 type GetAllNVLinkLogicalPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllNVLinkLogicalPartitionHandler initializes and returns a new handler for getting all NVLinkLogicalPartitions
 func NewGetAllNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllNVLinkLogicalPartitionHandler {
 	return GetAllNVLinkLogicalPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -370,7 +367,7 @@ func NewGetAllNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalC
 // @Success 200 {object} []model.APINVLinkLogicalPartition
 // @Router /v2/org/{org}/nico/nvlink-logical-partition [get]
 func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "GetAll", c, gaibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -456,7 +453,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -464,7 +461,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.NVLinkLogicalPartitionStatusMap[cdbm.NVLinkLogicalPartitionStatus(statusQuery)]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -481,7 +478,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for `includeInterfaces` query param", err)
 		}
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.Bool("includeInterfaces", includeInterfaces), logger)
+		cotel.SetAttribute(handlerSpan, attribute.Bool("includeInterfaces", includeInterfaces))
 	}
 
 	// Check `includeVpcs` in query
@@ -492,7 +489,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for `includeVpcs` query param", err)
 		}
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.Bool("includeVpcs", includeVpcs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.Bool("includeVpcs", includeVpcs))
 	}
 
 	// Check `includeStats` in query
@@ -503,7 +500,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for `includeStats` query param", nil)
 		}
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.Bool("includeStats", includeStats), logger)
+		cotel.SetAttribute(handlerSpan, attribute.Bool("includeStats", includeStats))
 	}
 
 	nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(gaibph.dbSession)
@@ -639,19 +636,17 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 // GetNVLinkLogicalPartitionHandler is the API Handler for retrieving NVLinkLogicalPartition
 type GetNVLinkLogicalPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetNVLinkLogicalPartitionHandler initializes and returns a new handler to retrieve NVLinkLogicalPartition
 func NewGetNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetNVLinkLogicalPartitionHandler {
 	return GetNVLinkLogicalPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -670,7 +665,7 @@ func NewGetNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 200 {object} model.APINVLinkLogicalPartition
 // @Router /v2/org/{org}/nico/nvlink-logical-partition/{id} [get]
 func (gibph GetNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Get", c, gibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -732,13 +727,13 @@ func (gibph GetNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for `includeStats` query param", err)
 		}
-		gibph.tracerSpan.SetAttribute(handlerSpan, attribute.Bool("includeStats", includeStats), logger)
+		cotel.SetAttribute(handlerSpan, attribute.Bool("includeStats", includeStats))
 	}
 
 	// Get IB Partition ID from URL
 	nvllpStrID := c.Param("id")
 
-	gibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("nvlink_logical_partition_id", nvllpStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("nvlink_logical_partition_id", nvllpStrID))
 
 	nvllpID, err := uuid.Parse(nvllpStrID)
 	if err != nil {
@@ -832,21 +827,19 @@ func (gibph GetNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 // UpdateNVLinkLogicalPartitionHandler is the API Handler for updating a NVLinkLogicalPartition
 type UpdateNVLinkLogicalPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateNVLinkLogicalPartitionHandler initializes and returns a new handler for updating NVLinkLogicalPartition
 func NewUpdateNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateNVLinkLogicalPartitionHandler {
 	return UpdateNVLinkLogicalPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -863,7 +856,7 @@ func NewUpdateNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalC
 // @Success 200 {object} model.APINVLinkLogicalPartition
 // @Router /v2/org/{org}/nico/nvlink-logical-partition/{id} [patch]
 func (uibph UpdateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Update", c, uibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -892,7 +885,7 @@ func (uibph UpdateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	// Get IB Partition ID from URL
 	nvllpStrID := c.Param("id")
 
-	uibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("nvlink_logical_partition_id", nvllpStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("nvlink_logical_partition_id", nvllpStrID))
 
 	nvllpID, err := uuid.Parse(nvllpStrID)
 	if err != nil {
@@ -955,7 +948,7 @@ func (uibph UpdateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 	// get status details for the response
 	sdDAO := cdbm.NewStatusDetailDAO(uibph.dbSession)
-	ssds, _, err := sdDAO.GetAllByEntityID(ctx, nil, nvllp.ID.String(), nil, cutil.GetPtr(pagination.MaxPageSize), nil)
+	ssds, _, err := sdDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{nvllp.ID.String()}}, cdbp.PageInput{Limit: cutil.GetPtr(pagination.MaxPageSize)})
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Status Details for NVLink Logical Partition from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Status Details for NVLink Logical Partition", nil)
@@ -1091,21 +1084,19 @@ func (uibph UpdateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 // DeleteNVLinkLogicalPartitionHandler is the API Handler for deleting a NVLinkLogicalPartition
 type DeleteNVLinkLogicalPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteNVLinkLogicalPartitionHandler initializes and returns a new handler for deleting NVLinkLogicalPartition
 func NewDeleteNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteNVLinkLogicalPartitionHandler {
 	return DeleteNVLinkLogicalPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1121,7 +1112,7 @@ func NewDeleteNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalC
 // @Success 202
 // @Router /v2/org/{org}/nico/nvlink-logical-partition/{id} [delete]
 func (dibph DeleteNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Delete", c, dibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkLogicalPartition", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1150,7 +1141,7 @@ func (dibph DeleteNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	// Get NVLink Logical Partition ID from URL param
 	nvllpStrID := c.Param("id")
 
-	dibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("nvlink_logical_partition_id", nvllpStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("nvlink_logical_partition_id", nvllpStrID))
 
 	nvllpID, err := uuid.Parse(nvllpStrID)
 	if err != nil {
@@ -1263,14 +1254,13 @@ func (dibph DeleteNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		}
 
 		// Create status detail
-		ssd, derr := sdDAO.CreateFromParams(ctx, tx, nvllp.ID.String(), string(deletingStatus),
-			cutil.GetPtr("Received request for deletion, pending processing"))
+		ssd, derr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: nvllp.ID.String(), Status: string(deletingStatus), Message: cutil.GetPtr("Received request for deletion, pending processing")})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for NVLink Logical Partition deletion", nil)
 		}
 		if ssd == nil {
-			logger.Error().Msg("Status Detail DB entry not returned from CreateFromParams")
+			logger.Error().Msg("Status Detail DB entry not returned from Create")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for NVLink Logical Partition deletion", nil)
 		}
 
@@ -1352,5 +1342,5 @@ func (dibph DeleteNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 	// Create response
 	logger.Info().Msg("finishing API handler")
-	return c.String(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

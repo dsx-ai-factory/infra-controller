@@ -16,10 +16,10 @@
  */
 
 //! Thin top crate for the `carbide-api` server. Almost nothing lives here — the
-//! real code is split across two other crates:
+//! runtime code is split across two other crates:
 //!
 //!   - [`carbide_api_core`] — the server itself: the [`Api`]/`Forge` service, the
-//!     request handlers, and the startup/bootstrap code.
+//!     request handlers, and the core service runtime.
 //!   - [`carbide_api_web`] — the admin web UI (the HTML pages under `/admin`).
 //!
 //! `carbide-api-web` depends on `carbide-api-core` (it needs the [`Api`] type), so
@@ -28,9 +28,18 @@
 //! web pages to the server at startup. That's this crate's whole job: it's the one
 //! place allowed to depend on both, so the wiring happens here (see `main.rs`).
 //!
-//! It also re-exports [`run`] so that the `carbide-api` binary and the integration
-//! tests in `carbide-api-test-helper` have one stable `carbide::run` entrypoint.
+//! This crate owns process bootstrap and exports [`run`] so that the
+//! `carbide-api` binary and integration tests have one stable entrypoint.
 
-// The CLI types and server entrypoint, re-exported so callers can use
-// `carbide::run`, `carbide::Command`, and `carbide::Options` as before.
-pub use carbide_api_core::{AdminUiRoutesBuilder, Command, Options, run};
+mod command_line;
+mod logging;
+mod metrics;
+mod postgres;
+mod readiness;
+mod resources;
+mod run;
+
+pub use carbide_api_core::AdminUiRoutesBuilder;
+pub use command_line::{Command, Options};
+pub use postgres::postgres_connect_options;
+pub use run::{ApiServerAddresses, run};

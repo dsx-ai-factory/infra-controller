@@ -20,7 +20,7 @@ use rpc::forge_tls_client::ForgeClientConfig;
 
 use crate::CONFIG;
 
-pub fn build_forge_client_config() -> ForgeClientConfig {
+pub(super) fn build_forge_client_config() -> ForgeClientConfig {
     let forge_root_ca_path = &CONFIG
         .read()
         .unwrap() // safety: the only way this will panic is if the lock is poisoned,

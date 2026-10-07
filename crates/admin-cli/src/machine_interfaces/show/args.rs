@@ -29,7 +29,7 @@ Show one machine interface by ID:
     $ nico-admin-cli machine-interfaces show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short,
         long,
@@ -37,14 +37,14 @@ pub struct Args {
         conflicts_with = "interface_id",
         help = "Show all machine interfaces (DEPRECATED)"
     )]
-    pub all: bool,
+    pub(crate) all: bool,
 
     #[clap(
         default_value(None),
         help = "The interface ID to query, leave empty for all (default)"
     )]
-    pub interface_id: Option<MachineInterfaceId>,
+    pub(crate) interface_id: Option<MachineInterfaceId>,
 
     #[clap(long, action)]
-    pub more: bool,
+    pub(crate) more: bool,
 }

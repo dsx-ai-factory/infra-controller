@@ -22,16 +22,13 @@ mod enable_rshim;
 mod get_rshim_status;
 mod show_obmc_log;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Show Rshim Status")]
     GetRshimStatus(get_rshim_status::Args),
     #[clap(about = "Disable Rshim")]

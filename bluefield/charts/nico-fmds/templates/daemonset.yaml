@@ -1,3 +1,28 @@
+{{/*
+  Token mode pins these paths to the dpu-agent's defaults.
+
+  The agent publishes the trust anchor and serves its socket at paths taken
+  from its own [forge-system] config, and DPF deploys it with no config file
+  at all -- so it always uses /opt/forge. It has no CLI flag for either path.
+  Rendering fmds against a different certsDir/rootCaFile therefore points it
+  at files the agent will never create: the init container waits forever for a
+  CA that is not coming, or the token source connects to a socket that does
+  not exist.
+
+  Failing here turns that silent hang into a render-time error. The overrides
+  remain available in cert mode, where fmds reads the credentials directly and
+  nothing has to agree with the agent.
+*/}}
+{{- if .Values.useNodeTokens }}
+  {{- $dir := .Values.certsDir | default "/opt/forge" }}
+  {{- $rootCa := .Values.rootCaFile | default "forge_root.pem" }}
+  {{- if ne $dir "/opt/forge" }}
+    {{- fail (printf "useNodeTokens requires the dpu-agent's default certsDir (/opt/forge); got %q. The agent has no way to be told otherwise, so fmds would wait for a CA that is never published." $dir) }}
+  {{- end }}
+  {{- if ne $rootCa "forge_root.pem" }}
+    {{- fail (printf "useNodeTokens requires the dpu-agent's default rootCaFile (forge_root.pem); got %q. The agent publishes under its own filename, so fmds would wait for a file that is never created." $rootCa) }}
+  {{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -51,29 +76,71 @@ spec:
             - /busybox/sh
             - -c
             - |
-              {{- $dir := .Values.certsDir | default "/opt/nico" }}
-              {{- $rootCa := .Values.rootCaFile | default "nico_root.pem" }}
+              {{- $dir := .Values.certsDir | default "/opt/forge" }}
+              {{- $rootCa := .Values.rootCaFile | default "forge_root.pem" }}
+              {{- if .Values.useNodeTokens }}
+              echo "Waiting for root CA in {{ $dir }}/pub ..."
+              while [ ! -f {{ $dir }}/pub/{{ $rootCa }} ]; do
+                sleep 5
+              done
+              echo "Root CA found, starting nico-fmds (node tokens from the dpu-agent)."
+              {{- else }}
               echo "Waiting for certificates in {{ $dir }} ..."
               while [ ! -f {{ $dir }}/{{ $rootCa }} ] || [ ! -f {{ $dir }}/machine_cert.pem ] || [ ! -f {{ $dir }}/machine_cert.key ]; do
                 sleep 5
               done
               echo "Certificates found, starting nico-fmds."
+              {{- end }}
           volumeMounts:
-            - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+            {{- if .Values.useNodeTokens }}
+            # Token mode never needs the credentials directory, not even to
+            # wait: the agent publishes the trust anchor to pub/, which holds
+            # nothing else.
+            - name: nico-certs-pub
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}/pub
               readOnly: true
+            {{- else }}
+            - name: nico-certs
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
+              readOnly: true
+            {{- end }}
       containers:
         - name: nico-fmds
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          # Keep gRPC on POD_IP, away from the tenant-facing metadata interface.
+          # Rust socket addresses require brackets only for IPv6.
+          command:
+            - /busybox/sh
+            - -ec
+            - |
+              listen_host="$POD_IP"
+              case "$listen_host" in
+                *:*) listen_host="[$listen_host]" ;;
+              esac
+              binary="$1"
+              shift
+              exec "$binary" "--grpc-address=${listen_host}:50052" "$@"
+            - --
           args:
-            {{- $dir := .Values.certsDir | default "/opt/nico" }}
-            {{- $rootCa := .Values.rootCaFile | default "nico_root.pem" }}
-            - "--grpc-address=$(POD_IP):50052"
+            {{- $dir := .Values.certsDir | default "/opt/forge" }}
+            {{- $rootCa := .Values.rootCaFile | default "forge_root.pem" }}
+            - /usr/bin/carbide-fmds
+            {{- with .Values.restAddress }}
+            - "--rest-address={{ . }}"
+            {{- end }}
+            {{- with .Values.compatibilityRestAddress }}
+            - "--compatibility-rest-address={{ . }}"
+            {{- end }}
+            {{- if .Values.useNodeTokens }}
+            - "--root-ca={{ $dir }}/pub/{{ $rootCa }}"
+            - "--node-token-socket={{ $dir }}/run/agent.sock"
+            {{- else }}
             - "--root-ca={{ $dir }}/{{ $rootCa }}"
             - "--client-cert={{ $dir }}/machine_cert.pem"
             - "--client-key={{ $dir }}/machine_cert.key"
+            {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with toYaml .Values.serviceDaemonSet.resources }}
           resources:
@@ -106,14 +173,47 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
           volumeMounts:
-            - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+            {{- $dir := .Values.certsDir | default "/opt/forge" }}
+            {{- $rootCa := .Values.rootCaFile | default "forge_root.pem" }}
+            {{- if .Values.useNodeTokens }}
+            # Token mode: the bearer JWT is the credential, so this container
+            # gets the trust anchor and nothing else. pub/ holds only the CA,
+            # so the machine key is absent from the pod — and because this is a
+            # directory mount rather than a subPath, the agent's atomic
+            # republish of the CA reaches a running pod.
+            - name: nico-certs-pub
+              mountPath: {{ $dir }}/pub
               readOnly: true
+            # Read-only: connecting to a unix socket does not write to the
+            # filesystem, and Linux exempts socket inodes from the read-only
+            # mount check, so connect(2) works here. The socket's own 0600 mode
+            # is what gates access.
+            - name: nico-agent-run
+              mountPath: {{ $dir }}/run
+              readOnly: true
+            {{- else }}
+            - name: nico-certs
+              mountPath: {{ $dir }}
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if .Values.useNodeTokens }}
+        # No credentials-directory volume at all in token mode: nothing in this
+        # pod is entitled to the machine key.
+        - name: nico-certs-pub
+          hostPath:
+            path: {{ .Values.certsDir | default "/opt/forge" }}/pub
+            type: DirectoryOrCreate
+        - name: nico-agent-run
+          hostPath:
+            path: {{ .Values.certsDir | default "/opt/forge" }}/run
+            type: DirectoryOrCreate
+        {{- else }}
         - name: nico-certs
           hostPath:
-            path: {{ .Values.certsDir | default "/opt/nico" }}
+            path: {{ .Values.certsDir | default "/opt/forge" }}
             type: DirectoryOrCreate
+        {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

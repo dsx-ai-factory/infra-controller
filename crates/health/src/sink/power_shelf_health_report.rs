@@ -17,11 +17,13 @@
 
 use std::sync::Arc;
 
+use carbide_instrument::{Outcome, emit};
 use carbide_uuid::power_shelf::PowerShelfId;
 
 use super::dedup_queue::DedupQueue;
 use super::{
-    CollectorEvent, DataSink, EventContext, HealthReport, HealthReportTarget, ReportSource,
+    CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
+    HealthReportTarget, ReportSource,
 };
 use crate::HealthError;
 use crate::api_client::ApiClientWrapper;
@@ -65,17 +67,16 @@ impl PowerShelfHealthReportSink {
 
                     match report.as_ref().try_into() {
                         Ok(converted) => {
-                            if let Err(error) = worker_client
+                            let result = worker_client
                                 .submit_power_shelf_health_report(&key.id, converted)
-                                .await
-                            {
-                                tracing::warn!(
-                                    ?error,
-                                    worker_id,
-                                    power_shelf_id = %key.id,
-                                    "Failed to submit power shelf health report"
-                                );
-                            }
+                                .await;
+                            emit(HealthReportSubmitted {
+                                target: HealthReportTarget::PowerShelf,
+                                outcome: Outcome::from(&result),
+                                id: key.id.to_string(),
+                                worker_id,
+                                error: result.err().map(|e| e.to_string()).unwrap_or_default(),
+                            });
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -102,13 +103,17 @@ impl DataSink for PowerShelfHealthReportSink {
         "power_shelf_health_report_sink"
     }
 
-    fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), HealthError> {
         let CollectorEvent::HealthReport(report) = event else {
-            return;
+            return Ok(());
         };
 
         if report.target != Some(HealthReportTarget::PowerShelf) {
-            return;
+            return Ok(());
         }
 
         if self.skip_empty_reports && report.is_empty() {
@@ -116,7 +121,7 @@ impl DataSink for PowerShelfHealthReportSink {
                 source = ?report.source,
                 "Skipping empty power shelf health report"
             );
-            return;
+            return Ok(());
         }
 
         let power_shelf_id = if let Some(power_shelf_id) = context.power_shelf_id() {
@@ -126,7 +131,9 @@ impl DataSink for PowerShelfHealthReportSink {
                 endpoint_key = context.endpoint_key(),
                 "Received power-shelf-target HealthReport event without power_shelf_id context"
             );
-            return;
+            return Err(HealthError::GenericError(
+                "power-shelf-target health report event without power_shelf_id context".to_string(),
+            ));
         };
 
         let key = PowerShelfHealthReportKey {
@@ -134,5 +141,7 @@ impl DataSink for PowerShelfHealthReportSink {
             source: report.source,
         };
         self.queue.save_latest(key, Arc::clone(report));
+
+        Ok(())
     }
 }

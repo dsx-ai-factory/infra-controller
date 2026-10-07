@@ -20,7 +20,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -56,6 +56,55 @@ type ConnectResult = Result<TokioIo<TcpStream>, ConnectError>;
 /// the end of the day you just need to call metrics.clone() to
 /// get another metrics instance with Arc::cloned references in
 /// it.
+/// Process-wide connect totals across every connector instance -- what
+/// [`register_global_metrics`] exposes. The per-connector [`ConnectorMetrics`]
+/// remain in-memory instrumentation (their per-addr maps are unbounded and
+/// test-oriented); these totals are bumped on every connect regardless.
+struct GlobalConnectTotals {
+    attempts: AtomicU64,
+    successes: AtomicU64,
+    errors: AtomicU64,
+}
+
+static GLOBAL_TOTALS: GlobalConnectTotals = GlobalConnectTotals {
+    attempts: AtomicU64::new(0),
+    successes: AtomicU64::new(0),
+    errors: AtomicU64::new(0),
+};
+
+/// Registers the process-wide TCP connect counters on `meter`:
+/// `carbide_client_tcp_connect_attempts_total`, `_successes_total`, and
+/// `_errors_total` (the exporter appends the `_total`). Call once, after the
+/// meter provider exists; the totals accumulate from process start either way.
+pub fn register_global_metrics(meter: &opentelemetry::metrics::Meter) {
+    let instruments = [
+        (
+            "carbide_client_tcp_connect_attempts",
+            "Number of outbound TCP connect attempts across all HTTP connectors",
+            &GLOBAL_TOTALS.attempts,
+        ),
+        (
+            "carbide_client_tcp_connect_successes",
+            "Number of successful outbound TCP connects across all HTTP connectors",
+            &GLOBAL_TOTALS.successes,
+        ),
+        (
+            "carbide_client_tcp_connect_errors",
+            "Number of failed outbound TCP connect attempts across all HTTP connectors",
+            &GLOBAL_TOTALS.errors,
+        ),
+    ];
+    for (name, description, total) in instruments {
+        meter
+            .u64_observable_counter(name)
+            .with_description(description)
+            .with_callback(move |observer| {
+                observer.observe(total.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ConnectorMetrics {
     inner: ConnectorMetricsInner,
@@ -145,6 +194,7 @@ impl ConnectorMetricsInner {
             .unwrap()
             .add_attempt_by_addr(addr, connect_start);
         self.total_attempts.fetch_add(1, Ordering::SeqCst);
+        GLOBAL_TOTALS.attempts.fetch_add(1, Ordering::Relaxed);
     }
 
     // connect_success is the "inner" function for handling a
@@ -153,8 +203,9 @@ impl ConnectorMetricsInner {
     fn connect_success(&mut self, addr: SocketAddr, connect_start: Instant) {
         self.connect_attempt(addr, connect_start);
         self.total_successes.fetch_add(1, Ordering::SeqCst);
+        GLOBAL_TOTALS.successes.fetch_add(1, Ordering::Relaxed);
         self.addr_maps.lock().unwrap().add_success_by_addr(addr);
-        trace!("connected to {addr}");
+        trace!(endpoint_address = %addr, "connected");
     }
 
     // connect_error is the "inner" function for handling a
@@ -163,8 +214,9 @@ impl ConnectorMetricsInner {
     fn connect_error(&mut self, addr: SocketAddr, connect_start: Instant, e: &ConnectError) {
         self.connect_attempt(addr, connect_start);
         self.total_errors.fetch_add(1, Ordering::SeqCst);
+        GLOBAL_TOTALS.errors.fetch_add(1, Ordering::Relaxed);
         self.addr_maps.lock().unwrap().add_error_by_addr(addr);
-        info!("connect error for {}: {:?}", addr, e);
+        info!(endpoint_address = %addr, error = ?e, "connect error");
     }
 }
 
@@ -360,7 +412,7 @@ fn connect(
             conf = conf.with_retries(retries)
         }
         if let Err(e) = socket.set_tcp_keepalive(&conf) {
-            warn!("tcp set_keepalive error: {}", e);
+            warn!(error = %e, "tcp set_keepalive error");
         }
     }
     #[cfg(target_os = "linux")]
@@ -385,11 +437,10 @@ fn connect(
     .map_err(ConnectError::message("tcp bind local error"))?;
 
     #[cfg(unix)]
+    // SAFETY: `into_raw_fd` consumes `socket` and transfers ownership of its descriptor;
+    // `from_raw_fd` immediately assumes that ownership exactly once. The descriptor was also
+    // configured as nonblocking above, as required by `TcpSocket`.
     let socket = unsafe {
-        // Safety: `from_raw_fd` is only safe to call if ownership of the raw
-        // file descriptor is transferred. Since we call `into_raw_fd` on the
-        // socket2 socket, it gives up ownership of the fd and will not close
-        // it, so this is safe.
         use std::os::unix::io::{FromRawFd, IntoRawFd};
         TcpSocket::from_raw_fd(socket.into_raw_fd())
     };
@@ -397,19 +448,19 @@ fn connect(
     if config.reuse_address
         && let Err(e) = socket.set_reuseaddr(true)
     {
-        warn!("tcp set_reuse_address error: {}", e);
+        warn!(error = %e, "tcp set_reuse_address error");
     }
 
     if let Some(size) = config.send_buffer_size
         && let Err(e) = socket.set_send_buffer_size(size.try_into().unwrap_or(u32::MAX))
     {
-        warn!("tcp set_buffer_size error: {}", e);
+        warn!(error = %e, "tcp set_buffer_size error");
     }
 
     if let Some(size) = config.recv_buffer_size
         && let Err(e) = socket.set_recv_buffer_size(size.try_into().unwrap_or(u32::MAX))
     {
-        warn!("tcp set_recv_buffer_size error: {}", e);
+        warn!(error = %e, "tcp set_recv_buffer_size error");
     }
 
     let connect = socket.connect(*addr);
@@ -468,7 +519,7 @@ impl<'a> ConnectingTcp<'a> {
         config: &'a Config,
         metrics: ConnectorMetrics,
     ) -> Self {
-        trace!("ConnectingTcp config: {:?}", config);
+        trace!(?config, "ConnectingTcp config");
 
         if let Some(fallback_timeout) = config.happy_eyeballs_timeout {
             let (preferred_addrs, fallback_addrs) = remote_addrs
@@ -875,10 +926,10 @@ impl tower_service::Service<Uri> for ForgeHttpConnector {
 
 fn get_host_port<'u>(config: &Config, dst: &'u Uri) -> Result<(&'u str, u16), ConnectError> {
     trace!(
-        "Http::connect; scheme={:?}, host={:?}, port={:?}",
-        dst.scheme(),
-        dst.host(),
-        dst.port(),
+        scheme = ?dst.scheme(),
+        host = ?dst.host(),
+        port = ?dst.port(),
+        "Http::connect"
     );
 
     if config.enforce_http {
@@ -954,7 +1005,7 @@ impl ForgeHttpConnector {
             );
 
         tryhard::retry_fn(|| {
-            trace!("establishing new tcp connection for {dst}");
+            trace!(destination_address = %dst, "establishing new tcp connection");
             let c = ConnectingTcp::new(addrs.clone(), config, self.metrics.clone());
             c.connect()
         })

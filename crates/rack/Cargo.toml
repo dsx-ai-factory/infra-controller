@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [features]
 default = []
@@ -30,6 +31,7 @@ bms-dsx-exchange = { path = "../bms-dsx-exchange", default-features = false }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-health-report = { path = "../health-report", default-features = false }
+carbide-instrument = { path = "../instrument" }
 carbide-mqtt-common = { path = "../mqtt-common", default-features = false }
 carbide-secrets = { path = "../secrets", default-features = false }
 carbide-uuid = { path = "../uuid", default-features = false }
@@ -45,10 +47,15 @@ opentelemetry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

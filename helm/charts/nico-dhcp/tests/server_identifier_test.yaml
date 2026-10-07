@@ -1,0 +1,131 @@
+suite: DHCP server identifier (option 54) pinning — issue #3663
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: omits option-data entirely when no VIP source is configured (pre-#3663 rendering)
+    asserts:
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: 'dhcp-server-identifier'
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: '"option-data"'
+
+  - it: derives the server identifier from the externalService loadBalancerIPs annotation
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.180.126.161"
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"name": "dhcp-server-identifier"'
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"data": "10.180.126.161"'
+
+  - it: uses the first entry of a comma-separated loadBalancerIPs annotation
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.180.126.161, 10.180.126.162"
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"data": "10.180.126.161"'
+
+  - it: does not derive from the annotation when externalService is disabled
+    set:
+      externalService:
+        enabled: false
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.180.126.161"
+    asserts:
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: 'dhcp-server-identifier'
+
+  - it: silently omits the option when the annotation is not a valid IPv4 (upgrade-safe)
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "not-an-ip"
+    asserts:
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: 'dhcp-server-identifier'
+
+  - it: silently omits the option when the annotation is empty (upgrade-safe)
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: ""
+    asserts:
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: 'dhcp-server-identifier'
+
+  - it: explicit serverIdentifier takes precedence over the annotation
+    set:
+      config.kea.serverIdentifier: "10.180.126.170"
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.180.126.161"
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"data": "10.180.126.170"'
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: '10\.180\.126\.161'
+
+  - it: rejects an explicit serverIdentifier that is not a single IPv4 address
+    set:
+      config.kea.serverIdentifier: "10.180.126.161,10.180.126.162"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'config\.kea\.serverIdentifier must be a single IPv4 address'
+
+  - it: rejects an explicit serverIdentifier with an out-of-range octet
+    set:
+      config.kea.serverIdentifier: "10.180.126.256"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'config\.kea\.serverIdentifier must be a single IPv4 address'
+
+  - it: rejects a non-string serverIdentifier with the friendly IPv4 message
+    set:
+      config.kea.serverIdentifier: 10
+    asserts:
+      - failedTemplate:
+          errorPattern: 'config\.kea\.serverIdentifier must be a single IPv4 address'
+
+  - it: rejects serverIdentifier combined with the raw config escape hatch
+    set:
+      config.kea.serverIdentifier: "10.180.126.170"
+      config.keaConfigJsonRaw: '{"Dhcp4": {}}'
+    asserts:
+      - failedTemplate:
+          errorPattern: 'serverIdentifier` is ignored when `config\.keaConfigJsonRaw` is set'
+
+  - it: raw config escape hatch alone renders without the pinning applied
+    set:
+      config.keaConfigJsonRaw: '{"Dhcp4": {}}'
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.180.126.161"
+    asserts:
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: 'dhcp-server-identifier'
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: 'Dhcp4'

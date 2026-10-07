@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bms_dsx_exchange::{BmsDsxExchangePublisher, Publication, PublisherConfig, SourceUpdate};
+use carbide_instrument::{Event, LabelValue, emit};
 use carbide_mqtt_common::hook::MqttPublisher;
-use carbide_mqtt_common::metrics::MqttHookMetrics;
+use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
 use carbide_uuid::rack::RackId;
 use chrono::Utc;
 use db::db_read::PgPoolReader;
@@ -60,6 +61,38 @@ enum Command {
     SourceUpdate(SourceUpdate),
 }
 
+impl Command {
+    fn kind(&self) -> CommandKind {
+        match self {
+            Self::Metadata { .. } => CommandKind::Metadata,
+            Self::SourceUpdate(_) => CommandKind::SourceUpdate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+enum CommandKind {
+    Metadata,
+    SourceUpdate,
+}
+
+#[derive(Event)]
+#[event(
+    event_name = "bms_dsx_exchange_command_dropped",
+    metric_name = "carbide_bms_dsx_commands_dropped_total",
+    component = "carbide-rack",
+    log = warn,
+    metric = counter,
+    message = "BMS DSX Exchange command dropped because the worker stopped",
+    describe = "Number of BMS DSX Exchange commands dropped because the worker stopped, by command kind."
+)]
+struct BmsDsxExchangeCommandDropped {
+    #[label]
+    command_kind: CommandKind,
+    #[context]
+    error: String,
+}
+
 pub struct BmsDsxExchangeHandle {
     sender: mpsc::Sender<Command>,
 }
@@ -79,7 +112,7 @@ impl BmsDsxExchangeHandle {
             .heartbeat_interval
             .min(publisher_config.republish_interval);
         let (sender, receiver) = mpsc::channel(queue_capacity);
-        let metrics = MqttHookMetrics::new(meter, sender.downgrade(), "bms");
+        let metrics = MqttHookMetrics::new(meter, sender.downgrade(), PublishComponent::Bms);
 
         let handle = Arc::new(BmsDsxExchangeHandle { sender });
 
@@ -97,7 +130,7 @@ impl BmsDsxExchangeHandle {
             .register_raw_message::<BmsMetadataMessage>(METADATA_PATTERN)
             .await
             .map_err(|error| {
-                eyre::eyre!("Failed to register BMS metadata message type: {error}")
+                eyre::eyre!("failed to register BMS metadata message type: {error}")
             })?;
 
         client
@@ -115,7 +148,7 @@ impl BmsDsxExchangeHandle {
         client
             .subscribe(METADATA_SUBSCRIPTION, QoS::AtMostOnce)
             .await
-            .map_err(|error| eyre::eyre!("Failed to subscribe to BMS metadata topics: {error}"))?;
+            .map_err(|error| eyre::eyre!("failed to subscribe to BMS metadata topics: {error}"))?;
 
         seed_current_rack_state(db_pool, handle.as_ref()).await?;
 
@@ -123,11 +156,12 @@ impl BmsDsxExchangeHandle {
     }
 
     async fn send(&self, command: Command) {
+        let command_kind = command.kind();
         if let Err(error) = self.sender.send(command).await {
-            tracing::warn!(
-                ?error,
-                "BMS DSX Exchange command dropped because the worker stopped"
-            );
+            emit(BmsDsxExchangeCommandDropped {
+                command_kind,
+                error: format!("{error:?}"),
+            });
         }
     }
 
@@ -190,8 +224,7 @@ async fn run_worker<P: MqttPublisher>(
                         }
                         Ok(None) => Vec::new(),
                         Err(error) => {
-                            tracing::warn!(topic = %topic, %error, "Failed to parse BMS metadata");
-                            metrics.record_serialization_error();
+                            metrics.record_bms_metadata_parse_error(topic, error.to_string());
                             Vec::new()
                         }
                     },
@@ -216,22 +249,22 @@ async fn publish_all<P: MqttPublisher>(
         let payload = match publication.payload_json() {
             Ok(payload) => payload,
             Err(error) => {
-                tracing::warn!(topic = %publication.topic, %error, "Failed to serialize BMS DSX publication");
-                metrics.record_serialization_error();
+                metrics.record_bms_publication_serialization_error(
+                    publication.topic,
+                    error.to_string(),
+                );
                 continue;
             }
         };
 
         let deadline = Instant::now() + publish_timeout;
         match timeout_at(deadline, publisher.publish(&publication.topic, payload)).await {
-            Ok(Ok(())) => metrics.record_success(),
+            Ok(Ok(())) => metrics.record_bms_success(),
             Ok(Err(error)) => {
-                tracing::warn!(topic = %publication.topic, %error, "Failed to publish BMS DSX message");
-                metrics.record_publish_error();
+                metrics.record_bms_publish_error(publication.topic, error.to_string());
             }
             Err(_) => {
-                tracing::warn!(topic = %publication.topic, "BMS DSX publish timed out");
-                metrics.record_timeout();
+                metrics.record_bms_timeout(publication.topic);
             }
         }
     }
@@ -278,6 +311,8 @@ async fn seed_current_rack_state(
 mod tests {
     use std::sync::Arc;
 
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_test_support::value_scenarios;
     use carbide_uuid::rack::RackId;
     use mqttea::MqtteaClientError;
     use opentelemetry::global;
@@ -286,6 +321,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    const DROPPED_COMMAND_METRIC: &str = "carbide_bms_dsx_commands_dropped_total";
 
     #[derive(Default)]
     struct RecordingPublisher {
@@ -398,7 +435,8 @@ mod tests {
         let mut join_set = JoinSet::new();
         let cancel_token = CancellationToken::new();
         let (sender, receiver) = mpsc::channel(32);
-        let metrics = MqttHookMetrics::new(&test_meter(), sender.downgrade(), "bms-test");
+        let metrics =
+            MqttHookMetrics::new(&test_meter(), sender.downgrade(), PublishComponent::Bms);
 
         join_set.spawn(run_worker(
             receiver,
@@ -420,6 +458,134 @@ mod tests {
     async fn shutdown(mut join_set: JoinSet<()>, cancel_token: CancellationToken) {
         cancel_token.cancel();
         while join_set.join_next().await.is_some() {}
+    }
+
+    #[derive(Debug)]
+    enum DroppedCommandCase {
+        Metadata,
+        SourceUpdate,
+        RackLeakState,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct DroppedCommandObservation {
+        log_count: usize,
+        command_kinds: Vec<String>,
+        metadata_count: f64,
+        source_update_count: f64,
+    }
+
+    #[test]
+    fn commands_dropped_after_the_worker_stops_log_and_count_by_kind() {
+        value_scenarios!(
+            run = |case| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime");
+                let (sender, receiver) = mpsc::channel(1);
+                drop(receiver);
+                let handle = BmsDsxExchangeHandle { sender };
+                let metrics = MetricsCapture::start();
+
+                let logs: Vec<_> = capture_logs(|| {
+                    runtime.block_on(async {
+                        match case {
+                            DroppedCommandCase::Metadata => {
+                                handle
+                                    .handle_metadata(
+                                        "BMS/v1/PUB/Metadata/private-topic".to_string(),
+                                        b"private payload".to_vec(),
+                                    )
+                                    .await;
+                            }
+                            DroppedCommandCase::SourceUpdate => {
+                                handle
+                                    .send(Command::SourceUpdate(
+                                        SourceUpdate::liquid_isolation_request(
+                                            "private-rack".to_string(),
+                                            true,
+                                        ),
+                                    ))
+                                    .await;
+                            }
+                            DroppedCommandCase::RackLeakState => {
+                                handle
+                                    .set_rack_leak_state(&RackId::new("private-rack"), true)
+                                    .await;
+                            }
+                        }
+                    });
+                })
+                .into_iter()
+                .filter(|log| log.metadata_name == "bms_dsx_exchange_command_dropped")
+                .collect();
+
+                for log in &logs {
+                    assert_eq!(log.level, tracing::Level::WARN);
+                    assert_eq!(
+                        log.metadata_name,
+                        "bms_dsx_exchange_command_dropped"
+                    );
+                    assert_eq!(
+                        log.message,
+                        "BMS DSX Exchange command dropped because the worker stopped"
+                    );
+                    assert_eq!(
+                        log.field("event_name"),
+                        Some("bms_dsx_exchange_command_dropped")
+                    );
+                    assert_eq!(log.field("metric_name"), Some(DROPPED_COMMAND_METRIC));
+                    assert_eq!(log.field("error"), Some("SendError { .. }"));
+                    for private_field in ["topic", "payload", "rack_id", "source_update"] {
+                        assert_eq!(log.field(private_field), None);
+                    }
+                }
+
+                DroppedCommandObservation {
+                    log_count: logs.len(),
+                    command_kinds: logs
+                        .iter()
+                        .map(|log| {
+                            log.field("command_kind")
+                                .expect("dropped command kind")
+                                .to_string()
+                        })
+                        .collect(),
+                    metadata_count: metrics
+                        .counter_delta(DROPPED_COMMAND_METRIC, &[("command_kind", "metadata")]),
+                    source_update_count: metrics.counter_delta(
+                        DROPPED_COMMAND_METRIC,
+                        &[("command_kind", "source_update")],
+                    ),
+                }
+            };
+            "one command is dropped" {
+                DroppedCommandCase::Metadata => DroppedCommandObservation {
+                    log_count: 1,
+                    command_kinds: vec!["metadata".to_string()],
+                    metadata_count: 1.0,
+                    source_update_count: 0.0,
+                },
+                DroppedCommandCase::SourceUpdate => DroppedCommandObservation {
+                    log_count: 1,
+                    command_kinds: vec!["source_update".to_string()],
+                    metadata_count: 0.0,
+                    source_update_count: 1.0,
+                },
+            }
+            "`set_rack_leak_state` drops both isolation requests" {
+                DroppedCommandCase::RackLeakState => DroppedCommandObservation {
+                    log_count: 2,
+                    command_kinds: vec![
+                        "source_update".to_string(),
+                        "source_update".to_string(),
+                    ],
+                    metadata_count: 0.0,
+                    source_update_count: 2.0,
+                },
+            }
+        );
     }
 
     #[test]

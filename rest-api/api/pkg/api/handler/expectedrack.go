@@ -4,47 +4,49 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateExpectedRackHandler is the API Handler for creating a new ExpectedRack
 type CreateExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateExpectedRackHandler initializes and returns a new handler for creating ExpectedRack
 func NewCreateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedRackHandler {
 	return CreateExpectedRackHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -60,7 +62,7 @@ func NewCreateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cf
 // @Success 201 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack [post]
 func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Create", c, cerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -68,12 +70,6 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 	if dbUser == nil {
 		logger.Error().Msg("invalid User object found in request context")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
-	}
-
-	// ensure our user is a provider or tenant for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, cerh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate request
@@ -93,7 +89,7 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("RackID", apiRequest.RackID).Logger()
-	cerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", apiRequest.RackID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", apiRequest.RackID))
 
 	// Retrieve the Site from the DB
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, cerh.dbSession)
@@ -103,6 +99,12 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		}
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
+	}
+
+	// Scope tenant privilege to the Site targeted by this request.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, cerh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate ProviderTenantSite relationship and site state
@@ -146,7 +148,6 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		ExpectedRackID: uuid.New(),
 		SiteID:         site.ID,
 		RackID:         apiRequest.RackID,
-		RackProfileID:  apiRequest.RackProfileID,
 		Labels:         apiRequest.Labels,
 		CreatedBy:      dbUser.ID,
 	}
@@ -159,6 +160,8 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackDAO(cerh.dbSession)
 	expectedRack, err := cdb.WithTxResult(ctx, cerh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRack, error) {
+		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
 		// Create the ExpectedRack in DB
 		er, err := erDAO.Create(ctx, tx, createInput)
 		if err != nil {
@@ -186,10 +189,21 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		}
 
 		// Run workflow
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "CreateExpectedRack", workflowOptions, createExpectedRackRequest); apiErr != nil {
+		if apiErr := common.ExecuteSyncWorkflow(rpcCtx, logger, stc, "CreateExpectedRack", workflowOptions, createExpectedRackRequest); apiErr != nil {
 			return nil, apiErr
 		}
-		return er, nil
+		var stored corev1.ExpectedRack
+		if rpcCtx.Err() != nil {
+			return nil, cutil.NewAPIError(http.StatusGatewayTimeout, "Expected Rack creation timed out before readback", nil)
+		}
+		apiErr := common.ExecuteCoreGRPC(rpcCtx, stc, corev1.Forge_GetExpectedRack_FullMethodName, &corev1.ExpectedRackRequest{RackId: er.RackID}, &stored, "")
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		if stored.GetRackId().GetId() != er.RackID || stored.GetRackProfileId().GetId() == "" || stored.GetRackGroupId().GetId() == "" {
+			return nil, cutil.NewAPIError(http.StatusBadGateway, "Core returned an invalid Expected Rack profile or group", nil)
+		}
+		return erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{ExpectedRackID: er.ID, RackProfileID: cutil.GetPtr(stored.RackProfileId.Id), RackGroupID: cutil.GetPtr(stored.RackGroupId.Id)})
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to create Expected Rack due to DB transaction error")
@@ -206,23 +220,21 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 
 // GetAllExpectedRackHandler is the API Handler for getting all ExpectedRacks
 type GetAllExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetAllExpectedRackHandler initializes and returns a new handler for getting all ExpectedRacks
 func NewGetAllExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetAllExpectedRackHandler {
 	return GetAllExpectedRackHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Get all ExpectedRacks
-// @Description Get all ExpectedRacks
+// @Description Get all ExpectedRacks. Provider callers may omit siteId to list across their Sites; Tenant callers must specify siteId.
 // @Tags ExpectedRack
 // @Accept json
 // @Produce json
@@ -236,7 +248,7 @@ func NewGetAllExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Success 200 {object} []model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack [get]
 func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "GetAll", c, gaerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -246,18 +258,15 @@ func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gaerh.dbSession, org, dbUser, true, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	filterInput := cdbm.ExpectedRackFilterInput{}
 
 	// Get Site ID from query param if specified
 	siteIDStr := c.QueryParam("siteId")
+	var site *cdbm.Site
+	var err error
+	var privilegeScope *common.TenantPrivilegeScope
 	if siteIDStr != "" {
-		site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gaerh.dbSession)
+		site, err = common.GetSiteFromIDString(ctx, nil, siteIDStr, gaerh.dbSession)
 		if err != nil {
 			if errors.Is(err, cdb.ErrDoesNotExist) {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data does not exist", nil)
@@ -265,7 +274,17 @@ func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
 		}
+		privilegeScope = &common.TenantPrivilegeScope{SiteID: &site.ID}
+	}
 
+	// A missing scope is the documented provider-wide list exemption above;
+	// tenant-only callers without siteId are rejected below.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gaerh.dbSession, org, dbUser, true, privilegeScope)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if site != nil {
 		// Validate ProviderTenantSite relationship and site state
 		hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, gaerh.dbSession, site, infrastructureProvider, tenant)
 		if apiError != nil {
@@ -310,7 +329,7 @@ func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
 
 	// Validate pagination request
 	pageRequest := pagination.PageRequest{}
-	err := c.Bind(&pageRequest)
+	err = c.Bind(&pageRequest)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
@@ -366,17 +385,15 @@ func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
 
 // GetExpectedRackHandler is the API Handler for retrieving an ExpectedRack
 type GetExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetExpectedRackHandler initializes and returns a new handler to retrieve ExpectedRack
 func NewGetExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetExpectedRackHandler {
 	return GetExpectedRackHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -393,7 +410,7 @@ func NewGetExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetEx
 // @Success 200 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack/{id} [get]
 func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Get", c, gerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -403,12 +420,6 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gerh.dbSession, org, dbUser, true, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	// Get Expected Rack ID from URL param
 	expectedRackID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -416,7 +427,7 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("ExpectedRackID", expectedRackID.String()).Logger()
-	gerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -448,6 +459,12 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	// Scope tenant privilege to the Expected Rack's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gerh.dbSession, org, dbUser, true, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
 	// Validate ProviderTenantSite relationship and site state
 	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, gerh.dbSession, site, infrastructureProvider, tenant)
 	if apiError != nil {
@@ -469,19 +486,17 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 
 // UpdateExpectedRackHandler is the API Handler for updating an ExpectedRack
 type UpdateExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateExpectedRackHandler initializes and returns a new handler for updating ExpectedRack
 func NewUpdateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedRackHandler {
 	return UpdateExpectedRackHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -498,7 +513,7 @@ func NewUpdateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cf
 // @Success 200 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack/{id} [patch]
 func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Update", c, uerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -509,19 +524,13 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// Ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, uerh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	// Get Expected Rack ID from URL param
 	expectedRackID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Rack ID in URL", nil)
 	}
 	logger = logger.With().Str("ExpectedRackID", expectedRackID.String()).Logger()
-	uerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()))
 
 	// Validate request
 	// Bind request data to API model
@@ -565,6 +574,12 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Rack", nil)
 	}
 
+	// Scope tenant privilege to the Expected Rack's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, uerh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
 	// Validate ProviderTenantSite relationship and site state
 	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, uerh.dbSession, site, infrastructureProvider, tenant)
 	if apiError != nil {
@@ -575,28 +590,27 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site of the Expected Rack", nil)
 	}
 
-	// If RackID is changing, ensure the new value is not already taken in this site
+	// RackID is immutable: Core and Flow identify expected racks by rackId, so
+	// PATCH may reassert the existing identity but cannot replace it. A rename
+	// would first mutate the Cloud record and only then fail in Core's lookup
+	// by the new rackId, so the mismatch is rejected here before any database
+	// write or workflow trigger. This mirrors the ExpectedMachine BMC MAC
+	// identity boundary.
 	if apiRequest.RackID != nil && *apiRequest.RackID != expectedRack.RackID {
-		_, count, err := erDAO.GetAll(ctx, nil, cdbm.ExpectedRackFilterInput{
-			SiteIDs: []uuid.UUID{expectedRack.SiteID},
-			RackIDs: []string{*apiRequest.RackID},
-		}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
-		if err != nil {
-			logger.Error().Err(err).Msg("error checking for duplicate Expected Rack")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Expected Rack uniqueness due to DB error", nil)
-		}
-		if count > 0 {
-			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Rack with specified RackID already exists for Site", validation.Errors{
-				"rackId": errors.New(*apiRequest.RackID),
-			})
-		}
+		logger.Warn().
+			Str("requestRackID", *apiRequest.RackID).
+			Str("currentRackID", expectedRack.RackID).
+			Msg("RackID cannot be changed after creation")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ExpectedRack update request data", validation.Errors{
+			"rackId": errors.New("RackID cannot be changed after creation"),
+		})
 	}
 
-	// Build update input from request, mapping flat API fields to DAO fields
+	// Build update input from request, mapping flat API fields to DAO fields.
+	// RackID is intentionally not passed through: it is immutable, so the DAO
+	// update path is structurally incapable of renaming an Expected Rack.
 	updateInput := cdbm.ExpectedRackUpdateInput{
 		ExpectedRackID: expectedRack.ID,
-		RackID:         apiRequest.RackID,
-		RackProfileID:  apiRequest.RackProfileID,
 		Name:           apiRequest.Name,
 		Description:    apiRequest.Description,
 	}
@@ -654,19 +668,17 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 
 // DeleteExpectedRackHandler is the API Handler for deleting an ExpectedRack
 type DeleteExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteExpectedRackHandler initializes and returns a new handler for deleting ExpectedRack
 func NewDeleteExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteExpectedRackHandler {
 	return DeleteExpectedRackHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -682,7 +694,7 @@ func NewDeleteExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cf
 // @Success 204
 // @Router /v2/org/{org}/expected-rack/{id} [delete]
 func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Delete", c, derh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -692,19 +704,13 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	// Ensure our user is a provider for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, derh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
 	// Get Expected Rack ID from URL param
 	expectedRackID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Rack ID in URL", nil)
 	}
 	logger = logger.With().Str("ExpectedRackID", expectedRackID.String()).Logger()
-	derh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()))
 
 	// Get ExpectedRack from DB by ID, including Site relation
 	erDAO := cdbm.NewExpectedRackDAO(derh.dbSession)
@@ -722,6 +728,12 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 	if site == nil {
 		logger.Error().Msg("no Site relation found for Expected Rack")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Rack", nil)
+	}
+
+	// Scope tenant privilege to the Expected Rack's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, derh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate ProviderTenantSite relationship and site state
@@ -742,7 +754,7 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 		}
 
 		// Build the delete request for workflow
-		deleteExpectedRackRequest := &cwssaws.ExpectedRackRequest{
+		deleteExpectedRackRequest := &corev1.ExpectedRackRequest{
 			RackId: expectedRack.RackID,
 		}
 
@@ -782,19 +794,17 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 // ReplaceAllExpectedRacksHandler is the API Handler for replacing the full
 // set of ExpectedRacks for a given Site with a provided list.
 type ReplaceAllExpectedRacksHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewReplaceAllExpectedRacksHandler initializes and returns a new handler for replacing all ExpectedRacks on a Site
 func NewReplaceAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedRacksHandler {
 	return ReplaceAllExpectedRacksHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -808,9 +818,9 @@ func NewReplaceAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPoo
 // @Param org path string true "Name of NGC organization"
 // @Param message body model.APIReplaceAllExpectedRacksRequest true "ExpectedRack replace-all request"
 // @Success 200 {object} []model.APIExpectedRack
-// @Router /v2/org/{org}/expected-rack [put]
+// @Router /v2/org/{org}/nico/expected-rack/all [put]
 func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "ReplaceAll", c, raerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "ReplaceAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -818,12 +828,6 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 	if dbUser == nil {
 		logger.Error().Msg("invalid User object found in request context")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
-	}
-
-	// Ensure our user is a provider or tenant for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, raerh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate request
@@ -841,8 +845,8 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("SiteID", apiRequest.SiteID).Int("RackCount", len(apiRequest.ExpectedRacks)).Logger()
-	raerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", apiRequest.SiteID), logger)
-	raerh.tracerSpan.SetAttribute(handlerSpan, attribute.Int("rack_count", len(apiRequest.ExpectedRacks)), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", apiRequest.SiteID))
+	cotel.SetAttribute(handlerSpan, attribute.Int("rack_count", len(apiRequest.ExpectedRacks)))
 
 	// Retrieve the Site
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, raerh.dbSession)
@@ -852,6 +856,12 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 		}
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
+	}
+
+	// Scope tenant privilege to the Site targeted by this request.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, raerh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate ProviderTenantSite relationship and site state
@@ -876,7 +886,6 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 			ExpectedRackID: uuid.New(),
 			SiteID:         site.ID,
 			RackID:         er.RackID,
-			RackProfileID:  er.RackProfileID,
 			Labels:         er.Labels,
 			CreatedBy:      dbUser.ID,
 		}
@@ -891,6 +900,8 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackDAO(raerh.dbSession)
 	replacedRacks, err := cdb.WithTxResult(ctx, raerh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedRack, error) {
+		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
 		// Replace the set scoped to this Site
 		racks, err := erDAO.ReplaceAll(ctx, tx,
 			cdbm.ExpectedRackFilterInput{SiteIDs: []uuid.UUID{site.ID}},
@@ -902,11 +913,11 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 		}
 
 		// Build the workflow request: a list of all ExpectedRacks that should now exist for the Site
-		protoRacks := make([]*cwssaws.ExpectedRack, 0, len(racks))
+		protoRacks := make([]*corev1.ExpectedRack, 0, len(racks))
 		for i := range racks {
 			protoRacks = append(protoRacks, racks[i].ToProto())
 		}
-		replaceRequest := &cwssaws.ExpectedRackList{
+		replaceRequest := &corev1.ExpectedRackList{
 			ExpectedRacks: protoRacks,
 		}
 
@@ -924,10 +935,40 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "ReplaceAllExpectedRacks", workflowOptions, replaceRequest); apiErr != nil {
+		if apiErr := common.ExecuteSyncWorkflow(rpcCtx, logger, stc, "ReplaceAllExpectedRacks", workflowOptions, replaceRequest); apiErr != nil {
 			return nil, apiErr
 		}
-		return racks, nil
+		if len(racks) == 0 {
+			return racks, nil
+		}
+		var stored corev1.ExpectedRackList
+		if rpcCtx.Err() != nil {
+			return nil, cutil.NewAPIError(http.StatusGatewayTimeout, "Expected Rack replacement timed out before readback", nil)
+		}
+		apiErr := common.ExecuteCoreGRPC(rpcCtx, stc, corev1.Forge_GetAllExpectedRacks_FullMethodName, &emptypb.Empty{}, &stored, "")
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		profiles := make(map[string]string, len(stored.ExpectedRacks))
+		groups := make(map[string]string, len(stored.ExpectedRacks))
+		for _, rack := range stored.ExpectedRacks {
+			profiles[rack.GetRackId().GetId()] = rack.GetRackProfileId().GetId()
+			groups[rack.GetRackId().GetId()] = rack.GetRackGroupId().GetId()
+		}
+		updates := make([]cdbm.ExpectedRackUpdateInput, 0, len(racks))
+		for i := range racks {
+			profile := profiles[racks[i].RackID]
+			group := groups[racks[i].RackID]
+			if profile == "" || group == "" {
+				return nil, cutil.NewAPIError(http.StatusBadGateway, "Core did not return a profile and group for every Expected Rack", nil)
+			}
+			updates = append(updates, cdbm.ExpectedRackUpdateInput{
+				ExpectedRackID: racks[i].ID,
+				RackProfileID:  cutil.GetPtr(profile),
+				RackGroupID:    cutil.GetPtr(group),
+			})
+		}
+		return erDAO.UpdateMultiple(ctx, tx, updates)
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to replace Expected Racks due to DB transaction error")
@@ -947,19 +988,17 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 // DeleteAllExpectedRacksHandler is the API Handler for deleting all ExpectedRacks
 // scoped to a specific Site (siteId query parameter).
 type DeleteAllExpectedRacksHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteAllExpectedRacksHandler initializes and returns a new handler for deleting all ExpectedRacks for a Site
 func NewDeleteAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedRacksHandler {
 	return DeleteAllExpectedRacksHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -973,9 +1012,9 @@ func NewDeleteAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string true "ID of Site whose ExpectedRacks should be deleted"
 // @Success 204
-// @Router /v2/org/{org}/expected-rack/all [delete]
+// @Router /v2/org/{org}/nico/expected-rack/all [delete]
 func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "DeleteAll", c, daerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "DeleteAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -983,12 +1022,6 @@ func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
 	if dbUser == nil {
 		logger.Error().Msg("invalid User object found in request context")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
-	}
-
-	// Ensure our user is a provider or tenant for the org
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, daerh.dbSession, org, dbUser, false, true)
-	if apiError != nil {
-		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// siteId query parameter is required to scope the delete operation
@@ -1001,7 +1034,7 @@ func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("SiteID", siteIDStr).Logger()
-	daerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr))
 
 	// Retrieve the Site
 	site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, daerh.dbSession)
@@ -1011,6 +1044,12 @@ func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
 		}
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in query due to DB error", nil)
+	}
+
+	// Scope tenant privilege to the Site targeted by this request.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, daerh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate ProviderTenantSite relationship and site state

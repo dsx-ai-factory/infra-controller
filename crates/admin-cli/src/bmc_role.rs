@@ -29,7 +29,7 @@ use libredfish::RoleId;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[clap(rename_all = "lower")]
-pub enum BmcRole {
+pub(crate) enum BmcRole {
     Administrator,
     Operator,
     ReadOnly,
@@ -39,7 +39,7 @@ pub enum BmcRole {
 impl BmcRole {
     /// The canonical role string accepted by the API `CreateBmcUser` request
     /// (matches clap's `rename_all = "lower"` rendering).
-    pub fn as_api_str(self) -> &'static str {
+    pub(crate) fn as_api_str(self) -> &'static str {
         match self {
             BmcRole::Administrator => "administrator",
             BmcRole::Operator => "operator",

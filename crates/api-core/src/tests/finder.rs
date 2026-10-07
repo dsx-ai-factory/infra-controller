@@ -17,7 +17,7 @@
 
 use common::api_fixtures::{
     FIXTURE_DHCP_RELAY_ADDRESS, TestEnv, create_managed_host, create_managed_host_with_config,
-    create_test_env, dpu,
+    create_test_env,
 };
 use model::test_support::ManagedHostConfig;
 use rpc::forge::IpType;
@@ -35,6 +35,15 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
     let host_machine = mh.host().rpc_machine().await;
+
+    let status = host_machine
+        .status
+        .as_ref()
+        .expect("host machine must have a status message");
+    assert!(
+        !status.interfaces.is_empty(),
+        "status.interfaces must be populated for the host machine"
+    );
 
     mh.instance_builer(&env)
         .single_interface_network_config(segment_id)
@@ -72,11 +81,14 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     )
     .await;
 
+    // The managed host above uses the default `auto` bmc_ip_allocation, which
+    // retains its auto-allocated BMC address as Static -- so the finder reports
+    // it as StaticBmcIp rather than plain BmcIp.
     test_inner(
         host_machine.bmc_info.as_ref().unwrap().ip(),
-        IpType::BmcIp,
+        IpType::StaticBmcIp,
         &env,
-        "test_bmc_ip",
+        "test_static_bmc_ip",
     )
     .await;
 
@@ -88,20 +100,123 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     )
     .await;
 
-    // Loopback IP is assigned at random from pool, so we need to search for the correct one
-    let mut txn = db_pool
-        .clone()
-        .begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let loopback_ip = dpu::loopback_ip(&mut txn, &mh.dpu().id).await;
-    test_inner(
-        &loopback_ip.to_string(),
-        IpType::LoopbackIp,
-        &env,
-        "test_loopback_ip",
-    )
-    .await;
+    let dpu_machine_id = mh.dpu().id;
+    let mut txn = db_pool.begin().await?;
+    let (mut network_config, version) =
+        db::machine::get_network_config(txn.as_mut(), &dpu_machine_id)
+            .await?
+            .take();
+    let loopback_ip = network_config
+        .loopback_ip
+        .expect("the DPU should have an IPv4 loopback address");
+    network_config.loopback_ip_v6 = Some("2001:db8:ffff::1".parse()?);
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &dpu_machine_id,
+            version,
+            &network_config,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    // The expanded IPv6 spelling must still match the stored address.
+    for ip in [
+        loopback_ip.to_string(),
+        "2001:0db8:ffff:0:0:0:0:1".to_string(),
+    ] {
+        let response = env
+            .api
+            .find_ip_address(tonic::Request::new(rpc::forge::FindIpAddressRequest {
+                ip: ip.clone(),
+            }))
+            .await?
+            .into_inner();
+        assert!(response.errors.is_empty(), "{ip}: {:?}", response.errors);
+        let loopback_matches = response
+            .matches
+            .iter()
+            .filter(|ip_match| ip_match.ip_type == IpType::LoopbackIp as i32)
+            .collect::<Vec<_>>();
+        assert_eq!(loopback_matches.len(), 1, "{ip}: {:?}", response.matches);
+        assert_eq!(
+            loopback_matches[0].owner_id.as_deref(),
+            Some(dpu_machine_id.to_string().as_str()),
+            "{ip}"
+        );
+    }
+
+    Ok(())
+}
+
+/// `FindIpAddress` returns every instance owner when isolated VPCs use the
+/// same overlay address. Each match also names its VPC and segment so an
+/// operator can tell the otherwise-identical allocations apart.
+#[crate::sqlx_test]
+async fn test_ip_finder_returns_every_duplicate_overlay_address_owner(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool.clone()).await;
+    let address = "10.20.30.40".parse().unwrap();
+
+    let mut txn = db_pool.begin().await?;
+    let owners = [
+        common::overlay_address::seed_overlay_address_owner(
+            txn.as_mut(),
+            "finder-owner-a",
+            address,
+        )
+        .await,
+        common::overlay_address::seed_overlay_address_owner(
+            txn.as_mut(),
+            "finder-owner-b",
+            address,
+        )
+        .await,
+    ];
+    txn.commit().await?;
+
+    let response = env
+        .api
+        .find_ip_address(tonic::Request::new(rpc::forge::FindIpAddressRequest {
+            ip: address.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert!(response.errors.is_empty(), "finder returned lookup errors");
+
+    let instance_matches = response
+        .matches
+        .iter()
+        .filter(|ip_match| ip_match.ip_type == IpType::InstanceAddress as i32)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instance_matches.len(),
+        owners.len(),
+        "finder should return one match for each overlay address owner"
+    );
+
+    for owner in owners {
+        let instance_id = owner.instance_id.to_string();
+        let ip_match = instance_matches
+            .iter()
+            .find(|ip_match| ip_match.owner_id.as_deref() == Some(instance_id.as_str()))
+            .unwrap_or_else(|| panic!("finder omitted instance {instance_id}"));
+        assert!(
+            ip_match.message.contains(&owner.vpc_id.to_string()),
+            "finder match should identify VPC {}: {}",
+            owner.vpc_id,
+            ip_match.message,
+        );
+        assert!(
+            ip_match.message.contains(&owner.segment_id.to_string()),
+            "finder match should identify segment {}: {}",
+            owner.segment_id,
+            ip_match.message,
+        );
+    }
 
     Ok(())
 }
@@ -128,10 +243,34 @@ async fn test_inner(ip: &str, ip_type: IpType, env: &TestEnv, caller: &str) {
     assert!(!res.matches.is_empty(), "{caller} not found");
     // In integration testing DHCP relay is in a network segment,
     // so we get multiple matches. Wouldn't happen in live.
-    for m in res.matches {
-        if m.ip_type == ip_type as i32 {
-            return; // success
+    if let Some(ip_match) = res
+        .matches
+        .into_iter()
+        .find(|ip_match| ip_match.ip_type == ip_type as i32)
+    {
+        match ip_type {
+            IpType::MachineAddress => {
+                assert!(
+                    ip_match.message.contains("machine address"),
+                    "{caller} used incorrect Data-interface wording: {}",
+                    ip_match.message,
+                );
+                assert!(
+                    !ip_match.message.contains("BMC"),
+                    "{caller} described a Data interface as BMC: {}",
+                    ip_match.message,
+                );
+            }
+            IpType::StaticBmcIp => {
+                assert!(
+                    ip_match.message.contains("static BMC IP"),
+                    "{caller} used incorrect BMC-interface wording: {}",
+                    ip_match.message,
+                );
+            }
+            _ => {}
         }
+        return;
     }
     panic!("{caller} did not have correct IPType");
 }
@@ -150,7 +289,7 @@ async fn test_identify_uuid(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         .build()
         .await;
     let res = mh.host().rpc_machine().await;
-    let interface_id = &res.interfaces[0].id;
+    let interface_id = &res.status.as_ref().unwrap().interfaces[0].id;
 
     // Network segment
     let req = rpc::forge::IdentifyUuidRequest {
@@ -235,7 +374,7 @@ async fn test_identify_mac(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let res = env
         .api
         .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-            machine_ids: vec![host_machine_id],
+            machine_ids: vec![host_machine_id.into()],
             ..Default::default()
         }))
         .await
@@ -243,8 +382,12 @@ async fn test_identify_mac(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         .into_inner()
         .machines
         .remove(0);
-    let interface_id = res.interfaces[0].id.as_ref().unwrap().to_string();
-    let mac_address = &res.interfaces[0].mac_address;
+    let interface_id = res.status.as_ref().unwrap().interfaces[0]
+        .id
+        .as_ref()
+        .unwrap()
+        .to_string();
+    let mac_address = &res.status.as_ref().unwrap().interfaces[0].mac_address;
 
     let req = rpc::forge::IdentifyMacRequest {
         mac_address: mac_address.to_string(),
@@ -276,7 +419,16 @@ async fn test_identify_serial(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     let res = mh.dpu().rpc_machine().await;
     assert_eq!(
-        res.discovery_info.unwrap().dmi_data.unwrap().product_serial,
+        res.status
+            .as_ref()
+            .unwrap()
+            .discovery_info
+            .as_ref()
+            .unwrap()
+            .dmi_data
+            .as_ref()
+            .unwrap()
+            .product_serial,
         dpu_config.serial
     );
 
@@ -391,7 +543,7 @@ async fn test_identify_serial(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 }
 
 /// `FindIpAddress` returns `IpTypeStaticBmcIp` when the address is a static/operator BMC
-/// allocation (`AllocationType::Static` after `preallocate_machine_interface` on underlay).
+/// allocation.
 #[crate::sqlx_test]
 async fn test_static_bmc_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     use std::net::IpAddr;
@@ -402,9 +554,14 @@ async fn test_static_bmc_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Re
     let bmc_mac = "AA:BB:CC:DD:EE:99".parse().unwrap();
 
     let mut txn = db_pool.begin().await.unwrap();
-    db::machine_interface::preallocate_machine_interface(txn.as_mut(), bmc_mac, static_ip, None)
-        .await
-        .expect("preallocate static BMC interface");
+    db::machine_interface::preallocate_bmc_machine_interface(
+        txn.as_mut(),
+        bmc_mac,
+        static_ip,
+        None,
+    )
+    .await
+    .expect("preallocate static BMC interface");
     txn.commit().await.unwrap();
 
     // Query the IP via finder
@@ -420,15 +577,107 @@ async fn test_static_bmc_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Re
 
     assert!(!res.matches.is_empty(), "Should find at least one match");
 
-    // Verify it's classified as StaticBmcIp
-    let has_static_bmc_ip = res
+    let static_bmc_match = res
         .matches
-        .iter()
-        .any(|m| m.ip_type == IpType::StaticBmcIp as i32);
+        .into_iter()
+        .find(|ip_match| ip_match.ip_type == IpType::StaticBmcIp as i32)
+        .expect("static BMC IP should be classified as IpTypeStaticBmcIp");
+    assert!(
+        static_bmc_match.message.contains("static BMC IP"),
+        "static BMC wording should match the interface type: {}",
+        static_bmc_match.message,
+    );
+
+    Ok(())
+}
+
+/// A static NVOS/Data address remains a MachineAddress even when it lives on the synthetic
+/// `static-assignments` segment. When the interface is associated with a switch, finder output
+/// identifies that switch.
+#[crate::sqlx_test]
+async fn test_static_data_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    use std::net::IpAddr;
+
+    use carbide_uuid::switch::SwitchId;
+    use model::machine_interface_address::MachineInterfaceAssociation;
+    use model::switch::{NewSwitch, SwitchConfig};
+
+    let env = create_test_env(db_pool.clone()).await;
+    let static_ip: IpAddr = "10.86.241.49".parse().unwrap();
+    let nvos_mac = "AA:BB:CC:DD:EE:98".parse().unwrap();
+    let switch_id = SwitchId::from(uuid::Uuid::new_v4());
+
+    let mut txn = db_pool.begin().await.unwrap();
+    db::machine_interface::preallocate_machine_interface(txn.as_mut(), nvos_mac, static_ip, None)
+        .await
+        .expect("preallocate static NVOS Data interface");
+    let interface = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac)
+        .await
+        .expect("find static NVOS Data interface")
+        .into_iter()
+        .next()
+        .expect("static NVOS Data interface should exist");
+    db::switch::create(
+        txn.as_mut(),
+        &NewSwitch {
+            id: switch_id,
+            config: SwitchConfig {
+                name: "gb-nvl-136-switch02".to_string(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+            slot_number: None,
+            tray_index: None,
+        },
+    )
+    .await
+    .expect("create associated switch");
+    db::machine_interface::associate_interface_with_machine(
+        &interface.id,
+        MachineInterfaceAssociation::Switch(switch_id),
+        txn.as_mut(),
+    )
+    .await
+    .expect("associate NVOS Data interface with switch");
+    txn.commit().await.unwrap();
+
+    let req = rpc::forge::FindIpAddressRequest {
+        ip: static_ip.to_string(),
+    };
+    let res = env
+        .api
+        .find_ip_address(tonic::Request::new(req))
+        .await
+        .expect("find_ip_address should succeed")
+        .into_inner();
 
     assert!(
-        has_static_bmc_ip,
-        "Static IP should be classified as IpTypeStaticBmcIp"
+        res.matches
+            .iter()
+            .all(|ip_match| ip_match.ip_type != IpType::StaticBmcIp as i32),
+        "static NVOS Data IP must never be classified as StaticBmcIp: {:?}",
+        res.matches,
+    );
+    let machine_address_match = res
+        .matches
+        .into_iter()
+        .find(|ip_match| ip_match.ip_type == IpType::MachineAddress as i32)
+        .expect("static NVOS Data IP should remain a MachineAddress");
+    assert!(
+        machine_address_match.owner_id.is_none(),
+        "static NVOS Data address must not expose a switch ID as a machine owner",
+    );
+    assert!(
+        machine_address_match.message.contains("machine address")
+            && machine_address_match
+                .message
+                .contains(&switch_id.to_string())
+            && !machine_address_match.message.contains("BMC"),
+        "static NVOS Data wording should identify the switch without calling it BMC: {}",
+        machine_address_match.message,
     );
 
     Ok(())

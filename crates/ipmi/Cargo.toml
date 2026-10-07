@@ -5,11 +5,13 @@ edition.workspace = true
 description = "Carbide IPMI"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_ipmi"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 carbide-secrets = { path = "../secrets", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
 carbide-uuid = { path = "../uuid" }
@@ -24,4 +26,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

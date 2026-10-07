@@ -22,12 +22,16 @@ import (
 type Component struct {
 	bun.BaseModel `bun:"table:component,alias:c"`
 
-	ID              uuid.UUID      `bun:"id,pk,type:uuid,default:gen_random_uuid()"`
-	Name            string         `bun:"name"`
-	Type            string         `bun:"type,type:varchar(16),default:'Compute'"`
-	Manufacturer    string         `bun:"manufacturer,notnull,unique:component_manufacturer_serial_idx"`
+	ID   uuid.UUID `bun:"id,pk,type:uuid,default:gen_random_uuid()"`
+	Name string    `bun:"name"`
+	Type string    `bun:"type,type:varchar(16),default:'Compute'"`
+	// Manufacturer and SerialNumber are descriptive labels, not identity: a
+	// mirrored component is identified by its host BMC's MAC address. nullzero
+	// maps the empty string to SQL NULL, so a component missing either half
+	// occupies no slot in component_manufacturer_serial_idx.
+	Manufacturer    string         `bun:"manufacturer,nullzero,unique:component_manufacturer_serial_idx"`
 	Model           string         `bun:"model"`
-	SerialNumber    string         `bun:"serial_number,notnull,notnull,unique:component_manufacturer_serial_idx"`
+	SerialNumber    string         `bun:"serial_number,nullzero,unique:component_manufacturer_serial_idx"`
 	Description     map[string]any `bun:"description,type:jsonb,json_use_number"`
 	FirmwareVersion string         `bun:"firmware_version,nullzero"`
 	// RackID is uuid.Nil when the component has been ingested but is not yet
@@ -44,6 +48,7 @@ type Component struct {
 	ComponentID *string                         `bun:"external_id"`
 	PowerState  *nicoapi.PowerState             `bun:"power_state"`
 	Status      *types.ComponentOperationStatus `bun:"status,type:jsonb,nullzero"`
+	Health      *types.HealthReport             `bun:"health,type:jsonb,nullzero"`
 	// LeakStatus is owned by the leak-detection loop. nullzero so an
 	// insert that leaves it empty falls back to the DB default 'UNKNOWN'
 	// rather than writing an empty string.
@@ -55,6 +60,9 @@ func (cd *Component) Create(ctx context.Context, idb bun.IDB) error {
 	return err
 }
 
+// Get looks the component up by ID, or by (manufacturer, serial_number) when no
+// ID is set. Both label columns are nullable, so a component stored without one
+// of them is only reachable by the first form.
 func (cd *Component) Get(
 	ctx context.Context,
 	idb bun.IDB,
@@ -63,16 +71,16 @@ func (cd *Component) Get(
 	var query *bun.SelectQuery
 
 	if cd.ID != uuid.Nil {
-		query = idb.NewSelect().Model(&component).Where("id = ?", cd.ID)
+		query = idb.NewSelect().Model(&component).Where("c.id = ?", cd.ID)
 	} else {
 		query = idb.NewSelect().Model(&component).Where(
-			"manufacturer = ? AND serial_number = ?",
+			"c.manufacturer = ? AND c.serial_number = ?",
 			cd.Manufacturer,
 			cd.SerialNumber,
 		)
 	}
 
-	query = query.Relation("BMCs")
+	query = query.Relation("BMCs").Relation("Rack").Relation("Rack.NVLDomain")
 
 	if err := query.Scan(ctx); err != nil {
 		return nil, err
@@ -87,14 +95,21 @@ var defaultComponentPagination = dbquery.Pagination{
 	Total:  0,
 }
 
+var defaultComponentOrderBy = []dbquery.OrderBy{
+	{Column: "c.name", Direction: dbquery.OrderAscending},
+	{Column: "c.id", Direction: dbquery.OrderAscending},
+}
+
 func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err error) {
 	err = idb.NewSelect().Model(&Component{}).Scan(ctx, &ret)
 	return ret, err
 }
 
-// GetComponentsByType returns all components of a specific type with their associated BMCs
+// GetComponentsByType returns all components of the given type, with each
+// component's BMCs relation preloaded (callers rely on this for BMC-MAC-based
+// linking).
 func GetComponentsByType(ctx context.Context, idb bun.IDB, componentType devicetypes.ComponentType) (ret []Component, err error) {
-	err = idb.NewSelect().Model(&ret).Where("type = ?", devicetypes.ComponentTypeToString(componentType)).Relation("BMCs").Scan(ctx)
+	err = idb.NewSelect().Model(&ret).Where("c.type = ?", devicetypes.ComponentTypeToString(componentType)).Relation("BMCs").Relation("Rack").Relation("Rack.NVLDomain").Scan(ctx)
 	return ret, err
 }
 
@@ -124,18 +139,18 @@ func GetListOfComponents(
 	// Build filterables list from all provided filters
 	filterables := make([]dbquery.Filterable, 0)
 
-	if filterable := info.ToFilterable("name"); filterable != nil {
+	if filterable := info.ToFilterable("c.name"); filterable != nil {
 		filterables = append(filterables, filterable)
 	}
 
 	if manufacturerFilter != nil {
-		if filterable := manufacturerFilter.ToFilterable("manufacturer"); filterable != nil {
+		if filterable := manufacturerFilter.ToFilterable("c.manufacturer"); filterable != nil {
 			filterables = append(filterables, filterable)
 		}
 	}
 
 	if modelFilter != nil {
-		if filterable := modelFilter.ToFilterable("model"); filterable != nil {
+		if filterable := modelFilter.ToFilterable("c.model"); filterable != nil {
 			filterables = append(filterables, filterable)
 		}
 	}
@@ -147,7 +162,7 @@ func GetListOfComponents(
 			typeStrings = append(typeStrings, devicetypes.ComponentTypeToString(ct))
 		}
 		filterables = append(filterables, &dbquery.Filter{
-			Column:   "type",
+			Column:   "c.type",
 			Operator: dbquery.OperatorIn,
 			Value:    typeStrings,
 		})
@@ -157,12 +172,18 @@ func GetListOfComponents(
 		conf.Filterables = filterables
 	}
 
+	conf.DefaultOrderBy = defaultComponentOrderBy
 	if orderBy != nil {
-		conf.DefaultOrderBy = []dbquery.OrderBy{*orderBy}
+		qualifiedOrderBy := *orderBy
+		qualifiedOrderBy.Column = "c." + qualifiedOrderBy.Column
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			qualifiedOrderBy,
+			{Column: "c.id", Direction: dbquery.OrderAscending},
+		}
 	}
 
-	// Always include BMCs relation
-	conf.Relations = []string{"BMCs"}
+	// Include the relations required to convert components into the public model.
+	conf.Relations = []string{"BMCs", "Rack", "Rack.NVLDomain"}
 
 	q, err := dbquery.New(ctx, conf)
 	if err != nil {
@@ -185,9 +206,10 @@ func (cd *Component) Patch(ctx context.Context, idb bun.IDB) error {
 func (cd *Component) GetIncludingDeleted(ctx context.Context, idb bun.IDB) (*Component, error) {
 	var comp Component
 	err := idb.NewSelect().Model(&comp).
-		Where("id = ?", cd.ID).
+		Where("c.id = ?", cd.ID).
 		WhereAllWithDeleted().
 		Relation("BMCs").
+		Relation("Rack").Relation("Rack.NVLDomain").
 		Scan(ctx)
 	if err != nil {
 		return nil, err
@@ -280,14 +302,6 @@ func (cd *Component) InvalidType() bool {
 	return !devicetypes.IsValidComponentTypeString(cd.Type)
 }
 
-func (cd *Component) SetComponentIDBySerial(ctx context.Context, idb bun.IDB) error {
-	if cd.ComponentID == nil {
-		return errors.New("component ID not set")
-	}
-	_, err := idb.NewUpdate().Model(cd).Set("external_id = ?", *cd.ComponentID).Where("serial_number = ?", cd.SerialNumber).Exec(ctx)
-	return err
-}
-
 func (cd *Component) SetPowerStateByComponentID(ctx context.Context, idb bun.IDB) error {
 	if cd.ComponentID == nil {
 		return errors.New("component ID not set")
@@ -331,6 +345,19 @@ func (cd *Component) SetStatusByComponentID(ctx context.Context, idb bun.IDB) er
 	}
 	_, err := idb.NewUpdate().Model(cd).
 		Set("status = ?", cd.Status).
+		Where("external_id = ?", *cd.ComponentID).
+		Exec(ctx)
+	return err
+}
+
+// SetHealthByComponentID writes the latest aggregate health snapshot for the
+// row identified by external_id.
+func (cd *Component) SetHealthByComponentID(ctx context.Context, idb bun.IDB) error {
+	if cd.ComponentID == nil || *cd.ComponentID == "" {
+		return errors.New("component ID not set")
+	}
+	_, err := idb.NewUpdate().Model(cd).
+		Set("health = ?", cd.Health).
 		Where("external_id = ?", *cd.ComponentID).
 		Exec(ctx)
 	return err

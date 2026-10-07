@@ -1,4 +1,4 @@
-# Flat VPCs and Zero-DPU Hosts
+# Flat VPCs and Zero-DPU Hosts <Badge intent="info">v2.0</Badge>
 
 `Flat` is a VPC virtualization type for tenant instances that run on hosts
 **without a NICo-managed DPU** — either hosts with no DPU hardware at all, or
@@ -27,8 +27,8 @@ VPCs, and how a tenant then creates Flat VPCs and instances on them.
   (ETV / FNN) model that Flat VPCs deliberately do **not** use
 - [Network Security Groups](../networking/network_security_groups.md) — the L3/L4
   rule filter that a Flat VPC can still carry
-- [VPC Peering](vpc_peering_management.md) — Flat VPCs may peer with ETV, FNN,
-  and other Flat VPCs
+- [VPC Peering](vpc_peering_management.md) — Flat VPCs can peer with FNN
+  and other Flat VPCs.
 
 ---
 
@@ -70,9 +70,10 @@ abbreviated as `…/nico/...` thereafter.
 
 | Task | Role | Interface |
 |---|---|---|
-| Put hosts in NIC / no-DPU mode (site-wide `dpu_mode`, per-host `ExpectedMachine.dpu_mode`) | Operator | **TOML** — Day 0 / rare; API restart |
+| Set hosts to `nic` or `ignore` through the site-wide `dpu_policy` | Operator | **TOML** — Day 0 / rare; API restart |
+| Set one host's DPU policy with `--dpu-policy` | Operator | **`nico-admin-cli`** (`em add` / `em patch`) — updating the declaration needs no API restart; applying a changed policy to an already-ingested host requires [force-delete and re-ingestion](../../provisioning/boot-interfaces-and-dpu-modes.md#35-flipping-a-dpu-to-nic-mode) |
 | Declare `HostInband` underlay segments | Operator | **TOML** (`[networks.<name>]`, `type = "hostinband"`) — Day 0 |
-| Create an additional `HostInband` segment after Day 0 | Operator | **TOML** (`[networks]`) + API restart, or **`nico-admin-cli`** (gRPC `CreateNetworkSegment`) — see [Configuring HostInband Segments](#2-configuring-hostinband-network-segments) |
+| Create an additional `HostInband` segment after initial setup | Operator | **Restart-applied TOML** (`[networks]`), or runtime **`nico-admin-cli`** (`network-segment create`) — see [Configuring HostInband Segments](#2-configuring-hostinband-network-segments) |
 | Inspect / delete a `HostInband` segment | Operator | **`nico-admin-cli`** (`network-segment show` / `delete`) |
 | Create an instance type and associate zero-DPU machines | Operator | **REST** `…/nico/instance-type` · `nicocli` |
 | Bind a `HostInband` segment to a Flat VPC | Tenant *(VPC owner)* | Set the VPC on the segment (see below) |
@@ -99,46 +100,61 @@ are running without a NICo-managed DPU, the underlay segments those hosts sit on
 are declared as `HostInband` segments, and (optionally) instance types exist so
 tenants can request the right machines.
 
-### 1. Put hosts in NIC or no-DPU mode
+### 1. Set the host DPU policy
 
-Whether a host is a "zero-DPU" host is decided by its **DPU mode**, which has
-three values:
+Whether NICo treats a host as a "zero-DPU" host is decided by its **DPU policy**,
+which has three values:
 
-| `dpu_mode` value | Meaning |
+| `dpu_policy` value | Meaning |
 |---|---|
-| `dpu_mode` | *(default)* The DPU is managed by NICo: BFB/firmware upgrades, HBN deployment, DPU agent, and the tenant overlay all apply. |
-| `nic_mode` | A DPU is physically present but is operated as a plain NIC. NICo skips DPU provisioning and overlay management for the host. |
-| `no_dpu` | The host has no DPU hardware; its NIC sits directly on the underlay. |
+| `manage` | *(site/effective default)* The DPU is managed by NICo: BFB/firmware upgrades, HBN deployment, DPU agent, and the tenant overlay all apply. A per-host `manage` declaration inherits the site policy rather than overriding it. |
+| `nic` | A DPU is physically present but should be operated as a plain NIC. NICo skips DPU provisioning and overlay management for the host. |
+| `ignore` | NICo does not configure or attach DPU hardware. Use this for a host without DPUs or when installed DPUs should be intentionally ignored. |
 
-Both `nic_mode` and `no_dpu` make the host a **zero-DPU host** for the purposes
+Both `nic` and `ignore` make the host a **zero-DPU host** for the purposes
 of Flat VPCs: NICo does not manage an overlay for it, and its only valid tenant
 attachments are `HostInband` segments.
 
-Set the mode in either of two places, with the per-host value taking precedence:
+Set the policy in either of two places. Per-host `nic` and `ignore`
+override the site-wide setting; per-host `manage` or an omitted per-host value
+instead defers to the site-wide setting for backward compatibility:
 
 - **Site-wide**, in the API server configuration:
 
   ```toml
   [site_explorer]
-  dpu_mode = "nic_mode"   # or "no_dpu"; omit entirely for the default "dpu_mode"
+  dpu_policy = "nic"   # or "ignore"; omit entirely for the default "manage"
   ```
 
-- **Per host**, on the host's `ExpectedMachine` entry, via the `dpu_mode` field.
-  An explicit per-host `nic_mode` or `no_dpu` always wins over the site-wide
-  setting; a per-host default (or no entry) defers to the site-wide value, which
-  in turn defaults to managed `dpu_mode`.
+- **Per host**, on the host's `ExpectedMachine` entry, via the admin CLI's
+  `--dpu-policy` option or the `dpu_policy` key in admin JSON. Per-host
+  `nic` and `ignore` override the site-wide setting; for backward
+  compatibility, per-host `manage` or an omitted policy defers to the site-wide
+  value, which defaults to `manage`.
 
-Two related Day-0 settings matter for zero-DPU sites:
+Existing configuration and admin JSON input remain readable: the previous
+`dpu_policy` value `use_as_nic` remains accepted, as do the legacy `dpu_mode`
+key and values `dpu_mode`, `nic_mode`, and `no_dpu`, which map to `manage`,
+`nic`, and `ignore`, respectively. The admin CLI likewise accepts the previous
+`use-as-nic` value and `--dpu-mode dpu-mode|nic-mode|no-dpu`; use
+`--dpu-policy manage|nic|ignore` for new automation.
 
-- **`[site_explorer] admin_segment_type_non_dpu`** (default `false`). When
-  `true`, non-DPU hosts use the `HostInband` admin segment type instead of the
-  regular `Admin` segment type for their admin-network attachment.
-- **`rack_management_enabled`** (top-level, default `false`). This is the
-  standalone / air-gapped rack-manager mode for GB200/GB300/VR144 deployments.
-  It runs DPUs in NIC mode and disables DPU BFB/firmware upgrades, HBN
-  deployment, the DPU agent, and the tenant DPU overlay — i.e. it is one of the
-  ways a whole site ends up as zero-DPU hosts. Enable it only when running NICo
-  with Rack Manager for those platforms.
+The Forge RPC intentionally retains `ExpectedMachine.dpu_mode` (field 16,
+`DpuMode`) as its stable compatibility surface. Direct gRPC clients continue to
+send `DPU_MODE`, `NIC_MODE`, or `NO_DPU`; NICo translates those values at the
+RPC boundary to the internal `manage`, `nic`, and `ignore` policies.
+`HostDpuPolicy` and `dpu_policy` are model, configuration, admin-CLI, and admin
+JSON vocabulary rather than Forge protobuf symbols. Responses translate
+non-default policies back through `dpu_mode`; the default `manage` policy might
+leave that field unset.
+
+The related `[site_explorer] admin_segment_type_non_dpu` Day-0 setting defaults
+to `false`. When `true`, non-DPU hosts use the `HostInband` admin segment type
+instead of the regular `Admin` segment type for their admin-network attachment.
+
+Rack management does not override DPU policy. Rack-manager deployments that run
+DPUs as NICs must set `[site_explorer] dpu_policy = "nic"` or set that policy
+per host.
 
 Because a zero-DPU host has no DPU to DHCP and identify host NICs for it, the
 host's data-NIC **MAC addresses must be registered** on its `ExpectedMachine`
@@ -147,8 +163,10 @@ one NIC per host is marked the **primary** (boot) interface. NICo records each
 registered host NIC as an interface bound to a `HostInband` segment, which is
 what the tenant's instance later attaches to.
 
-These are TOML / expected-machine settings and therefore Day-0 (or rare,
-restart-applied) changes.
+Site-wide TOML changes are Day-0 (or rare, restart-applied) changes. Per-host
+Expected Machine declarations can be updated through the admin CLI without an
+API restart; applying a changed policy to an already-ingested host requires
+force-delete and re-ingestion.
 
 ### 2. Configuring HostInband network segments
 
@@ -174,8 +192,20 @@ prefix = "10.40.9.0/24"      # CIDR of the underlay subnet
 gateway = "10.40.9.1"        # usually the first usable address
 mtu = 1500
 reserve_first = 2            # addresses to skip before allocating
-# allocation_strategy = "dynamic"   # or "static" for reservation-only DHCP
+# allocation_strategy = "dynamic"   # or "reserved" for reservation-only DHCP
 ```
+
+<Note>
+A zero-DPU host's BMC and host OS NIC may share this physical subnet/VLAN. Give
+the two interfaces distinct addresses from **one** `HostInband` segment; do not
+declare an overlapping `Underlay` segment for the same prefix.
+`bmc_ip_address` is optional: the default allocation retains the BMC's first
+DHCP address for the machine-interface row's lifetime. This is also supported
+when `dpu_policy = "nic"`, but it does not place the DPU BMC or DPU OOB
+interface on HostInband. See
+[Shared HostInband for a Host BMC and Host OS](../../provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os)
+for relay selection, DNS-subdomain, allocation, and isolation requirements.
+</Note>
 
 The same `[networks.<name>]` mechanism is used for `admin` and `underlay`
 segments; `hostinband` is the third config-declarable type. (Tenant segments are
@@ -197,14 +227,24 @@ after Day 0 in either of two ways:
 
 Note the current CLI surface for the runtime path:
 
-- `nico-admin-cli network-segment show` and `nico-admin-cli network-segment delete`
-  exist for inspecting and removing segments.
-- There is **no `network-segment create` CLI subcommand**, and the REST API /
-  `nicocli` do not expose operator network-segment management (the REST
-  `/subnet` endpoints are the tenant subnet surface, not operator `HostInband`
-  segments). Runtime creation is therefore done by calling the
-  `CreateNetworkSegment` gRPC endpoint directly. If a wrapped create command is
-  needed operationally, file a bug.
+- `nico-admin-cli --cloud-unsafe-op=<username> network-segment create` creates a
+  segment at runtime.
+
+  The global `--cloud-unsafe-op` acknowledgment is required and must not be used
+  against a production site.
+
+  For a `HostInband` segment, pass `--segment-type host-inband` with `--name`,
+  `--prefix`, and `--subdomain-id`; add `--gateway` when the IPv4 prefix has a
+  gateway.
+
+  Run `nico-admin-cli network-segment create --help` for the full flag set.
+- `nico-admin-cli network-segment show` lists segments. To remove one, use
+  `nico-admin-cli --cloud-unsafe-op=<username> network-segment delete`; the same
+  global acknowledgment is required and must not be used against production.
+
+<Tip>
+The REST API and `nicocli` do not expose operator network-segment management. The REST `/subnet` endpoints are the tenant subnet surface, not operator `HostInband` segments.
+</Tip>
 
 Deleting a `HostInband` segment follows the standard segment lifecycle: the
 segment is drained (it is not removed while any host interface or instance
@@ -231,7 +271,7 @@ or `nicocli` (its wrapper), which expose the full surface:
 For a zero-DPU site, create instance type(s) describing the zero-DPU machines'
 capabilities and associate those machines, so tenants can request instances of
 that type. The instance type itself does **not** carry a "no-DPU" flag — what
-makes a host zero-DPU is its `dpu_mode` (above). The instance type simply selects
+makes a host zero-DPU is its `dpu_policy` (above). The instance type simply selects
 which machines are allocatable; whether the selected host is zero-DPU then
 governs the network model at allocation time.
 
@@ -276,10 +316,12 @@ Flat VPCs:
   the operator's network responsibility; NICo stores the association but does not
   program a DPU ACL for a zero-DPU host.
 
-> As noted in the operations matrix, the `nicocli` wrapper does not currently
-> send `networkVirtualizationType` on `vpc create`, and its
-> `vpc virtualization update` accepts only `ETHERNET_VIRTUALIZER` / `FNN`. Use
-> the REST API for this step until that gap is closed.
+> The generated `nicocli vpc create` command accepts
+> `--network-virtualization-type FLAT`. The specialized `nicocli tui` VPC
+> creation flow does not prompt for a type and uses the Site default instead.
+> Its `vpc virtualization update` request only supports changing to `FNN` and
+> is rejected while the VPC contains any Subnets or Instances. Create a Flat
+> VPC with the generated command or the REST API.
 
 ### 2. Find the HostInband segment backing the VPC
 
@@ -330,15 +372,16 @@ Rules enforced at allocation:
 - **No DPU extension services.** Extension services run on DPU agents; a zero-DPU
   host has none, so an instance config that requests them is rejected.
 
-> As with VPC creation, `nicocli` does not yet expose `autoNetwork` on
-> `instance create`; use the REST API for this step and file a bug for the
-> wrapper.
+> The generated `nicocli instance create` command accepts
+> `--auto-network=true`. The specialized `nicocli tui` flow sets
+> `autoNetwork: true` automatically when the selected VPC is `FLAT` and skips
+> the interface prompts.
 
 ### 4. Check instance status
 
 Read instance status through the REST API or `nicocli`:
 
-```
+```text
 GET /v2/org/{org}/nico/instance/{id}
 nicocli instance get <instance-id>
 ```
@@ -399,9 +442,10 @@ operator SDN integration can tie its switch-side configuration to the VPC.
 
 **Operator — site is Flat-ready:**
 
-1. Hosts resolve to a zero-DPU mode. Confirm the intended hosts report
-   `nic_mode` or `no_dpu` (per-host `ExpectedMachine.dpu_mode`, or the site-wide
-   `[site_explorer] dpu_mode`).
+1. Confirm each intended host's effective policy resolves to `nic` or
+   `ignore` after applying per-host and site-wide inheritance. Per-host
+   `nic` and `ignore` win; per-host `manage` or an omitted value inherits
+   `[site_explorer] dpu_policy`.
 2. `HostInband` segments exist. `nico-admin-cli network-segment show` lists the
    declared segments with the expected prefix, gateway, and a VLAN/VNI assigned.
 3. Each zero-DPU host's data-NIC MACs are registered, and the host shows
@@ -432,5 +476,5 @@ operator SDN integration can tie its switch-side configuration to the VPC.
 | Instance allocation fails: segment "is not bound to a Flat VPC" | The host's `HostInband` segment has no VPC; the tenant/operator must bind it to a Flat VPC first |
 | Instance allocation fails: segment bound to a VPC whose `fabric_interface_type` is not `nic` | The `HostInband` segment is attached to a non-Flat VPC; only Flat VPCs may own `HostInband` segments |
 | Instance allocation fails: extension services on a zero-DPU host | Remove `dpu_extension_services` from the instance config; a zero-DPU host cannot run them |
-| `nicocli` won't let me choose `FLAT` / set `autoNetwork` | Known wrapper gap; use the REST API and file a bug against `nicocli` |
+| The specialized TUI does not offer `FLAT` during VPC creation | Use generated `nicocli vpc create --network-virtualization-type FLAT` or the REST API; the TUI uses the Site default |
 | Instance is `Ready` but cannot reach another host | Expected from NICo's side — Flat data-plane reachability is the operator's fabric responsibility, not something NICo programs or verifies |

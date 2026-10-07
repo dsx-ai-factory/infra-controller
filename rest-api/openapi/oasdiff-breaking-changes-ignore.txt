@@ -1,0 +1,341 @@
+PUT /v2/org/{org}/nico/credential/bmc removed the enum value `bmc-root` of the request property `kind`
+PUT /v2/org/{org}/nico/credential/bmc removed the enum value `site-wide-root` of the request property `kind`
+GET /v2/org/{org}/nico/tray removed the enum value `compute` from the `query` request parameter `type`
+GET /v2/org/{org}/nico/tray removed the enum value `powershelf` from the `query` request parameter `type`
+GET /v2/org/{org}/nico/tray removed the enum value `switch` from the `query` request parameter `type`
+PATCH /v2/org/{org}/nico/tray/firmware removed the enum value `compute` of the request property `filter/type`
+PATCH /v2/org/{org}/nico/tray/firmware removed the enum value `powershelf` of the request property `filter/type`
+PATCH /v2/org/{org}/nico/tray/firmware removed the enum value `switch` of the request property `filter/type`
+PATCH /v2/org/{org}/nico/tray/power removed the enum value `compute` of the request property `filter/type`
+PATCH /v2/org/{org}/nico/tray/power removed the enum value `powershelf` of the request property `filter/type`
+PATCH /v2/org/{org}/nico/tray/power removed the enum value `switch` of the request property `filter/type`
+GET /v2/org/{org}/nico/tray/validation removed the enum value `compute` from the `query` request parameter `type`
+GET /v2/org/{org}/nico/tray/validation removed the enum value `powershelf` from the `query` request parameter `type`
+GET /v2/org/{org}/nico/tray/validation removed the enum value `switch` from the `query` request parameter `type`
+POST /v2/org/{org}/nico/instance the `interfaces/items/virtualFunctionId` request property's max was decreased to `15.00`
+POST /v2/org/{org}/nico/instance/batch the `interfaces/items/virtualFunctionId` request property's max was decreased to `15.00`
+PATCH /v2/org/{org}/nico/instance/{instanceId} the `interfaces/items/virtualFunctionId` request property's max was decreased to `15.00`
+PATCH /v2/org/{org}/nico/machine/{machineId}/power removed the success response with the status `200`
+PUT /v2/org/{org}/nico/credential/bmc removed the success response with the status `200`
+PUT /v2/org/{org}/nico/credential/bmc removed the success response with the status `202`
+GET /v2/org/{org}/nico/machine the `items/health/alerts/items/inAlertSince` response's property type/format changed from `string, null`/`` to `string, null`/`date-time` for status `200`
+GET /v2/org/{org}/nico/machine/{machineId} the `health/alerts/items/inAlertSince` response's property type/format changed from `string, null`/`` to `string, null`/`date-time` for status `200`
+PATCH /v2/org/{org}/nico/machine/{machineId} the `health/alerts/items/inAlertSince` response's property type/format changed from `string, null`/`` to `string, null`/`date-time` for status `200`
+GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/health/alerts/items/inAlertSince` response's property type/format changed from `string, null`/`` to `string, null`/`date-time` for status `200`
+PATCH /v2/org/{org}/nico/machine/{machineId}/dpu-reprovision api path removed without deprecation
+POST /v2/org/{org}/nico/machine/{machineId}/bmc-reset api path removed without deprecation
+API POST /v2/org/{org}/nico/instance the `interfaces/items/` request property dependentRequired was added: when `ipFamilies` is present, `vpcId` are required
+API POST /v2/org/{org}/nico/instance the `interfaces/items/` request property dependentRequired was added: when `vpcId` is present, `ipFamilies` are required
+API POST /v2/org/{org}/nico/instance added the dependent schema `subnetId` to the `interfaces/items/` request property
+API POST /v2/org/{org}/nico/instance added the dependent schema `vpcId` to the `interfaces/items/` request property
+API POST /v2/org/{org}/nico/instance/batch the `interfaces/items/` request property dependentRequired was added: when `ipFamilies` is present, `vpcId` are required
+API POST /v2/org/{org}/nico/instance/batch the `interfaces/items/` request property dependentRequired was added: when `vpcId` is present, `ipFamilies` are required
+API POST /v2/org/{org}/nico/instance/batch added the dependent schema `subnetId` to the `interfaces/items/` request property
+API POST /v2/org/{org}/nico/instance/batch added the dependent schema `vpcId` to the `interfaces/items/` request property
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `interfaces/items/` request property dependentRequired was added: when `ipFamilies` is present, `vpcId` are required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `interfaces/items/` request property dependentRequired was added: when `vpcId` is present, `ipFamilies` are required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} added the dependent schema `subnetId` to the `interfaces/items/` request property
+API PATCH /v2/org/{org}/nico/instance/{instanceId} added the dependent schema `vpcId` to the `interfaces/items/` request property
+GET /v2/org/{org}/nico/operating-system removed the enum value `Templated iPXE` from the `query` request parameter `type`
+GET /v2/org/{org}/nico/tenant/current the `capabilities/targetedInstanceCreation` response's property type/format changed from `boolean`/`uuid` to `boolean`/`` for status `200`
+GET /v2/org/{org}/nico/vpc-peering the `items/tenant/capabilities/targetedInstanceCreation` response's property type/format changed from `boolean`/`uuid` to `boolean`/`` for status `200`
+POST /v2/org/{org}/nico/vpc-peering the `tenant/capabilities/targetedInstanceCreation` response's property type/format changed from `boolean`/`uuid` to `boolean`/`` for status `201`
+GET /v2/org/{org}/nico/vpc-peering/{id} the `tenant/capabilities/targetedInstanceCreation` response's property type/format changed from `boolean`/`uuid` to `boolean`/`` for status `200`
+API POST /v2/org/{org}/nico/operating-system the `siteIds` request property's minItems was increased to `1`
+POST /v2/org/{org}/nico/expected-machine the `chassisSerialNumber` request property's maxLength was decreased to `32`
+POST /v2/org/{org}/nico/expected-machine the `defaultBmcPassword` request property's maxLength was decreased to `20`
+POST /v2/org/{org}/nico/expected-machine the `defaultBmcUsername` request property's maxLength was decreased to `16`
+PATCH /v2/org/{org}/nico/expected-machine/batch the `items/chassisSerialNumber` request property's maxLength was decreased to `32`
+PATCH /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcPassword` request property's maxLength was decreased to `20`
+PATCH /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcUsername` request property's maxLength was decreased to `16`
+POST /v2/org/{org}/nico/expected-machine/batch the `items/chassisSerialNumber` request property's maxLength was decreased to `32`
+POST /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcPassword` request property's maxLength was decreased to `20`
+POST /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcUsername` request property's maxLength was decreased to `16`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `chassisSerialNumber` request property's maxLength was decreased to `32`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `defaultBmcPassword` request property's maxLength was decreased to `20`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `defaultBmcUsername` request property's maxLength was decreased to `16`
+API POST /v2/org/{org}/nico/task/run the `selector/allOf[subschema #1: TaskRunSelector]/percentage/percent` request property's min was increased to `1.00`
+API POST /v2/org/{org}/nico/task/run the `options/safetyPolicy/gates/items/failureRate/thresholdPercent` request property's min was increased to `1.00`
+API POST /v2/org/{org}/nico/task/run the `options/safetyPolicy/gates/items/failureCount/thresholdCount` request property's min was increased to `1.00`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/percentage/phases/items/` request property's min was increased to `1.00`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/count/phases/items/` request property's min was increased to `1.00`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/percentage/phases` request property's minItems was increased to `1`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/count/phases` request property's minItems was increased to `1`
+API GET /v2/org/{org}/nico/credential/rotation the `converged` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/credential/rotation the `device/currentVersion` response's property type/format changed from `integer, null`/`int64` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/credential/rotation the `device/rotateAttempts` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/credential/rotation the `device/rotatingToVersion` response's property type/format changed from `integer, null`/`int64` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/credential/rotation the `pending` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/credential/rotation the `quarantined` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/credential/rotation the `targetVersion` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API POST /v2/org/{org}/nico/credential/rotation the `targetVersion` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host the `components/items/firmware/items/powerDrainsNeeded` request property type/format changed from `integer`/`` to `integer`/`uint32`
+API GET /v2/org/{org}/nico/instance/type the `items/machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/instance/type the `items/machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/instance/type the `items/machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API POST /v2/org/{org}/nico/instance/type the `machineCapabilities/items/count` request property type/format changed from `integer, null`/`` to `integer, null`/`uint32`
+API POST /v2/org/{org}/nico/instance/type the `machineCapabilities/items/inactiveDevices/items/` request property type/format changed from `integer`/`` to `integer`/`uint32`
+API POST /v2/org/{org}/nico/instance/type the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/instance/type the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/instance/type the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `201`
+API GET /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/cores` request property type/format changed from `integer, null`/`` to `integer, null`/`uint32`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/count` request property type/format changed from `integer, null`/`` to `integer, null`/`uint32`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/inactiveDevices/items/` request property type/format changed from `integer`/`` to `integer`/`uint32`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/threads` request property type/format changed from `integer, null`/`` to `integer, null`/`uint32`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/ipblock the `items/usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock the `items/usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock the `items/usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock the `items/usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API POST /v2/org/{org}/nico/ipblock the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/ipblock the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/ipblock the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/ipblock the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine-capability the `items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine-capability the `items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine-capability the `items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `CREATED_ASC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `CREATED_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `STATUS_ASC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `UPDATED_ASC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `UPDATED_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability for the `query` request parameter `orderBy`, default value `TYPE_ASC` was added
+API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API PUT /v2/org/{org}/nico/site/{siteID}/tenant-identity/config the `oneOf[subschema #1: Without key rotation]/tokenTtlSeconds` request property type/format changed from `integer`/`` to `integer`/`uint32`
+API PUT /v2/org/{org}/nico/site/{siteID}/tenant-identity/config the `oneOf[subschema #2: With key rotation]/signingKeyOverlapSeconds` request property type/format changed from `integer`/`` to `integer`/`uint32`
+API PUT /v2/org/{org}/nico/site/{siteID}/tenant-identity/config the `oneOf[subschema #2: With key rotation]/tokenTtlSeconds` request property type/format changed from `integer`/`` to `integer`/`uint32`
+API GET /v2/org/{org}/nico/subnet the `items/usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/subnet the `items/usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/subnet the `items/usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/subnet the `items/usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API POST /v2/org/{org}/nico/subnet the request property `ipv4BlockId` became not nullable
+API POST /v2/org/{org}/nico/subnet the request property `ipv4BlockId` became required
+API POST /v2/org/{org}/nico/subnet the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/subnet the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/subnet the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/subnet the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API GET /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API POST /v2/org/{org}/nico/task/run the `options/maxConcurrentTargets` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/count/phases/items/` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/equal/phaseCount` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run the `options/phasePolicy/percentage/phases/items/` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run the `options/safetyPolicy/gates/items/failureCount/thresholdCount` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run the `options/safetyPolicy/gates/items/failureRate/thresholdPercent` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run the `selector/allOf[subschema #1: TaskRunSelector]/percentage/percent` request property type/format changed from `integer`/`` to `integer`/`int32`
+API POST /v2/org/{org}/nico/task/run/{id}/advance the `expectedPhaseIndex` request property type/format changed from `integer`/`` to `integer`/`int32`
+API GET /v2/org/{org}/nico/vpc the `items/effectiveRoutingProfile/accessTier` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/effectiveRoutingProfile/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/effectiveRoutingProfile/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/effectiveRoutingProfile/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/effectiveRoutingProfile/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API POST /v2/org/{org}/nico/vpc the `effectiveRoutingProfile/accessTier` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `effectiveRoutingProfile/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `effectiveRoutingProfile/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `effectiveRoutingProfile/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `effectiveRoutingProfile/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `201`
+API GET /v2/org/{org}/nico/vpc-prefix the `items/usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc-prefix the `items/usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc-prefix the `items/usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc-prefix the `items/usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API POST /v2/org/{org}/nico/vpc-prefix the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/vpc-prefix the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/vpc-prefix the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API POST /v2/org/{org}/nico/vpc-prefix the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
+API GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/accessTier` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` request property type/format changed from `integer`/`int64` to `integer`/`uint32`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/accessTier` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `effectiveRoutingProfile/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `effectiveRoutingProfile/accessTier` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `effectiveRoutingProfile/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `effectiveRoutingProfile/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `effectiveRoutingProfile/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `effectiveRoutingProfile/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+GET /v2/org/{org}/nico/rack the `items/components/items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack the `items/components/items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack the `items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/id` became nullable for the status `200`
+GET /v2/org/{org}/nico/rack/{id} the `components/items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id} the `components/items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id} the `id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/id` became nullable for the status `200`
+GET /v2/org/{org}/nico/task/run/{id}/target the `items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray the `items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray the `items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/id` became nullable for the status `200`
+GET /v2/org/{org}/nico/tray/{id} the `id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id} the `rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/id` became nullable for the status `200`
+API POST /v2/org/{org}/nico/operating-system added the pattern `^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$` to the request property `imageDisk`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} added the pattern `^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$` to the request property `imageDisk`
+API POST /v2/org/{org}/nico/instance removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API POST /v2/org/{org}/nico/instance/batch removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API GET /v2/org/{org}/nico/vpc the `items/vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc the `items/requestedVni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API POST /v2/org/{org}/nico/vpc the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `201`
+API POST /v2/org/{org}/nico/vpc the `requestedVni` response property's max was increased from `65535.00` to `16777215.00` for the response status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `201`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `requestedVni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `requestedVni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `requestedVni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the `defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the `defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `nvOsPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `nvOsUsername` request property's minLength was increased from `0` to `1`
+API GET /v2/org/{org}/nico/dpu the `items/bmcInfo/oneOf[subschema #1: MachineBMCInfo]/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the `bmcInfo/oneOf[subschema #1: MachineBMCInfo]/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/audit the `items/body` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit the `items/queryParams` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `body` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `queryParams` response's property `type` changed from `string` to `object` for status `200`
+
+# Expected Rack Group PATCH already rejects requests with no non-null update fields.
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'if' subschema to the request body
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'else' subschema to the request body
+
+API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/security`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/security`
+
+# Domain IDs previously required UUIDs, which already satisfy these nonblank constraints.
+# Accepting opaque nonblank strings broadens that contract; blank IDs remain invalid.
+API PATCH /v2/org/{org}/nico/domain/nvlink/firmware the `domainIds/items/` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/domain/nvlink/firmware added the pattern `\S` to the request property `domainIds/items/`
+API PATCH /v2/org/{org}/nico/domain/nvlink/power the `domainIds/items/` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/domain/nvlink/power added the pattern `\S` to the request property `domainIds/items/`
+
+# Rack and Tray domain references now use the Domain external ID (rack group ID),
+# not an internal UUID or the observed NMX-C cluster UUID.
+GET /v2/org/{org}/nico/rack the `items/nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/rack/{id} the `nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/tray the `items/nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/tray/{id} the `nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
+
+# Peering deletion now waits for DPU acknowledgement and inventory removal.
+# Return 202 with MessageResponse, not 204; callers poll GET for completion.
+API DELETE /v2/org/{org}/nico/vpc-peering/{id} removed the success response with the status `204`
+
+# VPC Prefix deletion has always returned 202; remove the vestigial 204 response.
+API DELETE /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} removed the success response with the status `204`
+
+# Expected rack group declarations need their protocol to derive the correct rack profile.
+# New declarations must provide it; legacy stored declarations remain readable with null.
+API POST /v2/org/{org}/nico/expected-rack-group added the new required request property `protocol`
+API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/protocol`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/protocol`
+
+API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
+API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`

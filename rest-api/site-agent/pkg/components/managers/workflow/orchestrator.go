@@ -8,27 +8,26 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
-
-	"sync/atomic"
-	"unsafe"
 
 	"github.com/rs/zerolog"
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
 	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
 // Orchestrator - Workflow Orchestrator
 func Orchestrator() {
-	defer computils.UpdateState(ManagerAccess.Data.EB)
 	log := ManagerAccess.Data.EB.Log
 	state := ManagerAccess.Data.EB.Managers.Workflow.State
 
@@ -48,14 +47,14 @@ func Orchestrator() {
 
 	// keep track how many events we've seen.
 	state.ConnectionAttempted.Inc()
-	state.ConnectionTime = time.Now().String()
+	state.SetConnectionTime(time.Now().String())
 
 	err := workflowOrchestrator()
 	if err != nil {
 		state.HealthStatus.Store(uint64(computils.CompUnhealthy))
-		tStr := err.Error()
-		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&state.Err)), unsafe.Pointer(&tStr))
-		log.Error().Msg(*state.Err)
+		errMsg := err.Error()
+		state.SetErr(errMsg)
+		log.Error().Msg(errMsg)
 	} else {
 		// keep track how many succeeded.
 		state.ConnectionSucc.Inc()
@@ -71,8 +70,18 @@ func workflowOrchestrator() error {
 	// Initialize Temporal client
 	log.Info().Msg("Workflow: Creating Elektra site agent Temporal workflow orchestrator")
 
+	// The shared interceptor also implements the worker interface, so the
+	// worker built from the subscriber client inherits it and must not
+	// register it again.
 	var clientInterceptors []interceptor.ClientInterceptor
-	var workerInterceptors []interceptor.WorkerInterceptor
+	// otelErr, not err: `var err error` is declared further down.
+	otelInterceptor, otelErr := ctemporal.TracingInterceptor()
+	if otelErr != nil {
+		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	}
+	if otelInterceptor != nil {
+		clientInterceptors = append(clientInterceptors, otelInterceptor)
+	}
 
 	// Create logger for temporal using
 	// zero logger
@@ -103,6 +112,18 @@ func workflowOrchestrator() error {
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read client certificates")
 			return err
+		}
+
+		// Each pod loads its own certificate on startup and reload.
+		leaf := clientcert.Leaf
+		if leaf == nil {
+			// GODEBUG=x509keypairleaf=0 leaves Leaf unset after a successful load.
+			leaf, err = x509.ParseCertificate(clientcert.Certificate[0])
+		}
+		if err == nil && leaf != nil && CertExpirationMetric != nil {
+			CertExpirationMetric.Set(float64(leaf.NotAfter.Unix()))
+		} else {
+			log.Warn().Err(err).Msg("Workflow: Unable to update Temporal certificate expiration metric")
 		}
 
 		// Load server cert
@@ -140,22 +161,19 @@ func workflowOrchestrator() error {
 	// Initialize client for publish namespace
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	log.Info().Msgf("Workflow: Connecting to Host %v, Port %v", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port)
+	host := ManagerAccess.Conf.EB.Temporal.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	target := net.JoinHostPort(host, ManagerAccess.Conf.EB.Temporal.Port)
+	log.Info().Msgf("Workflow: Connecting to %s", target)
 	clientOptions := client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalPublishNamespace,
 		ConnectionOptions: publishClientConnOptions,
-		DataConverter: converter.NewCompositeDataConverter(
-			converter.NewNilPayloadConverter(),
-			converter.NewByteSlicePayloadConverter(),
-			converter.NewProtoJSONPayloadConverterWithOptions(converter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			converter.NewProtoPayloadConverter(),
-			converter.NewJSONPayloadConverter(),
-		),
-		Interceptors: clientInterceptors,
-		Logger:       tLogger,
+		DataConverter:     swu.NewTemporalDataConverter(),
+		Interceptors:      clientInterceptors,
+		Logger:            tLogger,
 	}
 
 	if ManagerAccess.Data.EB.Conf.UtMode {
@@ -171,20 +189,12 @@ func workflowOrchestrator() error {
 
 	// Initialize client for subscribe namespace
 	clientOptions = client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace,
 		ConnectionOptions: subscribeClientConnOptions,
-		DataConverter: converter.NewCompositeDataConverter(
-			converter.NewNilPayloadConverter(),
-			converter.NewByteSlicePayloadConverter(),
-			converter.NewProtoJSONPayloadConverterWithOptions(converter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			converter.NewProtoPayloadConverter(),
-			converter.NewJSONPayloadConverter(),
-		),
-		Interceptors: clientInterceptors,
-		Logger:       tLogger,
+		DataConverter:     swu.NewTemporalDataConverter(),
+		Interceptors:      clientInterceptors,
+		Logger:            tLogger,
 	}
 
 	if ManagerAccess.Data.EB.Conf.UtMode {
@@ -202,7 +212,6 @@ func workflowOrchestrator() error {
 		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber,
 		ManagerAccess.Conf.EB.Temporal.TemporalSubscribeQueue,
 		worker.Options{
-			Interceptors:        workerInterceptors,
 			WorkflowPanicPolicy: worker.FailWorkflow,
 		})
 	log.Info().Msg("Workflow: Registering orchestrator workflows and activities for elektra cluster ")
@@ -215,6 +224,11 @@ func workflowOrchestrator() error {
 
 	// Register all manager flows here
 	// TODO: all RegisterSubscriber calls return an error and we ignore them. Should we?
+	err = ManagerAccess.API.Site.RegisterPublisher()
+	if err != nil {
+		return err
+	}
+
 	ManagerAccess.API.VPC.RegisterSubscriber()
 	ManagerAccess.API.VPC.RegisterPublisher()
 
@@ -223,6 +237,12 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.VpcPeering.RegisterSubscriber()
 	ManagerAccess.API.VpcPeering.RegisterPublisher()
+
+	// Inventory only: SpectrumX Partition CRUD goes through the generic Core gRPC proxy.
+	err = ManagerAccess.API.SpectrumXPartition.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("SpectrumXPartition: failed to register inventory publisher")
+	}
 
 	ManagerAccess.API.Subnet.RegisterSubscriber()
 	ManagerAccess.API.Subnet.RegisterPublisher()
@@ -249,6 +269,10 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.MachineValidation.RegisterSubscriber()
 
+	// Generic Core gRPC proxy: one workflow/activity for all proxied operations,
+	// registered on the Core gRPC manager that owns the connection.
+	ManagerAccess.API.CoreGrpc.RegisterSubscriber()
+
 	ManagerAccess.API.InstanceType.RegisterSubscriber()
 	ManagerAccess.API.InstanceType.RegisterPublisher()
 
@@ -263,6 +287,10 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.ExpectedRack.RegisterSubscriber()
 	ManagerAccess.API.ExpectedRack.RegisterPublisher()
+	err = ManagerAccess.API.ExpectedRackGroup.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("ExpectedRackGroup: failed to register publisher")
+	}
 
 	ManagerAccess.API.ExpectedSwitch.RegisterSubscriber()
 	ManagerAccess.API.ExpectedSwitch.RegisterPublisher()

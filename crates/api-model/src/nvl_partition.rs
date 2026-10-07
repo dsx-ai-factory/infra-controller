@@ -112,16 +112,15 @@ impl TryFrom<NvlPartitionSnapshotPgJson> for NvlPartition {
 
 impl<'r> FromRow<'r, PgRow> for NvlPartitionSnapshotPgJson {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let json: serde_json::value::Value = row.try_get(0)?;
-        NvlPartitionSnapshotPgJson::deserialize(json).map_err(|err| sqlx::Error::Decode(err.into()))
+        // Json<T> deserializes the row bytes straight into the snapshot
+        // struct, skipping the intermediate serde_json::Value DOM.
+        let json: sqlx::types::Json<NvlPartitionSnapshotPgJson> = row.try_get(0)?;
+        Ok(json.0)
     }
 }
 
 impl<'r> FromRow<'r, PgRow> for NvlPartition {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let json: serde_json::value::Value = row.try_get(0)?;
-        NvlPartitionSnapshotPgJson::deserialize(json)
-            .map_err(|err| sqlx::Error::Decode(err.into()))?
-            .try_into()
+        NvlPartitionSnapshotPgJson::from_row(row)?.try_into()
     }
 }

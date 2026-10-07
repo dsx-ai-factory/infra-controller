@@ -61,7 +61,7 @@ impl MetricsEmitter for NetworkSegmentMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_available_ips_count")
-                .with_description("The total number of available ips in the site")
+                .with_description("Number of available IPs per network segment")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for (_seg_id, seg_stats) in metrics.seg_stats.clone() {
@@ -87,7 +87,7 @@ impl MetricsEmitter for NetworkSegmentMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_reserved_ips_count")
-                .with_description("The total number of reserved ips in the site")
+                .with_description("Number of reserved IPs per network segment")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for (_seg_id, seg_stats) in metrics.seg_stats.clone() {
@@ -113,7 +113,7 @@ impl MetricsEmitter for NetworkSegmentMetricsEmitter {
             let metrics = shared_metrics;
             meter
                 .u64_observable_gauge("carbide_total_ips_count")
-                .with_description("The total number of ips in the site")
+                .with_description("Number of IPs per network segment")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for (_seg_id, seg_stats) in metrics.seg_stats.clone() {

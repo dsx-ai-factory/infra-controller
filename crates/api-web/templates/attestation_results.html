@@ -39,7 +39,7 @@
 
 <h2>Attestation Results</h2>
 
-<form>
+<form method="POST" action="/admin/machine/{{ machine_id }}/attestation-submit-report-promotion">
 <table class="detailsview">
     <thead>
 		<tr>
@@ -108,7 +108,7 @@
             <td colspan="2"></td>
             <td colspan="2" class="text-center">
                 <input type="hidden" name="reportname" value="{{ report_id }}"/>
-                <input type="submit" formaction="/admin/machine/{{ machine_id }}/attestation-submit-report-promotion" value="Promote Report" />
+                <input type="submit" value="Promote Report" />
             </td>
         </tr>
     </tbody>

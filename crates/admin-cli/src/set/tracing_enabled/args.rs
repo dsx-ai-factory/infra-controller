@@ -29,7 +29,7 @@ Disable OTLP trace/span export:
     $ nico-admin-cli set tracing-enabled false
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[arg(num_args = 1, value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set, value_name = "true|false")]
-    pub value: bool,
+    pub(super) value: bool,
 }

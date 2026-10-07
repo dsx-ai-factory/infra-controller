@@ -7,6 +7,8 @@
 // pulling in gRPC dependencies.
 package types
 
+import "fmt"
+
 // ComponentType represents the type of a rack component.
 type ComponentType string
 
@@ -19,6 +21,31 @@ const (
 	ComponentTypeUMS        ComponentType = "UMS"
 	ComponentTypeCDU        ComponentType = "CDU"
 )
+
+// ParseComponentType converts a string into a validated ComponentType.
+func ParseComponentType(value string) (ComponentType, error) {
+	componentType := ComponentType(value)
+	if err := componentType.Validate(); err != nil {
+		return ComponentTypeUnknown, err
+	}
+
+	return componentType, nil
+}
+
+// Validate checks that the component type identifies a concrete supported type.
+func (ct ComponentType) Validate() error {
+	switch ct {
+	case ComponentTypeCompute,
+		ComponentTypeNVSwitch,
+		ComponentTypePowerShelf,
+		ComponentTypeTORSwitch,
+		ComponentTypeUMS,
+		ComponentTypeCDU:
+		return nil
+	default:
+		return fmt.Errorf("unknown component type %q", ct)
+	}
+}
 
 // BMCType represents the type of BMC (Baseboard Management Controller).
 type BMCType string
@@ -99,9 +126,10 @@ const (
 	LeakStatusNotDetected LeakStatus = "NOT_DETECTED"
 )
 
-// Phase is the coarse lifecycle bucket a component is in. Shared across
-// compute, nvswitch, and power shelf; map new core sub-states onto an
-// existing phase rather than adding new ones.
+// Phase is Flow's coarse operability bucket. Component phases are shared across
+// compute, nvswitch, and power shelf; map new Core sub-states onto an existing
+// phase rather than adding new ones. Rack operation status aggregates these
+// phases according to AggregateComponentOperationStatus.
 type Phase string
 
 const (

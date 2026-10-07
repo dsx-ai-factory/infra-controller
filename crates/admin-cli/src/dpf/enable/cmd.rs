@@ -15,20 +15,20 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use rpc::admin_cli::OutputFormat;
 
 use crate::dpf::common::DpfQuery;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn modify_dpf_state(
+pub(in crate::dpf) async fn modify_dpf_state(
     query: &DpfQuery,
     _format: OutputFormat, // TODO: Implement json output handling.
     api_client: &ApiClient,
     enabled: bool,
 ) -> CarbideCliResult<()> {
-    let host: MachineId = query.try_into()?;
+    let host: HostMachineId = query.try_into()?;
 
     // Prevent disabling DPF if it was used for ingestion.
     if !enabled {

@@ -13,15 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -30,9 +21,19 @@ import (
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+const validDpfHelmChartData = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","serviceID":"firewall-v1","deployInCluster":false,"security":{"privileged":false,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"firewall"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}`
 
 // TestCreateDpuExtensionServiceHandler_Handle tests the Create DPU Extension Service handler
 func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
@@ -68,7 +69,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, existingDES)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	version := "V1-T1761856992374052"
@@ -85,17 +86,17 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			},
 		},
 	}
-	versionInfo := &cwssaws.DpuExtensionServiceVersionInfo{
+	versionInfo := &corev1.DpuExtensionServiceVersionInfo{
 		Version:       version,
 		Data:          "apiVersion: v1\nkind: Pod",
 		HasCredential: true,
 		Created:       createdTime.Format(cdbm.DpuExtensionServiceTimeFormat),
-		Observability: &cwssaws.DpuExtensionServiceObservability{
-			Configs: []*cwssaws.DpuExtensionServiceObservabilityConfig{
+		Observability: &corev1.DpuExtensionServiceObservability{
+			Configs: []*corev1.DpuExtensionServiceObservabilityConfig{
 				{
 					Name: &obsName,
-					Config: &cwssaws.DpuExtensionServiceObservabilityConfig_Prometheus{
-						Prometheus: &cwssaws.DpuExtensionServiceObservabilityConfigPrometheus{
+					Config: &corev1.DpuExtensionServiceObservabilityConfig_Prometheus{
+						Prometheus: &corev1.DpuExtensionServiceObservabilityConfigPrometheus{
 							ScrapeIntervalSeconds: 30,
 							Endpoint:              "busybox:9090",
 						},
@@ -104,21 +105,51 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			},
 		},
 	}
+	dpfServiceName := "test-dpf-service"
+	dpfUnknownLifecycleServiceName := "test-dpf-service-unknown-lifecycle"
+
 	mockTC := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
-	var capturedCreateRequest *cwssaws.CreateDpuExtensionServiceRequest
+	var capturedCreateRequest *corev1.CreateDpuExtensionServiceRequest
 	mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		arg := args.Get(1)
-		if ptr, ok := arg.(**cwssaws.DpuExtensionService); ok {
-			*ptr = &cwssaws.DpuExtensionService{
-				LatestVersionInfo: versionInfo,
+		if ptr, ok := arg.(**corev1.DpuExtensionService); ok {
+			serviceName := "test-service"
+			description := "Test Description"
+			serviceType := corev1.DpuExtensionServiceType_KUBERNETES_POD
+			responseVersionInfo := versionInfo
+			var lifecycleStatus *corev1.LifecycleStatus
+			if capturedCreateRequest != nil {
+				serviceName = capturedCreateRequest.ServiceName
+				if capturedCreateRequest.Description != nil {
+					description = *capturedCreateRequest.Description
+				}
+				serviceType = capturedCreateRequest.ServiceType
+				if serviceType == corev1.DpuExtensionServiceType_DPF_HELM_CHART {
+					responseVersionInfo = &corev1.DpuExtensionServiceVersionInfo{
+						Version: version,
+						Data:    capturedCreateRequest.Data,
+						Created: createdTime.Format(cdbm.DpuExtensionServiceTimeFormat),
+					}
+					lifecycleStatus = &corev1.LifecycleStatus{State: `{"state":"ready"}`}
+					if serviceName == dpfUnknownLifecycleServiceName {
+						lifecycleStatus = &corev1.LifecycleStatus{State: `{"state":"bogus"}`}
+					}
+				}
+			}
+			*ptr = &corev1.DpuExtensionService{
+				ServiceName:       serviceName,
+				Description:       description,
+				ServiceType:       serviceType,
+				LatestVersionInfo: responseVersionInfo,
 				ActiveVersions:    []string{version},
+				LifecycleStatus:   lifecycleStatus,
 			}
 		}
 	}).Return(nil)
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockTC.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateDpuExtensionService", mock.Anything).Run(func(args mock.Arguments) {
-		capturedCreateRequest = args.Get(3).(*cwssaws.CreateDpuExtensionServiceRequest)
+		capturedCreateRequest = args.Get(3).(*corev1.CreateDpuExtensionServiceRequest)
 	}).Return(mockWorkflowRun, nil)
 
 	// Mock Site Client Pool
@@ -133,7 +164,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		Description: cutil.GetPtr("Test Description"),
 		ServiceType: model.DpuExtensionServiceTypeKubernetesPod,
 		SiteID:      st1.ID.String(),
-		Data:        "apiVersion: v1\nkind: Pod",
+		Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 		Credentials: &model.APIDpuExtensionServiceCredentials{
 			RegistryURL: "https://registry.example.com",
 			Username:    cutil.GetPtr("testuser"),
@@ -142,6 +173,45 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		Observability: expectedObservability,
 	}
 	okBodyBytes, _ := json.Marshal(okBody)
+	dpfBody := model.APIDpuExtensionServiceCreateRequest{
+		Name:        dpfServiceName,
+		Description: cutil.GetPtr("Test DPF Description"),
+		ServiceType: model.DpuExtensionServiceTypeDpfHelmChart,
+		DpuTarget:   cutil.GetPtr(model.DpuExtensionServiceDpuTargetAllActive),
+		SiteID:      st1.ID.String(),
+		Data:        validDpfHelmChartData,
+	}
+	dpfBodyBytes, _ := json.Marshal(dpfBody)
+
+	// Keep these invalid variants otherwise identical to the valid DPF body so
+	// the HTTP cases isolate REST validation of the two new fields.
+	emptyDpfServiceIDBody := dpfBody
+	emptyDpfServiceIDBody.Data = strings.Replace(validDpfHelmChartData, `"serviceID":"firewall-v1"`, `"serviceID":""`, 1)
+	emptyDpfServiceIDBodyBytes, _ := json.Marshal(emptyDpfServiceIDBody)
+
+	missingDpfServiceIDBody := dpfBody
+	missingDpfServiceIDBody.Data = strings.Replace(validDpfHelmChartData, `"serviceID":"firewall-v1",`, ``, 1)
+	missingDpfServiceIDBodyBytes, _ := json.Marshal(missingDpfServiceIDBody)
+
+	unsupportedDeployInClusterBody := dpfBody
+	unsupportedDeployInClusterBody.Data = strings.Replace(validDpfHelmChartData, `"deployInCluster":false`, `"deployInCluster":true`, 1)
+	unsupportedDeployInClusterBodyBytes, _ := json.Marshal(unsupportedDeployInClusterBody)
+
+	missingDeployInClusterBody := dpfBody
+	missingDeployInClusterBody.Data = strings.Replace(validDpfHelmChartData, `"deployInCluster":false,`, ``, 1)
+	missingDeployInClusterBodyBytes, _ := json.Marshal(missingDeployInClusterBody)
+
+	missingDpuTargetBody := dpfBody
+	missingDpuTargetBody.DpuTarget = nil
+	missingDpuTargetBodyBytes, _ := json.Marshal(missingDpuTargetBody)
+
+	emptyDpuTargetBody := dpfBody
+	emptyDpuTargetBody.DpuTarget = cutil.GetPtr("")
+	emptyDpuTargetBodyBytes, _ := json.Marshal(emptyDpuTargetBody)
+
+	dpfUnknownLifecycleBody := dpfBody
+	dpfUnknownLifecycleBody.Name = dpfUnknownLifecycleServiceName
+	dpfUnknownLifecycleBodyBytes, _ := json.Marshal(dpfUnknownLifecycleBody)
 
 	nameClashBody := okBody
 	nameClashBody.Name = "existing-service"
@@ -154,12 +224,13 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	invalidBodyBytes := []byte(`{"name": "test"}`)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		reqBody        string
-		user           *cdbm.User
-		expectedErr    bool
-		expectedStatus int
+		name              string
+		reqOrgName        string
+		reqBody           string
+		user              *cdbm.User
+		expectedErr       bool
+		expectedStatus    int
+		expectedErrorData map[string]string
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -193,6 +264,63 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
 		},
+		// Data missing serviceID must be rejected at the REST boundary.
+		{
+			name:           "error when DPF Helm chart service ID is omitted",
+			reqOrgName:     tnOrg,
+			reqBody:        string(missingDpfServiceIDBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when DPF Helm chart service ID is empty",
+			reqOrgName:     tnOrg,
+			reqBody:        string(emptyDpfServiceIDBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when DPF Helm chart omits deployInCluster",
+			reqOrgName:     tnOrg,
+			reqBody:        string(missingDeployInClusterBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when deployInCluster is set to true",
+			reqOrgName:     tnOrg,
+			reqBody:        string(unsupportedDeployInClusterBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		// A missing Helm target must return its field-level validation detail in the API error body.
+		{
+			name:           "error when DPF Helm chart omits DPU target",
+			reqOrgName:     tnOrg,
+			reqBody:        string(missingDpuTargetBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrorData: map[string]string{
+				"dpuTarget": "must be specified for `DpfHelmChart` services",
+			},
+		},
+		// An empty Helm target must fail
+		{
+			name:           "error when DPF Helm chart DPU target is empty",
+			reqOrgName:     tnOrg,
+			reqBody:        string(emptyDpuTargetBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrorData: map[string]string{
+				"dpuTarget": "must be specified for `DpfHelmChart` services",
+			},
+		},
 		{
 			name:           "error when site does not exist",
 			reqOrgName:     tnOrg,
@@ -217,16 +345,31 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
 		},
+		{
+			name:           "success creating DPF Helm chart DPU Extension Service",
+			reqOrgName:     tnOrg,
+			reqBody:        string(dpfBodyBytes),
+			user:           tnu1,
+			expectedErr:    false,
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:           "success creating DPF Helm chart DPU Extension Service with unknown Core lifecycle state",
+			reqOrgName:     tnOrg,
+			reqBody:        string(dpfUnknownLifecycleBodyBytes),
+			user:           tnu1,
+			expectedErr:    false,
+			expectedStatus: http.StatusCreated,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cdesh := CreateDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        common.GetTestConfig(),
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       common.GetTestConfig(),
 			}
 
 			// Setup echo server/context
@@ -240,27 +383,54 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := cdesh.Handle(ec)
 			require.NoError(t, err)
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 
+			if tt.expectedErrorData != nil {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, tt.expectedErrorData, response.Data)
+			}
+
 			if !tt.expectedErr && rec.Code == http.StatusCreated {
 				var apiDES model.APIDpuExtensionService
 				err := json.Unmarshal(rec.Body.Bytes(), &apiDES)
 				require.NoError(t, err)
-				assert.Equal(t, okBody.Name, apiDES.Name)
-				assert.Equal(t, okBody.ServiceType, apiDES.ServiceType)
-				assert.Equal(t, okBody.SiteID, apiDES.SiteID)
+				expectedBody := okBody
+				switch {
+				case strings.Contains(tt.name, "unknown Core lifecycle state"):
+					// Core did not report a usable state, so the service stays Pending
+					expectedBody = dpfUnknownLifecycleBody
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusPending, apiDES.Status)
+				case strings.Contains(tt.name, "DPF Helm chart"):
+					expectedBody = dpfBody
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, apiDES.Status)
+				default:
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, apiDES.Status)
+				}
+				assert.Equal(t, expectedBody.Name, apiDES.Name)
+				assert.Equal(t, expectedBody.ServiceType, apiDES.ServiceType)
+				assert.Equal(t, expectedBody.DpuTarget, apiDES.DpuTarget)
+				assert.Equal(t, expectedBody.SiteID, apiDES.SiteID)
 				assert.Equal(t, version, *apiDES.Version)
 				assert.Equal(t, []string{version}, apiDES.ActiveVersions)
 				assert.Equal(t, createdTime, apiDES.VersionInfo.Created)
 				require.NotNil(t, capturedCreateRequest)
-				assert.Equal(t, okBody.Name, capturedCreateRequest.ServiceName)
-				assert.Equal(t, okBody.Data, capturedCreateRequest.Data)
+				assert.Equal(t, expectedBody.Name, capturedCreateRequest.ServiceName)
+				assert.Equal(t, expectedBody.Data, capturedCreateRequest.Data)
+				if expectedBody.ServiceType == model.DpuExtensionServiceTypeDpfHelmChart {
+					require.NotNil(t, capturedCreateRequest.DpuTarget)
+					assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *capturedCreateRequest.DpuTarget)
+					assert.Nil(t, capturedCreateRequest.Credential)
+					assert.Nil(t, capturedCreateRequest.Observability)
+					return
+				}
 				require.NotNil(t, capturedCreateRequest.Credential)
 				assert.Equal(t, okBody.Credentials.RegistryURL, capturedCreateRequest.Credential.RegistryUrl)
 				require.NotNil(t, capturedCreateRequest.Observability)
@@ -314,7 +484,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	mockTC := &tmocks.Client{}
 
@@ -397,10 +567,9 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gadesh := GetAllDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -426,8 +595,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gadesh.Handle(ec)
 			require.NoError(t, err)
@@ -492,7 +660,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	mockTC := &tmocks.Client{}
 
@@ -571,10 +739,9 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gdesh := GetDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -588,8 +755,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gdesh.Handle(ec)
 			require.NoError(t, err)
@@ -639,27 +805,30 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, des1)
 	des2 := common.TestBuildDpuExtensionService(t, dbSession, "service-2", model.DpuExtensionServiceTypeKubernetesPod, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)
 	assert.NotNil(t, des2)
-
+	desDpf := common.TestBuildDpuExtensionService(t, dbSession, "service-dpf", model.DpuExtensionServiceTypeDpfHelmChart, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)
+	assert.NotNil(t, desDpf)
+	desDpfPending := common.TestBuildDpuExtensionService(t, dbSession, "service-dpf-pending", model.DpuExtensionServiceTypeDpfHelmChart, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusPending, tnu1)
+	assert.NotNil(t, desDpfPending)
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	version := "V1-T1761856992374065"
 	createdTime := time.Now().UTC().Round(time.Microsecond)
 	updateObsName := "service-logs"
-	versionInfo := &cwssaws.DpuExtensionServiceVersionInfo{
+	versionInfo := &corev1.DpuExtensionServiceVersionInfo{
 		Version:       version,
 		Data:          "apiVersion: v1\nkind: Pod",
 		HasCredential: true,
 		Created:       createdTime.Format(cdbm.DpuExtensionServiceTimeFormat),
-		Observability: &cwssaws.DpuExtensionServiceObservability{
-			Configs: []*cwssaws.DpuExtensionServiceObservabilityConfig{
+		Observability: &corev1.DpuExtensionServiceObservability{
+			Configs: []*corev1.DpuExtensionServiceObservabilityConfig{
 				{
 					Name: &updateObsName,
-					Config: &cwssaws.DpuExtensionServiceObservabilityConfig_Logging{
-						Logging: &cwssaws.DpuExtensionServiceObservabilityConfigLogging{
+					Config: &corev1.DpuExtensionServiceObservabilityConfig_Logging{
+						Logging: &corev1.DpuExtensionServiceObservabilityConfigLogging{
 							Path: "/var/log/service.log",
 						},
 					},
@@ -670,11 +839,22 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 	mockTC := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
-	var capturedUpdateRequest *cwssaws.UpdateDpuExtensionServiceRequest
+	var capturedUpdateRequest *corev1.UpdateDpuExtensionServiceRequest
 	mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		arg := args.Get(1)
-		if ptr, ok := arg.(**cwssaws.DpuExtensionService); ok {
-			*ptr = &cwssaws.DpuExtensionService{
+		if ptr, ok := arg.(**corev1.DpuExtensionService); ok {
+			serviceName := "service-1"
+			description := "Updated Description"
+			if capturedUpdateRequest != nil && capturedUpdateRequest.ServiceName != nil {
+				serviceName = *capturedUpdateRequest.ServiceName
+			}
+			if capturedUpdateRequest != nil && capturedUpdateRequest.Description != nil {
+				description = *capturedUpdateRequest.Description
+			}
+			*ptr = &corev1.DpuExtensionService{
+				ServiceName:       serviceName,
+				Description:       description,
+				ServiceType:       corev1.DpuExtensionServiceType_KUBERNETES_POD,
 				LatestVersionInfo: versionInfo,
 				ActiveVersions:    []string{version},
 			}
@@ -682,7 +862,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	}).Return(nil)
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockTC.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateDpuExtensionService", mock.Anything).Run(func(args mock.Arguments) {
-		capturedUpdateRequest = args.Get(3).(*cwssaws.UpdateDpuExtensionServiceRequest)
+		capturedUpdateRequest = args.Get(3).(*corev1.UpdateDpuExtensionServiceRequest)
 	}).Return(mockWorkflowRun, nil)
 
 	// Mock Site Client Pool
@@ -708,7 +888,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	okBody2 := model.APIDpuExtensionServiceUpdateRequest{
 		Name:        cutil.GetPtr("updated-service-name-2"),
 		Description: cutil.GetPtr("Updated Description"),
-		Data:        cutil.GetPtr("apiVersion: v1\nkind: Pod\nmetadata:\n  name: updated-service"),
+		Data:        cutil.GetPtr("apiVersion: v1\nkind: Pod\nmetadata:\n  name: updated-service\nspec:\n  containers:\n  - name: test\n    image: test:latest"),
 		Credentials: &model.APIDpuExtensionServiceCredentials{
 			RegistryURL: "https://registry.hub.docker.com",
 			Username:    cutil.GetPtr("testuser"),
@@ -726,6 +906,29 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		},
 	}
 	okBody2Bytes, _ := json.Marshal(okBody2)
+
+	dpfBody := model.APIDpuExtensionServiceUpdateRequest{
+		Description: cutil.GetPtr("Updated DPF Description"),
+		Data:        cutil.GetPtr(validDpfHelmChartData),
+	}
+	dpfBodyBytes, _ := json.Marshal(dpfBody)
+
+	// Change only the deployment location so the update case specifically
+	// verifies rejection of the unsupported host-cluster mode.
+	unsupportedDpfDeployBody := dpfBody
+	unsupportedDpfDeployData := strings.Replace(validDpfHelmChartData, `"deployInCluster":false`, `"deployInCluster":true`, 1)
+	unsupportedDpfDeployBody.Data = &unsupportedDpfDeployData
+	unsupportedDpfDeployBodyBytes, _ := json.Marshal(unsupportedDpfDeployBody)
+
+	missingDpfDeployBody := dpfBody
+	missingDpfDeployData := strings.Replace(validDpfHelmChartData, `"deployInCluster":false,`, ``, 1)
+	missingDpfDeployBody.Data = &missingDpfDeployData
+	missingDpfDeployBodyBytes, _ := json.Marshal(missingDpfDeployBody)
+
+	missingDpfServiceIDBody := dpfBody
+	missingDpfServiceIDData := strings.Replace(validDpfHelmChartData, `"serviceID":"firewall-v1",`, ``, 1)
+	missingDpfServiceIDBody.Data = &missingDpfServiceIDData
+	missingDpfServiceIDBodyBytes, _ := json.Marshal(missingDpfServiceIDBody)
 
 	tests := []struct {
 		name                  string
@@ -773,6 +976,72 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedStatus:        http.StatusBadRequest,
 		},
 		{
+			name:                  "error when Kubernetes Pod data is not a Pod specification",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: des1.ID.String(),
+			reqBody:               `{"data": "kind: Deployment"}`,
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		{
+			name:                  "error when DPF Helm chart data is not a chart definition",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			reqBody:               `{"data": "kind: Pod"}`,
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		// Updates must retain the required DPF DPUService service ID.
+		{
+			name:                  "error when DPF Helm chart update omits service ID",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			reqBody:               string(missingDpfServiceIDBodyBytes),
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		// Updates must also require an explicit DPF deployment location.
+		{
+			name:                  "error when DPF Helm chart update omits deployInCluster",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			reqBody:               string(missingDpfDeployBodyBytes),
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		// Updates must enforce the deployInCluster to be false
+		{
+			name:                  "error when DPF Helm chart update deploys in the host cluster",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			reqBody:               string(unsupportedDpfDeployBodyBytes),
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		{
+			name:                  "error when DPF Helm chart update carries only credentials",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			reqBody:               `{"credentials": {"registryUrl": "https://registry.hub.docker.com", "username": "testuser", "password": "testpass"}}`,
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		{
+			name:                  "error when DPF Helm chart update carries only observability",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			reqBody:               `{"observability": {"configs": []}}`,
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		{
 			name:                  "error when DPU Extension Service does not exist",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: uuid.New().String(),
@@ -808,6 +1077,15 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedErr:           false,
 			expectedStatus:        http.StatusOK,
 		},
+		{
+			name:                  "success updating DPF Helm chart DPU Extension Service without Core lifecycle status",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpfPending.ID.String(),
+			reqBody:               string(dpfBodyBytes),
+			user:                  tnu1,
+			expectedErr:           false,
+			expectedStatus:        http.StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
@@ -832,11 +1110,10 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			capturedUpdateRequest = nil
 
 			udesh := UpdateDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -850,19 +1127,28 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := udesh.Handle(ec)
 			require.NoError(t, err)
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 
+			if strings.Contains(tt.name, "carries only") {
+				assert.Nil(t, capturedUpdateRequest)
+			}
+
 			if !tt.expectedErr && rec.Code == http.StatusOK {
 				var apiDES model.APIDpuExtensionService
 				err := json.Unmarshal(rec.Body.Bytes(), &apiDES)
 				require.NoError(t, err)
-				if strings.Contains(tt.name, "data/credentials") {
+				if strings.Contains(tt.name, "DPF Helm chart") {
+					// Core did not report a lifecycle state, so the stored status is kept
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusPending, apiDES.Status)
+					assert.Equal(t, *dpfBody.Description, *apiDES.Description)
+					require.NotNil(t, capturedUpdateRequest)
+					assert.Equal(t, *dpfBody.Data, capturedUpdateRequest.Data)
+				} else if strings.Contains(tt.name, "data/credentials") {
 					assert.Equal(t, *okBody2.Name, apiDES.Name)
 					assert.Equal(t, *okBody2.Description, *apiDES.Description)
 					require.NotNil(t, capturedUpdateRequest)
@@ -924,7 +1210,8 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, des1)
 	des2 := common.TestBuildDpuExtensionService(t, dbSession, "service-2", model.DpuExtensionServiceTypeKubernetesPod, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)
 	assert.NotNil(t, des2)
-
+	desDpf := common.TestBuildDpuExtensionService(t, dbSession, "service-dpf", model.DpuExtensionServiceTypeDpfHelmChart, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)
+	assert.NotNil(t, desDpf)
 	al1 := common.TestBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
 	it1 := common.TestBuildInstanceType(t, dbSession, "test-instance-type-1", nil, st1, map[string]string{
 		"name":        "test-instance-type-1",
@@ -945,7 +1232,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1017,16 +1304,23 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedErr:           false,
 			expectedStatus:        http.StatusNoContent,
 		},
+		{
+			name:                  "success accepting DPF Helm chart deletion",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: desDpf.ID.String(),
+			user:                  tnu1,
+			expectedErr:           false,
+			expectedStatus:        http.StatusAccepted,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ddesh := DeleteDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1040,8 +1334,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ddesh.Handle(ec)
 			require.NoError(t, err)
@@ -1054,6 +1347,13 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 				_, err = desDAO.GetByID(context.Background(), nil, uuid.MustParse(tt.dpuExtensionServiceID), nil)
 				require.Error(t, err)
 				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			}
+			if !tt.expectedErr && rec.Code == http.StatusAccepted {
+				assertDeletionAcceptedResponse(t, rec.Body.Bytes())
+				desDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
+				stored, getErr := desDAO.GetByID(context.Background(), nil, uuid.MustParse(tt.dpuExtensionServiceID), nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusDeleting, stored.Status)
 			}
 		})
 	}
@@ -1090,7 +1390,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1100,19 +1400,19 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	version := "V1-T1761856992374052"
 	createdTime := time.Now().UTC().Round(time.Microsecond)
 	versionObsName := "version-metrics"
-	mockVersionInfo := &cwssaws.DpuExtensionServiceVersionInfoList{
-		VersionInfos: []*cwssaws.DpuExtensionServiceVersionInfo{
+	mockVersionInfo := &corev1.DpuExtensionServiceVersionInfoList{
+		VersionInfos: []*corev1.DpuExtensionServiceVersionInfo{
 			{
 				Version:       version,
 				Data:          "apiVersion: v1\nkind: Pod",
 				HasCredential: true,
 				Created:       createdTime.Format(cdbm.DpuExtensionServiceTimeFormat),
-				Observability: &cwssaws.DpuExtensionServiceObservability{
-					Configs: []*cwssaws.DpuExtensionServiceObservabilityConfig{
+				Observability: &corev1.DpuExtensionServiceObservability{
+					Configs: []*corev1.DpuExtensionServiceObservabilityConfig{
 						{
 							Name: &versionObsName,
-							Config: &cwssaws.DpuExtensionServiceObservabilityConfig_Prometheus{
-								Prometheus: &cwssaws.DpuExtensionServiceObservabilityConfigPrometheus{
+							Config: &corev1.DpuExtensionServiceObservabilityConfig_Prometheus{
+								Prometheus: &corev1.DpuExtensionServiceObservabilityConfigPrometheus{
 									ScrapeIntervalSeconds: 60,
 									Endpoint:              "service:9090",
 								},
@@ -1126,7 +1426,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 
 	mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		arg := args.Get(1)
-		if ptr, ok := arg.(**cwssaws.DpuExtensionServiceVersionInfoList); ok {
+		if ptr, ok := arg.(**corev1.DpuExtensionServiceVersionInfoList); ok {
 			*ptr = mockVersionInfo
 		}
 	}).Return(nil)
@@ -1199,11 +1499,10 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gdesvh := GetDpuExtensionServiceVersionHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1217,8 +1516,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID, tt.versionID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gdesvh.Handle(ec)
 			require.NoError(t, err)
@@ -1330,7 +1628,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1340,8 +1638,8 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	mockTC.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteDpuExtensionService", mock.Anything).Return(mockWorkflowRun, nil)
 
 	// Mock fetching older version info for des3 version
-	mockVersionInfo := &cwssaws.DpuExtensionServiceVersionInfoList{
-		VersionInfos: []*cwssaws.DpuExtensionServiceVersionInfo{
+	mockVersionInfo := &corev1.DpuExtensionServiceVersionInfoList{
+		VersionInfos: []*corev1.DpuExtensionServiceVersionInfo{
 			{
 				Version:       des3OldVersionInfo.Version,
 				Data:          des3OldVersionInfo.Data,
@@ -1354,7 +1652,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	mockWorkflowRun2 := &tmocks.WorkflowRun{}
 	mockWorkflowRun2.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		arg := args.Get(1)
-		if ptr, ok := arg.(**cwssaws.DpuExtensionServiceVersionInfoList); ok {
+		if ptr, ok := arg.(**corev1.DpuExtensionServiceVersionInfoList); ok {
 			*ptr = mockVersionInfo
 		}
 	}).Return(nil)
@@ -1468,11 +1766,10 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ddesvh := DeleteDpuExtensionServiceVersionHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1486,8 +1783,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID.String(), tt.versionID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ddesvh.Handle(ec)
 			require.NoError(t, err)

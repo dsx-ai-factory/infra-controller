@@ -16,37 +16,72 @@
  */
 
 use ::rpc::forge::{self as forgerpc, InstancePowerRequest};
+use carbide_uuid::instance::InstanceId;
+use eyre::WrapErr;
 
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn handle_reboot(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    let machine_id = api_client
-        .get_one_instance(args.instance)
-        .await?
-        .instances
-        .last()
-        .ok_or_else(|| CarbideCliError::GenericError("Unknown UUID".to_string()))?
-        .machine_id
-        .ok_or_else(|| {
-            CarbideCliError::GenericError("Instance has no machine associated.".to_string())
-        })?;
+fn with_reboot_context<T>(
+    result: Result<T, tonic::Status>,
+    instance_id: InstanceId,
+) -> CarbideCliResult<T> {
+    result
+        .wrap_err_with(|| format!("failed to request reboot for instance {instance_id}"))
+        .map_err(CarbideCliError::from)
+}
 
-    api_client
-        .0
-        .invoke_instance_power(InstancePowerRequest {
-            instance_id: Some(args.instance),
-            machine_id: Some(machine_id),
-            operation: forgerpc::instance_power_request::Operation::PowerReset as i32,
-            boot_with_custom_ipxe: args.custom_pxe,
-            apply_updates_on_reboot: args.apply_updates_on_reboot,
-        })
-        .await?;
+pub(super) async fn handle_reboot(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+    with_reboot_context(
+        api_client
+            .0
+            .invoke_instance_power(InstancePowerRequest {
+                instance_id: Some(args.instance),
+                operation: forgerpc::instance_power_request::Operation::PowerReset as i32,
+                boot_with_custom_ipxe: args.custom_pxe,
+                apply_updates_on_reboot: args.apply_updates_on_reboot,
+            })
+            .await,
+        args.instance,
+    )?;
     println!(
-        "Reboot for instance {} (machine {}) is requested successfully!",
-        args.instance, machine_id
+        "Reboot for instance {} is requested successfully!",
+        args.instance
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::*;
+
+    #[test]
+    fn reboot_error_includes_instance_context_and_preserves_source() {
+        let instance_id = "12345678-1234-5678-90ab-cdef01234567"
+            .parse::<InstanceId>()
+            .unwrap();
+
+        let error = with_reboot_context::<()>(
+            Err(tonic::Status::unavailable("API unavailable")),
+            instance_id,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("failed to request reboot for instance {instance_id}")
+        );
+        let CarbideCliError::EyreReport(report) = error else {
+            panic!("expected an EyreReport");
+        };
+        let status = report
+            .downcast_ref::<tonic::Status>()
+            .expect("tonic status should remain in the error chain");
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(status.message(), "API unavailable");
+    }
 }

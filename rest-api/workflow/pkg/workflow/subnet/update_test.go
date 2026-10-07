@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateSubnetTestSuite struct {
@@ -41,8 +41,8 @@ func (s *UpdateSubnetTestSuite) Test_UpdateSubnetInventory_Success() {
 
 	siteID := uuid.New()
 
-	subnetInventory := &cwssaws.SubnetInventory{
-		Segments:  []*cwssaws.NetworkSegment{},
+	subnetInventory := &corev1.SubnetInventory{
+		Segments:  []*corev1.NetworkSegment{},
 		Timestamp: timestamppb.Now(),
 	}
 
@@ -69,8 +69,8 @@ func (s *UpdateSubnetTestSuite) Test_UpdateSubnetInventory_ActivityFails() {
 
 	siteID := uuid.New()
 
-	subnetInventory := &cwssaws.SubnetInventory{
-		Segments:  []*cwssaws.NetworkSegment{},
+	subnetInventory := &corev1.SubnetInventory{
+		Segments:  []*corev1.NetworkSegment{},
 		Timestamp: timestamppb.Now(),
 	}
 

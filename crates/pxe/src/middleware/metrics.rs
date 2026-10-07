@@ -15,8 +15,7 @@
  * limitations under the License.
  */
 
-// Completely forked from the `axum-metrics` crate, but changed the one line that doesn't allow req-uri
-// as a fallback because we need it.
+// Completely forked from the `axum-metrics` crate, with PXE-specific adjustments.
 
 //! Minimalist exporter-agnostic [`metrics`] instrumentation middleware for [`axum`].
 //!
@@ -74,8 +73,6 @@
 //! - `endpoint`: the matched route template ([`MatchedPath`]), or `unknown` otherwise.
 //! - `method`: the request method.
 //! - `code`: the response status code.
-//! - Additional labels from [`ExtraMetricLabels`] extension of [`Request`] or [`Response`],
-//!   if exists.
 use std::borrow::Cow;
 use std::future::Future;
 use std::num::Saturating;
@@ -92,16 +89,9 @@ use pin_project_lite::pin_project;
 use tower_layer::Layer;
 use tower_service::Service;
 
-/// An [http extension][axum::http::Extensions] to add extra metric labels.
-///
-/// Setting this extension for [`Request`] or [`Response`] to add additional labels to the relavent
-/// metrics.
-#[derive(Debug, Clone)]
-pub struct ExtraMetricLabels(pub Vec<Label>);
-
 /// Layer for applying [`Metric`].
 #[derive(Default, Clone)]
-pub struct MetricLayer {
+pub(crate) struct MetricLayer {
     _priv: (),
 }
 
@@ -115,7 +105,7 @@ impl<S> Layer<S> for MetricLayer {
 
 /// Middleware that instrument metrics on all requests and responses.
 #[derive(Debug, Clone)]
-pub struct Metric<S> {
+pub(crate) struct Metric<S> {
     inner: S,
 }
 
@@ -160,33 +150,21 @@ where
         let method = req.method().clone();
         let endpoint = match req.extensions().get::<MatchedPath>() {
             Some(path) => Cow::Owned(path.as_str().to_owned()),
-            // The original code here punts on this, we want the req.uri() as a backup explicitly
-            None => Cow::Owned(req.uri().path().to_string()),
+            None => Cow::Borrowed("unknown"),
         };
-        // endpoint, method, code, (reserved)
-        let mut labels = Vec::with_capacity(4);
+        let mut labels = Vec::with_capacity(3);
         labels.extend([
             Label::new("endpoint", endpoint),
             Label::new("method", method_to_str(&method)),
         ]);
 
-        let req = {
-            let req_labels = match req.extensions().get::<ExtraMetricLabels>() {
-                None => labels.clone(),
-                Some(extra_labels) => labels
-                    .iter()
-                    .chain(extra_labels.0.iter())
-                    .cloned()
-                    .collect(),
-            };
-            req.map(|inner| RequestBody {
-                inner,
-                metric: ReqMetric {
-                    body_size: Saturating(0),
-                    labels: req_labels,
-                },
-            })
-        };
+        let req = req.map(|inner| RequestBody {
+            inner,
+            metric: ReqMetric {
+                body_size: Saturating(0),
+                labels: labels.clone(),
+            },
+        });
 
         inflight_gauge.increment(1);
         let resp_metric = RespMetric {
@@ -222,7 +200,7 @@ pin_project! {
     /// Response body for [`Metric`].
     // Keep order.
     #[repr(C)]
-    pub struct ResponseBody<B> {
+    pub(crate) struct ResponseBody<B> {
         #[pin]
         inner: B,
         metric: RespMetric,
@@ -260,7 +238,7 @@ pin_project! {
     /// Request body for [`Metric`].
     // Keep order.
     #[repr(C)]
-    pub struct RequestBody<B> {
+    pub(crate) struct RequestBody<B> {
         #[pin]
         inner: B,
         metric: ReqMetric,
@@ -312,7 +290,7 @@ pin_project! {
     /// Response future for [`Metric`].
     // Keep order.
     #[repr(C)]
-    pub struct ResponseFuture<Fut> {
+    pub(crate) struct ResponseFuture<Fut> {
         #[pin]
         fut: Fut,
         metric: Option<RespMetric>,
@@ -333,9 +311,6 @@ where
         metric
             .labels
             .push(Label::new("code", code_to_str(resp.status())));
-        if let Some(extra_labels) = resp.extensions().get::<ExtraMetricLabels>() {
-            metric.labels.extend(extra_labels.0.iter().cloned());
-        }
         histogram!("http_response_duration_seconds", metric.labels.iter())
             .record(metric.start_inst.elapsed());
 
@@ -384,4 +359,63 @@ fn code_to_str(code: StatusCode) -> &'static str {
     assert!((MIN..=MAX).contains(&code));
     let pos = 3 * (code - MIN) as usize;
     &TABLE[pos..pos + 3]
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_matched_paths_use_bounded_unknown_endpoint() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let app = Router::new()
+            .route("/known", get(|| async { StatusCode::NO_CONTENT }))
+            .nest_service(
+                "/nested",
+                Router::new().route("/{id}", get(|| async { StatusCode::NO_CONTENT })),
+            )
+            .layer(MetricLayer::default());
+
+        for (uri, expected_status) in [
+            ("/unmatched/user-controlled", StatusCode::NOT_FOUND),
+            ("/nested/user-controlled", StatusCode::NO_CONTENT),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("serve request");
+            assert_eq!(response.status(), expected_status);
+        }
+
+        let exposition = handle.render();
+        for code in ["204", "404"] {
+            assert!(
+                exposition.lines().any(|line| {
+                    line.starts_with("http_requests_total{")
+                        && line.contains(&format!("code=\"{code}\""))
+                        && line.contains("endpoint=\"unknown\"")
+                }),
+                "missing MatchedPath must use the bounded unknown endpoint label, got:\n{exposition}"
+            );
+        }
+        assert!(
+            !exposition.contains("user-controlled"),
+            "raw request paths must not appear in metric labels, got:\n{exposition}"
+        );
+    }
 }

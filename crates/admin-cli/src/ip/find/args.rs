@@ -28,9 +28,9 @@ Identify what owns an IPv6 address:
     $ nico-admin-cli ip find 2001:db8::1
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     /// The IP address we are looking to identify
-    pub ip: std::net::IpAddr,
+    ip: std::net::IpAddr,
 }
 
 impl From<Args> for ::rpc::forge::FindIpAddressRequest {

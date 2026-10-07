@@ -18,6 +18,8 @@ stateDiagram-v2
     state "Validation" as Validation
     state "Measuring" as Measuring
     state "Ready" as Ready
+    state "Decommissioning" as Decommissioning
+    state "Decommissioned (terminal)" as Decommissioned
     state "Assigned" as Assigned
     state "HostReprovision" as HostReprovision
     state "DPUReprovision" as DPUReprovision
@@ -51,6 +53,7 @@ stateDiagram-v2
     Ready --> Measuring : Redo Measurements Request
     Ready --> BomValidating : BOM Validation Request
     Ready --> Validation : Machine Validation Request
+    Ready --> Decommissioning : Decommission Request
 
     Assigned --> PostAssignedMeasuring : Measurements required
     Assigned --> WaitingForCleanup : Cleanup
@@ -67,6 +70,8 @@ stateDiagram-v2
     WaitingForCleanup --> BomValidating
 
     PostAssignedMeasuring --> WaitingForCleanup : Measurements complete
+
+    Decommissioning --> Decommissioned : Device reset and credential deletion complete
 
     AnyNotAssignedState --> Failed : Any failure condition
     Failed --> AnyNotAssignedState : Recovery
@@ -122,7 +127,8 @@ stateDiagram-v2
     if_state_dpu_nodpu --> HostInit_HI_WaitingForPlatformConfiguration : No DPU
 
     DD_Configuring --> DD_EnableRshim
-    DD_EnableRshim --> if_bfb_supported
+    DD_EnableRshim --> DD_RebootAllDPUS : DPF selected during site exploration
+    DD_EnableRshim --> if_bfb_supported : DPF not selected during site exploration
 
     if_bfb_supported --> DD_SSB_E_CheckSecureBootStatus : BFB install supported
     if_bfb_supported --> DD_SSB_D_CheckSecureBootStatus : BFB install not supported
@@ -182,10 +188,12 @@ stateDiagram-v2
 
     state "WaitingForPlatformConfiguration" as DI_WaitingForPlatformConfiguration
     state "WaitingForNetworkConfig" as DI_WaitingForNetworkConfig
+    state "DpfStates/Provisioning" as DI_DpfStates_Provisioning
     state "HostInit/EnableIpmiOverLan" as HostInit_HI_EnableIpmiOverLan
 
     DpuDiscoveringState_DD_SSB_E_CheckSecureBootStatus --> DI_IDO_InstallingBFB : Security boot is enabled
-    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_DpfStates_Provisioning : DPF selected during site exploration
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init : DPF not selected during site exploration
 
     DI_IDO_InstallingBFB --> DI_IDO_WaitForInstallComplete
     DI_IDO_WaitForInstallComplete --> DI_IDO_WaitForInstallComplete : Task Running/New/Starting (wait more)
@@ -415,6 +423,7 @@ stateDiagram-v2
     state "Measuring/WaitingForMeasurements" as Measuring_M_WaitingForMeasurements
     state "DPUReprovision/dr_bfb_check_support" as DPUReprovision_dr_bfb_check_support
     state "HostReprovision/CheckingFirmware" as HostReprovision_HR_CheckingFirmware
+    state "Decommissioning/SuppressingSiteExplorer" as Decommissioning_SuppressingSiteExplorer
 
     HostInit_HI_Discovered --> Ready
     Measuring --> Ready : Measuring completed
@@ -427,7 +436,51 @@ stateDiagram-v2
     Ready --> Assigned_A_WaitingForNetworkSegmentToBeReady : Instance assigned
     Ready --> Measuring_M_WaitingForMeasurements : Redo measuring requested
     Ready --> HostInit_HI_UefiSetup_HI_USS_UnlockHost : Need setup BIOS password
+    Ready --> Decommissioning_SuppressingSiteExplorer : Decommission requested
 ```
+
+## Decommissioning State Details
+
+Decommissioning starts only from `Ready` and follows this top-level sequence:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "SuppressingSiteExplorer" as SuppressingSiteExplorer
+    state "DeconfiguringHost" as DeconfiguringHost
+    state "DeconfiguringDpus" as DeconfiguringDpus
+    state "SuppressingOobDhcp" as SuppressingOobDhcp
+    state "PowerCyclingHost" as PowerCyclingHost
+    state "PoweringOnHost" as PoweringOnHost
+    state "WaitingForOobDhcpAcknowledgement" as WaitingForOobDhcpAcknowledgement
+    state "SuppressingBmcDhcp" as SuppressingBmcDhcp
+    state "FactoryResettingBmcs" as FactoryResettingBmcs
+    state "WaitingForBmcDhcpAcknowledgement" as WaitingForBmcDhcpAcknowledgement
+    state "DeletingManagedCredentials" as DeletingManagedCredentials
+    state "Decommissioned (terminal)" as Decommissioned
+
+    [*] --> SuppressingSiteExplorer
+    SuppressingSiteExplorer --> DeconfiguringHost : Site Explorer acknowledges suppressions
+    DeconfiguringHost --> DeconfiguringDpus : Host firmware configuration reset
+    DeconfiguringDpus --> SuppressingOobDhcp : DPUs run preingestion BFB
+    SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
+    PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
+    PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
+    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : DHCP acknowledges OOB suppressions
+    SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
+    FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
+    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : DHCP acknowledges BMC suppressions
+    DeletingManagedCredentials --> Decommissioned : Per-device credentials deleted
+```
+
+`DeconfiguringHost` disables lockdown, unlocks managed SuperNICs, resets UEFI
+settings, and clears the host UEFI password. `DeconfiguringDpus` removes DPF
+resources when applicable and installs the vanilla `preingestion.bfb` on every
+DPU.
+
+Refer to [Decommission Managed Hosts and DPUs](../../decommissioning/hosts.md) for the
+operator procedure, platform limitations, and intended post-reset state.
 
 ## Instance Assignment State Details (InstanceState)
 
@@ -441,7 +494,8 @@ stateDiagram-v2
 
     state "WaitingForNetworkSegmentToBeReady" as A_WaitingForNetworkSegmentToBeReady
     state "WaitingForNetworkConfig" as A_WaitingForNetworkConfig
-    state "WaitingForStorageConfig" as A_WaitingForStorageConfig
+    state "WaitingForStorageConfig (legacy recovery)" as A_WaitingForStorageConfig
+    state "WaitingForExtensionServicesConfig (legacy recovery)" as A_WaitingForExtensionServicesConfig
     state "WaitingForRebootToReady" as A_WaitingForRebootToReady
     state "Assigned/Ready" as A_Ready
     state "WaitingForDpusToUp" as A_WaitingForDpusToUp
@@ -456,6 +510,7 @@ stateDiagram-v2
         state "ReleaseOldResources" as A_NCU_ReleaseOldResources
     }
     state "HostPlatformConfiguration" as A_HostPlatformConfiguration {
+        state "FactoryResetBmc" as A_HPC_FactoryResetBmc
         state "PowerCycle" as A_HPC_PowerCycle
         state "UnlockHost" as A_HPC_UnlockHost {
             state "DisableLockdown" as A_HPC_UH_DisableLockdown
@@ -486,19 +541,23 @@ stateDiagram-v2
     A_WaitingForNetworkSegmentToBeReady --> A_WaitingForNetworkSegmentToBeReady : segments not ready
     A_WaitingForNetworkSegmentToBeReady --> A_WaitingForNetworkConfig : No segment OR segments ready
 
-    A_WaitingForNetworkConfig --> A_WaitingForNetworkConfig : Host network not synced on DPU
-    A_WaitingForNetworkConfig --> A_WaitingForStorageConfig : No DPU OR Host network synced on DPU
+    A_WaitingForNetworkConfig --> A_WaitingForNetworkConfig : An assigned provisioning gate is not ready
+    A_WaitingForNetworkConfig --> A_WaitingForRebootToReady : Deletion requested OR all assigned provisioning gates clear
 
-    A_WaitingForStorageConfig --> A_WaitingForRebootToReady : Attach storage volumes
-    A_WaitingForRebootToReady --> A_Ready : Reboot machine
+    A_WaitingForStorageConfig --> A_WaitingForExtensionServicesConfig : Recover a persisted legacy state
+    A_WaitingForExtensionServicesConfig --> A_WaitingForExtensionServicesConfig : Extension services not ready
+    A_WaitingForExtensionServicesConfig --> A_WaitingForRebootToReady : No managed DPU OR no configured services OR services ready
+    A_WaitingForRebootToReady --> A_WaitingForRebootToReady : Aggregate PreventHostStateChanges OR managed DPU PXE signal
+    A_WaitingForRebootToReady --> A_Ready : Readiness checks pass OR deletion or custom iPXE bypass; ForceRestart
 
     A_Ready --> A_NCU_WaitingForNetworkSegmentToBeReady : Update network request
-    A_Ready --> A_HPC_PowerCycle : (Instance deleted OR Host/DPU reporvisioning requested) AND need config bootorder
-    A_Ready --> A_WaitingForDpusToUp : (Instance deleted OR Host/DPU reporvisioning requested) AND not need config bootorder AND Power is Off
-    A_Ready --> A_BootingWithDiscoveryImage : (Instance deleted OR Host/DPU reporvisioning requested) AND not need config bootorder AND Power is On
+    A_Ready --> A_HPC_FactoryResetBmc : Instance deleted
+    A_Ready --> A_HPC_UH_DisableLockdown : Host or DPU reprovisioning, firmware update, or custom iPXE requested
+    A_HPC_FactoryResetBmc --> A_HPC_PowerCycle : Factory reset completes or is disabled
 
-    A_WaitingForDpusToUp --> A_BootingWithDiscoveryImage : DPUs UP-triggered
-    A_WaitingForDpusToUp --> A_WaitingForDpusToUp : Not DPUs UP-triggered
+    A_WaitingForDpusToUp --> A_WaitingForRebootToReady : DPUs ready or absent AND custom iPXE requested
+    A_WaitingForDpusToUp --> A_BootingWithDiscoveryImage : DPUs ready or absent AND no custom iPXE request
+    A_WaitingForDpusToUp --> A_WaitingForDpusToUp : Managed DPUs not ready
 
     A_BootingWithDiscoveryImage --> A_BootingWithDiscoveryImage : Retry reboot if needed
     A_BootingWithDiscoveryImage --> A_SwitchToAdminNetwork : If instance deleted
@@ -520,8 +579,8 @@ stateDiagram-v2
     A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForConfigSynced : No segments OR All ready
     A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForNetworkSegmentToBeReady : Not all segments ready
 
-    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No DPU OR DPU synced
-    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Wait for DPU synced
+    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No associated DPU OR observations synced with no aggregate PreventHostStateChanges
+    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Managed DPU observation not synced OR aggregate PreventHostStateChanges
     A_NCU_ReleaseOldResources --> A_Ready
 
     A_HPC_PowerCycle --> A_HPC_PowerCycle : Wait Power Off
@@ -555,6 +614,46 @@ stateDiagram-v2
     A_Failed --> A_HPC_SBO_SetBootOrder : BiosSetupFailed AND is_bios_setup ok
 ```
 
+### Network Readiness Gates
+
+During initial provisioning, `WaitingForNetworkConfig` waits for all required
+network configuration observations to match their desired versions. For a host
+with associated DPUs, it also waits for aggregate health alerts that prevent
+host state changes to clear. A host without associated DPUs skips both the DPU
+observation and aggregate health checks in this state.
+
+The normal agent report gives a p0 transport failure the combination of
+`BgpPeeringTor` and `PreventAllocations`. The PXE gate matches that probe ID and
+classification; it does not inspect the alert target. A host `Replace` report
+takes precedence for this check. Without one, the primary DPU `Replace` report
+takes precedence over that DPU's `Merge` reports. Refer to
+[DPU ToR Uplink Health](../../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+for the uplink policy and classifications.
+
+`WaitingForRebootToReady` repeats the aggregate health and primary p0 checks
+immediately before the normal PXE `ForceRestart`. This closes the interval in
+which health can change after the configuration check. Hosts without managed
+DPUs skip this PXE signal check, including one supplied by a host `Replace`
+report, but still receive the aggregate health check. In
+`WaitingForNetworkConfig`, a host `Replace` report can supply the matching
+signal before NICo looks for a primary DPU, including on a host without managed
+DPUs.
+
+Normal success proceeds directly from `WaitingForNetworkConfig` to
+`WaitingForRebootToReady`. `WaitingForStorageConfig` and
+`WaitingForExtensionServicesConfig` remain only so NICo can recover hosts that
+persisted those states on an older release.
+
+The following requests bypass these readiness checks:
+
+- Instance deletion proceeds through its required restart without waiting for
+  network health.
+- An explicit custom iPXE request proceeds through its requested restart.
+
+A live network update uses `NetworkConfigUpdate/WaitingForConfigSynced`. A host
+with associated DPUs waits for current observations and aggregate health alerts
+that prevent host state changes. A host without associated DPUs skips both
+checks. This path does not apply the primary p0 PXE gate or restart the host.
 
 ## Host Reprovision State Details (HostReprovisionState)
 
@@ -673,7 +772,6 @@ stateDiagram-v2
     DR_RebootHost --> Assigned_A_Ready : if entered from Assigned AND host reprovision not requested
 ```
 
-
 ## WaitingForCleanup State Details
 
 ```mermaid
@@ -757,7 +855,6 @@ stateDiagram-v2
 ```
 
 ## Failed State
-
 
 ```mermaid
 stateDiagram-v2

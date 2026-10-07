@@ -28,14 +28,14 @@ Update an instance's OS configuration:
     --os '{\"os_image_id\":\"abcdef01-2345-6789-abcd-ef0123456789\"}'
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, required(true))]
-    pub instance: InstanceId,
+    pub(super) instance: InstanceId,
     #[clap(
         long,
         required(true),
         help = "OS definition in JSON format",
         value_name = "OS_JSON"
     )]
-    pub os: InstanceOperatingSystemConfig,
+    pub(super) os: InstanceOperatingSystemConfig,
 }

@@ -18,7 +18,7 @@
 // build.rs
 // Registry build script. This takes the YAML registry schema files
 // from the databases/ directory, and uses them to generate the
-// src/registry/registries.rs file, which will now contain ALL compile-time
+// OUT_DIR/registries.rs file, which will now contain ALL compile-time
 // embedded registries for use by any components which need to
 // work with mlxconfig variable management and assignment.
 
@@ -374,12 +374,13 @@ pub fn get_registries_for_device(
 // write_generated_code writes the generated code to the
 // output registries.rs file.
 fn write_generated_code(code: &str) {
-    let dest_dir = Path::new("src").join("registry");
-    if !dest_dir.exists() {
-        fs::create_dir_all(&dest_dir).expect("Failed to create src/registry directory");
-    }
-
-    let dest_path = dest_dir.join("registries.rs");
+    // Generated sources belong in Cargo's output directory. Keeping the source
+    // tree immutable is required by Bazel sandboxes and also prevents parallel
+    // Cargo builds from racing over a checked-in file.
+    let dest_path = Path::new(
+        &std::env::var("OUT_DIR").expect("Cargo always defines OUT_DIR for build scripts"),
+    )
+    .join("registries.rs");
 
     if let Ok(existing) = fs::read_to_string(&dest_path)
         && existing == code

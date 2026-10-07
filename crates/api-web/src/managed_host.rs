@@ -28,7 +28,7 @@ use carbide_rpc_utils::{ManagedHostMetadata, reason_to_user_string};
 use db::managed_host;
 use hyper::http::StatusCode;
 use itertools::Itertools;
-use model::machine::{LoadSnapshotOptions, Machine, ManagedHostStateSnapshot};
+use model::machine::{DpuMachine, LoadSnapshotOptions, ManagedHostStateSnapshot};
 use model::{self, machine};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
@@ -53,6 +53,7 @@ struct ManagedHostShow {
     active_state_filter: String,
     active_time_in_state_above_sla_filter: String,
     states: Vec<String>,
+    health_alert_ids: Vec<String>,
     gpus: Vec<String>,
     active_gpu_filter: String,
     ibs: Vec<String>,
@@ -60,6 +61,7 @@ struct ManagedHostShow {
     mems: Vec<(isize, String)>,
     active_mem_filter: isize,
     is_filtered: bool,
+    has_dpf_warning: bool,
     page: PageContext,
 }
 
@@ -72,35 +74,36 @@ struct GroupedHosts {
 struct HostGroup {
     num_in_group: usize,
     group_fields: Vec<String>,
-    filter: String,
+    query: String,
 }
 
 #[derive(PartialEq, Eq)]
-pub struct ManagedHostRowDisplay {
-    pub machine_id: String,
-    pub state: String,
-    pub time_in_state: String,
-    pub time_in_state_above_sla: bool,
-    pub state_reason: String,
-    pub health_probe_alerts: Vec<health_report::HealthProbeAlert>,
-    pub health_sources: Vec<String>,
-    pub host_admin_ip: String,
-    pub host_admin_mac: String,
-    pub host_bmc_ip: String,
-    pub host_bmc_mac: String,
-    pub vendor: String,
-    pub model: String,
-    pub num_gpus: usize,
-    pub num_ib_ifs: usize,
-    pub host_memory: String,
-    pub is_link_ref: bool, // is maintenance_reference a URL?
-    pub maintenance_reference: String,
-    pub maintenance_start_time: String,
-    pub dpus: Vec<AttachedDpuRowDisplay>,
+struct ManagedHostRowDisplay {
+    machine_id: String,
+    state: String,
+    time_in_state_above_sla: bool,
+    state_reason: String,
+    health_probe_alerts: Vec<health_report::HealthProbeAlert>,
+    health_sources: Vec<String>,
+    host_admin_ip: String,
+    host_admin_mac: String,
+    host_bmc_ip: String,
+    host_bmc_mac: String,
+    vendor: String,
+    model: String,
+    num_gpus: usize,
+    num_ib_ifs: usize,
+    host_memory: String,
+    is_link_ref: bool, // is maintenance_reference a URL?
+    maintenance_reference: String,
+    maintenance_start_time: String,
+    dpus: Vec<AttachedDpuRowDisplay>,
+    dpf_enabled: bool,
+    dpf_used_for_ingestion: bool,
 }
 
 impl ManagedHostRowDisplay {
-    pub(crate) fn from_snapshot(
+    fn from_snapshot(
         item: ManagedHostStateSnapshot,
         sla_config: &machine::slas::MachineSlaConfig,
     ) -> Self {
@@ -126,6 +129,7 @@ impl ManagedHostRowDisplay {
 
         // Decompose hardware_info into the pieces we want to show
         let (vendor, model, num_gpus, num_ib_ifs, host_memory) = host_snapshot
+            .status
             .hardware_info
             .map(|hardware_info| {
                 let (vendor, model) = hardware_info
@@ -141,44 +145,42 @@ impl ManagedHostRowDisplay {
                     get_memory_details(
                         &hardware_info
                             .memory_devices
-                            .into_iter()
-                            .map_into()
-                            .collect(),
+                            .iter()
+                            .map(|g| rpc::machine_discovery::MemoryDeviceGroup {
+                                size_mb: g.size_mb,
+                                mem_type: g.mem_type.clone(),
+                                count: g.count,
+                            })
+                            .collect::<Vec<_>>(),
                     )
                     .unwrap_or_default(),
                 )
             })
             .unwrap_or_default();
         let host_bmc_ip = host_snapshot
+            .status
             .bmc_info
             .ip
             .map(|ip| ip.to_string())
             .unwrap_or_default();
         let host_bmc_mac = host_snapshot
+            .status
             .bmc_info
             .mac
             .map(|m| m.to_string())
             .unwrap_or_default();
 
         let (host_admin_ip, host_admin_mac) = host_snapshot
+            .status
             .interfaces
             .into_iter()
             .find(|i| i.primary_interface)
-            .map(|i| {
-                (
-                    i.addresses
-                        .first()
-                        .map(|i| i.to_string())
-                        .unwrap_or_default(),
-                    i.mac_address.to_string(),
-                )
-            })
+            .map(|i| (i.addresses.iter().join(","), i.mac_address.to_string()))
             .unwrap_or_default();
 
         Self {
             machine_id: host_snapshot.id.to_string(),
             state: host_snapshot.state.value.to_string(),
-            time_in_state: host_snapshot.state.version.since_state_change_humanized(),
             time_in_state_above_sla: machine::state_sla(
                 &host_snapshot.id,
                 &host_snapshot.state.value,
@@ -210,21 +212,29 @@ impl ManagedHostRowDisplay {
             maintenance_reference,
             maintenance_start_time,
             dpus: dpu_snapshots.into_iter().map_into().collect(),
+            dpf_enabled: host_snapshot.config.dpf.enabled,
+            dpf_used_for_ingestion: host_snapshot.config.dpf.used_for_ingestion,
         }
     }
 }
 
-impl From<model::machine::Machine> for AttachedDpuRowDisplay {
-    fn from(item: Machine) -> Self {
+impl From<DpuMachine> for AttachedDpuRowDisplay {
+    fn from(item: DpuMachine) -> Self {
         let bmc_ip = item
+            .status
             .bmc_info
             .ip
             .map(|ip| ip.to_string())
             .unwrap_or_default();
-        let bmc_mac = item.bmc_info.mac.map(|m| m.to_string()).unwrap_or_default();
-        let primary_iface = item.interfaces.iter().find(|i| i.primary_interface);
+        let bmc_mac = item
+            .status
+            .bmc_info
+            .mac
+            .map(|m| m.to_string())
+            .unwrap_or_default();
+        let primary_iface = item.status.interfaces.iter().find(|i| i.primary_interface);
         let oob_ip = primary_iface
-            .and_then(|t| t.addresses.first().map(|a| a.to_string()))
+            .map(|interface| interface.addresses.iter().join(","))
             .unwrap_or_default();
         let oob_mac = primary_iface
             .map(|t| t.mac_address.to_string())
@@ -253,12 +263,12 @@ impl Ord for ManagedHostRowDisplay {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub struct AttachedDpuRowDisplay {
-    pub machine_id: String,
-    pub bmc_ip: String,
-    pub bmc_mac: String,
-    pub oob_ip: String,
-    pub oob_mac: String,
+struct AttachedDpuRowDisplay {
+    machine_id: String,
+    bmc_ip: String,
+    bmc_mac: String,
+    oob_ip: String,
+    oob_mac: String,
 }
 
 enum DpuProperty {
@@ -395,7 +405,7 @@ impl ManagedHostRowDisplay {
 }
 
 /// List managed hosts
-pub async fn show_html(
+pub(super) async fn show_html(
     state: AxumState<Arc<Api>>,
     Query(mut params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -412,7 +422,7 @@ pub async fn show_html(
     {
         Ok(hosts) => hosts,
         Err(err) => {
-            tracing::error!(%err, "fetch_managed_hosts");
+            tracing::error!(error = %err, "fetch_managed_hosts");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading managed hosts",
@@ -423,6 +433,7 @@ pub async fn show_html(
 
     let active_health_alerts_filter = params
         .remove("health-alerts-filter")
+        .filter(|value| !value.is_empty())
         .unwrap_or("all".to_string());
     let active_maintenance_filter = params
         .remove("maintenance-filter")
@@ -451,6 +462,7 @@ pub async fn show_html(
     let mut hosts = Vec::new();
     let mut models_per_vendor: HashMap<String, Vec<String>> = HashMap::new();
     let mut states = HashSet::new();
+    let mut health_alert_ids = HashSet::new();
     let mut gpus = HashSet::new();
     let mut ibs = HashSet::new();
     let mut mems = HashSet::new();
@@ -476,6 +488,9 @@ pub async fn show_html(
         states.insert(short_state(&m.state).to_string());
         gpus.insert(m.num_gpus);
         ibs.insert(m.num_ib_ifs);
+        for alert in &m.health_probe_alerts {
+            health_alert_ids.insert(alert.id.to_string());
+        }
         let barry = mem_to_size(&m.host_memory);
         mems.insert((barry, format!("{barry} GiB")));
 
@@ -497,7 +512,10 @@ pub async fn show_html(
         }
         if active_gpu_filter != "all" {
             let Ok(gf) = active_gpu_filter.parse::<usize>() else {
-                tracing::warn!("Invalid GPU filter: '{active_gpu_filter}'");
+                tracing::warn!(
+                    active_gpu_filter = %active_gpu_filter,
+                    "Invalid GPU filter",
+                );
                 continue;
             };
             if gf != m.num_gpus {
@@ -506,7 +524,10 @@ pub async fn show_html(
         }
         if active_ib_filter != "all" {
             let Ok(ibf) = active_ib_filter.parse::<usize>() else {
-                tracing::warn!("Invalid IB IFs filter: '{active_ib_filter}'");
+                tracing::warn!(
+                    active_ib_filter = %active_ib_filter,
+                    "Invalid IB IFs filter",
+                );
                 continue;
             };
             if ibf != m.num_ib_ifs {
@@ -521,6 +542,15 @@ pub async fn show_html(
                 continue;
             }
             if active_health_alerts_filter == "unhealthy" && m.health_probe_alerts.is_empty() {
+                continue;
+            }
+            if active_health_alerts_filter != "healthy"
+                && active_health_alerts_filter != "unhealthy"
+                && !m
+                    .health_probe_alerts
+                    .iter()
+                    .any(|a| a.id.to_string() == active_health_alerts_filter)
+            {
                 continue;
             }
         }
@@ -538,7 +568,20 @@ pub async fn show_html(
 
     hosts.sort_unstable();
 
-    let grouped_hosts = group_hosts(&hosts, &group_by);
+    let active_filters = ActiveFilters {
+        health_alerts: &active_health_alerts_filter,
+        maintenance: &active_maintenance_filter,
+        vendor: &active_vendor_filter,
+        model: &active_model_filter,
+        state: &active_state_filter,
+        gpu: &active_gpu_filter,
+        ib: &active_ib_filter,
+        mem: active_mem_filter,
+        time_in_state_above_sla: &active_time_in_state_above_sla_filter,
+        group_by: &group_by_param,
+    };
+
+    let grouped_hosts = group_hosts(&hosts, &group_by, &active_filters);
 
     // Paginate the filtered result set (only for individual view, not grouped).
     let (info, hosts) = if grouped_hosts.is_some() {
@@ -557,13 +600,21 @@ pub async fn show_html(
         .sorted_unstable()
         .collect();
 
-    for (_, models) in models_per_vendor.iter_mut() {
+    for models in models_per_vendor.values_mut() {
         models.sort_unstable();
     }
 
     let models_per_vendor_json = serde_json::to_string(&models_per_vendor).unwrap();
 
     let states: Vec<String> = states.into_iter().sorted_unstable().collect();
+
+    if !matches!(
+        active_health_alerts_filter.as_str(),
+        "all" | "healthy" | "unhealthy"
+    ) {
+        health_alert_ids.insert(active_health_alerts_filter.clone());
+    }
+    let health_alert_ids: Vec<String> = health_alert_ids.into_iter().sorted_unstable().collect();
 
     let gpus: Vec<String> = gpus
         .into_iter()
@@ -596,25 +647,18 @@ pub async fn show_html(
         || active_ib_filter != "all"
         || active_mem_filter != -1;
 
-    let extra_query_params = ActiveFilters {
-        health_alerts: &active_health_alerts_filter,
-        maintenance: &active_maintenance_filter,
-        vendor: &active_vendor_filter,
-        model: &active_model_filter,
-        state: &active_state_filter,
-        gpu: &active_gpu_filter,
-        ib: &active_ib_filter,
-        mem: active_mem_filter,
-        time_in_state_above_sla: &active_time_in_state_above_sla_filter,
-        group_by: &group_by_param,
-    }
-    .to_query_params();
+    let extra_query_params = active_filters.to_query_params();
+
+    let has_dpf_warning = hosts
+        .iter()
+        .any(|h| !h.dpus.is_empty() && !h.dpf_used_for_ingestion);
 
     let tmpl = ManagedHostShow {
         grouped_hosts,
         active_group_by: GroupingKey::vec_to_params(&group_by),
         active_health_alerts_filter,
         active_maintenance_filter,
+        has_dpf_warning,
         hosts,
         active_vendor_filter,
         active_model_filter,
@@ -623,6 +667,7 @@ pub async fn show_html(
         active_state_filter,
         active_time_in_state_above_sla_filter,
         states,
+        health_alert_ids,
         gpus,
         active_gpu_filter,
         ibs,
@@ -635,7 +680,11 @@ pub async fn show_html(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-fn group_hosts(hosts: &[ManagedHostRowDisplay], group_by: &[GroupingKey]) -> Option<GroupedHosts> {
+fn group_hosts(
+    hosts: &[ManagedHostRowDisplay],
+    group_by: &[GroupingKey],
+    active_filters: &ActiveFilters<'_>,
+) -> Option<GroupedHosts> {
     if group_by.is_empty() || hosts.is_empty() {
         return None;
     }
@@ -652,11 +701,11 @@ fn group_hosts(hosts: &[ManagedHostRowDisplay], group_by: &[GroupingKey]) -> Opt
     let mut groups = Vec::new();
     for (k, num) in count {
         let fields: Vec<String> = k.as_str().split(',').map(|s| s.to_string()).collect();
-        let filter = filter_expr(group_by, &fields);
+        let query = active_filters.to_drilldown_query_params(group_by, &fields);
         groups.push(HostGroup {
             num_in_group: num,
             group_fields: fields,
-            filter,
+            query,
         });
         total += num;
     }
@@ -670,21 +719,11 @@ fn group_hosts(hosts: &[ManagedHostRowDisplay], group_by: &[GroupingKey]) -> Opt
     })
 }
 
-// keys: health,host_memory,num_gpus,num_ib_ifs,state
-// OUT: state-filter=all&gpu-filter=all&ib-filter=all&mem-filter=all
-fn filter_expr(keys: &[GroupingKey], values: &[String]) -> String {
-    keys.iter()
-        .zip(values.iter())
-        .map(|(k, v)| format!("{}={}", k.filter_name(), v.to_lowercase()))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-pub async fn show_all_json(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_all_json(state: AxumState<Arc<Api>>) -> Response {
     let mut managed_hosts = match fetch_managed_hosts_with_metadata(state, true).await {
         Ok(m) => m,
         Err(err) => {
-            tracing::error!(%err, "fetch_managed_hosts");
+            tracing::error!(error = %err, "fetch_managed_hosts");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading managed hosts",
@@ -745,47 +784,80 @@ struct ActiveFilters<'a> {
 }
 
 impl ActiveFilters<'_> {
-    fn to_query_params(&self) -> String {
-        let mut parts = Vec::new();
+    fn query_pairs(&self, include_group_by: bool) -> Vec<(&'static str, String)> {
+        let mut pairs = Vec::new();
         if self.health_alerts != "all" {
-            parts.push(format!("&health-alerts-filter={}", self.health_alerts));
+            pairs.push(("health-alerts-filter", self.health_alerts.to_string()));
         }
         if self.maintenance != "all" {
-            parts.push(format!("&maintenance-filter={}", self.maintenance));
+            pairs.push(("maintenance-filter", self.maintenance.to_string()));
         }
         if self.vendor != "all" {
-            parts.push(format!("&vendor-filter={}", self.vendor));
+            pairs.push(("vendor-filter", self.vendor.to_string()));
         }
         if self.model != "all" {
-            parts.push(format!("&model-filter={}", self.model));
+            pairs.push(("model-filter", self.model.to_string()));
         }
         if self.state != "all" {
-            parts.push(format!("&state-filter={}", self.state));
+            pairs.push(("state-filter", self.state.to_string()));
         }
         if self.gpu != "all" {
-            parts.push(format!("&gpu-filter={}", self.gpu));
+            pairs.push(("gpu-filter", self.gpu.to_string()));
         }
         if self.ib != "all" {
-            parts.push(format!("&ib-filter={}", self.ib));
+            pairs.push(("ib-filter", self.ib.to_string()));
         }
         if self.mem != -1 {
-            parts.push(format!("&mem-filter={}", self.mem));
+            pairs.push(("mem-filter", self.mem.to_string()));
         }
         if self.time_in_state_above_sla != "all" {
-            parts.push(format!(
-                "&time-in-state-above-sla-filter={}",
-                self.time_in_state_above_sla
+            pairs.push((
+                "time-in-state-above-sla-filter",
+                self.time_in_state_above_sla.to_string(),
             ));
         }
-        if self.group_by != "none" {
-            parts.push(format!("&group-by={}", self.group_by));
+        if include_group_by && self.group_by != "none" {
+            pairs.push(("group-by", self.group_by.to_string()));
         }
-        parts.join("")
+        pairs
+    }
+
+    fn encode_query_pair((key, value): (&str, String)) -> String {
+        format!("{key}={}", urlencoding::encode(&value))
+    }
+
+    fn to_query_params(&self) -> String {
+        self.query_pairs(true)
+            .into_iter()
+            .map(Self::encode_query_pair)
+            .map(|part| format!("&{part}"))
+            .join("")
+    }
+
+    fn to_drilldown_query_params(
+        &self,
+        grouping_keys: &[GroupingKey],
+        group_values: &[String],
+    ) -> String {
+        let grouped_filter_names: HashSet<_> =
+            grouping_keys.iter().map(GroupingKey::filter_name).collect();
+
+        self.query_pairs(false)
+            .into_iter()
+            .filter(|(key, _)| !grouped_filter_names.contains(key))
+            .chain(
+                grouping_keys
+                    .iter()
+                    .zip(group_values)
+                    .map(|(key, value)| (key.filter_name(), value.to_lowercase())),
+            )
+            .map(Self::encode_query_pair)
+            .join("&")
     }
 }
 
 /// View managed host details. This has been replaced by the Machine details page
-pub async fn detail(
+pub(super) async fn detail(
     AxumState(_state): AxumState<Arc<Api>>,
     AxumPath(machine_id): AxumPath<String>,
 ) -> Response {
@@ -807,7 +879,7 @@ fn mem_to_size(mem: &str) -> isize {
         .collect_tuple()
         .map(|(size, unit)| (size.parse::<f64>(), unit))
     else {
-        tracing::warn!("Invalid memory format: '{mem}'");
+        tracing::warn!(mem, "Invalid memory format",);
         return 0;
     };
 
@@ -815,7 +887,7 @@ fn mem_to_size(mem: &str) -> isize {
         "GiB" => size,
         "TiB" => size * 1024.0,
         _ => {
-            tracing::warn!("Invalid unit '{}' in mem string '{mem}'", unit);
+            tracing::warn!(unit, mem, "Invalid unit in mem string",);
             return 0;
         }
     }) as isize
@@ -826,3 +898,44 @@ fn short_state(s: &str) -> &str {
 }
 
 impl super::Base for ManagedHostShow {}
+
+#[cfg(test)]
+mod tests {
+
+    use super::{ActiveFilters, GroupingKey};
+
+    fn active_filters_with_model(model: &str) -> ActiveFilters<'_> {
+        ActiveFilters {
+            health_alerts: "all",
+            maintenance: "all",
+            vendor: "all",
+            model,
+            state: "all",
+            gpu: "all",
+            ib: "all",
+            mem: -1,
+            time_in_state_above_sla: "all",
+            group_by: "none",
+        }
+    }
+
+    #[test]
+    fn test_active_filters_to_query_params_encodes_space() {
+        let active_filters = active_filters_with_model("poweredge r750");
+
+        assert_eq!(
+            active_filters.to_query_params(),
+            "&model-filter=poweredge%20r750"
+        );
+    }
+
+    #[test]
+    fn test_active_filters_to_drilldown_query_params_encodes_ampersand() {
+        let active_filters = active_filters_with_model("r&d");
+
+        assert_eq!(
+            active_filters.to_drilldown_query_params(&[GroupingKey::State], &["Ready".to_string()]),
+            "model-filter=r%26d&state-filter=ready"
+        );
+    }
+}

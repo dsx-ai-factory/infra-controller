@@ -28,7 +28,7 @@ Write the Ansible inventory to a file:
     $ nico-admin-cli inventory --filename ./inventory.ini
 
 ")]
-pub struct Cmd {
+pub(crate) struct Cmd {
     #[clap(short, long, help = "Write to file")]
-    pub filename: Option<String>,
+    pub(super) filename: Option<String>,
 }

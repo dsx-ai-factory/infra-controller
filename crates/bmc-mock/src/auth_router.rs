@@ -1,19 +1,15 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use std::sync::Arc;
 
@@ -27,9 +23,9 @@ use axum::routing::any;
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Basic;
+use carbide_axum_utils::router::call_router_with_new_request;
 use tracing::instrument;
 
-use crate::http::call_router_with_new_request;
 use crate::redfish::account_service::AccountServiceState;
 use crate::redfish::session_service::SessionServiceState;
 use crate::redfish::{account_service, service_root, session_service};
@@ -37,7 +33,7 @@ use crate::redfish::{account_service, service_root, session_service};
 const WWW_AUTHENTICATE_VALUE: HeaderValue = HeaderValue::from_static("Basic realm=\"bmc-mock\"");
 const X_AUTH_TOKEN_HEADER: &str = "x-auth-token";
 
-pub fn append(router: Router, authorizer: Authorizer) -> Router {
+pub(super) fn append(router: Router, authorizer: Authorizer) -> Router {
     let service_root_path = service_root::resource().odata_id.to_string();
     let service_root_path_with_trailing_slash = format!("{service_root_path}/");
     let account_service_path = account_service::resource().odata_id.to_string();
@@ -162,7 +158,7 @@ impl AuthMiddleware {
 }
 
 #[derive(Clone)]
-pub struct Authorizer {
+pub(super) struct Authorizer {
     account_service_state: Arc<AccountServiceState>,
     session_service_state: Arc<SessionServiceState>,
     forbid_factory_default_password: bool,
@@ -170,7 +166,7 @@ pub struct Authorizer {
 
 impl Authorizer {
     /// Builds the factory-default authorizer for a mock BMC state.
-    pub fn new(
+    pub(super) fn new(
         account_service_state: Arc<AccountServiceState>,
         session_service_state: Arc<SessionServiceState>,
     ) -> Self {
@@ -181,7 +177,7 @@ impl Authorizer {
         }
     }
 
-    pub fn permit_factory_default_password(mut self) -> Self {
+    pub(super) fn permit_factory_default_password(mut self) -> Self {
         self.forbid_factory_default_password = false;
         self
     }

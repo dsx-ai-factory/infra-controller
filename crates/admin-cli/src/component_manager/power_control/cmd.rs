@@ -23,7 +23,7 @@ use crate::component_manager::common;
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
 
-pub async fn power_control(
+pub(super) async fn power_control(
     opts: Args,
     format: OutputFormat,
     api_client: &ApiClient,

@@ -15,11 +15,12 @@
  * limitations under the License.
  */
 use ::rpc::forge::{self as rpc};
-use carbide_machine_controller::handler::attestation::trigger_attestation;
+use carbide_machine_controller::handler::attestation::{SchedulingOutcome, trigger_attestation};
 use carbide_uuid::machine::MachineId;
 use db::ObjectFilter;
 use model::attestation::spdm as model_spdm;
 use model::machine::machine_search_config::MachineSearchConfig;
+use state_controller::state_handler::StateHandlerError;
 use tokio::time as tt;
 use tonic::{Request, Response, Status};
 
@@ -31,6 +32,19 @@ pub(crate) async fn trigger_machine_attestation(
     request: Request<rpc::SpdmMachineAttestationTriggerRequest>,
 ) -> Result<Response<rpc::SpdmMachineAttestationTriggerResponse>, Status> {
     log_request_data(&request);
+
+    // `spdm.enabled` decides whether the SPDM state controller is spawned at
+    // all, so with it off there is nothing to process the rows this would
+    // insert. Scheduling anyway strands the machine as permanently
+    // "under attestation".
+    if !api.runtime_config.spdm.enabled {
+        return Err(CarbideError::UnavailableError(
+            "SPDM attestation is disabled for this site, so no attestation \
+             controller is running to carry the request out"
+                .to_string(),
+        )
+        .into());
+    }
 
     let request_payload = request.get_ref();
     let machine_id = request_payload
@@ -58,7 +72,7 @@ pub(crate) async fn trigger_machine_attestation(
                 id: format!("{}", machine_id),
             }));
         }
-        1 => &machines[0].bmc_info,
+        1 => &machines[0].status.bmc_info,
         _ => {
             return Err(Status::from(CarbideError::Internal {
                 message: format!("Found more than one machine for machine id {}", machine_id),
@@ -74,37 +88,64 @@ pub(crate) async fn trigger_machine_attestation(
             .await?;
     drop(db_reader);
 
-    let redfish_client_future = api.redfish_pool.client_by_info(&bmc_access_info);
-
-    let redfish_client = match tt::timeout(redfish_timeout_duration, redfish_client_future).await {
-        Ok(redfish_result) => redfish_result.map_err(|e| CarbideError::RedfishClientCreation {
-            inner: Box::new(e),
-            machine_id,
-        })?,
-        Err(_) => {
-            return Err(Status::from(CarbideError::Internal {
-                message: format!(
-                    "redfish creation could not finish in {} seconds",
-                    redfish_timeout_duration.as_secs()
-                ),
-            }));
+    // Called only if the machine's profile turns out to need the BMC: creating
+    // a client authenticates against it, which the profile-only outcomes
+    // report without.
+    let connect = async || {
+        let redfish_client_future = api.redfish_pool.client_by_info(&bmc_access_info);
+        match tt::timeout(redfish_timeout_duration, redfish_client_future).await {
+            Ok(redfish_result) => redfish_result.map_err(StateHandlerError::from),
+            Err(_) => Err(StateHandlerError::GenericError(eyre::eyre!(
+                "redfish creation could not finish in {} seconds",
+                redfish_timeout_duration.as_secs()
+            ))),
         }
     };
 
-    let records_inserted = trigger_attestation(
+    let result = trigger_attestation(
         api.pg_pool(),
-        redfish_client,
+        connect,
         bmc_info,
         &machine_id,
         redfish_timeout_duration,
     )
     .await
-    .map_err(|e| CarbideError::AttestationError(format!("trigger error: {e}")))?;
+    .map_err(|error| match error {
+        // Reaching the BMC is the only external service this path calls, so
+        // an operator gets the reachability mitigation that carries rather
+        // than a generic attestation failure.
+        StateHandlerError::ExternalServiceError(redfish) => {
+            CarbideError::RedfishError(libredfish::RedfishError::GenericError {
+                error: redfish.to_string(),
+            })
+        }
+        other => CarbideError::AttestationError(format!("trigger error: {other}")),
+    })?;
 
     Ok(Response::new(rpc::SpdmMachineAttestationTriggerResponse {
         machine_id: Some(machine_id),
-        devices_under_attestation: records_inserted as i32,
+        devices_under_attestation: result.devices_scheduled as i32,
+        resolved_hardware_class: result.hardware_class,
+        outcome: reported_outcome(result.outcome).into(),
+        used_any_fallback: result.used_any_fallback,
+        profile_version: result.profile_version,
+        started_at: result.started_at.map(Into::into),
     }))
+}
+
+/// Spelled out rather than derived, so adding an outcome fails to compile
+/// until it has been given a wire value. Neither type is local to this crate,
+/// so this cannot be a `From`.
+fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
+    match outcome {
+        SchedulingOutcome::Scheduled => rpc::SpdmSchedulingOutcome::Scheduled,
+        SchedulingOutcome::PartiallySatisfied => rpc::SpdmSchedulingOutcome::PartiallySatisfied,
+        SchedulingOutcome::AttestationDisabled => rpc::SpdmSchedulingOutcome::AttestationDisabled,
+        SchedulingOutcome::NoAttestersFound => rpc::SpdmSchedulingOutcome::NoAttestersFound,
+        SchedulingOutcome::PolicyMatchedNothing => rpc::SpdmSchedulingOutcome::PolicyMatchedNothing,
+        SchedulingOutcome::ClassNotRecorded => rpc::SpdmSchedulingOutcome::ClassNotRecorded,
+        SchedulingOutcome::NoProfile => rpc::SpdmSchedulingOutcome::NoProfile,
+    }
 }
 
 pub(crate) async fn cancel_machine_attestation(
@@ -145,7 +186,7 @@ pub(crate) async fn list_attestation_machines(
     // if selector is not selected AND machine id is None,
     // just list all machines + their attestation status
     // if machine id not None, print the attestation status for this machine only
-    // if machine id is None AND selector is unsucessful, print failed attestations
+    // if machine id is None AND selector is unsuccessful, print failed attestations
     // if machine is None AND selector is in progress, print all machines that are in progress
 
     let mut txn = api.txn_begin().await?;
@@ -253,7 +294,7 @@ pub(crate) async fn attest_quote(
 
     // TODO: consider if this code can be turned into a templated function and reused
     // in bind_attest_key
-    let machine_id =
+    let machine_id: MachineId =
         crate::handlers::utils::convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -263,7 +304,7 @@ pub(crate) async fn attest_quote(
             Some(entry) => entry.ak_pub,
             None => {
                 return Err(CarbideError::AttestQuoteError(
-                    "Could not form SQL query to fetch AK Pub".into(),
+                    "could not form SQL query to fetch AK pub".into(),
                 )
                 .into());
             }
@@ -277,22 +318,25 @@ pub(crate) async fn attest_quote(
         &request.attestation,
         &request.signature,
     )
-    .inspect_err(|_| {
-        tracing::warn!(
-            "PCR signature verification failed (event log: {})",
-            crate::attestation::event_log_to_string(&request.event_log)
-        );
+    .inspect_err(|e| {
+        carbide_instrument::emit(crate::attestation::MeasuredBootVerificationFailed {
+            cause: crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
+            event_log: crate::attestation::event_log_to_string(&request.event_log),
+            error: format!("PCR signature verification failed: {e}"),
+        });
     })?;
 
     // Make sure we can verify the the PCR hash one way
     // or another. If it can't be, return an error.
     let pcr_hash_matches =
         crate::attestation::verify_pcr_hash(&request.attestation, &request.pcr_values)
-            .inspect_err(|_| {
-                tracing::warn!(
-                    "PCR hash verification failed (event log: {})",
-                    crate::attestation::event_log_to_string(&request.event_log)
-                );
+            .inspect_err(|e| {
+                carbide_instrument::emit(crate::attestation::MeasuredBootVerificationFailed {
+                    cause:
+                        crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
+                    event_log: crate::attestation::event_log_to_string(&request.event_log),
+                    error: format!("PCR hash verification failed: {e}"),
+                });
             })?;
 
     // And now pass on through the computed signature
@@ -322,7 +366,7 @@ pub(crate) async fn attest_quote(
         .map_err(|e| CarbideError::Internal {
             message: format!(
                 "Failed storing measurement report: (machine_id: {}, err: {})",
-                &machine_id, e
+                machine_id, e
             ),
         })?;
 
@@ -341,8 +385,8 @@ pub(crate) async fn attest_quote(
 
     if attestation_failed {
         tracing::info!(
-            "Attestation failed for machine with id {} - not vending any certs",
-            machine_id
+            machine_id = %machine_id,
+            "Attestation failed; not vending any certificates",
         );
         return Ok(Response::new(rpc::AttestQuoteResponse {
             success: false,
@@ -361,9 +405,9 @@ pub(crate) async fn attest_quote(
     };
 
     tracing::info!(
-        "Attestation succeeded for machine with id {} - sending a cert back. Attestion_enabled is {}",
-        machine_id,
-        api.runtime_config.attestation_enabled
+        machine_id = %machine_id,
+        attestation_enabled = api.runtime_config.attestation_enabled,
+        "Attestation succeeded; sending a certificate",
     );
     Ok(Response::new(rpc::AttestQuoteResponse {
         success: true,
@@ -378,4 +422,50 @@ pub(crate) async fn attest_quote(
     _request: Request<rpc::AttestQuoteRequest>,
 ) -> std::result::Result<Response<rpc::AttestQuoteResponse>, Status> {
     unimplemented!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchedulingOutcome, reported_outcome, rpc};
+
+    /// One outcome is spelled twice: `LabelValue` snake-cases the variant for
+    /// the metric, and protobuf screaming-cases it for the wire. Two derives,
+    /// no common source, so renaming either side moves one spelling and
+    /// leaves the other, and an operator reading a metric no longer finds the
+    /// same word on the API.
+    #[test]
+    fn the_metric_label_and_the_wire_name_stay_one_vocabulary() {
+        const PREFIX: &str = "SPDM_SCHEDULING_OUTCOME_";
+
+        let covered = [
+            SchedulingOutcome::Scheduled,
+            SchedulingOutcome::PartiallySatisfied,
+            SchedulingOutcome::AttestationDisabled,
+            SchedulingOutcome::NoAttestersFound,
+            SchedulingOutcome::PolicyMatchedNothing,
+            SchedulingOutcome::ClassNotRecorded,
+            SchedulingOutcome::NoProfile,
+        ]
+        .map(|outcome| {
+            let wire = reported_outcome(outcome);
+            assert_eq!(
+                carbide_instrument::LabelValue::label_value(&outcome).as_str(),
+                wire.as_str_name()
+                    .strip_prefix(PREFIX)
+                    .expect("every value carries the enum prefix")
+                    .to_lowercase(),
+                "{outcome:?}"
+            );
+            wire
+        });
+
+        // An outcome added to the schema but never listed above would
+        // otherwise go unchecked, since nothing here iterates the enum.
+        for value in 1.. {
+            let Ok(wire) = rpc::SpdmSchedulingOutcome::try_from(value) else {
+                break;
+            };
+            assert!(covered.contains(&wire), "{wire:?} is not covered above");
+        }
+    }
 }

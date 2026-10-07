@@ -19,9 +19,12 @@
 FROM registry.minikube/runtime-container:latest as carbide
 
 WORKDIR ./carbide
+RUN mkdir -p /opt/carbide/scout-firmware-scripts
+
 COPY .skaffold/target/carbide-api/debug/carbide-api /opt/carbide/
 COPY .skaffold/target/nico-admin-cli/debug/nico-admin-cli /opt/carbide/
 RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli && \
     ln -s /opt/carbide/nico-admin-cli /opt/carbide/forge-admin-cli
 COPY crates/api/casbin-policy.csv /opt/carbide/
+COPY pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
 ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv

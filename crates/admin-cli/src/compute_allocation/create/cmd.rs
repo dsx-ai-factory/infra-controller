@@ -26,7 +26,7 @@ use crate::rpc::ApiClient;
 /// Create a compute allocation.
 /// On successful creation, the details of the
 /// new allocation will be displayed.
-pub async fn create(
+pub(super) async fn create(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

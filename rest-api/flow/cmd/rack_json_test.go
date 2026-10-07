@@ -61,6 +61,7 @@ func TestReadRackJSONDataFileNotFound(t *testing.T) {
 func TestParseRackJSON(t *testing.T) {
 	validUUID := "a1b2c3d4-0001-4000-8000-000000000001"
 	compUUID := "a1b2c3d4-0002-4000-8000-000000000001"
+	domainUUID := "a1b2c3d4-0003-4000-8000-000000000001"
 
 	testCases := map[string]struct {
 		json        string
@@ -102,6 +103,21 @@ func TestParseRackJSON(t *testing.T) {
 			json:        `{"info": {"id": "not-a-uuid"}}`,
 			expectError: true,
 			errContains: "invalid rack UUID",
+		},
+		"rack with NVLink domain IDs": {
+			json: `{
+				"info": {"name": "R1"},
+				"nvl_domain_ids": ["` + domainUUID + `"]
+			}`,
+			validate: func(t *testing.T, rack *types.Rack) {
+				require.Len(t, rack.NVLDomainIDs, 1)
+				assert.Equal(t, domainUUID, rack.NVLDomainIDs[0].String())
+			},
+		},
+		"rack with invalid NVLink domain UUID": {
+			json:        `{"nvl_domain_ids":["not-a-uuid"]}`,
+			expectError: true,
+			errContains: "invalid NVLink domain UUID",
 		},
 		"rack with all location fields": {
 			json: `{

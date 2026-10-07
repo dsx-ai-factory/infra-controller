@@ -31,6 +31,7 @@ const (
 // dispatcher code type-directed.
 type Selector interface {
 	SelectorKind() SelectorKind
+	Validate() error
 }
 
 // PercentageSelector selects a deterministic percentage of candidate targets.
@@ -41,6 +42,20 @@ type PercentageSelector struct {
 
 func (*PercentageSelector) SelectorKind() SelectorKind {
 	return SelectorKindPercentage
+}
+
+func (s *PercentageSelector) Validate() error {
+	if s == nil {
+		return fmt.Errorf("percentage selector is required")
+	}
+	if s.Percentage < 1 || s.Percentage > 100 {
+		return fmt.Errorf("percentage selector must be between 1 and 100")
+	}
+	if s.Seed == "" {
+		return fmt.Errorf("percentage selector seed is required")
+	}
+
+	return nil
 }
 
 // -----------------------------------------------------------------------------
@@ -57,6 +72,29 @@ type Options struct {
 	PhasePolicy          PhasePolicy    `json:"phase_policy"`
 }
 
+func (o *Options) Validate() error {
+	if o == nil {
+		return fmt.Errorf("options are required")
+	}
+	if o.MaxConcurrentTargets <= 0 {
+		return fmt.Errorf("max_concurrent_targets must be greater than 0")
+	}
+	if err := o.SafetyPolicy.Validate(); err != nil {
+		return fmt.Errorf("safety_policy: %w", err)
+	}
+	if err := o.ConflictPolicy.Validate(); err != nil {
+		return fmt.Errorf("conflict_policy: %w", err)
+	}
+	if err := o.OrderingPolicy.Validate(); err != nil {
+		return fmt.Errorf("ordering_policy: %w", err)
+	}
+	if err := o.PhasePolicy.Validate(); err != nil {
+		return fmt.Errorf("phase_policy: %w", err)
+	}
+
+	return nil
+}
+
 // -----------------------------------------------------------------------------
 // Safety Gates
 // -----------------------------------------------------------------------------
@@ -65,6 +103,19 @@ type Options struct {
 // tripped.
 type SafetyPolicy struct {
 	Gates []SafetyGate `json:"gates"`
+}
+
+func (p SafetyPolicy) Validate() error {
+	for idx, gate := range p.Gates {
+		if gate == nil {
+			return fmt.Errorf("safety gate %d is required", idx)
+		}
+		if err := gate.Validate(); err != nil {
+			return fmt.Errorf("safety gate %d: %w", idx, err)
+		}
+	}
+
+	return nil
 }
 
 // SafetyGateKind identifies the metric a safety gate evaluates.
@@ -79,6 +130,9 @@ const (
 // Each payload decides which phase/run stats it needs through its fields.
 type SafetyGate interface {
 	SafetyGateKind() SafetyGateKind
+	SafetyGateScope() SafetyGateScope
+	IsTripped(failed int, total int) bool
+	Validate() error
 }
 
 // SafetyGateScope decides whether a gate evaluates only the active phase or
@@ -101,6 +155,29 @@ func (*FailureRateGate) SafetyGateKind() SafetyGateKind {
 	return SafetyGateKindFailureRate
 }
 
+func (g *FailureRateGate) SafetyGateScope() SafetyGateScope {
+	return g.Scope
+}
+
+func (g *FailureRateGate) IsTripped(failed int, total int) bool {
+	return total > 0 &&
+		failed*100 >= int(g.FailureThresholdPercent)*total
+}
+
+func (g *FailureRateGate) Validate() error {
+	if g == nil {
+		return fmt.Errorf("failure rate safety gate is required")
+	}
+	if err := validateSafetyGateScope(g.Scope); err != nil {
+		return err
+	}
+	if g.FailureThresholdPercent < 1 || g.FailureThresholdPercent > 100 {
+		return fmt.Errorf("failure_threshold_percent must be between 1 and 100")
+	}
+
+	return nil
+}
+
 // FailureCountGate trips when failures reach the configured count in its
 // scope.
 type FailureCountGate struct {
@@ -110,6 +187,37 @@ type FailureCountGate struct {
 
 func (*FailureCountGate) SafetyGateKind() SafetyGateKind {
 	return SafetyGateKindFailureCount
+}
+
+func (g *FailureCountGate) SafetyGateScope() SafetyGateScope {
+	return g.Scope
+}
+
+func (g *FailureCountGate) IsTripped(failed int, total int) bool {
+	return failed >= int(g.FailureThresholdCount)
+}
+
+func (g *FailureCountGate) Validate() error {
+	if g == nil {
+		return fmt.Errorf("failure count safety gate is required")
+	}
+	if err := validateSafetyGateScope(g.Scope); err != nil {
+		return err
+	}
+	if g.FailureThresholdCount <= 0 {
+		return fmt.Errorf("failure_threshold_count must be greater than 0")
+	}
+
+	return nil
+}
+
+func validateSafetyGateScope(scope SafetyGateScope) error {
+	switch scope {
+	case "", SafetyGateScopeCurrentPhase, SafetyGateScopeCumulativeRun:
+		return nil
+	default:
+		return fmt.Errorf("unsupported safety gate scope %q", scope)
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -130,11 +238,19 @@ type ConflictPolicy struct {
 	Payload ConflictPolicyPayload `json:"payload"`
 }
 
+func (p ConflictPolicy) Validate() error {
+	if p.Payload == nil {
+		return fmt.Errorf("conflict policy is required")
+	}
+	return p.Payload.Validate()
+}
+
 // ConflictPolicyPayload is implemented by concrete conflict-handling policies.
 // Policies own retry/backoff configuration rather than scattering those fields
 // on OperationRun.
 type ConflictPolicyPayload interface {
 	ConflictPolicyKind() ConflictPolicyKind
+	Validate() error
 }
 
 // ConflictRetryPolicy retries blocked targets until RetryTimeout elapses.
@@ -188,9 +304,17 @@ type OrderingPolicy struct {
 	Payload OrderingPolicyPayload `json:"payload"`
 }
 
+func (p OrderingPolicy) Validate() error {
+	if p.Payload == nil {
+		return fmt.Errorf("ordering policy is required")
+	}
+	return p.Payload.Validate()
+}
+
 // OrderingPolicyPayload is implemented by concrete target-ordering strategies.
 type OrderingPolicyPayload interface {
 	OrderingPolicyKind() OrderingPolicyKind
+	Validate() error
 }
 
 // RandomOrdering shuffles targets using a persisted seed so retries and
@@ -201,6 +325,17 @@ type RandomOrdering struct {
 
 func (*RandomOrdering) OrderingPolicyKind() OrderingPolicyKind {
 	return OrderingPolicyKindRandom
+}
+
+func (p *RandomOrdering) Validate() error {
+	if p == nil {
+		return fmt.Errorf("random ordering policy is required")
+	}
+	if p.Seed == "" {
+		return fmt.Errorf("random ordering seed is required")
+	}
+
+	return nil
 }
 
 // PhysicalLocationOrderingStrategy describes rack-location-aware ordering
@@ -222,6 +357,19 @@ func (*PhysicalLocationOrdering) OrderingPolicyKind() OrderingPolicyKind {
 	return OrderingPolicyKindPhysicalLocation
 }
 
+func (p *PhysicalLocationOrdering) Validate() error {
+	if p == nil {
+		return fmt.Errorf("physical_location ordering policy is required")
+	}
+	switch p.Strategy {
+	case PhysicalLocationOrderingStrategyRowByRow,
+		PhysicalLocationOrderingStrategyOnePerRowRoundRobin:
+		return nil
+	default:
+		return fmt.Errorf("unsupported physical_location ordering strategy %q", p.Strategy)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Phase Policy
 // -----------------------------------------------------------------------------
@@ -238,6 +386,7 @@ const (
 // PhasePlan is implemented by concrete phase-splitting configurations.
 type PhasePlan interface {
 	PhasePlanKind() PhasePlanKind
+	Validate() error
 }
 
 // PhasePolicy combines a phase plan with the rule for advancing between
@@ -245,6 +394,13 @@ type PhasePlan interface {
 type PhasePolicy struct {
 	Plan          PhasePlan          `json:"plan"`
 	AdvancePolicy PhaseAdvancePolicy `json:"advance_policy"`
+}
+
+func (p PhasePolicy) Validate() error {
+	if p.Plan == nil {
+		return nil
+	}
+	return p.Plan.Validate()
 }
 
 // EqualPhases splits selected targets into PhaseCount roughly equal phases.
@@ -256,6 +412,17 @@ func (*EqualPhases) PhasePlanKind() PhasePlanKind {
 	return PhasePlanKindEqual
 }
 
+func (p *EqualPhases) Validate() error {
+	if p == nil {
+		return fmt.Errorf("equal phase policy is required")
+	}
+	if p.PhaseCount <= 0 {
+		return fmt.Errorf("equal phase_count must be greater than 0")
+	}
+
+	return nil
+}
+
 // PercentagePhases defines explicit phase sizes as percentages of selected
 // targets.
 type PercentagePhases struct {
@@ -264,6 +431,28 @@ type PercentagePhases struct {
 
 func (*PercentagePhases) PhasePlanKind() PhasePlanKind {
 	return PhasePlanKindPercentage
+}
+
+func (p *PercentagePhases) Validate() error {
+	if p == nil {
+		return fmt.Errorf("percentage phase policy is required")
+	}
+	if len(p.Phases) == 0 {
+		return fmt.Errorf("percentage phase policy must include at least one phase")
+	}
+
+	sum := int32(0)
+	for _, phase := range p.Phases {
+		if phase.Percentage < 1 || phase.Percentage > 100 {
+			return fmt.Errorf("percentage phase percentages must be between 1 and 100")
+		}
+		sum += phase.Percentage
+	}
+	if sum != 100 {
+		return fmt.Errorf("percentage phase percentages must sum to 100")
+	}
+
+	return nil
 }
 
 // PercentagePhase describes one explicit percentage-based phase.
@@ -281,6 +470,23 @@ func (*CountPhases) PhasePlanKind() PhasePlanKind {
 	return PhasePlanKindCount
 }
 
+func (p *CountPhases) Validate() error {
+	if p == nil {
+		return fmt.Errorf("count phase policy is required")
+	}
+	if len(p.Phases) == 0 {
+		return fmt.Errorf("count phase policy must include at least one phase")
+	}
+
+	for _, phase := range p.Phases {
+		if phase.Count <= 0 {
+			return fmt.Errorf("count phase counts must be greater than 0")
+		}
+	}
+
+	return nil
+}
+
 // CountPhase describes one explicit count-based phase.
 type CountPhase struct {
 	Count int32 `json:"count"`
@@ -296,15 +502,6 @@ type PhaseAdvancePolicy struct {
 // Operation Template
 // -----------------------------------------------------------------------------
 
-// InclusiveScopeComposition controls how target_spec and prior-run target
-// sources combine when both are inclusive.
-type InclusiveScopeComposition string
-
-const (
-	InclusiveScopeCompositionIntersect InclusiveScopeComposition = "intersect"
-	InclusiveScopeCompositionUnion     InclusiveScopeComposition = "union"
-)
-
 // Operation stores the shared operation-run operation template. Payload holds
 // the concrete task operation info, while the surrounding fields capture
 // operation-run-only scheduling and scoping metadata.
@@ -318,13 +515,59 @@ type Operation struct {
 	Payload      operations.Operation  `json:"payload"`
 }
 
+func (o *Operation) Validate() error {
+	if o == nil {
+		return fmt.Errorf("operation is required")
+	}
+	if o.Payload == nil {
+		return fmt.Errorf("operation payload is required")
+	}
+	if err := o.Payload.Validate(); err != nil {
+		return fmt.Errorf("validate operation payload: %w", err)
+	}
+	if !o.Type.IsZero() && o.Type != o.Payload.Type() {
+		return fmt.Errorf("operation type does not match payload")
+	}
+	if o.Code != "" && o.Code != o.Payload.CodeString() {
+		return fmt.Errorf("operation code does not match payload")
+	}
+	if o.TargetSpec != nil {
+		if err := o.TargetSpec.Validate(); err != nil {
+			return fmt.Errorf("target_spec: %w", err)
+		}
+		if o.TargetScope.DefaultScopeComponentFilter != nil {
+			return fmt.Errorf(
+				"target_scope.default_scope_component_filter requires target_spec to be omitted",
+			)
+		}
+	}
+	if err := o.TargetScope.Validate(); err != nil {
+		return fmt.Errorf("target_scope: %w", err)
+	}
+
+	return nil
+}
+
 // OperationTargetScope controls how the embedded operation target_spec and
 // previous operation-run targets contribute to the candidate scope.
 type OperationTargetScope struct {
-	ExcludeTargetSpec          bool                      `json:"exclude_target_spec"`
-	OperationRunIDs            []uuid.UUID               `json:"operation_run_ids,omitempty"`
-	ExcludeOperationRunTargets bool                      `json:"exclude_operation_run_targets"`
-	InclusiveScopeComposition  InclusiveScopeComposition `json:"inclusive_scope_composition"`
+	ExcludedOperationRunIDs     []uuid.UUID                `json:"excluded_operation_run_ids,omitempty"`
+	DefaultScopeComponentFilter *operation.ComponentFilter `json:"default_scope_component_filter,omitempty"`
+}
+
+func (s OperationTargetScope) Validate() error {
+	for idx, id := range s.ExcludedOperationRunIDs {
+		if id == uuid.Nil {
+			return fmt.Errorf("excluded_operation_run_ids[%d] is required", idx)
+		}
+	}
+	if s.DefaultScopeComponentFilter != nil {
+		if err := s.DefaultScopeComponentFilter.Validate(); err != nil {
+			return fmt.Errorf("default_scope_component_filter: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // QueueOptions stores operation-level task conflict behavior using the same

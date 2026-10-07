@@ -9,7 +9,6 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -110,8 +109,6 @@ func TestInfrastructureProviderSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -196,36 +193,29 @@ func TestInfrastructureProviderSQLDAO_GetAllByOrg(t *testing.T) {
 				dbSession: tt.fields.dbSession,
 			}
 			got, err := ipsd.GetAllByOrg(tt.args.ctx, nil, tt.args.org, nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("InfrastructureProviderSQLDAO.GetAllByOrg() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if len(got) != len(tt.want) {
-				t.Errorf("InfrastructureProviderSQLDAO.GetAllByOrg() gotlen = %v, wantlen = %v", len(got), len(tt.want))
+			if tt.wantErr {
+				require.NotNil(t, err)
+			} else {
+				require.Nil(t, err)
+				require.NotNil(t, got)
+				assert.Equal(t, len(got), len(tt.want))
 			}
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestInfrastructureProviderSQLDAO_CreateFromParams(t *testing.T) {
+func TestInfrastructureProviderSQLDAO_Create(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session
 	}
 	type args struct {
-		ctx            context.Context
-		name           string
-		displayName    *string
-		org            string
-		orgDisplayName *string
-		createdBy      *User
+		ctx   context.Context
+		input InfrastructureProviderCreateInput
 	}
 
 	// Create test DB
@@ -264,13 +254,13 @@ func TestInfrastructureProviderSQLDAO_CreateFromParams(t *testing.T) {
 				dbSession: dbSession,
 			},
 			args: args{
-				ctx:            ctx,
-				name:           ip.Name,
-				displayName:    ip.DisplayName,
-				org:            ip.Org,
-				orgDisplayName: ip.OrgDisplayName,
-				createdBy: &User{
-					ID: ip.CreatedBy,
+				ctx: ctx,
+				input: InfrastructureProviderCreateInput{
+					Name:           ip.Name,
+					DisplayName:    ip.DisplayName,
+					Org:            ip.Org,
+					OrgDisplayName: ip.OrgDisplayName,
+					CreatedBy:      ip.CreatedBy,
 				},
 			},
 			want:               ip,
@@ -283,52 +273,36 @@ func TestInfrastructureProviderSQLDAO_CreateFromParams(t *testing.T) {
 			ipsd := InfrastructureProviderSQLDAO{
 				dbSession: tt.fields.dbSession,
 			}
-			got, err := ipsd.CreateFromParams(tt.args.ctx, nil, tt.args.name, tt.args.displayName, tt.args.org, tt.args.orgDisplayName, tt.args.createdBy)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("InfrastructureProviderSQLDAO.CreateFromParams() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			got, err := ipsd.Create(tt.args.ctx, nil, tt.args.input)
+			if tt.wantErr {
+				require.NotNil(t, err)
+			} else {
+				require.Nil(t, err)
+				require.NotNil(t, got)
 			}
 
-			if got.Name != tt.want.Name {
-				t.Errorf("Name = %v, want %v", got.Name, tt.want.Name)
-			}
-
-			if *got.DisplayName != *tt.want.DisplayName {
-				t.Errorf("DisplayName = %v, want %v", *got.DisplayName, *tt.want.DisplayName)
-			}
-
-			if got.Org != tt.want.Org {
-				t.Errorf("Org = %v, want %v", got.Org, tt.want.Org)
-			}
-
-			if got.OrgDisplayName != nil && *got.OrgDisplayName != *tt.want.OrgDisplayName {
-				t.Errorf("OrgDisplayName = %v, want %v", *got.OrgDisplayName, *tt.want.OrgDisplayName)
-			}
-
-			if got.CreatedBy != tt.want.CreatedBy {
-				t.Errorf("CreatedBy = %v, want %v", got.CreatedBy, tt.want.CreatedBy)
-			}
+			assert.Equal(t, tt.want.Name, got.Name)
+			assert.Equal(t, *tt.want.DisplayName, *got.DisplayName)
+			assert.Equal(t, tt.want.Org, got.Org)
+			assert.Equal(t, *tt.want.OrgDisplayName, *got.OrgDisplayName)
+			assert.Equal(t, tt.want.CreatedBy, got.CreatedBy)
+			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestInfrastructureProviderSQLDAO_UpdateFromParams(t *testing.T) {
+func TestInfrastructureProviderSQLDAO_Update(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session
 	}
 	type args struct {
-		ctx            context.Context
-		id             uuid.UUID
-		name           *string
-		displayName    *string
-		orgDisplayName *string
+		ctx   context.Context
+		input InfrastructureProviderUpdateInput
 	}
 
 	// Create test DB
@@ -384,11 +358,13 @@ func TestInfrastructureProviderSQLDAO_UpdateFromParams(t *testing.T) {
 				dbSession: dbSession,
 			},
 			args: args{
-				ctx:            ctx,
-				id:             ip.ID,
-				name:           cutil.GetPtr(uip.Name),
-				displayName:    uip.DisplayName,
-				orgDisplayName: uip.OrgDisplayName,
+				ctx: ctx,
+				input: InfrastructureProviderUpdateInput{
+					InfrastructureProviderID: ip.ID,
+					Name:                     cutil.GetPtr(uip.Name),
+					DisplayName:              uip.DisplayName,
+					OrgDisplayName:           uip.OrgDisplayName,
+				},
 			},
 			want:               uip,
 			wantErr:            false,
@@ -400,39 +376,28 @@ func TestInfrastructureProviderSQLDAO_UpdateFromParams(t *testing.T) {
 			ipsd := InfrastructureProviderSQLDAO{
 				dbSession: tt.fields.dbSession,
 			}
-			got, err := ipsd.UpdateFromParams(tt.args.ctx, nil, tt.args.id, tt.args.name, tt.args.displayName, tt.args.orgDisplayName)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("InfrastructureProviderSQLDAO.UpdateFromParams() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			got, err := ipsd.Update(tt.args.ctx, nil, tt.args.input)
+			if tt.wantErr {
+				require.NotNil(t, err)
+			} else {
+				require.Nil(t, err)
+				require.NotNil(t, got)
 			}
 
-			if got.Name != tt.want.Name {
-				t.Errorf("Name = %v, want %v", got.Name, tt.want.Name)
-			}
-
-			if *got.DisplayName != *tt.want.DisplayName {
-				t.Errorf("DisplayName = %v, want %v", *got.DisplayName, *tt.want.DisplayName)
-			}
-
-			if got.Org != tt.want.Org {
-				t.Errorf("Org = %v, want %v", got.Org, tt.want.Org)
-			}
-
-			if got.Updated.String() == tt.want.Updated.String() {
-				t.Errorf("got.Updated = %v, want different value", got.Updated)
-			}
+			assert.Equal(t, tt.want.Name, got.Name)
+			assert.Equal(t, *tt.want.DisplayName, *got.DisplayName)
+			assert.Equal(t, tt.want.Org, got.Org)
+			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
 }
 
-func TestInfrastructureProviderSQLDAO_DeleteByID(t *testing.T) {
+func TestInfrastructureProviderSQLDAO_Delete(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session
 	}
@@ -493,8 +458,11 @@ func TestInfrastructureProviderSQLDAO_DeleteByID(t *testing.T) {
 			ipsd := InfrastructureProviderSQLDAO{
 				dbSession: tt.fields.dbSession,
 			}
-			if err := ipsd.DeleteByID(tt.args.ctx, nil, tt.args.id); (err != nil) != tt.wantErr {
-				t.Errorf("InfrastructureProviderSQLDAO.DeleteByID() error = %v, wantErr %v", err, tt.wantErr)
+			derr := ipsd.Delete(tt.args.ctx, nil, tt.args.id)
+			if tt.wantErr {
+				require.NotNil(t, derr)
+			} else {
+				require.Nil(t, derr)
 			}
 
 			dip := &InfrastructureProvider{}
@@ -503,15 +471,11 @@ func TestInfrastructureProviderSQLDAO_DeleteByID(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if dip.Deleted == nil {
-				t.Errorf("Failed to soft-delete InfrastructureProvider")
-			}
+			assert.NotNil(t, dip.Deleted)
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

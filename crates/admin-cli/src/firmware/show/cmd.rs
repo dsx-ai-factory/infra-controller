@@ -23,7 +23,7 @@ use crate::async_write;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn show(
+pub(super) async fn show(
     _args: &Args,
     format: OutputFormat,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
 use clap::Parser;
 use rpc::forge as forgerpc;
 
@@ -27,26 +27,36 @@ Set the primary DPU for a host:
     $ nico-admin-cli managed-host set-primary-dpu 12345678-1234-5678-90ab-cdef01234567 \
     abcdef01-2345-6789-abcd-ef0123456789
 
-Set the primary DPU and reboot the host afterward:
+Request another reconciliation for the selected DPU:
     $ nico-admin-cli managed-host set-primary-dpu 12345678-1234-5678-90ab-cdef01234567 \
-    abcdef01-2345-6789-abcd-ef0123456789 --reboot
+    abcdef01-2345-6789-abcd-ef0123456789 --force-reconcile
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "ID of the host machine")]
-    pub host_machine_id: MachineId,
+    host_machine_id: StableHostMachineId,
     #[clap(help = "ID of the DPU machine to make primary")]
-    pub dpu_machine_id: MachineId,
-    #[clap(long, help = "Reboot the host after the update")]
-    pub reboot: bool,
+    dpu_machine_id: DpuMachineId,
+    #[clap(
+        long,
+        help = "Request a fresh machine-controller reconciliation even when this DPU is already selected. Sends only force_reconcile=true; servers without force_reconcile support ignore it, while supporting servers leave any required restart to machine-controller"
+    )]
+    force_reconcile: bool,
+    #[clap(
+        long,
+        help = "Deprecated compatibility option for servers without force_reconcile support. Sends reboot=true and force_reconcile=true; supporting servers treat it as reconciliation, while older servers force-restart the host after changing the target"
+    )]
+    reboot: bool,
 }
 
+#[allow(deprecated)] // Keep `--reboot` functional when this CLI calls an older server.
 impl From<Args> for forgerpc::SetPrimaryDpuRequest {
     fn from(args: Args) -> Self {
         Self {
             host_machine_id: Some(args.host_machine_id),
             dpu_machine_id: Some(args.dpu_machine_id),
             reboot: args.reboot,
+            force_reconcile: args.force_reconcile || args.reboot,
         }
     }
 }

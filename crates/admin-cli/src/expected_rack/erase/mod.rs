@@ -15,10 +15,12 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmd;
+mod args;
+mod cmd;
 
-pub use args::Args;
+pub(super) use args::Args;
+use clap::CommandFactory;
+use clap::error::ErrorKind;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -26,7 +28,16 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::erase(self, &ctx.api_client).await?;
+        if !self.confirm {
+            Self::command()
+                .bin_name("nico-admin-cli expected-rack erase")
+                .error(
+                    ErrorKind::MissingRequiredArgument,
+                    "--confirm is required to erase all expected racks",
+                )
+                .exit();
+        }
+        cmd::erase(&ctx.api_client).await?;
         Ok(())
     }
 }

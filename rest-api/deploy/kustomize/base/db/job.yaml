@@ -20,10 +20,23 @@ spec:
       imagePullSecrets:
         - name: image-pull-secret
       restartPolicy: OnFailure
+      # 1000 is the `nvs` user the migrations image declares. `pg_isready` in
+      # the init container is a client binary that writes nothing, so it runs
+      # under the same UID without needing anything from its own image.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       initContainers:
         # Wait for PostgreSQL to be ready using a single pg_isready check (relying on Job retries)
         - name: wait-for-postgres
           image: postgres:14.4-alpine
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - pg_isready
             - -h
@@ -36,6 +49,12 @@ spec:
         - name: migrations
           image: nico-rest-db
           imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: PGHOST
               value: postgres.postgres
@@ -50,6 +69,9 @@ spec:
                 secretKeyRef:
                   name: db-creds
                   key: password
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "64Mi"
@@ -57,3 +79,8 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "100m"
+      volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp.
+        - name: tmp
+          emptyDir: {}

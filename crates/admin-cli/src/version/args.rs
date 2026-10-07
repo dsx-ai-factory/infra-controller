@@ -28,7 +28,7 @@ Also display the runtime config:
     $ nico-admin-cli version --show-runtime-config
 
 ")]
-pub struct Opts {
+pub(crate) struct Opts {
     #[clap(short, long, action, help = "Display Runtime Config also.")]
-    pub show_runtime_config: bool,
+    pub(super) show_runtime_config: bool,
 }

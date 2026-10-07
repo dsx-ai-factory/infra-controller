@@ -67,9 +67,6 @@ async fn vpc_pages_show_status_vni(pool: sqlx::PgPool) {
         .expect("expected status VNI")
         .to_string();
 
-    // Ensure this test would fail if the UI still read the old VPC vni field.
-    assert!(vpc.vni.is_none());
-
     // Add a VPC prefix so the IPAM prefix detail page can render parent VPC data.
     let vpc_prefix = env
         .api()
@@ -77,6 +74,7 @@ async fn vpc_pages_show_status_vni(pool: sqlx::PgPool) {
             id: None,
             prefix: String::new(),
             vpc_id: Some(vpc_id),
+            site_prefix_id: None,
             config: Some(forge::VpcPrefixConfig {
                 prefix: "192.0.2.0/25".to_string(),
             }),

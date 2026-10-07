@@ -33,15 +33,15 @@ Peer two VPCs with a chosen peering ID:
     abcdef01-2345-6789-abcd-ef0123456789 --id 0fedcba9-8765-4321-0fed-cba987654321
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The ID of one VPC ID to peer")]
-    pub vpc1_id: VpcId,
+    vpc1_id: VpcId,
 
     #[clap(help = "The ID of other VPC ID to peer")]
-    pub vpc2_id: VpcId,
+    vpc2_id: VpcId,
 
     #[clap(long, help = "Optional desired ID for the VPC peering")]
-    pub id: Option<VpcPeeringId>,
+    id: Option<VpcPeeringId>,
 }
 
 impl From<Args> for VpcPeeringCreationRequest {

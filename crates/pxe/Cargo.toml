@@ -21,6 +21,7 @@ description = "Carbide is a Bare Metal Provisioning system with auto-discovery a
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "carbide"
@@ -29,10 +30,16 @@ path = "src/main.rs"
 [dependencies]
 # [begin-local-dependencies]
 carbide-host-support = { path = "../host-support", default-features = false }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing"] }
+carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-tls = { path = "../tls" }
+carbide-utils = { path = "../utils", default-features = false }
 carbide-version = { path = "../version" }
 carbide-rpc = { path = "../rpc" }
 carbide-uuid = { path = "../uuid" }
+logfmt = { path = "../logfmt" }
+metrics-endpoint = { path = "../metrics-endpoint" }
+trace-propagation = { path = "../trace-propagation" }
 # [end-local-dependencies]
 
 axum = { workspace = true }
@@ -42,11 +49,17 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 http-body = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["server-graceful", "service", "tokio"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 mime = { workspace = true }
+opentelemetry = { workspace = true }
 pin-project-lite = { workspace = true }
+prometheus = { workspace = true }
+rand = { workspace = true }
 serde = { features = ["derive"], workspace = true }
+serde_yaml = { workspace = true }
 tera = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
@@ -55,13 +68,19 @@ tower = { workspace = true }
 tower-http = { features = ["fs"], workspace = true }
 tower-layer = { workspace = true }
 tower-service = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { features = ["v4", "serde"], workspace = true }
 
 [build-dependencies]
 carbide-version = { path = "../version" }
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing", "test-support"] }
+carbide-test-support = { path = "../test-support" }
+opentelemetry_sdk = { workspace = true }
 tempfile = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 [lints]
 workspace = true

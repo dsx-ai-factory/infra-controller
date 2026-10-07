@@ -27,16 +27,16 @@ Delete a network security group:
     --tenant-organization-id fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "Network security group ID to delete")]
-    pub id: String,
+    pub(super) id: String,
 
     #[clap(
         short = 't',
         long,
         help = "Tenant organization ID of the network security group"
     )]
-    pub tenant_organization_id: String,
+    tenant_organization_id: String,
 }
 
 impl From<Args> for DeleteNetworkSecurityGroupRequest {

@@ -9,7 +9,7 @@ Command-line client for the NVIDIA Infrastructure Controller (NICo) REST API. Co
 
 ## Prerequisites
 
-- Go 1.25.4 or later
+- Go 1.26.4 or later
 - Access to a running NVIDIA Infrastructure Controller (NICo) REST API instance (local via `make kind-reset` or remote)
 
 ## Installation
@@ -44,7 +44,7 @@ If you use a coding agent that has shell access, point it at [`cli/INSTALL.md`](
 
 ```text
 Install nicocli following the instructions at
-https://github.com/NVIDIA/infra-controller/rest-api/blob/main/cli/INSTALL.md
+https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/cli/INSTALL.md
 ```
 
 ### Inside the nico-rest-api container
@@ -127,6 +127,10 @@ auth:
     token_url: http://localhost:8080/realms/nico-dev/protocol/openid-connect/token
     client_id: nico-api
     client_secret: nico-local-secret
+    # scopes: [openid]
+    # client_auth_method: client_secret_post
+    # token_parameters:
+    #   audience: nico
     # Run `nicocli login` to authenticate; it will prompt for username/password
     # and persist the resulting bearer token (and refresh token) here.
 
@@ -159,7 +163,7 @@ These flags apply to every command and override the corresponding config values.
 
 ### Configuring with environment variables
 
-Every field in `~/.nico/config.yaml` can also be set via a `NICO_*` environment variable. When both a config value and an env var are present, the env var wins; an explicit command-line flag still beats both. Set any of these in your shell instead of editing the config file:
+The scalar fields listed below can also be set via a `NICO_*` environment variable. When both a config value and an env var are present, the env var wins; an explicit command-line flag still beats both. Set any of these in your shell instead of editing the config file:
 
 | Env Var | Config field | Notes |
 |---------|--------------|-------|
@@ -170,6 +174,7 @@ Every field in `~/.nico/config.yaml` can also be set via a `NICO_*` environment 
 | `NICO_TOKEN_COMMAND` | `auth.token_command` | Shell command that prints a bearer token |
 | `NICO_AUTH_SCRIPT` | `auth.token_command` | Alias of `NICO_TOKEN_COMMAND` (canonical name wins when both set) |
 | `NICO_TOKEN_URL` | `auth.oidc.token_url` | |
+| `NICO_KEYCLOAK_REALM` | `auth.oidc.realm` | Used only when the token endpoint is built from `--keycloak-url` |
 | `NICO_CLIENT_ID` | `auth.oidc.client_id` | |
 | `NICO_CLIENT_SECRET` | `auth.oidc.client_secret` | |
 | `NICO_OIDC_USERNAME` | `auth.oidc.username` | |
@@ -181,7 +186,21 @@ Every field in `~/.nico/config.yaml` can also be set via a `NICO_*` environment 
 | `NICO_AUTHN_URL` | `auth.api_key.authn_url` | Required for legacy NGC keys; ignored for `nvapi-` bearer keys |
 | `NICO_API_KEY_TOKEN` | `auth.api_key.token` | Persisted token after NGC exchange |
 
-`NICO_KEYCLOAK_URL` and `NICO_KEYCLOAK_REALM` do not map to a single config field; they feed the login command and construct the OIDC `token_url` at login time.
+`NICO_KEYCLOAK_URL` does not map to a config field of its own; it feeds the login command and
+constructs the OIDC `token_url`, which is what gets persisted.
+
+`--keycloak-realm` and `--client-id` both carry built-in defaults (`nico-dev` and `nico-api`)
+that match the Kustomize development realm, not the realm `helm-prereqs/setup.sh` installs.
+Set `auth.oidc.realm` and `auth.oidc.client_id` for your deployment rather than relying on
+them. When a login fails, the error names the token endpoint it contacted and any value that
+came from a built-in default.
+
+Client-credentials configurations can also set `auth.oidc.scopes` as a YAML list,
+`auth.oidc.token_parameters` as a map of additional non-secret form parameters,
+and `auth.oidc.client_auth_method` to `client_secret_post` or
+`client_secret_basic`. The default remains `scope=openid` with
+`client_secret_post`. Reserved OAuth and credential fields cannot be overridden
+through `token_parameters`.
 
 To see exactly which `NICO_*` variables are in use right now, pass `--debug` on any command:
 
@@ -208,6 +227,26 @@ Output formatting and pagination flags live on individual commands, not on the r
 | `--data-file` | create/update commands | Path to a JSON file (use `-` for stdin) |
 
 Run `nicocli <command> --help` for the full per-command flag list, including spec-derived query parameters and body fields.
+
+### Bootstrap site prerequisites from a manifest
+
+`nicocli site bootstrap` creates or verifies the REST resources needed to use a Site. It initializes the calling organization, requires the Site to already exist, then processes its auto-created Site IP Blocks, Instance Types, Allocations, VPCs, VPC Prefixes, and optional Instances in dependency order. It never creates a Site.
+
+Start from the [example manifest](examples/site-prerequisites.yaml), replace the organization and resource values, and run:
+
+```bash
+nicocli site bootstrap \
+  --file cli/examples/site-prerequisites.yaml \
+  --output-file site-prerequisites.resolved.yaml
+```
+
+The manifest uses `${...}` references so later requests can consume IDs returned by earlier requests. For example, `${site.id}` resolves to the existing Site ID, `${siteIpBlocks.id}` resolves to a Site IP Block selected from the fabric-prefix inventory, and `${allocations.network.allocationConstraints.0.derivedResourceId}` resolves to the Tenant IP Block created by the network Allocation.
+
+Site IP Blocks are not created by this command. NICo automatically creates them from fabric prefixes reported by the Site; the manifest's `siteIpBlocks` entries are read-only selectors for those existing resources. If the Site inventory has not arrived yet, bootstrap stops with a rerun message instead of posting a Provider-owned IP Block.
+
+For managed resources, the command looks up a recorded ID first, then uses exact name and scope. Matching resources are reused, while a matching resource whose returned configuration differs from the request stops the workflow with a drift error. The output file preserves the requests, selectors, and resolved resource IDs so it can be replayed after an interrupted run or against a replacement installation. All requests use operation paths and methods resolved from the same embedded OpenAPI model that builds the regular CLI commands.
+
+Bootstrap first calls the Service Account endpoint for `provider.org`. In Service Account mode that single call initializes and returns both identities, and the Provider and Tenant organization names must match; otherwise bootstrap falls back to the Provider and Tenant current endpoints. Separate Provider and Tenant organizations use the same token, so it must have the required role in both organizations. `provider.org` may be omitted when the Provider organization already comes from `--org`, `NICO_ORG`, or the selected CLI config. Site registration, fabric-prefix inventory, and machine readiness are external asynchronous steps; if a dependency is not ready yet, complete that step and rerun the same manifest.
 
 ## Authentication
 
@@ -276,7 +315,7 @@ Commands follow `nicocli <resource> [sub-resource] <action> [args] [flags]`.
 
 Nested API paths appear as sub-resource groups:
 
-```
+```bash
 nicocli allocation list
 nicocli allocation constraint list
 nicocli allocation constraint create <allocationId>
@@ -299,7 +338,7 @@ nicocli completion fish > ~/.config/fish/completions/nicocli.fish
 
 Each environment (local dev, staging, prod) gets its own config file in `~/.nico/`:
 
-```
+```text
 ~/.nico/config.yaml           # default (local dev)
 ~/.nico/config.staging.yaml   # staging
 ~/.nico/config.prod.yaml      # production
@@ -331,6 +370,69 @@ To skip the config selector and connect to a specific environment directly:
 
 ```bash
 nicocli --config ~/.nico/config.prod.yaml tui
+```
+
+## MCP Server Mode
+
+The NICo MCP server exposes the NICo REST read surface (every `GET` operation in the embedded OpenAPI spec) as Model Context Protocol tools over streamable-HTTP.
+
+The server ships as its own binary, `nico-mcp`, so that neither the MCP server code nor its MCP SDK dependency are linked into `nicocli`. Build and run it directly — `nicocli mcp` prints these same build/run instructions but never launches `nico-mcp` itself.
+
+```bash
+# Build and install nico-mcp (from the rest-api directory):
+make nico-mcp
+
+# Run the standalone server:
+nico-mcp --listen :8080 --path /mcp --base-url https://nico.example.com --org tester
+```
+
+Install the binaries with `make nico-cli` and `make nico-mcp`, run from the `rest-api` directory.
+
+### Properties
+
+- **Read-only.** Only `GET` operations are exposed. Mutating routes (`POST`, `PATCH`, `PUT`, `DELETE`) are intentionally excluded.
+- **Tool naming.** Tools are named `nico_<snake_case(operationId)>` (e.g. `nico_get_all_site`, `nico_validate_rack`).
+- **Stateless and request/response only.** The server sets `Stateless: true` and `JSONResponse: true` on the MCP streamable-HTTP handler -- responses are always `Content-Type: application/json`, never `text/event-stream`, and the server retains no per-session state.
+- **JWT passthrough.** The `Authorization: Bearer <jwt>` header on the inbound MCP request is forwarded unchanged only to the server's configured NICo REST base URL. NICo REST validates the JWT, resolves the caller org, and enforces role-based authorization. The MCP layer never makes the authz decision itself.
+
+### Flags
+
+| Flag | Env Var | Description |
+|------|---------|-------------|
+| `--listen` | `NICO_MCP_LISTEN` | Listen address (default `:8080`) |
+| `--path` | `NICO_MCP_PATH` | HTTP path the MCP handler is mounted at (default `/mcp`) |
+| `--shutdown-timeout` | `NICO_MCP_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout (default `10s`) |
+
+`--base-url`, `--org`, `--api-name`, and `--token` are accepted directly by `nico-mcp`; each also reads its `NICO_*` environment variable. `--base-url` pins the trusted NICo REST destination, so a per-call `base_url` must match it when configured. Without `--base-url`, a tool call may select its destination and proceed without credentials or with an explicit per-call token; only inherited credentials from the inbound Authorization header or server default token are rejected rather than forwarded. The MCP server does **not** read `~/.nico/config.yaml` and starts cleanly with no config file present.
+
+### Per-call config
+
+Connection values can be passed on each MCP tool call. `org`, `api_name`, and `token` override server defaults; `base_url` supplies the destination only when no server base URL is configured and otherwise must match it:
+
+| Tool arg | Equivalent flag | Config field |
+|----------|-----------------|--------------|
+| `org` | `--org` | `api.org` |
+| `base_url` | `--base-url` | `api.base` |
+| `api_name` | `--api-name` | `api.name` |
+| `token` | `--token` | `auth.token` |
+
+Token precedence per tool call is: tool argument -> inbound `Authorization` header -> server startup flag/env. Inbound and startup tokens are eligible only when a server base URL is configured; a caller-selected destination can use an explicit per-call token or no token. The MCP server does not read the on-disk config file or resolve OIDC and NGC credentials; clients or an upstream gateway must supply the resolved bearer through the per-call `token` argument or inbound `Authorization` header.
+
+### Probing the server
+
+```bash
+# List the tool catalogue
+curl -sS http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq
+
+# Call a specific tool
+curl -sS http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nico_get_all_site","arguments":{}}}' | jq
 ```
 
 ## Troubleshooting

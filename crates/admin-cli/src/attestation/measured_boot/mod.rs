@@ -19,62 +19,44 @@
 //! Measured Boot attestation (`attestation/measured_boot`): subcommand dispatchers,
 //! args, and backing functions for `... attestation measured-boot` (alias `mb`).
 
-pub mod bundle;
-pub mod global;
-pub mod journal;
-pub mod machine;
-pub mod profile;
-pub mod report;
-pub mod site;
+pub(crate) mod bundle;
+mod global;
+pub(crate) mod journal;
+pub(crate) mod machine;
+pub(crate) mod profile;
+pub(crate) mod report;
+pub(crate) mod site;
 
 use carbide_uuid::machine::MachineId;
 use measured_boot::{ToTable, set_summary};
 use serde::Serialize;
 
 use crate::cfg::dispatch::Dispatch;
-use crate::cfg::measurement::{Cmd, GlobalOptions};
+use crate::cfg::measurement::Cmd;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
+// `Cmd` keeps a hand-written `Dispatch` (the one exception to the derive):
+// it must set the measured-boot summary flag exactly once -- derived from
+// `ctx.config.extended` -- before delegating to any subgroup, and the
+// `Dispatch` derive has no way to express that pre-delegation side effect.
 impl Dispatch for Cmd {
     async fn dispatch(self, ctx: RuntimeContext) -> CarbideCliResult<()> {
-        // Build internal GlobalOptions from RuntimeContext
-        let args = GlobalOptions {
-            format: ctx.config.format,
-            extended: ctx.config.extended,
-        };
-        set_summary(!args.extended);
-        let mut cli_data = global::cmds::CliData {
-            grpc_conn: &ctx.api_client,
-            args: &args,
-        };
+        set_summary(!ctx.config.extended);
 
         match self {
-            // Handle everything with the `bundle` subcommand.
-            Cmd::Bundle(subcmd) => bundle::cmds::dispatch(subcmd, &mut cli_data).await?,
-
-            // Handle everything with the `journal` subcommand.
-            Cmd::Journal(subcmd) => journal::cmds::dispatch(subcmd, &mut cli_data).await?,
-
-            // Handle everything with the `profile` subcommand.
-            Cmd::Profile(subcmd) => profile::cmds::dispatch(subcmd, &mut cli_data).await?,
-
-            // Handle everything with the `report` subcommand.
-            Cmd::Report(subcmd) => report::cmds::dispatch(subcmd, &mut cli_data).await?,
-
-            // Handle everything with the `machine` subcommand.
-            Cmd::Machine(subcmd) => machine::cmds::dispatch(subcmd, &mut cli_data).await?,
-
-            // Handle everything with the `site` subcommand.
-            Cmd::Site(subcmd) => site::cmds::dispatch(subcmd, &mut cli_data).await?,
+            Cmd::Bundle(c) => c.dispatch(ctx).await,
+            Cmd::Journal(c) => c.dispatch(ctx).await,
+            Cmd::Report(c) => c.dispatch(ctx).await,
+            Cmd::Machine(c) => c.dispatch(ctx).await,
+            Cmd::Profile(c) => c.dispatch(ctx).await,
+            Cmd::Site(c) => c.dispatch(ctx).await,
         }
-
-        Ok(())
     }
 }
 
 #[derive(Serialize)]
-pub struct MachineIdList(Vec<MachineId>);
+struct MachineIdList(Vec<MachineId>);
 
 impl ToTable for MachineIdList {
     fn into_table(self) -> eyre::Result<String> {

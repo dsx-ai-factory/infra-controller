@@ -17,24 +17,35 @@
 
 //! Per-SPIFFE-caller BMC Redfish session token manager.
 //!
-//! Issues one live `X-Auth-Token` per `(SPIFFE service id, BMC MAC)` pair by
-//! calling `nv-redfish` directly. Every call to [`BmcSessionManager::rotate`]
-//! revokes the prior session (if any) and creates a new one.
+//! Every call to [`BmcSessionManager::issue_credentials`] mints a **fresh**
+//! Redfish session by calling `nv-redfish` directly, and never touches a
+//! session it did not just create. Redfish's `SessionService` supports
+//! concurrent sessions, so replicas that share a SPIFFE identity each hold
+//! their own token instead of revoking each other's -- the failure mode a
+//! one-session-per-identity discipline created, where two `bmc-proxy`
+//! replicas alternately invalidated one another and looped on 401s.
+//!
+//! ## Slot bounding
+//!
+//! Session slots on a BMC are finite, so minting is paired with a cap:
+//! after a successful mint, the caller's oldest sessions beyond
+//! `max_sessions_per_caller` (per `(SPIFFE service id, BMC MAC)`) are
+//! best-effort revoked, oldest first. Sessions whose owners vanished
+//! without revocation expire via the BMC's own idle timeout.
 //!
 //! ## Persistence model
 //!
-//! The outstanding session `@odata.id` for each pair is persisted in the
+//! Each outstanding session's `@odata.id` is persisted as one row in the
 //! `bmc_redfish_sessions` Postgres table behind the [`BmcSessionStore`]
 //! trait. The `X-Auth-Token` itself is returned to the caller once and is
-//! never stored anywhere by this manager. The DB row exists purely so the
-//! next rotate (and [`BmcSessionManager::flush_mac`]) knows which session
-//! resource to `DELETE` on the BMC before issuing a new one.
+//! never stored anywhere by this manager. The rows exist purely so a later
+//! revoke -- cap enforcement or [`BmcSessionManager::flush_mac`] -- knows
+//! which session resources to `DELETE` on the BMC.
 //!
-//! Multiple API replicas may concurrently rotate the same pair. We do not
-//! serialize across replicas: in the worst case a race produces one orphan
-//! session on the BMC that expires via the BMC's idle-timeout. Within a
-//! single replica, a per-BMC `tokio::sync::Mutex` serializes all rotates
-//! against the same MAC.
+//! Multiple API replicas may concurrently mint for the same pair; nothing
+//! needs to serialize across replicas, since no replica touches a session
+//! it did not create. Within a single replica, a per-BMC
+//! `tokio::sync::Mutex` serializes all mints against the same MAC.
 //!
 //! ## Lifecycle hooks
 //!
@@ -44,19 +55,19 @@
 //!   wiped). Orphans expire via the BMC idle timer.
 //! * [`BmcSessionManager::note_credentials_updated`] -- intended for use
 //!   when the BMC root credentials are set or rotated. Rows are
-//!   intentionally retained so the next rotate revokes the now-stale
-//!   sessions with the new credentials before issuing a fresh one.
+//!   intentionally retained so a later mint's cap enforcement can clean up
+//!   the now-stale sessions with the new credentials.
 //!
 //! ## Lockout-avoidance circuit breaker
 //!
 //! Each [`BmcSessionManager`] tracks an in-memory per-BMC counter of
 //! consecutive HTTP 401/403 responses returned during session creation.
 //! Once that counter reaches the configured threshold the breaker trips and
-//! any subsequent [`BmcSessionManager::rotate`] call for the same BMC
-//! short-circuits with [`BmcSessionError::AvoidLockout`] rather than
-//! attempting another login (which could exhaust the BMC root account's
-//! retry budget). The breaker is cleared by:
-//!   * a successful [`BmcSessionManager::rotate`] (online recovery),
+//! any subsequent mint for the same BMC short-circuits with
+//! [`BmcSessionError::AvoidLockout`] rather than attempting another login
+//! (which could exhaust the BMC root account's retry budget). The breaker
+//! is cleared by:
+//!   * a successful mint (online recovery),
 //!   * [`BmcSessionManager::flush_mac`] (credentials deleted), or
 //!   * [`BmcSessionManager::note_credentials_updated`] (credentials set or
 //!     rotated).
@@ -78,18 +89,19 @@ use carbide_redfish::nv_redfish::{BmcError, NvRedfishClientPool, RedfishBmc};
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
-use db::bmc_redfish_session;
+use db::ConditionalWrite;
+use db::bmc_redfish_session::{self, SessionNotOwned};
 use mac_address::MacAddress;
 use model::bmc_redfish_session::StoredSession;
 use nv_redfish::Error as NvError;
 use nv_redfish::core::{EntityTypeRef as _, ODataId};
-use nv_redfish::session_service::SessionCreate;
+use nv_redfish::session_service::{SessionCollection, SessionCreate};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 /// Errors surfaced by [`BmcSessionManager`].
 #[derive(thiserror::Error, Debug)]
-pub enum BmcSessionError {
+pub(crate) enum BmcSessionError {
     /// No BMC root credentials are stored for this MAC; cannot create a
     /// session.
     #[error("BMC root credentials are not configured for MAC {0}")]
@@ -97,14 +109,14 @@ pub enum BmcSessionError {
 
     /// Failure interacting with the BMC via nv-redfish (connect, create,
     /// or delete failed for a reason other than auth).
-    #[error("Redfish error talking to BMC at {bmc_addr}: {detail}")]
+    #[error("redfish error talking to BMC at {bmc_addr}: {detail}")]
     Redfish {
         bmc_addr: SocketAddr,
         detail: String,
     },
 
     /// Failure reading the BMC root credentials from the credential store.
-    #[error("Credential store error: {0}")]
+    #[error("credential store error: {0}")]
     CredentialStore(String),
 
     /// Failure persisting or reading session metadata from the
@@ -113,7 +125,7 @@ pub enum BmcSessionError {
     Store(String),
 
     /// The BMC's Redfish ServiceRoot does not expose a `SessionService`.
-    #[error("BMC at {bmc_addr} does not expose Redfish SessionService")]
+    #[error("BMC at {bmc_addr} does not expose redfish SessionService")]
     NoSessionService { bmc_addr: SocketAddr },
 
     /// The lockout-avoidance circuit breaker is tripped for this BMC and
@@ -134,12 +146,12 @@ pub enum BmcSessionError {
 /// A live Redfish session that we issued to a caller. The `token` is
 /// transient: it is returned exactly once and never persisted by us.
 #[derive(Clone)]
-pub struct SessionEntry {
+pub(crate) struct SessionEntry {
     /// `X-Auth-Token` value returned by the BMC on session creation.
-    pub token: String,
+    pub(crate) token: String,
     /// `@odata.id` of the session resource on the BMC; used to revoke the
     /// session via `DELETE` on the next rotate.
-    pub session_odata_id: ODataId,
+    session_odata_id: ODataId,
 }
 
 impl fmt::Debug for SessionEntry {
@@ -151,7 +163,7 @@ impl fmt::Debug for SessionEntry {
     }
 }
 
-pub enum BmcAuthMaterial {
+pub(crate) enum BmcAuthMaterial {
     Session(SessionEntry),
     Basic(Credentials),
 }
@@ -170,6 +182,145 @@ impl fmt::Debug for BmcAuthMaterial {
     }
 }
 
+/// Which best-effort BMC session cleanup step failed.
+///
+/// `operation` is the only metric label. BMCs, callers, sessions, and errors
+/// stay on the log record instead of creating a new series for each failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
+enum BmcSessionCleanupOperation {
+    RevokePriorSession,
+    ListSessionsForRevoke,
+    RevokeUnpersistedSession,
+    DeleteSessionRows,
+}
+
+/// A BMC session outlived the work that created it and could not be cleaned
+/// up. `operation` names which cleanup failed and picks the wording operators
+/// already receive. `spiffe_service_id` and `session` are absent on the paths
+/// that never had one -- `flush_mac` works from the MAC alone, and a failed
+/// session listing never reached a specific session.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_session_cleanup_failed",
+    metric_name = "carbide_bmc_session_cleanup_failures_total",
+    component = "nico-api",
+    log = warn,
+    metric = counter,
+    message = dynamic,
+    describe = "Number of BMC session cleanup failures, by operation."
+)]
+struct BmcSessionCleanupFailed {
+    #[label]
+    operation: BmcSessionCleanupOperation,
+    #[context]
+    bmc_mac_address: MacAddress,
+    #[context]
+    spiffe_service_id: Option<String>,
+    #[context]
+    session: Option<ODataId>,
+    #[context]
+    error: String,
+}
+
+impl carbide_instrument::DynamicMessage for BmcSessionCleanupFailed {
+    fn message(&self) -> &'static str {
+        match self.operation {
+            BmcSessionCleanupOperation::RevokePriorSession => {
+                "failed to revoke an excess BMC session; it will leak until BMC idle timeout"
+            }
+            BmcSessionCleanupOperation::ListSessionsForRevoke => {
+                "failed to list BMC sessions for excess-session revoke; continuing"
+            }
+            BmcSessionCleanupOperation::RevokeUnpersistedSession => {
+                "failed to revoke just-created session after store upsert failed; it will leak until BMC idle timeout"
+            }
+            BmcSessionCleanupOperation::DeleteSessionRows => {
+                "failed to delete BMC session rows during flush_mac; continuing"
+            }
+        }
+    }
+}
+
+/// The actual lockout-avoidance state change, as the bounded `transition`
+/// label shared by the trip and clear Events below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
+enum BmcSessionLockoutBreakerTransition {
+    Tripped,
+    Cleared,
+}
+
+/// The one metric the Events below record.
+#[derive(carbide_instrument::MetricFamily)]
+#[metric(
+    name = "carbide_bmc_session_lockout_breaker_transitions_total",
+    kind = counter,
+    component = "nico-api",
+    describe = "Number of BMC session lockout-avoidance breaker transitions."
+)]
+struct BmcSessionLockoutBreakerTransitions {
+    transition: BmcSessionLockoutBreakerTransition,
+}
+
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_session_lockout_breaker_tripped",
+    metric_family = BmcSessionLockoutBreakerTransitions,
+    log = warn,
+    message = "BmcSessionManager: lockout-avoidance breaker tripped"
+)]
+struct BmcSessionLockoutBreakerTripped {
+    #[label]
+    transition: BmcSessionLockoutBreakerTransition,
+    #[context]
+    bmc_mac_address: MacAddress,
+    #[context(value)]
+    http_status: i64,
+    #[context(value)]
+    consecutive_unauthorized_count: i64,
+    #[context(value)]
+    lockout_threshold_count: i64,
+}
+
+impl BmcSessionLockoutBreakerTripped {
+    fn new(
+        bmc_mac_address: MacAddress,
+        http_status: u16,
+        consecutive_unauthorized_count: u32,
+        lockout_threshold_count: u32,
+    ) -> Self {
+        Self {
+            transition: BmcSessionLockoutBreakerTransition::Tripped,
+            bmc_mac_address,
+            http_status: i64::from(http_status),
+            consecutive_unauthorized_count: i64::from(consecutive_unauthorized_count),
+            lockout_threshold_count: i64::from(lockout_threshold_count),
+        }
+    }
+}
+
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_session_lockout_breaker_cleared",
+    metric_family = BmcSessionLockoutBreakerTransitions,
+    log = info,
+    message = "BmcSessionManager: lockout-avoidance breaker cleared"
+)]
+struct BmcSessionLockoutBreakerCleared {
+    #[label]
+    transition: BmcSessionLockoutBreakerTransition,
+    #[context]
+    bmc_mac_address: MacAddress,
+}
+
+impl BmcSessionLockoutBreakerCleared {
+    fn new(bmc_mac_address: MacAddress) -> Self {
+        Self {
+            transition: BmcSessionLockoutBreakerTransition::Cleared,
+            bmc_mac_address,
+        }
+    }
+}
+
 /// Per-BMC lockout-avoidance state.
 #[derive(Debug, Clone)]
 struct LockoutState {
@@ -183,52 +334,67 @@ struct LockoutState {
 /// Persistence layer for outstanding Redfish sessions. Wraps DB errors as
 /// [`BmcSessionError::Store`] so the manager's surface stays uniform.
 #[async_trait]
-pub trait BmcSessionStore: Send + Sync {
-    async fn get(
+pub(crate) trait BmcSessionStore: Send + Sync {
+    /// Every outstanding session for `(spiffe_service_id, bmc_mac)`,
+    /// oldest first.
+    async fn find_by_owner(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
-    ) -> Result<Option<StoredSession>, BmcSessionError>;
+    ) -> Result<Vec<StoredSession>, BmcSessionError>;
 
-    async fn upsert(
+    /// Records a newly created session as one more row for its owner.
+    /// A row already naming this `(bmc_mac, session_odata_id)` describes a
+    /// session the BMC has since replaced, so the insert takes it over.
+    async fn insert(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
         session_odata_id: &str,
     ) -> Result<(), BmcSessionError>;
 
+    /// `delete_session` removes one session row only if it belongs to this owner.
+    /// A missing or differently owned row returns `NotApplied`; the caller must
+    /// leave the remote session alone.
+    async fn delete_session(
+        &self,
+        spiffe_service_id: &str,
+        bmc_mac: MacAddress,
+        session_odata_id: &str,
+    ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError>;
+
     async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError>;
 }
 
 /// Postgres-backed [`BmcSessionStore`] used in production.
-pub struct PgBmcSessionStore {
+pub(crate) struct PgBmcSessionStore {
     pool: PgPool,
 }
 
 impl PgBmcSessionStore {
-    pub fn new(pool: PgPool) -> Self {
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait]
 impl BmcSessionStore for PgBmcSessionStore {
-    async fn get(
+    async fn find_by_owner(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
-    ) -> Result<Option<StoredSession>, BmcSessionError> {
+    ) -> Result<Vec<StoredSession>, BmcSessionError> {
         let mut conn = self
             .pool
             .acquire()
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))?;
-        bmc_redfish_session::get(conn.as_mut(), spiffe_service_id, bmc_mac)
+        bmc_redfish_session::find_by_owner(conn.as_mut(), spiffe_service_id, bmc_mac)
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))
     }
 
-    async fn upsert(
+    async fn insert(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
@@ -239,9 +405,30 @@ impl BmcSessionStore for PgBmcSessionStore {
             .acquire()
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))?;
-        bmc_redfish_session::upsert(conn.as_mut(), spiffe_service_id, bmc_mac, session_odata_id)
+        bmc_redfish_session::insert(conn.as_mut(), spiffe_service_id, bmc_mac, session_odata_id)
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))
+    }
+
+    async fn delete_session(
+        &self,
+        spiffe_service_id: &str,
+        bmc_mac: MacAddress,
+        session_odata_id: &str,
+    ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|err| BmcSessionError::Store(err.to_string()))?;
+        bmc_redfish_session::delete_session(
+            conn.as_mut(),
+            spiffe_service_id,
+            bmc_mac,
+            session_odata_id,
+        )
+        .await
+        .map_err(|err| BmcSessionError::Store(err.to_string()))
     }
 
     async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
@@ -257,7 +444,7 @@ impl BmcSessionStore for PgBmcSessionStore {
     }
 }
 
-pub struct BmcSessionManager {
+pub(crate) struct BmcSessionManager {
     redfish_pool: Arc<NvRedfishClientPool>,
     credential_manager: Arc<dyn CredentialManager>,
     store: Arc<dyn BmcSessionStore>,
@@ -265,16 +452,20 @@ pub struct BmcSessionManager {
     lockouts: Mutex<HashMap<MacAddress, LockoutState>>,
     lockout_threshold: u32,
     allow_basic_auth_fallback: bool,
+    /// Cap on outstanding sessions per `(SPIFFE service id, BMC MAC)`;
+    /// a mint that pushes past it revokes the caller's oldest sessions.
+    max_sessions_per_caller: usize,
     no_session_service: Mutex<HashSet<MacAddress>>,
 }
 
 impl BmcSessionManager {
-    pub fn new(
+    pub(crate) fn new(
         redfish_pool: Arc<NvRedfishClientPool>,
         credential_manager: Arc<dyn CredentialManager>,
         store: Arc<dyn BmcSessionStore>,
         lockout_threshold: u32,
         allow_basic_auth_fallback: bool,
+        max_sessions_per_caller: usize,
     ) -> Self {
         Self {
             redfish_pool,
@@ -284,21 +475,25 @@ impl BmcSessionManager {
             lockouts: Mutex::new(HashMap::new()),
             lockout_threshold: lockout_threshold.max(1),
             allow_basic_auth_fallback,
+            max_sessions_per_caller: max_sessions_per_caller.max(1),
             no_session_service: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Revoke the prior session (if any) for the given `(spiffe_service_id,
-    /// bmc_mac)` pair, then create a brand new session against the BMC at
-    /// `bmc_addr` and return its token.
-    pub async fn rotate(
+    /// Create a brand new session against the BMC at `bmc_addr` and return
+    /// its token, then revoke this caller's oldest sessions beyond the cap.
+    ///
+    /// Never touches a session another mint created below the cap, so any
+    /// number of callers sharing `spiffe_service_id` can hold live tokens
+    /// concurrently.
+    async fn mint_session(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
         bmc_addr: SocketAddr,
     ) -> Result<SessionEntry, BmcSessionError> {
         let mac_lock = self.acquire_mac_lock(bmc_mac).await;
-        let _mac_guard = mac_lock.lock().await;
+        let mac_guard = mac_lock.lock().await;
 
         if let Some(err) = self.check_not_locked_out(bmc_mac).await {
             return Err(err);
@@ -311,7 +506,7 @@ impl BmcSessionManager {
             }
         };
 
-        let service_root = match self.redfish_pool.service_root(bmc_addr, creds).await {
+        let service_root = match self.redfish_pool.service_root(bmc_addr, Some(creds)).await {
             Ok(root) => root,
             Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
         };
@@ -332,47 +527,6 @@ impl BmcSessionManager {
             }
             Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
         };
-
-        // We try to revoke previous session, best effort, if we fail we still try to
-        // create a new session
-        if let Some(prior) = self.store.get(spiffe_service_id, bmc_mac).await? {
-            let prior_id = ODataId::from(prior.session_odata_id);
-            match sessions.members().await {
-                Ok(members) => {
-                    if let Some(prior_session) = members
-                        .into_iter()
-                        .find(|m| m.raw().odata_id() == &prior_id)
-                    {
-                        if let Err(err) = prior_session.delete().await {
-                            tracing::warn!(
-                                error = ?err,
-                                %bmc_mac,
-                                spiffe_service_id,
-                                session = %prior_id,
-                                "failed to revoke prior BMC session; \
-                                 continuing with new session creation"
-                            );
-                        }
-                    } else {
-                        tracing::info!(
-                            %bmc_mac,
-                            spiffe_service_id,
-                            session = %prior_id,
-                            "prior BMC session no longer present in Sessions collection; \
-                             skipping revoke"
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = ?err,
-                        %bmc_mac,
-                        spiffe_service_id,
-                        "failed to list BMC sessions for prior-session revoke; continuing"
-                    );
-                }
-            }
-        }
 
         let created = match sessions
             .create_session(&SessionCreate::builder(username, password).build())
@@ -400,23 +554,31 @@ impl BmcSessionManager {
         // If persist fails we revoke token to avoid exhaust of session limit
         if let Err(store_err) = self
             .store
-            .upsert(spiffe_service_id, bmc_mac, &location.to_string())
+            .insert(spiffe_service_id, bmc_mac, &location.to_string())
             .await
         {
             if let Err(revoke_err) = created.delete().await {
-                tracing::warn!(
-                    error = ?revoke_err,
-                    %bmc_mac,
-                    spiffe_service_id,
-                    session = %location,
-                    "failed to revoke just-created session after store upsert failed; \
-                     it will leak until BMC idle timeout"
-                );
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::RevokeUnpersistedSession,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: Some(location),
+                    error: format!("{revoke_err:?}"),
+                });
             }
             return Err(store_err);
         }
 
         self.clear_lockout(bmc_mac).await;
+
+        // Cap enforcement is best-effort housekeeping that cannot change the
+        // token being returned, and on BMCs without $expand it costs one GET
+        // per live session -- so release the per-MAC lock first rather than
+        // stalling every concurrent mint for this BMC behind it.
+        drop(mac_guard);
+
+        self.revoke_sessions_beyond_cap(spiffe_service_id, bmc_mac, &location, &sessions)
+            .await;
 
         Ok(SessionEntry {
             token,
@@ -424,7 +586,108 @@ impl BmcSessionManager {
         })
     }
 
-    pub async fn issue_credentials(
+    /// Best-effort revoke of this caller's oldest sessions beyond
+    /// `max_sessions_per_caller`, so a caller that refetches -- restarts,
+    /// 401 recoveries, extra replicas -- cannot grow its session count
+    /// without bound. Failures are counted and logged, never propagated:
+    /// the fresh session was already minted and belongs to the caller
+    /// regardless.
+    ///
+    /// Runs outside the per-MAC lock; concurrent passes at worst revoke the
+    /// same already-dead session, which the missing-member check tolerates.
+    ///
+    /// Claiming a row before its remote `DELETE` leaves one residual window
+    /// (a single request round-trip wide): a concurrent mint can be handed
+    /// the same reused `@odata.id` between the two, and the `DELETE` then
+    /// hits that fresh session. All that costs is one 401 on a token whose
+    /// caller refetches and re-mints -- the recovery every caller already
+    /// implements. Closing the window would take either a cross-instance
+    /// per-MAC lock held across BMC I/O, or `If-Match` preconditions on
+    /// nv-redfish's session delete; neither is worth it for that failure.
+    async fn revoke_sessions_beyond_cap(
+        &self,
+        spiffe_service_id: &str,
+        bmc_mac: MacAddress,
+        just_minted: &ODataId,
+        sessions: &SessionCollection<RedfishBmc>,
+    ) {
+        let outstanding = match self.store.find_by_owner(spiffe_service_id, bmc_mac).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: None,
+                    error: err.to_string(),
+                });
+                return;
+            }
+        };
+
+        let excess = sessions_beyond_cap(outstanding, self.max_sessions_per_caller, just_minted);
+        if excess.is_empty() {
+            return;
+        }
+
+        let members = match sessions.members().await {
+            Ok(members) => members,
+            Err(err) => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: None,
+                    error: format!("{err:?}"),
+                });
+                return;
+            }
+        };
+
+        for row in excess {
+            let session_id = ODataId::from(row.session_odata_id);
+
+            // Delete the owned row before deleting the session on the BMC. If the
+            // row is missing or belongs to another caller, skip the remote DELETE.
+            // When the BMC reuses `@odata.id`, the old session is already gone.
+            match self
+                .store
+                .delete_session(spiffe_service_id, bmc_mac, &session_id.to_string())
+                .await
+            {
+                Ok(ConditionalWrite::Applied(())) => {}
+                Ok(ConditionalWrite::NotApplied(SessionNotOwned)) => continue,
+                Err(err) => {
+                    carbide_instrument::emit(BmcSessionCleanupFailed {
+                        operation: BmcSessionCleanupOperation::DeleteSessionRows,
+                        bmc_mac_address: bmc_mac,
+                        spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                        session: Some(session_id),
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+            }
+
+            // A missing member means the BMC already expired the session. A
+            // failed delete leaks it until the BMC idle timeout -- the row is
+            // already claimed, and re-inserting it could stomp a takeover, so
+            // best effort ends here.
+            if let Some(session) = members.iter().find(|m| m.raw().odata_id() == &session_id)
+                && let Err(err) = session.delete().await
+            {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::RevokePriorSession,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: Some(session_id),
+                    error: format!("{err:?}"),
+                });
+            }
+        }
+    }
+
+    pub(crate) async fn issue_credentials(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
@@ -432,7 +695,7 @@ impl BmcSessionManager {
     ) -> Result<BmcAuthMaterial, BmcSessionError> {
         if !self.allow_basic_auth_fallback {
             return self
-                .rotate(spiffe_service_id, bmc_mac, bmc_addr)
+                .mint_session(spiffe_service_id, bmc_mac, bmc_addr)
                 .await
                 .map(BmcAuthMaterial::Session);
         }
@@ -443,14 +706,17 @@ impl BmcSessionManager {
             return Ok(BmcAuthMaterial::Basic(creds));
         }
 
-        match self.rotate(spiffe_service_id, bmc_mac, bmc_addr).await {
+        match self
+            .mint_session(spiffe_service_id, bmc_mac, bmc_addr)
+            .await
+        {
             Ok(entry) => Ok(BmcAuthMaterial::Session(entry)),
             Err(BmcSessionError::NoSessionService { .. }) => {
                 let newly_cached = self.no_session_service.lock().await.insert(bmc_mac);
                 if newly_cached {
                     tracing::info!(
-                        %bmc_mac,
-                        %bmc_addr,
+                        bmc_mac_address = %bmc_mac,
+                        bmc_address = %bmc_addr,
                         "BMC does not expose Redfish SessionService; serving basic-auth credentials for the remainder of this process lifetime"
                     );
                 }
@@ -479,20 +745,22 @@ impl BmcSessionManager {
     }
 
     /// Drop all session rows for `bmc_mac` and clear any lockout state.
-    pub async fn flush_mac(&self, bmc_mac: MacAddress) {
+    pub(crate) async fn flush_mac(&self, bmc_mac: MacAddress) {
         if let Err(err) = self.store.delete_by_mac(bmc_mac).await {
-            tracing::warn!(
-                error = %err,
-                %bmc_mac,
-                "failed to delete BMC session rows during flush_mac; continuing"
-            );
+            carbide_instrument::emit(BmcSessionCleanupFailed {
+                operation: BmcSessionCleanupOperation::DeleteSessionRows,
+                bmc_mac_address: bmc_mac,
+                spiffe_service_id: None,
+                session: None,
+                error: err.to_string(),
+            });
         }
         self.clear_lockout(bmc_mac).await;
         self.clear_no_session_service(bmc_mac).await;
     }
 
     /// Reset Circtuit Breaker
-    pub async fn note_credentials_updated(&self, bmc_mac: MacAddress) {
+    pub(crate) async fn note_credentials_updated(&self, bmc_mac: MacAddress) {
         self.clear_lockout(bmc_mac).await;
         self.clear_no_session_service(bmc_mac).await;
     }
@@ -500,14 +768,14 @@ impl BmcSessionManager {
     async fn clear_no_session_service(&self, bmc_mac: MacAddress) {
         if self.no_session_service.lock().await.remove(&bmc_mac) {
             tracing::info!(
-                %bmc_mac,
+                bmc_mac_address = %bmc_mac,
                 "BmcSessionManager: forgetting cached `no SessionService` decision; \
                  next issue_credentials will re-probe"
             );
         }
     }
 
-    pub async fn check_not_locked_out(&self, bmc_mac: MacAddress) -> Option<BmcSessionError> {
+    async fn check_not_locked_out(&self, bmc_mac: MacAddress) -> Option<BmcSessionError> {
         let lockouts = self.lockouts.lock().await;
         let state = lockouts.get(&bmc_mac)?;
         if state.tripped_at.is_some() {
@@ -537,13 +805,12 @@ impl BmcSessionManager {
         entry.last_status = status;
         if entry.consecutive_unauthorized >= self.lockout_threshold && entry.tripped_at.is_none() {
             entry.tripped_at = Some(Instant::now());
-            tracing::warn!(
-                %bmc_mac,
+            carbide_instrument::emit(BmcSessionLockoutBreakerTripped::new(
+                bmc_mac,
                 status,
-                consecutive_unauthorized = entry.consecutive_unauthorized,
-                threshold = self.lockout_threshold,
-                "BmcSessionManager: lockout-avoidance breaker tripped"
-            );
+                entry.consecutive_unauthorized,
+                self.lockout_threshold,
+            ));
             return Some(BmcSessionError::AvoidLockout {
                 bmc_mac,
                 consecutive_unauthorized: entry.consecutive_unauthorized,
@@ -555,7 +822,7 @@ impl BmcSessionManager {
 
     async fn clear_lockout(&self, bmc_mac: MacAddress) {
         if self.lockouts.lock().await.remove(&bmc_mac).is_some() {
-            tracing::info!(%bmc_mac, "BmcSessionManager: lockout-avoidance breaker cleared");
+            carbide_instrument::emit(BmcSessionLockoutBreakerCleared::new(bmc_mac));
         }
     }
 
@@ -601,7 +868,31 @@ impl BmcSessionManager {
     }
 }
 
-pub fn classify_unauthorized(err: &NvError<RedfishBmc>) -> Option<u16> {
+/// The sessions a caller must give up to fit under `cap`: the oldest ones,
+/// keeping the newest `cap`. `outstanding` is expected oldest-first, as
+/// [`BmcSessionStore::find_by_owner`] returns it, and to contain the row for
+/// `just_minted`.
+///
+/// `just_minted` is excluded *before* the excess is selected: concurrent
+/// replicas can mint within the same server-side `now()`, and an `issued_at`
+/// tie is broken lexically, which can sort the just-minted row among the
+/// "oldest". The session whose token is about to be handed out must survive,
+/// and skipping it may not shrink the revocation count -- otherwise a tie
+/// would leave the caller one over the cap.
+fn sessions_beyond_cap(
+    outstanding: Vec<StoredSession>,
+    cap: usize,
+    just_minted: &ODataId,
+) -> Vec<StoredSession> {
+    let excess = outstanding.len().saturating_sub(cap);
+    outstanding
+        .into_iter()
+        .filter(|row| ODataId::from(row.session_odata_id.clone()) != *just_minted)
+        .take(excess)
+        .collect()
+}
+
+fn classify_unauthorized(err: &NvError<RedfishBmc>) -> Option<u16> {
     let NvError::Bmc(BmcError::InvalidResponse { status, .. }) = err else {
         return None;
     };
@@ -619,71 +910,153 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
+    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
     use carbide_secrets::SecretsError;
     use carbide_secrets::credentials::{
         BmcCredentialType, CredentialKey, CredentialManager, CredentialReader, CredentialWriter,
         Credentials,
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_test_support::{Check, check_values, value_scenarios};
+    use db::ConditionalWrite;
+    use db::bmc_redfish_session::SessionNotOwned;
     use mac_address::MacAddress;
     use sqlx::types::chrono::Utc;
     use tokio::sync::Mutex;
 
-    use super::{BmcSessionError, BmcSessionManager, BmcSessionStore, StoredSession};
+    use super::{
+        BmcSessionCleanupFailed, BmcSessionCleanupOperation, BmcSessionError, BmcSessionManager,
+        BmcSessionStore, StoredSession,
+    };
 
     fn mac(byte: u8) -> MacAddress {
         MacAddress::from([byte, 0, 0, 0, 0, 1])
     }
 
     const TEST_LOCKOUT_THRESHOLD: u32 = 3;
+    const TEST_MAX_SESSIONS_PER_CALLER: usize = 4;
+    const CLEANUP_FAILURE_METRIC: &str = "carbide_bmc_session_cleanup_failures_total";
 
+    /// One row per session, insertion-ordered like the Postgres store's
+    /// `issued_at` ordering (rows are only ever appended).
     #[derive(Default)]
     struct InMemoryBmcSessionStore {
-        rows: Mutex<HashMap<(String, MacAddress), StoredSession>>,
+        rows: Mutex<Vec<StoredSession>>,
     }
 
     impl InMemoryBmcSessionStore {
         fn new() -> Arc<Self> {
             Arc::new(Self::default())
         }
+
+        async fn rows(&self) -> Vec<StoredSession> {
+            self.rows.lock().await.clone()
+        }
     }
 
     #[async_trait]
     impl BmcSessionStore for InMemoryBmcSessionStore {
-        async fn get(
+        async fn find_by_owner(
             &self,
             spiffe_service_id: &str,
             bmc_mac: MacAddress,
-        ) -> Result<Option<StoredSession>, BmcSessionError> {
+        ) -> Result<Vec<StoredSession>, BmcSessionError> {
             Ok(self
                 .rows
                 .lock()
                 .await
-                .get(&(spiffe_service_id.to_owned(), bmc_mac))
-                .cloned())
+                .iter()
+                .filter(|row| {
+                    row.spiffe_service_id == spiffe_service_id && row.bmc_mac_address == bmc_mac
+                })
+                .cloned()
+                .collect())
         }
 
-        async fn upsert(
+        async fn insert(
             &self,
             spiffe_service_id: &str,
             bmc_mac: MacAddress,
             session_odata_id: &str,
         ) -> Result<(), BmcSessionError> {
-            self.rows.lock().await.insert(
-                (spiffe_service_id.to_owned(), bmc_mac),
-                StoredSession {
-                    spiffe_service_id: spiffe_service_id.to_owned(),
-                    bmc_mac_address: bmc_mac,
-                    session_odata_id: session_odata_id.to_owned(),
-                    issued_at: Utc::now(),
-                },
-            );
+            let mut rows = self.rows.lock().await;
+            // Mirror the Postgres ON CONFLICT: a colliding row describes a
+            // session the BMC has already replaced, so it is taken over.
+            rows.retain(|row| {
+                row.bmc_mac_address != bmc_mac || row.session_odata_id != session_odata_id
+            });
+            rows.push(StoredSession {
+                spiffe_service_id: spiffe_service_id.to_owned(),
+                bmc_mac_address: bmc_mac,
+                session_odata_id: session_odata_id.to_owned(),
+                issued_at: Utc::now(),
+            });
             Ok(())
         }
 
+        async fn delete_session(
+            &self,
+            spiffe_service_id: &str,
+            bmc_mac: MacAddress,
+            session_odata_id: &str,
+        ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+            let mut rows = self.rows.lock().await;
+            let before = rows.len();
+            rows.retain(|row| {
+                row.spiffe_service_id != spiffe_service_id
+                    || row.bmc_mac_address != bmc_mac
+                    || row.session_odata_id != session_odata_id
+            });
+            Ok(if rows.len() < before {
+                ConditionalWrite::Applied(())
+            } else {
+                ConditionalWrite::NotApplied(SessionNotOwned)
+            })
+        }
+
         async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
-            self.rows.lock().await.retain(|(_, m), _| *m != bmc_mac);
+            self.rows
+                .lock()
+                .await
+                .retain(|row| row.bmc_mac_address != bmc_mac);
             Ok(())
+        }
+    }
+
+    struct DeleteFailingBmcSessionStore;
+
+    #[async_trait]
+    impl BmcSessionStore for DeleteFailingBmcSessionStore {
+        async fn find_by_owner(
+            &self,
+            _spiffe_service_id: &str,
+            _bmc_mac: MacAddress,
+        ) -> Result<Vec<StoredSession>, BmcSessionError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert(
+            &self,
+            _spiffe_service_id: &str,
+            _bmc_mac: MacAddress,
+            _session_odata_id: &str,
+        ) -> Result<(), BmcSessionError> {
+            Ok(())
+        }
+
+        async fn delete_session(
+            &self,
+            _spiffe_service_id: &str,
+            _bmc_mac: MacAddress,
+            _session_odata_id: &str,
+        ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+            Ok(ConditionalWrite::Applied(()))
+        }
+
+        async fn delete_by_mac(&self, _bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
+            Err(BmcSessionError::Store(
+                "injected session-row deletion failure".to_string(),
+            ))
         }
     }
 
@@ -715,8 +1088,81 @@ mod tests {
             store.clone(),
             threshold,
             allow_basic_auth_fallback,
+            TEST_MAX_SESSIONS_PER_CALLER,
         ));
         (manager, store)
+    }
+
+    fn cap_row(n: u8) -> StoredSession {
+        StoredSession {
+            spiffe_service_id: "svc".to_string(),
+            bmc_mac_address: mac(0x10),
+            session_odata_id: format!("/sessions/{n}"),
+            // Explicit, distinct timestamps document the oldest-first input
+            // ordering the function's contract assumes.
+            issued_at: Utc::now() + chrono::Duration::seconds(i64::from(n)),
+        }
+    }
+
+    /// Runs the selection over rows `/sessions/0..rows` with the row at
+    /// index `minted` playing the just-minted session.
+    fn observe_sessions_beyond_cap((rows, cap, minted): (u8, usize, u8)) -> Vec<String> {
+        let just_minted = nv_redfish::core::ODataId::from(format!("/sessions/{minted}"));
+        super::sessions_beyond_cap((0..rows).map(cap_row).collect(), cap, &just_minted)
+            .into_iter()
+            .map(|row| row.session_odata_id)
+            .collect()
+    }
+
+    #[test]
+    fn sessions_beyond_cap_keeps_the_newest_cap_sessions() {
+        // The just-minted row is the newest (last index) except where the
+        // scenario says otherwise.
+        check_values(
+            [
+                Check {
+                    scenario: "under cap",
+                    input: (3, 4, 2),
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "exactly at cap",
+                    input: (4, 4, 3),
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "one over revokes the oldest",
+                    input: (5, 4, 4),
+                    expect: vec!["/sessions/0".to_string()],
+                },
+                // Regression: an issued_at tie can sort the just-minted row
+                // among the "oldest". It must survive, and the caller must
+                // still land on the cap -- the next-oldest goes instead.
+                Check {
+                    scenario: "minted row sorted oldest survives, next-oldest goes",
+                    input: (5, 4, 0),
+                    expect: vec!["/sessions/1".to_string()],
+                },
+                Check {
+                    scenario: "many over revoke oldest first",
+                    input: (7, 4, 6),
+                    expect: vec![
+                        "/sessions/0".to_string(),
+                        "/sessions/1".to_string(),
+                        "/sessions/2".to_string(),
+                    ],
+                },
+                // The constructor clamps the configured cap to >= 1, so 0 is
+                // unreachable in production; the function itself still
+                // behaves sanely: everything but the minted row goes.
+                Check {
+                    scenario: "cap of zero revokes everything else",
+                    input: (2, 0, 1),
+                    expect: vec!["/sessions/0".to_string()],
+                },
+            ],
+            observe_sessions_beyond_cap,
+        );
     }
 
     #[test]
@@ -734,13 +1180,14 @@ mod tests {
         session_odata_id: &str,
     ) {
         store
-            .upsert(spiffe_service_id, bmc_mac, session_odata_id)
+            .insert(spiffe_service_id, bmc_mac, session_odata_id)
             .await
-            .expect("in-memory upsert never fails");
+            .expect("in-memory insert never fails");
     }
 
     #[tokio::test]
     async fn flush_mac_deletes_store_rows_and_clears_lockout() {
+        let _metrics = MetricsCapture::start();
         let (manager, store) = manager_with_creds();
         let mac_a = mac(0xAA);
         let mac_b = mac(0xBB);
@@ -753,16 +1200,89 @@ mod tests {
         manager.flush_mac(mac_a).await;
 
         // mac_a rows are gone, mac_b survives.
-        let rows = store.rows.lock().await;
+        let rows = store.rows().await;
         assert_eq!(rows.len(), 1);
-        assert!(rows.keys().all(|(_, m)| *m == mac_b));
-        drop(rows);
+        assert!(rows.iter().all(|row| row.bmc_mac_address == mac_b));
         // lockout was cleared along with the rows.
         assert!(manager.check_not_locked_out(mac_a).await.is_none());
     }
 
+    #[test]
+    fn flush_mac_counts_store_delete_failure_and_still_clears_cached_state() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
+        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let credential_manager =
+            Arc::new(TestCredentialManager::new(Credentials::UsernamePassword {
+                username: "root".to_string(),
+                password: "password".to_string(),
+            }));
+        let manager = Arc::new(BmcSessionManager::new(
+            redfish_pool,
+            credential_manager,
+            Arc::new(DeleteFailingBmcSessionStore),
+            TEST_LOCKOUT_THRESHOLD,
+            false,
+            TEST_MAX_SESSIONS_PER_CALLER,
+        ));
+        let bmc_mac = mac(0xAF);
+
+        runtime.block_on(async {
+            manager.force_trip_for_test(bmc_mac, 3, 401).await;
+            manager.no_session_service.lock().await.insert(bmc_mac);
+        });
+
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| runtime.block_on(manager.flush_mac(bmc_mac)));
+        let cleanup_logs = logs
+            .iter()
+            .filter(|log| log.field("metric_name") == Some(CLEANUP_FAILURE_METRIC))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            cleanup_logs.len(),
+            1,
+            "the injected store failure should emit one cleanup Event"
+        );
+        let log = cleanup_logs[0];
+        let bmc_mac_address = bmc_mac.to_string();
+        assert_eq!(log.level, tracing::Level::WARN);
+        assert_eq!(log.metadata_name, "bmc_session_cleanup_failed");
+        assert_eq!(
+            log.message,
+            "failed to delete BMC session rows during flush_mac; continuing"
+        );
+        assert_eq!(log.field("operation"), Some("delete_session_rows"));
+        assert_eq!(log.field("bmc_mac_address"), Some(bmc_mac_address.as_str()));
+        assert_eq!(
+            log.field("error"),
+            Some("BMC session store error: injected session-row deletion failure")
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                CLEANUP_FAILURE_METRIC,
+                &[("operation", "delete_session_rows")]
+            ),
+            1.0
+        );
+
+        runtime.block_on(async {
+            assert!(
+                manager.check_not_locked_out(bmc_mac).await.is_none(),
+                "`flush_mac` should clear the breaker after a store failure"
+            );
+            assert!(
+                !manager.no_session_service.lock().await.contains(&bmc_mac),
+                "`flush_mac` should clear the SessionService cache after a store failure"
+            );
+        });
+    }
+
     #[tokio::test]
     async fn note_credentials_updated_retains_store_rows() {
+        let _metrics = MetricsCapture::start();
         let (manager, store) = manager_with_creds();
         let bmc_mac = mac(0xCC);
         seed_row(&store, "svc-1", bmc_mac, "/sessions/keep-me").await;
@@ -770,26 +1290,61 @@ mod tests {
 
         manager.note_credentials_updated(bmc_mac).await;
 
-        // Row is still present so the next rotate can revoke it with the
-        // new creds; the breaker has been cleared.
-        let rows = store.rows.lock().await;
-        assert!(rows.contains_key(&("svc-1".to_string(), bmc_mac)));
-        drop(rows);
+        // Row is still present so a later mint's cap pass can clean up the
+        // stale session with the new creds; the breaker has been cleared.
+        let rows = store.rows().await;
+        assert!(
+            rows.iter()
+                .any(|row| row.spiffe_service_id == "svc-1" && row.bmc_mac_address == bmc_mac)
+        );
         assert!(manager.check_not_locked_out(bmc_mac).await.is_none());
     }
 
+    // The regression this change exists for: callers sharing one SPIFFE
+    // identity each keep their own session row. Under the old
+    // one-row-per-identity model the second insert overwrote (and the
+    // manager then revoked) the first caller's session.
     #[tokio::test]
-    async fn in_memory_store_upsert_replaces_existing_row() {
+    async fn store_keeps_one_row_per_session_for_one_identity() {
         let store = InMemoryBmcSessionStore::new();
         let bmc_mac = mac(0xDD);
-        store.upsert("svc", bmc_mac, "/sessions/v1").await.unwrap();
-        store.upsert("svc", bmc_mac, "/sessions/v2").await.unwrap();
-        let row = store
-            .get("svc", bmc_mac)
+        store.insert("svc", bmc_mac, "/sessions/v1").await.unwrap();
+        store.insert("svc", bmc_mac, "/sessions/v2").await.unwrap();
+
+        let rows = store
+            .find_by_owner("svc", bmc_mac)
             .await
-            .expect("ok")
-            .expect("row present");
-        assert_eq!(row.session_odata_id, "/sessions/v2");
+            .expect("in-memory find never fails");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.session_odata_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/sessions/v1", "/sessions/v2"],
+            "both sessions must coexist, oldest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_delete_session_removes_only_that_session() {
+        let store = InMemoryBmcSessionStore::new();
+        let bmc_mac = mac(0xDE);
+        store.insert("svc", bmc_mac, "/sessions/v1").await.unwrap();
+        store.insert("svc", bmc_mac, "/sessions/v2").await.unwrap();
+
+        assert_eq!(
+            store
+                .delete_session("svc", bmc_mac, "/sessions/v1")
+                .await
+                .expect("in-memory delete never fails"),
+            ConditionalWrite::Applied(())
+        );
+
+        let rows = store
+            .find_by_owner("svc", bmc_mac)
+            .await
+            .expect("in-memory find never fails");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_odata_id, "/sessions/v2");
     }
 
     #[tokio::test]
@@ -804,12 +1359,13 @@ mod tests {
             store,
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         );
 
         let bmc_mac = mac(0xCE);
         let bmc_addr = "127.0.0.1:9999".parse().unwrap();
         let err = manager
-            .rotate("svc-x", bmc_mac, bmc_addr)
+            .mint_session("svc-x", bmc_mac, bmc_addr)
             .await
             .expect_err("should fail with missing root credentials");
         match err {
@@ -961,6 +1517,13 @@ mod tests {
 
     #[async_trait]
     impl CredentialWriter for CountingCredentialManager {
+        async fn get_credentials_from_writer(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            CredentialReader::get_credentials(self, key).await
+        }
+
         async fn set_credentials(
             &self,
             _key: &CredentialKey,
@@ -1002,6 +1565,7 @@ mod tests {
             store,
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         ));
 
         let bmc_mac = mac(0xAB);
@@ -1012,7 +1576,7 @@ mod tests {
             let manager = manager.clone();
             let spiffe = format!("svc-{i}");
             handles.push(tokio::spawn(async move {
-                let _ = manager.rotate(&spiffe, bmc_mac, bmc_addr).await;
+                let _ = manager.mint_session(&spiffe, bmc_mac, bmc_addr).await;
             }));
         }
         for h in handles {
@@ -1051,6 +1615,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_unauthorized_trips_at_threshold() {
+        let _metrics = MetricsCapture::start();
         let (manager, _store) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xDE);
         assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
@@ -1080,6 +1645,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_unauthorized_only_emits_avoid_lockout_on_the_tripping_request() {
+        let _metrics = MetricsCapture::start();
         let (manager, _store) = manager_with_creds_and_threshold(2);
         let bmc_mac = mac(0xDE);
         assert!(manager.record_unauthorized(bmc_mac, 401).await.is_none());
@@ -1095,8 +1661,398 @@ mod tests {
         );
     }
 
+    const TEST_SPIFFE_SERVICE_ID: &str = "spiffe://example.test/service";
+    const TEST_SESSION_ID: &str = "/redfish/v1/SessionService/Sessions/42";
+
+    #[derive(Debug)]
+    enum CleanupFailureCase {
+        RevokePriorSession,
+        ListSessionsForRevoke,
+        RevokeUnpersistedSession,
+        DeleteSessionRows,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct CleanupFailureObservation {
+        level: tracing::Level,
+        metadata_name: String,
+        message: String,
+        event_name: Option<String>,
+        metric_name: Option<String>,
+        operation: Option<String>,
+        bmc_mac_address: Option<String>,
+        spiffe_service_id: Option<String>,
+        session: Option<String>,
+        error: Option<String>,
+        spiffe_service_id_kind: Option<CapturedFieldKind>,
+        error_kind: Option<CapturedFieldKind>,
+        counter_delta: f64,
+    }
+
+    fn observe_cleanup_failure(case: CleanupFailureCase) -> CleanupFailureObservation {
+        let bmc_mac = mac(0xBC);
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| match case {
+            CleanupFailureCase::RevokePriorSession => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::RevokePriorSession,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(TEST_SPIFFE_SERVICE_ID.to_string()),
+                    session: Some(nv_redfish::core::ODataId::from(TEST_SESSION_ID.to_string())),
+                    error: "DeleteError { status: 500 }".to_string(),
+                });
+            }
+            CleanupFailureCase::ListSessionsForRevoke => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(TEST_SPIFFE_SERVICE_ID.to_string()),
+                    session: None,
+                    error: "ListError { status: 503 }".to_string(),
+                });
+            }
+            CleanupFailureCase::RevokeUnpersistedSession => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::RevokeUnpersistedSession,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(TEST_SPIFFE_SERVICE_ID.to_string()),
+                    session: Some(nv_redfish::core::ODataId::from(TEST_SESSION_ID.to_string())),
+                    error: "DeleteError { status: 500 }".to_string(),
+                });
+            }
+            CleanupFailureCase::DeleteSessionRows => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::DeleteSessionRows,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: None,
+                    session: None,
+                    error: "BMC session store error: database unavailable".to_string(),
+                });
+            }
+        });
+        assert_eq!(
+            logs.len(),
+            1,
+            "each cleanup failure should write one record"
+        );
+        let log = logs.first().expect("cleanup failure Event did not log");
+        let operation = log.field("operation").map(str::to_string);
+
+        CleanupFailureObservation {
+            level: log.level,
+            metadata_name: log.metadata_name.clone(),
+            message: log.message.clone(),
+            event_name: log.field("event_name").map(str::to_string),
+            metric_name: log.field("metric_name").map(str::to_string),
+            operation: operation.clone(),
+            bmc_mac_address: log.field("bmc_mac_address").map(str::to_string),
+            spiffe_service_id: log.field("spiffe_service_id").map(str::to_string),
+            session: log.field("session").map(str::to_string),
+            error: log.field("error").map(str::to_string),
+            spiffe_service_id_kind: log.field_kind("spiffe_service_id"),
+            error_kind: log.field_kind("error"),
+            counter_delta: metrics.counter_delta(
+                CLEANUP_FAILURE_METRIC,
+                &[(
+                    "operation",
+                    operation
+                        .as_deref()
+                        .expect("cleanup failure Event should label its operation"),
+                )],
+            ),
+        }
+    }
+
+    fn expected_cleanup_failure(
+        event_name: &str,
+        message: &str,
+        operation: &str,
+        spiffe_service_id: Option<&str>,
+        session: Option<&str>,
+        error: &str,
+    ) -> CleanupFailureObservation {
+        CleanupFailureObservation {
+            level: tracing::Level::WARN,
+            metadata_name: event_name.to_string(),
+            message: message.to_string(),
+            event_name: Some(event_name.to_string()),
+            metric_name: Some(CLEANUP_FAILURE_METRIC.to_string()),
+            operation: Some(operation.to_string()),
+            bmc_mac_address: Some(mac(0xBC).to_string()),
+            spiffe_service_id: spiffe_service_id.map(str::to_string),
+            session: session.map(str::to_string),
+            error: Some(error.to_string()),
+            spiffe_service_id_kind: spiffe_service_id.map(|_| CapturedFieldKind::Debug),
+            error_kind: Some(CapturedFieldKind::Debug),
+            counter_delta: 1.0,
+        }
+    }
+
+    #[test]
+    fn cleanup_failures_log_and_count_by_operation() {
+        value_scenarios!(
+            run = observe_cleanup_failure;
+            "prior session revoke fails" {
+                CleanupFailureCase::RevokePriorSession => expected_cleanup_failure(
+                    "bmc_session_cleanup_failed",
+                    "failed to revoke an excess BMC session; it will leak until BMC idle timeout",
+                    "revoke_prior_session",
+                    Some(TEST_SPIFFE_SERVICE_ID),
+                    Some(TEST_SESSION_ID),
+                    "DeleteError { status: 500 }",
+                ),
+            }
+            "session listing for prior revoke fails" {
+                CleanupFailureCase::ListSessionsForRevoke => expected_cleanup_failure(
+                    "bmc_session_cleanup_failed",
+                    "failed to list BMC sessions for excess-session revoke; continuing",
+                    "list_sessions_for_revoke",
+                    Some(TEST_SPIFFE_SERVICE_ID),
+                    None,
+                    "ListError { status: 503 }",
+                ),
+            }
+            "unpersisted session rollback revoke fails" {
+                CleanupFailureCase::RevokeUnpersistedSession => expected_cleanup_failure(
+                    "bmc_session_cleanup_failed",
+                    "failed to revoke just-created session after store upsert failed; it will leak until BMC idle timeout",
+                    "revoke_unpersisted_session",
+                    Some(TEST_SPIFFE_SERVICE_ID),
+                    Some(TEST_SESSION_ID),
+                    "DeleteError { status: 500 }",
+                ),
+            }
+            "flush store deletion fails" {
+                CleanupFailureCase::DeleteSessionRows => expected_cleanup_failure(
+                    "bmc_session_cleanup_failed",
+                    "failed to delete BMC session rows during flush_mac; continuing",
+                    "delete_session_rows",
+                    None,
+                    None,
+                    "BMC session store error: database unavailable",
+                ),
+            }
+        );
+    }
+
+    const BREAKER_TRANSITION_METRIC: &str = "carbide_bmc_session_lockout_breaker_transitions_total";
+
+    #[derive(Clone, Copy)]
+    enum BreakerTransitionCase {
+        Trip,
+        ClearExisting,
+        ClearMissing,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct BreakerTransitionObservation {
+        tripped_delta: f64,
+        cleared_delta: f64,
+        unauthorized_results: Vec<bool>,
+        remains_locked_out: bool,
+        logs: Vec<BreakerTransitionLog>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct BreakerTransitionLog {
+        metadata_name: String,
+        level: tracing::Level,
+        message: String,
+        event_name: Option<String>,
+        metric_name: Option<String>,
+        transition: Option<String>,
+        bmc_mac_address: Option<String>,
+        http_status: Option<String>,
+        consecutive_unauthorized_count: Option<String>,
+        lockout_threshold_count: Option<String>,
+        transition_kind: Option<CapturedFieldKind>,
+        bmc_mac_address_kind: Option<CapturedFieldKind>,
+        http_status_kind: Option<CapturedFieldKind>,
+        consecutive_unauthorized_count_kind: Option<CapturedFieldKind>,
+        lockout_threshold_count_kind: Option<CapturedFieldKind>,
+    }
+
+    fn observe_breaker_transition(case: BreakerTransitionCase) -> BreakerTransitionObservation {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        let (manager, _store) = manager_with_creds_and_threshold(2);
+        let bmc_mac = mac(0xDE);
+        let metrics = MetricsCapture::start();
+        let mut unauthorized_results = Vec::new();
+
+        let logs = capture_logs(|| {
+            runtime.block_on(async {
+                match case {
+                    BreakerTransitionCase::Trip => {
+                        unauthorized_results
+                            .push(manager.record_unauthorized(bmc_mac, 401).await.is_some());
+                        unauthorized_results
+                            .push(manager.record_unauthorized(bmc_mac, 403).await.is_some());
+                        unauthorized_results
+                            .push(manager.record_unauthorized(bmc_mac, 401).await.is_some());
+                    }
+                    BreakerTransitionCase::ClearExisting => {
+                        manager.force_trip_for_test(bmc_mac, 4, 403).await;
+                        manager.clear_lockout(bmc_mac).await;
+                    }
+                    BreakerTransitionCase::ClearMissing => {
+                        manager.clear_lockout(bmc_mac).await;
+                    }
+                }
+            });
+        })
+        .into_iter()
+        .filter(|log| log.field("metric_name") == Some(BREAKER_TRANSITION_METRIC))
+        .map(|log| {
+            let event_name = log.field("event_name").map(str::to_string);
+            let metric_name = log.field("metric_name").map(str::to_string);
+            let transition = log.field("transition").map(str::to_string);
+            let bmc_mac_address = log.field("bmc_mac_address").map(str::to_string);
+            let http_status = log.field("http_status").map(str::to_string);
+            let consecutive_unauthorized_count = log
+                .field("consecutive_unauthorized_count")
+                .map(str::to_string);
+            let lockout_threshold_count = log.field("lockout_threshold_count").map(str::to_string);
+            let transition_kind = log.field_kind("transition");
+            let bmc_mac_address_kind = log.field_kind("bmc_mac_address");
+            let http_status_kind = log.field_kind("http_status");
+            let consecutive_unauthorized_count_kind =
+                log.field_kind("consecutive_unauthorized_count");
+            let lockout_threshold_count_kind = log.field_kind("lockout_threshold_count");
+
+            BreakerTransitionLog {
+                metadata_name: log.metadata_name,
+                level: log.level,
+                message: log.message,
+                event_name,
+                metric_name,
+                transition,
+                bmc_mac_address,
+                http_status,
+                consecutive_unauthorized_count,
+                lockout_threshold_count,
+                transition_kind,
+                bmc_mac_address_kind,
+                http_status_kind,
+                consecutive_unauthorized_count_kind,
+                lockout_threshold_count_kind,
+            }
+        })
+        .collect();
+
+        let remains_locked_out = runtime
+            .block_on(manager.check_not_locked_out(bmc_mac))
+            .is_some();
+        BreakerTransitionObservation {
+            tripped_delta: metrics
+                .counter_delta(BREAKER_TRANSITION_METRIC, &[("transition", "tripped")]),
+            cleared_delta: metrics
+                .counter_delta(BREAKER_TRANSITION_METRIC, &[("transition", "cleared")]),
+            unauthorized_results,
+            remains_locked_out,
+            logs,
+        }
+    }
+
+    fn expected_breaker_transition_log(
+        event_name: &str,
+        level: tracing::Level,
+        message: &str,
+        transition: &str,
+        bmc_mac: MacAddress,
+        trip_context: Option<(u16, u32, u32)>,
+    ) -> BreakerTransitionLog {
+        let (http_status, consecutive_unauthorized_count, lockout_threshold_count) = trip_context
+            .map(|(status, consecutive, threshold)| {
+                (
+                    Some(status.to_string()),
+                    Some(consecutive.to_string()),
+                    Some(threshold.to_string()),
+                )
+            })
+            .unwrap_or_default();
+        let native_number_kind = trip_context.map(|_| CapturedFieldKind::I64);
+
+        BreakerTransitionLog {
+            metadata_name: event_name.to_string(),
+            level,
+            message: message.to_string(),
+            event_name: Some(event_name.to_string()),
+            metric_name: Some(BREAKER_TRANSITION_METRIC.to_string()),
+            transition: Some(transition.to_string()),
+            bmc_mac_address: Some(bmc_mac.to_string()),
+            http_status,
+            consecutive_unauthorized_count,
+            lockout_threshold_count,
+            transition_kind: Some(CapturedFieldKind::String),
+            bmc_mac_address_kind: Some(CapturedFieldKind::Debug),
+            http_status_kind: native_number_kind,
+            consecutive_unauthorized_count_kind: native_number_kind,
+            lockout_threshold_count_kind: native_number_kind,
+        }
+    }
+
+    #[test]
+    fn breaker_transitions_log_and_count_once() {
+        let bmc_mac = mac(0xDE);
+        check_values(
+            [
+                Check {
+                    scenario: "the first threshold crossing trips once",
+                    input: BreakerTransitionCase::Trip,
+                    expect: BreakerTransitionObservation {
+                        tripped_delta: 1.0,
+                        cleared_delta: 0.0,
+                        unauthorized_results: vec![false, true, false],
+                        remains_locked_out: true,
+                        logs: vec![expected_breaker_transition_log(
+                            "bmc_session_lockout_breaker_tripped",
+                            tracing::Level::WARN,
+                            "BmcSessionManager: lockout-avoidance breaker tripped",
+                            "tripped",
+                            bmc_mac,
+                            Some((403, 2, 2)),
+                        )],
+                    },
+                },
+                Check {
+                    scenario: "removing existing breaker state clears once",
+                    input: BreakerTransitionCase::ClearExisting,
+                    expect: BreakerTransitionObservation {
+                        tripped_delta: 0.0,
+                        cleared_delta: 1.0,
+                        unauthorized_results: Vec::new(),
+                        remains_locked_out: false,
+                        logs: vec![expected_breaker_transition_log(
+                            "bmc_session_lockout_breaker_cleared",
+                            tracing::Level::INFO,
+                            "BmcSessionManager: lockout-avoidance breaker cleared",
+                            "cleared",
+                            bmc_mac,
+                            None,
+                        )],
+                    },
+                },
+                Check {
+                    scenario: "clearing a missing breaker is a no-op",
+                    input: BreakerTransitionCase::ClearMissing,
+                    expect: BreakerTransitionObservation {
+                        tripped_delta: 0.0,
+                        cleared_delta: 0.0,
+                        unauthorized_results: Vec::new(),
+                        remains_locked_out: false,
+                        logs: Vec::new(),
+                    },
+                },
+            ],
+            observe_breaker_transition,
+        );
+    }
+
     #[tokio::test]
     async fn clear_lockout_removes_tripped_state() {
+        let _metrics = MetricsCapture::start();
         let (manager, _store) = manager_with_creds_and_threshold(1);
         let bmc_mac = mac(0xEE);
         manager.force_trip_for_test(bmc_mac, 1, 401).await;
@@ -1114,7 +2070,7 @@ mod tests {
 
         let bmc_addr = "127.0.0.1:9999".parse().unwrap();
         let err = manager
-            .rotate("svc-locked", bmc_mac, bmc_addr)
+            .mint_session("svc-locked", bmc_mac, bmc_addr)
             .await
             .expect_err("rotate must refuse to contact a locked-out BMC");
         match err {
@@ -1133,6 +2089,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_unauthorized_records_trip_exactly_once() {
+        let _metrics = MetricsCapture::start();
         let (manager, _store) = manager_with_creds_and_threshold(3);
         let bmc_mac = mac(0xF2);
 
@@ -1181,6 +2138,7 @@ mod tests {
             store,
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         );
 
         let bmc_mac = mac(0xA1);

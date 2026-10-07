@@ -8,11 +8,15 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
-	"github.com/google/uuid"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/uptrace/bun"
 )
@@ -82,8 +86,8 @@ var (
 	// REST-specific" default. Callers should use the helper functions
 	// below rather than this map directly.
 	vpcTypeCapabilities = map[string]struct {
-		// supportsRoutingProfile is true for VPC types that accept a
-		// `routingProfile` field on create. FNN-only today.
+		// supportsRoutingProfile is true for VPC types that accept named
+		// or inline routing-profile configuration. FNN-only.
 		supportsRoutingProfile bool
 
 		// supportsAutoInterface is true for VPC types that allow
@@ -98,8 +102,8 @@ var (
 	}
 )
 
-// VpcTypeSupportsRoutingProfile reports whether VPCs of the given
-// network-virtualization type accept a `routingProfile` on create.
+// VpcTypeSupportsRoutingProfile reports whether the given network-virtualization
+// type supports named or inline VPC routing-profile configuration.
 // A nil pointer (no type specified) returns false; the caller is
 // expected to have resolved any defaulting beforehand.
 func VpcTypeSupportsRoutingProfile(virtType *string) bool {
@@ -120,6 +124,183 @@ func VpcTypeSupportsAutoInterface(virtType *string) bool {
 	return vpcTypeCapabilities[*virtType].supportsAutoInterface
 }
 
+// VpcRouteTarget is the persisted representation of a routing-profile route target.
+type VpcRouteTarget struct {
+	ASN uint32 `json:"asn"`
+	VNI uint32 `json:"vni"`
+}
+
+// ToProto converts a persisted route target to its Core representation.
+func (target VpcRouteTarget) ToProto() *corev1.RouteTarget {
+	return &corev1.RouteTarget{Asn: target.ASN, Vni: target.VNI}
+}
+
+// FromProto populates a persisted route target from its Core representation.
+func (target *VpcRouteTarget) FromProto(protoTarget *corev1.RouteTarget) {
+	*target = VpcRouteTarget{}
+	if protoTarget == nil {
+		return
+	}
+	target.ASN = protoTarget.Asn
+	target.VNI = protoTarget.Vni
+}
+
+// VpcRoutingProfileOverrides contains presence-aware properties set directly on a VPC.
+// Nil properties inherit from the VPC's named routing profile, while present empty
+// lists explicitly replace the corresponding base-profile list with an empty list.
+type VpcRoutingProfileOverrides struct {
+	RouteTargetImports             *[]VpcRouteTarget `json:"routeTargetImports"`
+	RouteTargetsOnExports          *[]VpcRouteTarget `json:"routeTargetsOnExports"`
+	LeakDefaultRouteFromUnderlay   *bool             `json:"leakDefaultRouteFromUnderlay"`
+	LeakTenantHostRoutesToUnderlay *bool             `json:"leakTenantHostRoutesToUnderlay"`
+	TenantLeakCommunitiesAccepted  *bool             `json:"tenantLeakCommunitiesAccepted"`
+	AcceptedLeaksFromUnderlay      *[]string         `json:"acceptedLeaksFromUnderlay"`
+	AllowedAnycastPrefixes         *[]string         `json:"allowedAnycastPrefixes"`
+}
+
+// VpcEffectiveRoutingProfile is the fully resolved routing profile reported by Core.
+type VpcEffectiveRoutingProfile struct {
+	RouteTargetImports             []VpcRouteTarget `json:"routeTargetImports"`
+	RouteTargetsOnExports          []VpcRouteTarget `json:"routeTargetsOnExports"`
+	LeakDefaultRouteFromUnderlay   bool             `json:"leakDefaultRouteFromUnderlay"`
+	LeakTenantHostRoutesToUnderlay bool             `json:"leakTenantHostRoutesToUnderlay"`
+	TenantLeakCommunitiesAccepted  bool             `json:"tenantLeakCommunitiesAccepted"`
+	AcceptedLeaksFromUnderlay      []string         `json:"acceptedLeaksFromUnderlay"`
+	AllowedAnycastPrefixes         []string         `json:"allowedAnycastPrefixes"`
+	Internal                       bool             `json:"internal"`
+	AccessTier                     uint32           `json:"accessTier"`
+}
+
+// vpcRouteTargetsToProto converts persisted route targets to their Core wire representation.
+func vpcRouteTargetsToProto(targets []VpcRouteTarget) []*corev1.RouteTarget {
+	protoTargets := make([]*corev1.RouteTarget, 0, len(targets))
+	for _, target := range targets {
+		protoTargets = append(protoTargets, target.ToProto())
+	}
+	return protoTargets
+}
+
+// vpcRouteTargetsFromProto converts Core route targets to their persisted representation.
+func vpcRouteTargetsFromProto(targets []*corev1.RouteTarget) []VpcRouteTarget {
+	dbTargets := make([]VpcRouteTarget, 0, len(targets))
+	for _, protoTarget := range targets {
+		target := VpcRouteTarget{}
+		target.FromProto(protoTarget)
+		dbTargets = append(dbTargets, target)
+	}
+	return dbTargets
+}
+
+// vpcPrefixesToProto converts stored CIDR strings to Core prefix-filter entries.
+func vpcPrefixesToProto(prefixes []string) []*corev1.PrefixFilterPolicyEntry {
+	entries := make([]*corev1.PrefixFilterPolicyEntry, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		entries = append(entries, &corev1.PrefixFilterPolicyEntry{Prefix: prefix})
+	}
+	return entries
+}
+
+// vpcPrefixesFromProto converts Core prefix-filter entries to stored CIDR strings.
+func vpcPrefixesFromProto(entries []*corev1.PrefixFilterPolicyEntry) []string {
+	prefixes := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		prefixes = append(prefixes, entry.GetPrefix())
+	}
+	return prefixes
+}
+
+// ToProto converts VPC routing-profile overrides to their presence-aware Core representation.
+func (profile *VpcRoutingProfileOverrides) ToProto() *corev1.VpcRoutingProfileOverrides {
+	if profile == nil {
+		return nil
+	}
+
+	protoProfile := &corev1.VpcRoutingProfileOverrides{
+		LeakDefaultRouteFromUnderlay:   profile.LeakDefaultRouteFromUnderlay,
+		LeakTenantHostRoutesToUnderlay: profile.LeakTenantHostRoutesToUnderlay,
+		TenantLeakCommunitiesAccepted:  profile.TenantLeakCommunitiesAccepted,
+	}
+	if profile.RouteTargetImports != nil {
+		protoProfile.RouteTargetImports = &corev1.RouteTargets{Values: vpcRouteTargetsToProto(*profile.RouteTargetImports)}
+	}
+	if profile.RouteTargetsOnExports != nil {
+		protoProfile.RouteTargetsOnExports = &corev1.RouteTargets{Values: vpcRouteTargetsToProto(*profile.RouteTargetsOnExports)}
+	}
+	if profile.AcceptedLeaksFromUnderlay != nil {
+		protoProfile.AcceptedLeaksFromUnderlay = &corev1.PrefixFilterPolicyEntries{Values: vpcPrefixesToProto(*profile.AcceptedLeaksFromUnderlay)}
+	}
+	if profile.AllowedAnycastPrefixes != nil {
+		protoProfile.AllowedAnycastPrefixes = &corev1.PrefixFilterPolicyEntries{Values: vpcPrefixesToProto(*profile.AllowedAnycastPrefixes)}
+	}
+
+	return protoProfile
+}
+
+// FromProto populates VPC routing-profile overrides from Core while preserving field presence.
+func (profile *VpcRoutingProfileOverrides) FromProto(protoProfile *corev1.VpcRoutingProfileOverrides) {
+	*profile = VpcRoutingProfileOverrides{}
+	if protoProfile == nil {
+		return
+	}
+
+	profile.LeakDefaultRouteFromUnderlay = protoProfile.LeakDefaultRouteFromUnderlay
+	profile.LeakTenantHostRoutesToUnderlay = protoProfile.LeakTenantHostRoutesToUnderlay
+	profile.TenantLeakCommunitiesAccepted = protoProfile.TenantLeakCommunitiesAccepted
+	if protoProfile.RouteTargetImports != nil {
+		targets := vpcRouteTargetsFromProto(protoProfile.RouteTargetImports.Values)
+		profile.RouteTargetImports = &targets
+	}
+	if protoProfile.RouteTargetsOnExports != nil {
+		targets := vpcRouteTargetsFromProto(protoProfile.RouteTargetsOnExports.Values)
+		profile.RouteTargetsOnExports = &targets
+	}
+	if protoProfile.AcceptedLeaksFromUnderlay != nil {
+		prefixes := vpcPrefixesFromProto(protoProfile.AcceptedLeaksFromUnderlay.Values)
+		profile.AcceptedLeaksFromUnderlay = &prefixes
+	}
+	if protoProfile.AllowedAnycastPrefixes != nil {
+		prefixes := vpcPrefixesFromProto(protoProfile.AllowedAnycastPrefixes.Values)
+		profile.AllowedAnycastPrefixes = &prefixes
+	}
+}
+
+// ToProto converts a resolved VPC routing profile to the Core status representation.
+func (profile *VpcEffectiveRoutingProfile) ToProto() *corev1.VpcEffectiveRoutingProfile {
+	if profile == nil {
+		return nil
+	}
+
+	return &corev1.VpcEffectiveRoutingProfile{
+		RouteTargetImports:             vpcRouteTargetsToProto(profile.RouteTargetImports),
+		RouteTargetsOnExports:          vpcRouteTargetsToProto(profile.RouteTargetsOnExports),
+		LeakDefaultRouteFromUnderlay:   profile.LeakDefaultRouteFromUnderlay,
+		LeakTenantHostRoutesToUnderlay: profile.LeakTenantHostRoutesToUnderlay,
+		TenantLeakCommunitiesAccepted:  profile.TenantLeakCommunitiesAccepted,
+		AcceptedLeaksFromUnderlay:      vpcPrefixesToProto(profile.AcceptedLeaksFromUnderlay),
+		AllowedAnycastPrefixes:         vpcPrefixesToProto(profile.AllowedAnycastPrefixes),
+		Internal:                       profile.Internal,
+		AccessTier:                     profile.AccessTier,
+	}
+}
+
+// FromProto populates a resolved VPC routing profile from the Core status representation.
+func (profile *VpcEffectiveRoutingProfile) FromProto(protoProfile *corev1.VpcEffectiveRoutingProfile) {
+	*profile = VpcEffectiveRoutingProfile{}
+	if protoProfile == nil {
+		return
+	}
+
+	profile.RouteTargetImports = vpcRouteTargetsFromProto(protoProfile.RouteTargetImports)
+	profile.RouteTargetsOnExports = vpcRouteTargetsFromProto(protoProfile.RouteTargetsOnExports)
+	profile.LeakDefaultRouteFromUnderlay = protoProfile.LeakDefaultRouteFromUnderlay
+	profile.LeakTenantHostRoutesToUnderlay = protoProfile.LeakTenantHostRoutesToUnderlay
+	profile.TenantLeakCommunitiesAccepted = protoProfile.TenantLeakCommunitiesAccepted
+	profile.AcceptedLeaksFromUnderlay = vpcPrefixesFromProto(protoProfile.AcceptedLeaksFromUnderlay)
+	profile.AllowedAnycastPrefixes = vpcPrefixesFromProto(protoProfile.AllowedAnycastPrefixes)
+	profile.Internal = protoProfile.Internal
+	profile.AccessTier = protoProfile.AccessTier
+}
+
 // Vpc represents entries in the vpc table
 type Vpc struct {
 	bun.BaseModel `bun:"table:vpc,alias:v"`
@@ -137,7 +318,11 @@ type Vpc struct {
 	NVLinkLogicalPartitionID               *uuid.UUID                              `bun:"nvlink_logical_partition_id,type:uuid"`
 	NVLinkLogicalPartition                 *NVLinkLogicalPartition                 `bun:"rel:belongs-to,join:nvlink_logical_partition_id=id"`
 	NetworkVirtualizationType              *string                                 `bun:"network_virtualization_type"`
+	SlaacEnabled                           bool                                    `bun:"slaac_enabled,notnull"`
 	RoutingProfile                         *string                                 `bun:"routing_profile"`
+	PowerResourceGroup                     *string                                 `bun:"power_resource_group"`
+	RoutingProfileOverrides                *VpcRoutingProfileOverrides             `bun:"routing_profile_overrides,type:jsonb"`
+	EffectiveRoutingProfile                *VpcEffectiveRoutingProfile             `bun:"effective_routing_profile,type:jsonb"`
 	ControllerVpcID                        *uuid.UUID                              `bun:"controller_vpc_id,type:uuid"`
 	ActiveVni                              *int                                    `bun:"active_vni,type:integer"`
 	NetworkSecurityGroupID                 *string                                 `bun:"network_security_group_id"`
@@ -163,77 +348,98 @@ func (vpc *Vpc) GetSiteID() *uuid.UUID {
 	return &vpc.ID
 }
 
-// toMetadataProto builds a workflow Metadata proto from the VPC's Name,
-// Description, and Labels. Description defaults to the empty string when
-// the receiver's pointer is nil; this matches the existing handler
-// behaviour.
-func (vpc *Vpc) toMetadataProto() *cwssaws.Metadata {
-	md := &cwssaws.Metadata{
-		Name:        vpc.Name,
-		Description: "",
-	}
-	if vpc.Description != nil {
-		md.Description = *vpc.Description
-	}
-	if vpc.Labels != nil {
-		md.Labels = vpc.Labels.ToProto()
-	}
-	return md
-}
-
 // ToProto converts this VPC into its workflow proto representation.
 // Used as the canonical entity-to-proto conversion; request-shape
 // protos (create / update) are produced by `ToProto` methods on the
 // corresponding API request types in api/pkg/api/model/vpc.go.
 //
-// `NetworkVirtualizationType` is mapped from the DB column's string
-// value to the workflow enum (defaulting to `ETHERNET_VIRTUALIZER`
-// when the string is set but unrecognized, matching the pre-refactor
-// handler behaviour). It is omitted from the proto when the DB
-// column is nil.
-func (vpc *Vpc) ToProto() *cwssaws.Vpc {
-	proto := &cwssaws.Vpc{
-		Id:                     &cwssaws.VpcId{Value: vpc.GetSiteID().String()},
-		Name:                   vpc.Name,
-		TenantOrganizationId:   vpc.Org,
-		NetworkSecurityGroupId: vpc.NetworkSecurityGroupID,
-		Metadata:               vpc.toMetadataProto(),
+// Desired configuration, including routing-profile overrides, is emitted via
+// the structured `config` field. Controller-resolved state (the allocated VNI
+// and effective routing profile) is emitted via `status`. The deprecated flat mirror fields
+// are no longer populated: site agents at or after commit a2e3f88b read
+// exclusively from `config`/`status`.
+func (vpc *Vpc) ToProto() *corev1.Vpc {
+	metadata := &corev1.Metadata{
+		Name:        vpc.Name,
+		Description: "",
 	}
+	if vpc.Description != nil {
+		metadata.Description = *vpc.Description
+	}
+	if vpc.Labels != nil {
+		metadata.Labels = vpc.Labels.ToProto()
+	}
+
+	var nvllpProto *corev1.NVLinkLogicalPartitionId
 	if vpc.NVLinkLogicalPartitionID != nil {
-		proto.DefaultNvlinkLogicalPartitionId = &cwssaws.NVLinkLogicalPartitionId{Value: vpc.NVLinkLogicalPartitionID.String()}
+		nvllpProto = &corev1.NVLinkLogicalPartitionId{Value: vpc.NVLinkLogicalPartitionID.String()}
 	}
+	var networkVirtualizationType *corev1.VpcVirtualizationType
 	if vpc.NetworkVirtualizationType != nil {
-		nwvt := cwssaws.VpcVirtualizationType_ETHERNET_VIRTUALIZER
+		nwvt := corev1.VpcVirtualizationType_ETHERNET_VIRTUALIZER
 		switch *vpc.NetworkVirtualizationType {
-		case cwssaws.VpcVirtualizationType_FNN.String():
-			nwvt = cwssaws.VpcVirtualizationType_FNN
-		case cwssaws.VpcVirtualizationType_FLAT.String():
-			nwvt = cwssaws.VpcVirtualizationType_FLAT
+		case corev1.VpcVirtualizationType_FNN.String():
+			nwvt = corev1.VpcVirtualizationType_FNN
+		case corev1.VpcVirtualizationType_FLAT.String():
+			nwvt = corev1.VpcVirtualizationType_FLAT
 		}
-		proto.NetworkVirtualizationType = &nwvt
+		networkVirtualizationType = &nwvt
 	}
+
+	config := &corev1.VpcConfig{
+		TenantOrganizationId:            vpc.Org,
+		NetworkSecurityGroupId:          vpc.NetworkSecurityGroupID,
+		DefaultNvlinkLogicalPartitionId: nvllpProto,
+		Vni:                             cutil.IntPtrToUint32Ptr(vpc.Vni),
+		RoutingProfileType:              vpc.RoutingProfile,
+		RoutingProfileOverrides:         vpc.RoutingProfileOverrides.ToProto(),
+		PowerResourceGroup:              vpc.PowerResourceGroup,
+		NetworkVirtualizationType:       networkVirtualizationType,
+		SlaacEnabled:                    cutil.GetPtr(vpc.SlaacEnabled),
+	}
+
+	proto := &corev1.Vpc{
+		Id:       &corev1.VpcId{Value: vpc.GetSiteID().String()},
+		Name:     vpc.Name,
+		Metadata: metadata,
+		Config:   config,
+	}
+
+	allocatedVni := cutil.IntPtrToUint32Ptr(vpc.ActiveVni)
+	effectiveRoutingProfile := vpc.EffectiveRoutingProfile.ToProto()
+	if allocatedVni != nil || effectiveRoutingProfile != nil {
+		proto.Status = &corev1.VpcStatus{
+			Vni:                     allocatedVni,
+			EffectiveRoutingProfile: effectiveRoutingProfile,
+		}
+	}
+
 	return proto
 }
 
 // FromProto populates this VPC from its workflow proto representation.
-// A nil proto is a no-op. This is the inverse of `ToProto` and exists
-// for convention symmetry — currently no code path on the cloud side
-// reconstructs a full VPC entity from a `cwssaws.Vpc` (the site is the
-// destination, not the source), but the method is provided so future
-// reconciliation flows have a single canonical entry point.
+// A nil proto is a no-op. This is the inverse of `ToProto` and is the
+// canonical entry point for cloud-side callers that consume structured
+// config and status reported by a site.
 //
 // Field-level contract:
 //   - `vpc.ID` is preserved on a missing or unparseable `proto.Id`,
 //     because callers pre-validate the UUID before calling.
 //   - `Name` is sourced from `proto.Metadata.Name` when set, falling
-//     back to the (deprecated) top-level `proto.Name` so the method
-//     keeps working through the deprecation window.
+//     back to the legacy top-level `proto.Name` when metadata omits it.
+//   - Desired-configuration fields (Org, NSG, NVLink, virtualization
+//     type, named routing profile, routing-profile overrides, requested VNI)
+//     are read from structured `config`. Controller-resolved fields (allocated
+//     VNI and effective routing profile) are read from `status`.
 //   - Optional pointer fields (NetworkSecurityGroupID,
 //     NVLinkLogicalPartitionID) are cleared when the proto omits them
 //     OR when the proto value is invalid (e.g. an unparseable UUID).
 //     This makes `FromProto` a clean reset rather than a partial
 //     merge, matching the Expected* pattern.
-func (vpc *Vpc) FromProto(proto *cwssaws.Vpc) {
+//   - SLAAC defaults to false when its wire value is absent. Inventory
+//     reconciliation checks wire presence before applying that value to an
+//     existing database row.
+func (vpc *Vpc) FromProto(proto *corev1.Vpc) {
 	if proto == nil {
 		return
 	}
@@ -246,26 +452,60 @@ func (vpc *Vpc) FromProto(proto *cwssaws.Vpc) {
 	if proto.Metadata != nil && proto.Metadata.Name != "" {
 		vpc.Name = proto.Metadata.Name
 	}
-	vpc.Org = proto.TenantOrganizationId
-	vpc.NetworkSecurityGroupID = proto.NetworkSecurityGroupId
-	if proto.DefaultNvlinkLogicalPartitionId != nil {
-		if id, err := uuid.Parse(proto.DefaultNvlinkLogicalPartitionId.Value); err == nil {
-			vpc.NVLinkLogicalPartitionID = &id
-		} else {
-			vpc.NVLinkLogicalPartitionID = nil
-		}
-	} else {
-		vpc.NVLinkLogicalPartitionID = nil
+	cfg := proto.GetConfig()
+	if cfg == nil {
+		cfg = &corev1.VpcConfig{}
 	}
+
+	vpc.Org = cfg.TenantOrganizationId
+	vpc.SlaacEnabled = cfg.GetSlaacEnabled()
+	vpc.NetworkSecurityGroupID = cfg.NetworkSecurityGroupId
+	vpc.RoutingProfile = cfg.RoutingProfileType
+	vpc.PowerResourceGroup = cfg.PowerResourceGroup
+	vpc.RoutingProfileOverrides = nil
+	if cfg.RoutingProfileOverrides != nil {
+		vpc.RoutingProfileOverrides = &VpcRoutingProfileOverrides{}
+		vpc.RoutingProfileOverrides.FromProto(cfg.RoutingProfileOverrides)
+	}
+	vpc.Vni = cutil.Uint32PtrToIntPtr(cfg.Vni)
+	vpc.ActiveVni = nil
+	vpc.EffectiveRoutingProfile = nil
+	status := proto.GetStatus()
+	if status != nil {
+		vpc.ActiveVni = cutil.Uint32PtrToIntPtr(status.Vni)
+		if status.EffectiveRoutingProfile != nil {
+			vpc.EffectiveRoutingProfile = &VpcEffectiveRoutingProfile{}
+			vpc.EffectiveRoutingProfile.FromProto(status.EffectiveRoutingProfile)
+		}
+	}
+
+	vpc.NVLinkLogicalPartitionID = nil
+	if cfg.DefaultNvlinkLogicalPartitionId != nil {
+		if id, err := uuid.Parse(cfg.DefaultNvlinkLogicalPartitionId.Value); err == nil {
+			vpc.NVLinkLogicalPartitionID = &id
+		}
+	}
+
+	vpc.NetworkVirtualizationType = nil
+	if cfg.NetworkVirtualizationType != nil {
+		s := VpcEthernetVirtualizer
+		switch *cfg.NetworkVirtualizationType {
+		case corev1.VpcVirtualizationType_FNN:
+			s = VpcFNN
+		case corev1.VpcVirtualizationType_FLAT:
+			s = VpcFlat
+		}
+		vpc.NetworkVirtualizationType = &s
+	}
+
+	vpc.Description = nil
 	if proto.Metadata != nil {
-		vpc.Description = nil
 		if proto.Metadata.Description != "" {
 			desc := proto.Metadata.Description
 			vpc.Description = &desc
 		}
 		vpc.Labels.FromProto(proto.Metadata.GetLabels())
 	} else {
-		vpc.Description = nil
 		vpc.Labels = nil
 	}
 }
@@ -281,14 +521,19 @@ type VpcCreateInput struct {
 	SiteID                                 uuid.UUID
 	NVLinkLogicalPartitionID               *uuid.UUID
 	NetworkVirtualizationType              *string
+	SlaacEnabled                           bool
 	RoutingProfile                         *string
+	PowerResourceGroup                     *string
+	RoutingProfileOverrides                *VpcRoutingProfileOverrides
 	ControllerVpcID                        *uuid.UUID
+	ActiveVni                              *int
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
 	Labels                                 map[string]string
 	Status                                 string
 	CreatedBy                              User
 	Vni                                    *int
+	EffectiveRoutingProfile                *VpcEffectiveRoutingProfile
 }
 
 // VpcUpdateInput input parameters for Update method
@@ -297,7 +542,11 @@ type VpcUpdateInput struct {
 	Name                                   *string
 	Description                            *string
 	NetworkVirtualizationType              *string
+	SlaacEnabled                           *bool
 	RoutingProfile                         *string
+	PowerResourceGroup                     *string
+	RoutingProfileOverrides                *VpcRoutingProfileOverrides
+	EffectiveRoutingProfile                *VpcEffectiveRoutingProfile
 	ControllerVpcID                        *uuid.UUID
 	ActiveVni                              *int
 	NVLinkLogicalPartitionID               *uuid.UUID
@@ -315,16 +564,22 @@ type VpcClearInput struct {
 	Description                            bool
 	ControllerVpcID                        bool
 	RoutingProfile                         bool
+	PowerResourceGroup                     bool
+	RoutingProfileOverrides                bool
+	EffectiveRoutingProfile                bool
 	NVLinkLogicalPartitionID               bool
 	NetworkSecurityGroupID                 bool
 	NetworkSecurityGroupPropagationDetails bool
 	Labels                                 bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // VpcFilterInput input parameters for Filter method
 type VpcFilterInput struct {
 	Name                      *string
 	VpcIDs                    []uuid.UUID
+	ControllerVpcIDs          []uuid.UUID
 	InfrastructureProviderID  *uuid.UUID
 	TenantIDs                 []uuid.UUID
 	SiteIDs                   []uuid.UUID
@@ -334,6 +589,8 @@ type VpcFilterInput struct {
 	NetworkVirtualizationType *string
 	Statuses                  []string
 	SearchQuery               *string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*Vpc)(nil)
@@ -383,19 +640,15 @@ type VpcDAO interface {
 
 // VpcSQLDAO is an implementation of the VpcDAO interface
 type VpcSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a Vpc by ID
-func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Vpc, error) {
+func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetByID")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", id.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.GetByID")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", id.String()))
 
 	v := &Vpc{}
 
@@ -419,12 +672,10 @@ func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, inclu
 // GetCountByStatus returns count of VPCs for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (map[string]int, error) {
+func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetCountByStatus")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.GetCountByStatus")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
 
 	v := &Vpc{}
 	var statusQueryResults []map[string]interface{}
@@ -432,15 +683,15 @@ func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastruc
 	query := db.GetIDB(tx, vsd.dbSession).NewSelect().Model(v)
 	if infrastructureProviderID != nil {
 		query = query.Where("v.infrastructure_provider_id = ?", *infrastructureProviderID)
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "infrastructure_provider_id", infrastructureProviderID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("infrastructure_provider_id", infrastructureProviderID.String()))
 	}
 	if tenantID != nil {
 		query = query.Where("v.tenant_id = ?", *tenantID)
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "tenant_id", tenantID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("tenant_id", tenantID.String()))
 	}
 	if siteID != nil {
 		query = query.Where("v.site_id = ?", *siteID)
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "site_id", siteID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("site_id", siteID.String()))
 	}
 
 	err := query.Column("v.status").ColumnExpr("COUNT(*) AS total_count").GroupExpr("v.status").Scan(ctx, &statusQueryResults)
@@ -467,29 +718,20 @@ func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastruc
 	return results, nil
 }
 
-func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.SelectQuery, vpcDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.SelectQuery, vpcDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.Name != nil {
 		query = query.Where("v.name = ?", *filter.Name)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", *filter.Name)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("name", *filter.Name))
 	}
 
 	if filter.Org != nil {
 		query = query.Where("v.org = ?", *filter.Org)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "org", *filter.Org)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("org", *filter.Org))
 	}
 
 	if filter.InfrastructureProviderID != nil {
 		query = query.Where("v.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderID.String())
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderID.String()))
 	}
 
 	if filter.TenantIDs != nil {
@@ -497,10 +739,6 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 			query = query.Where("v.tenant_id = ?", filter.TenantIDs[0])
 		} else {
 			query = query.Where("v.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		}
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "tenant_ids", filter.TenantIDs)
 		}
 	}
 
@@ -510,26 +748,15 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 		} else {
 			query = query.Where("v.site_id IN (?)", bun.In(filter.SiteIDs))
 		}
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.NVLinkLogicalPartitionIDs != nil {
 		query = query.Where("v.nvlink_logical_partition_id IN (?)", bun.In(filter.NVLinkLogicalPartitionIDs))
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "nvlink_logical_partition_ids", filter.NVLinkLogicalPartitionIDs)
-		}
 	}
 
 	if filter.NetworkVirtualizationType != nil {
 		query = query.Where("v.network_virtualization_type = ?", filter.NetworkVirtualizationType)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_virtualization_type", *filter.NetworkVirtualizationType)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("network_virtualization_type", *filter.NetworkVirtualizationType))
 	}
 
 	if filter.Statuses != nil {
@@ -538,27 +765,19 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 		} else {
 			query = query.Where("v.status IN (?)", bun.In(filter.Statuses))
 		}
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "statuses", filter.Statuses)
-		}
 	}
 
 	if filter.NetworkSecurityGroupIDs != nil {
 		// Single-item IN queries are optimized by the query planner to =
 		query = query.Where("v.network_security_group_id IN (?)", bun.In(filter.NetworkSecurityGroupIDs))
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_security_group_ids", filter.NetworkSecurityGroupIDs)
-		}
 	}
 
 	if filter.VpcIDs != nil {
 		query = query.Where("v.id IN (?)", bun.In(filter.VpcIDs))
+	}
 
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "vpc_ids", filter.VpcIDs)
-		}
+	if filter.ControllerVpcIDs != nil {
+		query = query.Where("v.controller_vpc_id IN (?)", bun.In(filter.ControllerVpcIDs))
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -572,9 +791,7 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 				WhereOr("v.status ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("v.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("search_query", searchQuery))
 	}
 	return query, nil
 }
@@ -583,16 +800,17 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in VpcOrderByDefault in ascending order
-func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInput, page paginator.PageInput, includeRelations []string) ([]Vpc, int, error) {
+func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInput, page paginator.PageInput, includeRelations []string) (_ []Vpc, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetAll")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.GetAll")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
 
-	// var vpcs []Vpc
 	vpcs := []Vpc{}
 	query := db.GetIDB(tx, vsd.dbSession).NewSelect().Model(&vpcs)
+	// Soft-deleted rows are excluded by default.
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	query, err := vsd.setQueryWithFilter(filter, query, vpcDAOSpan)
 	if err != nil {
@@ -622,14 +840,11 @@ func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInpu
 }
 
 // Create a new Vpc from the given parameters
-func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.CreateFromParams")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", input.Name)
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.Create")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 	if input.ID != nil {
@@ -646,8 +861,12 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 		SiteID:                                 input.SiteID,
 		NVLinkLogicalPartitionID:               input.NVLinkLogicalPartitionID,
 		NetworkVirtualizationType:              input.NetworkVirtualizationType,
+		SlaacEnabled:                           input.SlaacEnabled,
 		RoutingProfile:                         input.RoutingProfile,
+		PowerResourceGroup:                     input.PowerResourceGroup,
+		RoutingProfileOverrides:                input.RoutingProfileOverrides,
 		ControllerVpcID:                        input.ControllerVpcID,
+		ActiveVni:                              input.ActiveVni,
 		NetworkSecurityGroupID:                 input.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: input.NetworkSecurityGroupPropagationDetails,
 		Labels:                                 input.Labels,
@@ -655,6 +874,7 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 		IsMissingOnSite:                        false,
 		CreatedBy:                              input.CreatedBy.ID,
 		Vni:                                    input.Vni,
+		EffectiveRoutingProfile:                input.EffectiveRoutingProfile,
 	}
 
 	_, err := db.GetIDB(tx, vsd.dbSession).NewInsert().Model(v).Exec(ctx)
@@ -671,14 +891,11 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 }
 
 // Update updates an existing Vpc from the given parameters
-func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.UpdateFromParams")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", input.VpcID.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.Update")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", input.VpcID.String()))
 
 	v := &Vpc{
 		ID: input.VpcID,
@@ -689,49 +906,68 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 	if input.Name != nil {
 		v.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("name", *input.Name))
 	}
 
 	if input.Description != nil {
 		v.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("description", *input.Description))
 	}
 
 	if input.NVLinkLogicalPartitionID != nil {
 		v.NVLinkLogicalPartitionID = input.NVLinkLogicalPartitionID
 		updatedFields = append(updatedFields, "nvlink_logical_partition_id")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "nvlink_logical_partition_id", input.NVLinkLogicalPartitionID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("nvlink_logical_partition_id", input.NVLinkLogicalPartitionID.String()))
 	}
 
 	if input.NetworkVirtualizationType != nil {
 		v.NetworkVirtualizationType = input.NetworkVirtualizationType
 		updatedFields = append(updatedFields, "network_virtualization_type")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_virtualization_type", *input.NetworkVirtualizationType)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("network_virtualization_type", *input.NetworkVirtualizationType))
+	}
+
+	if input.SlaacEnabled != nil {
+		v.SlaacEnabled = *input.SlaacEnabled
+		updatedFields = append(updatedFields, "slaac_enabled")
 	}
 
 	if input.ControllerVpcID != nil {
 		v.ControllerVpcID = input.ControllerVpcID
 		updatedFields = append(updatedFields, "controller_vpc_id")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "controller_vpc_id", input.ControllerVpcID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("controller_vpc_id", input.ControllerVpcID.String()))
 	}
 
 	if input.RoutingProfile != nil {
 		v.RoutingProfile = input.RoutingProfile
 		updatedFields = append(updatedFields, "routing_profile")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "routing_profile", *input.RoutingProfile)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("routing_profile", *input.RoutingProfile))
+	}
+
+	if input.PowerResourceGroup != nil {
+		v.PowerResourceGroup = input.PowerResourceGroup
+		updatedFields = append(updatedFields, "power_resource_group")
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("power_resource_group", *input.PowerResourceGroup))
+	}
+
+	if input.RoutingProfileOverrides != nil {
+		v.RoutingProfileOverrides = input.RoutingProfileOverrides
+		updatedFields = append(updatedFields, "routing_profile_overrides")
+	}
+
+	if input.EffectiveRoutingProfile != nil {
+		v.EffectiveRoutingProfile = input.EffectiveRoutingProfile
+		updatedFields = append(updatedFields, "effective_routing_profile")
 	}
 
 	if input.ActiveVni != nil {
 		v.ActiveVni = input.ActiveVni
 		updatedFields = append(updatedFields, "active_vni")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "active_vni", *input.ActiveVni)
 	}
 
 	if input.Vni != nil {
 		v.Vni = input.Vni
 		updatedFields = append(updatedFields, "vni")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "vni", *input.Vni)
 	}
 
 	if input.Labels != nil {
@@ -742,31 +978,22 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 	if input.Status != nil {
 		v.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if input.IsMissingOnSite != nil {
 		v.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if input.NetworkSecurityGroupID != nil {
 		v.NetworkSecurityGroupID = input.NetworkSecurityGroupID
 		updatedFields = append(updatedFields, "network_security_group_id")
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_security_group_id", input.NetworkSecurityGroupID)
-		}
 	}
 
 	if input.NetworkSecurityGroupPropagationDetails != nil {
 		v.NetworkSecurityGroupPropagationDetails = input.NetworkSecurityGroupPropagationDetails
 		updatedFields = append(updatedFields, "network_security_group_propagation_details")
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_security_group_propagation_details", input.NetworkSecurityGroupPropagationDetails)
-		}
 	}
 
 	if len(updatedFields) > 0 {
@@ -787,14 +1014,11 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 }
 
 // Clear clears VPC attributes based on provided arguments
-func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.ClearFromParams")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", input.VpcID.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.ClearFromParams")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", input.VpcID.String()))
 
 	v := &Vpc{
 		ID: input.VpcID,
@@ -817,6 +1041,21 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 		updatedFields = append(updatedFields, "routing_profile")
 	}
 
+	if input.PowerResourceGroup {
+		v.PowerResourceGroup = nil
+		updatedFields = append(updatedFields, "power_resource_group")
+	}
+
+	if input.RoutingProfileOverrides {
+		v.RoutingProfileOverrides = nil
+		updatedFields = append(updatedFields, "routing_profile_overrides")
+	}
+
+	if input.EffectiveRoutingProfile {
+		v.EffectiveRoutingProfile = nil
+		updatedFields = append(updatedFields, "effective_routing_profile")
+	}
+
 	if input.Labels {
 		v.Labels = nil
 		updatedFields = append(updatedFields, "labels")
@@ -837,10 +1076,20 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 		updatedFields = append(updatedFields, "network_security_group_propagation_details")
 	}
 
+	if input.Deleted {
+		v.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, vsd.dbSession).NewUpdate().Model(v).Column(updatedFields...).Where("id = ?", input.VpcID).Exec(ctx)
+		query := db.GetIDB(tx, vsd.dbSession).NewUpdate().Model(v).Column(updatedFields...).Where("id = ?", input.VpcID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -855,14 +1104,11 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 }
 
 // DeleteByID deletes a Vpc by ID
-func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.DeleteByID")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", id.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.DeleteByID")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", id.String()))
 
 	v := &Vpc{
 		ID: id,
@@ -879,7 +1125,6 @@ func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) er
 // NewVpcDAO returns a new VpcDAO
 func NewVpcDAO(dbSession *db.Session) VpcDAO {
 	return &VpcSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

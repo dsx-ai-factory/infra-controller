@@ -5,7 +5,6 @@ max_database_connections = 1222
 asn = 123
 dhcp_servers = ["1.2.3.4", "5.6.7.8"]
 route_servers = ["9.10.11.12"]
-rapid_iterations = false
 initial_domain_name = "forge.local"
 initial_dpu_agent_upgrade_policy = "off"
 machine_update_run_interval = 60
@@ -56,6 +55,7 @@ power_down_wait = "13s"
 failure_retry_time = "31m"
 dpu_up_threshold = "33m"
 scout_reporting_timeout = "20m"
+boot_interface_observation_interval = "10m"
 
 [host_health]
 prevent_allocations_on_stale_dpu_agent_version = true
@@ -109,8 +109,11 @@ instance_autoreboot_period.start = "2025-01-07T00:00:00Z"
 instance_autoreboot_period.end = "2026-01-08T00:00:00Z"
 max_concurrent_machine_updates_absolute = 1
 
-[dpa_config]
+[ewethers_config]
 enabled = true
+svpc_enabled = true
+
+[ewethers_config.svpc]
 mqtt_endpoint = "mqtt.forge"
 
 [host_models.dell_r750]
@@ -153,9 +156,6 @@ known_firmware = [
   { version = "2.0", filename = "/mnt/persistence/fw/dell/uefi/r750_1.1.fw", url = "https://letmegooglethat.com/?q=dell750uefi", checksum = "f4d4e0954b5635e6c9a8c79ebaa95218", default = true },
 ]
 
-[multi_dpu]
-enabled = false
-
 [measured_boot_collector]
 enabled = false
 run_interval = "555s"
@@ -169,6 +169,12 @@ DevicesandIOPorts_IOMMU = "Disabled"
 OperatingModes_ChooseOperatingMode = "MinimalPower"
 
 [rack_profiles.NVL72]
+product_family = "gb200"
+
+[rack_profiles.NVL72.firmware_object]
+url = "https://firmware.example.invalid/sot/nvl72.json"
+fetch_timeout = "45s"
+
 [rack_profiles.NVL72.rack_capabilities.compute]
 name = "GB200"
 count = 18
@@ -181,6 +187,8 @@ count = 9
 count = 8
 
 [rack_profiles.NVL36]
+product_family = "gb200"
+
 [rack_profiles.NVL36.rack_capabilities.compute]
 count = 9
 

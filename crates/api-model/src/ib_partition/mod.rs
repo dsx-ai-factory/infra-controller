@@ -43,7 +43,7 @@ pub struct IbPartitionSearchFilter {
 /// Partition Keys are 16 bit values valid up to a value of 0x7fff
 /// Partition Keys are serialized as strings, since the hex represenation is
 /// their canonical representation.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PartitionKey(u16);
 
 impl PartitionKey {
@@ -59,7 +59,7 @@ impl PartitionKey {
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
-#[error("Partition Key \"{0}\" is not valid")]
+#[error("partition key \"{0}\" is not valid")]
 pub struct InvalidPartitionKeyError(String);
 
 impl serde::Serialize for PartitionKey {
@@ -255,7 +255,7 @@ impl<'r> FromRow<'r, PgRow> for IBPartition {
                     .map(|p| PartitionKey::try_from(p as u16))
                     .transpose()
                     .map_err(|_| {
-                        let err = eyre::eyre!("Pkey {} is not valid", pkey.unwrap_or_default());
+                        let err = eyre::eyre!("pkey {} is not valid", pkey.unwrap_or_default());
                         sqlx::Error::Decode(err.into())
                     })?,
                 tenant_organization_id,

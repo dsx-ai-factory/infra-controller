@@ -37,26 +37,26 @@ use super::{Base, filters};
 
 #[derive(Template)]
 #[template(path = "state_history.html")]
-pub(super) struct StateHistory {
-    pub id: String,
+struct StateHistory {
+    id: String,
     /// The type of object that the history is for in humand readable
     /// form. E.g. Host, Switch, PowerShelf, etc.
-    pub object_type: String,
+    object_type: String,
     /// The base URL that is used for this type of object. E.g. `machine`
-    pub object_url_path: String,
-    pub history: StateHistoryTable,
+    object_url_path: String,
+    history: StateHistoryTable,
 }
 
 #[derive(Template)]
 #[template(path = "state_history_table.html")]
 pub(super) struct StateHistoryTable {
-    pub records: Vec<StateHistoryRecord>,
+    pub(super) records: Vec<StateHistoryRecord>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub(super) struct StateHistoryRecord {
-    pub state: String,
-    pub version: String,
+    state: String,
+    version: String,
 }
 
 impl From<::rpc::forge::MachineEvent> for StateHistoryRecord {
@@ -91,7 +91,7 @@ macro_rules! define_show_state_history_handlers {
         // Path segment after "admin/", e.g. "machine" or "power-shelf"
         object_url_path = $object_url_path:literal,
     ) => {
-        pub async fn $fn_name(
+        pub(super) async fn $fn_name(
             AxumState(state): AxumState<Arc<Api>>,
             AxumPath(id): AxumPath<String>,
         ) -> Response {
@@ -112,7 +112,7 @@ macro_rules! define_show_state_history_handlers {
             (StatusCode::OK, Html(display.render().unwrap())).into_response()
         }
 
-        pub async fn $fn_name_json(
+        pub(super) async fn $fn_name_json(
             AxumState(state): AxumState<Arc<Api>>,
             AxumPath(id): AxumPath<String>,
         ) -> Response {
@@ -128,9 +128,11 @@ macro_rules! define_show_state_history_handlers {
 macro_rules! define_fetch_state_history_records {
     (
         // name of the generated function
-        $fn_name:ident,
+        $visibility:vis $fn_name:ident,
         // type of the ID (MachineId, SwitchId, ...)
         id_type = $Id:ty,
+        // canonical structured log field for this ID type
+        id_log_field = $id_log_field:ident,
         // field in the request holding the vector of IDs (machine_ids, switch_ids, ...)
         id_vec_field = $ids_field:ident,
         // RPC method on Api (find_machine_state_histories, find_switch_state_histories, ...)
@@ -141,7 +143,7 @@ macro_rules! define_fetch_state_history_records {
         record_type = $Record:ty,
     ) => {
         /// Fetches state history records for object with ID `id_str`
-        pub async fn $fn_name(
+        $visibility async fn $fn_name(
             api: &Api,
             id_str: &str,
         ) -> Result<($Id, Vec<$Record>), (http::StatusCode, String)> {
@@ -162,7 +164,12 @@ macro_rules! define_fetch_state_history_records {
             {
                 Ok(response) => response.into_inner().histories,
                 Err(err) => {
-                    tracing::error!(%err, %id, stringify!($api_method));
+                    tracing::error!(
+                        error = %err,
+                        $id_log_field = %id,
+                        operation = stringify!($api_method),
+                        "State history request failed"
+                    );
                     return Err((
                         http::StatusCode::INTERNAL_SERVER_ERROR,
                         concat!("Failed ", stringify!($api_method)).to_string(),
@@ -186,6 +193,7 @@ macro_rules! define_fetch_state_history_records {
 define_fetch_state_history_records!(
     fetch_machine_state_history_records,
     id_type = MachineId,
+    id_log_field = machine_id,
     id_vec_field = machine_ids,
     api_method = find_machine_state_histories,
     request_type = MachineStateHistoriesRequest,
@@ -193,8 +201,9 @@ define_fetch_state_history_records!(
 );
 
 define_fetch_state_history_records!(
-    fetch_power_shelf_state_history_records,
+    pub(super) fetch_power_shelf_state_history_records,
     id_type = PowerShelfId,
+    id_log_field = power_shelf_id,
     id_vec_field = power_shelf_ids,
     api_method = find_power_shelf_state_histories,
     request_type = PowerShelfStateHistoriesRequest,
@@ -202,8 +211,9 @@ define_fetch_state_history_records!(
 );
 
 define_fetch_state_history_records!(
-    fetch_rack_state_history_records,
+    pub(super) fetch_rack_state_history_records,
     id_type = RackId,
+    id_log_field = rack_id,
     id_vec_field = rack_ids,
     api_method = find_rack_state_histories,
     request_type = RackStateHistoriesRequest,
@@ -211,8 +221,9 @@ define_fetch_state_history_records!(
 );
 
 define_fetch_state_history_records!(
-    fetch_switch_state_history_records,
+    pub(super) fetch_switch_state_history_records,
     id_type = SwitchId,
+    id_log_field = switch_id,
     id_vec_field = switch_ids,
     api_method = find_switch_state_histories,
     request_type = SwitchStateHistoriesRequest,

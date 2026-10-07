@@ -455,3 +455,50 @@ func TestConfig_Validation(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerPool_StressSubmitDuringStop(t *testing.T) {
+	for iter := 0; iter < 200; iter++ {
+		config := DefaultConfig()
+		config.MaxWorkers = 4
+		config.QueueSize = 10
+
+		pool := New(config)
+		if err := pool.Start(); err != nil {
+			t.Fatalf("failed to start pool: %v", err)
+		}
+
+		const numGoroutines = 20
+		var wg sync.WaitGroup
+		var ready sync.WaitGroup
+		ready.Add(numGoroutines)
+
+		for g := 0; g < numGoroutines; g++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("Submit panicked: %v", r)
+					}
+				}()
+				signaledReady := false
+				for j := 0; j < 50; j++ {
+					task := newMockTask(fmt.Sprintf("stress-%d-%d-%d", iter, id, j), 0, false)
+					_ = pool.Submit(task) // errors are expected once stopped; panics are not
+					if !signaledReady {
+						signaledReady = true
+						ready.Done()
+					}
+				}
+			}(g)
+		}
+
+		// Wait until every goroutine has made at least one submission
+		// attempt, so Stop genuinely overlaps with active submissions
+		// rather than potentially running before any of them start.
+		ready.Wait()
+		_ = pool.Stop()
+
+		wg.Wait()
+	}
+}

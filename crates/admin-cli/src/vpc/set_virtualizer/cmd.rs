@@ -26,7 +26,7 @@ use crate::rpc::ApiClient;
 ///
 /// This is intended for dev use only, and can only be done on a VPC
 /// with 0 instances (an error will be returned otherwise).
-pub async fn set_network_virtualization_type(
+pub(super) async fn set_network_virtualization_type(
     api_client: &ApiClient,
     args: Args,
 ) -> CarbideCliResult<()> {

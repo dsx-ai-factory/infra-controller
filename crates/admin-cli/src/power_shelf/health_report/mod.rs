@@ -16,9 +16,9 @@
  */
 
 mod add;
-pub mod args;
+mod args;
 mod print_empty_template;
 mod remove;
 mod show;
 
-pub use args::Args;
+pub(super) use args::Args;

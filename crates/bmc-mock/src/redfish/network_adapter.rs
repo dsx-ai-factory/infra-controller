@@ -26,7 +26,7 @@ use crate::{hw, redfish};
 const NETWORK_ADAPTER_TYPE: &str = "#NetworkAdapter.v1_7_0.NetworkAdapter";
 const NETWORK_ADAPTER_NAME: &str = "Network Adapter";
 
-pub fn chassis_resource(chassis_id: &str, adapter_id: &str) -> redfish::Resource<'static> {
+pub(crate) fn chassis_resource(chassis_id: &str, adapter_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/NetworkAdapters/{adapter_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
@@ -36,7 +36,7 @@ pub fn chassis_resource(chassis_id: &str, adapter_id: &str) -> redfish::Resource
     }
 }
 
-pub fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
+pub(super) fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/NetworkAdapters");
     redfish::Collection {
         odata_id: Cow::Owned(odata_id),
@@ -45,17 +45,17 @@ pub fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
     }
 }
 
-pub struct NetworkAdapter {
-    pub id: Cow<'static, str>,
+pub(crate) struct NetworkAdapter {
+    pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
-    pub functions: Vec<redfish::network_device_function::NetworkDeviceFunction>,
+    pub(crate) functions: Vec<redfish::network_device_function::NetworkDeviceFunction>,
 }
 
 impl NetworkAdapter {
-    pub fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
     }
-    pub fn find_function(
+    pub(crate) fn find_function(
         &self,
         function_id: &str,
     ) -> Option<&redfish::network_device_function::NetworkDeviceFunction> {
@@ -64,7 +64,7 @@ impl NetworkAdapter {
 }
 
 /// Get builder of the network adapter.
-pub fn builder(resource: &redfish::Resource) -> NetworkAdapterBuilder {
+pub(crate) fn builder(resource: &redfish::Resource) -> NetworkAdapterBuilder {
     NetworkAdapterBuilder {
         id: Cow::Owned(resource.id.to_string()),
         value: resource.json_patch(),
@@ -72,7 +72,10 @@ pub fn builder(resource: &redfish::Resource) -> NetworkAdapterBuilder {
     }
 }
 
-pub fn builder_from_nic(resource: &redfish::Resource, nic: &hw::nic::Nic) -> NetworkAdapterBuilder {
+pub(crate) fn builder_from_nic(
+    resource: &redfish::Resource,
+    nic: &hw::nic::Nic,
+) -> NetworkAdapterBuilder {
     builder(resource)
         .maybe_with(NetworkAdapterBuilder::serial_number, &nic.serial_number)
         .maybe_with(NetworkAdapterBuilder::description, &nic.description)
@@ -81,7 +84,7 @@ pub fn builder_from_nic(resource: &redfish::Resource, nic: &hw::nic::Nic) -> Net
         .maybe_with(NetworkAdapterBuilder::part_number, &nic.part_number)
 }
 
-pub struct NetworkAdapterBuilder {
+pub(crate) struct NetworkAdapterBuilder {
     id: Cow<'static, str>,
     value: serde_json::Value,
     functions: Vec<redfish::network_device_function::NetworkDeviceFunction>,
@@ -98,27 +101,27 @@ impl Builder for NetworkAdapterBuilder {
 }
 
 impl NetworkAdapterBuilder {
-    pub fn manufacturer(self, value: &str) -> Self {
+    pub(crate) fn manufacturer(self, value: &str) -> Self {
         self.add_str_field("Manufacturer", value)
     }
 
-    pub fn model(self, value: &str) -> Self {
+    pub(crate) fn model(self, value: &str) -> Self {
         self.add_str_field("Model", value)
     }
 
-    pub fn part_number(self, value: &str) -> Self {
+    pub(crate) fn part_number(self, value: &str) -> Self {
         self.add_str_field("PartNumber", value)
     }
 
-    pub fn serial_number(self, value: &str) -> Self {
+    pub(crate) fn serial_number(self, value: &str) -> Self {
         self.add_str_field("SerialNumber", value)
     }
 
-    pub fn description(self, value: &str) -> Self {
+    pub(crate) fn description(self, value: &str) -> Self {
         self.add_str_field("Description", value)
     }
 
-    pub fn network_device_functions(
+    pub(crate) fn network_device_functions(
         self,
         collection: &redfish::Collection<'_>,
         functions: Vec<redfish::network_device_function::NetworkDeviceFunction>,
@@ -128,13 +131,13 @@ impl NetworkAdapterBuilder {
         v
     }
 
-    pub fn status(self, status: redfish::resource::Status) -> Self {
+    pub(crate) fn status(self, status: redfish::resource::Status) -> Self {
         self.apply_patch(json!({
             "Status": status.into_json()
         }))
     }
 
-    pub fn build(self) -> NetworkAdapter {
+    pub(crate) fn build(self) -> NetworkAdapter {
         NetworkAdapter {
             id: self.id,
             value: self.value,

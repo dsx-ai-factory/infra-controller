@@ -30,7 +30,7 @@ Check whether carbide has working credentials for a BMC:
     $ nico-admin-cli site-explorer have-credentials 192.0.2.10
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: ExploreOptions,
+    pub(super) inner: ExploreOptions,
 }

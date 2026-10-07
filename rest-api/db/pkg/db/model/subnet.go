@@ -15,15 +15,17 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 
 	"github.com/uptrace/bun"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -119,55 +121,77 @@ func (s *Subnet) GetSiteID() *uuid.UUID {
 	return &s.ID
 }
 
+func (s *Subnet) toMetadataProto() *corev1.Metadata {
+	md := &corev1.Metadata{
+		Name:        s.Name,
+		Description: "",
+	}
+	if s.Description != nil {
+		md.Description = *s.Description
+	}
+	return md
+}
+
 // ToProto converts this Subnet into its workflow proto representation.
 // Used as the canonical entity-to-proto conversion; request-shape protos
 // (create) are produced by `ToProto` methods on the corresponding API
 // request types in api/pkg/api/model/subnet.go.
+//
+// Desired configuration is emitted via the structured `config` field and
+// identity metadata via `metadata`. The deprecated flat mirror fields are
+// no longer populated.
 //
 // `Prefixes` is built from `IPv4Prefix` + `PrefixLength` when
 // `IPv4Prefix` is set; otherwise the field is left nil. The Site-facing
 // `ReserveFirst` count is a deployment policy that does not live on the
 // entity, so this method emits prefixes with a zero `ReserveFirst` and
 // the request-shape `ToProto` overlays the policy value.
-func (s *Subnet) ToProto() *cwssaws.NetworkSegment {
-	proto := &cwssaws.NetworkSegment{
-		Id:    &cwssaws.NetworkSegmentId{Value: s.GetSiteID().String()},
-		VpcId: &cwssaws.VpcId{Value: s.VpcID.String()},
-		Name:  s.Name,
+func (s *Subnet) ToProto() *corev1.NetworkSegment {
+	config := &corev1.NetworkSegmentConfig{
+		VpcId: &corev1.VpcId{Value: s.VpcID.String()},
 	}
 	if s.DomainID != nil {
-		proto.SubdomainId = &cwssaws.DomainId{Value: s.DomainID.String()}
+		config.SubdomainId = &corev1.DomainId{Value: s.DomainID.String()}
 	}
 	if s.MTU != nil {
 		mtu := int32(*s.MTU)
-		proto.Mtu = &mtu
+		config.Mtu = &mtu
 	}
 	if s.IPv4Prefix != nil {
-		proto.Prefixes = []*cwssaws.NetworkPrefix{
+		config.Prefixes = []*corev1.NetworkPrefix{
 			{
 				Gateway: s.IPv4Gateway,
 				Prefix:  fmt.Sprintf("%s/%d", *s.IPv4Prefix, s.PrefixLength),
 			},
 		}
 	}
-	return proto
+
+	return &corev1.NetworkSegment{
+		Id:       &corev1.NetworkSegmentId{Value: s.GetSiteID().String()},
+		Metadata: s.toMetadataProto(),
+		Config:   config,
+	}
 }
 
 // FromProto populates this Subnet from its workflow proto representation.
 // A nil proto is a no-op. This is the inverse of `ToProto` and exists
 // for convention symmetry — currently no code path on the cloud side
-// reconstructs a full Subnet entity from a `cwssaws.NetworkSegment` (the
+// reconstructs a full Subnet entity from a `corev1.NetworkSegment` (the
 // site is the destination, not the source), but the method is provided
 // so future reconciliation flows have a single canonical entry point.
 //
 // Field-level contract:
 //   - `s.ID` is preserved on a missing or unparseable `proto.Id`,
 //     because callers pre-validate the UUID before calling.
+//   - `Name` is sourced from the structured `proto.Metadata.Name`.
+//   - Desired-configuration fields (VpcID, DomainID, MTU, prefixes) are
+//     read from the structured `config` only. Deprecated flat mirrors are
+//     not consulted during entity reconstruction.
 //   - Optional pointer fields (DomainID, MTU, IPv4Prefix, IPv4Gateway)
 //     are cleared when the proto omits them OR when the proto value is
 //     invalid (e.g. an unparseable UUID, an unparseable prefix). This
 //     makes `FromProto` a clean reset rather than a partial merge.
-func (s *Subnet) FromProto(proto *cwssaws.NetworkSegment) {
+func (s *Subnet) FromProto(proto *corev1.NetworkSegment) {
 	if proto == nil {
 		return
 	}
@@ -176,38 +200,49 @@ func (s *Subnet) FromProto(proto *cwssaws.NetworkSegment) {
 			s.ID = id
 		}
 	}
-	if proto.VpcId != nil {
-		if id, err := uuid.Parse(proto.VpcId.Value); err == nil {
+	s.Name = ""
+	s.Description = nil
+	if proto.Metadata != nil {
+		if proto.Metadata.Name != "" {
+			s.Name = proto.Metadata.Name
+		}
+		if proto.Metadata.Description != "" {
+			s.Description = &proto.Metadata.Description
+		}
+	}
+
+	cfg := proto.Config
+	if cfg == nil {
+		cfg = &corev1.NetworkSegmentConfig{}
+	}
+	if cfg.VpcId != nil {
+		if id, err := uuid.Parse(cfg.VpcId.Value); err == nil {
 			s.VpcID = id
 		}
 	}
-	s.Name = proto.Name
-	if proto.SubdomainId != nil {
-		if id, err := uuid.Parse(proto.SubdomainId.Value); err == nil {
+	s.DomainID = nil
+	if cfg.SubdomainId != nil {
+		if id, err := uuid.Parse(cfg.SubdomainId.Value); err == nil {
 			s.DomainID = &id
-		} else {
-			s.DomainID = nil
 		}
-	} else {
-		s.DomainID = nil
 	}
-	if proto.Mtu != nil {
-		m := int(*proto.Mtu)
+	s.MTU = nil
+	if cfg.Mtu != nil {
+		m := int(*cfg.Mtu)
 		s.MTU = &m
-	} else {
-		s.MTU = nil
 	}
 	s.IPv4Prefix = nil
 	s.IPv4Gateway = nil
-	if len(proto.Prefixes) > 0 && proto.Prefixes[0] != nil {
+	s.PrefixLength = 0
+	if len(cfg.Prefixes) > 0 && cfg.Prefixes[0] != nil {
 		// The proto carries `<prefix>/<length>` as a single string; split
 		// it back into the entity's two fields. A malformed value clears
 		// both rather than leaving the receiver in a partial state.
-		prefix, length, ok := splitNetworkPrefix(proto.Prefixes[0].Prefix)
+		prefix, length, ok := splitNetworkPrefix(cfg.Prefixes[0].Prefix)
 		if ok {
 			s.IPv4Prefix = &prefix
 			s.PrefixLength = length
-			s.IPv4Gateway = proto.Prefixes[0].Gateway
+			s.IPv4Gateway = cfg.Prefixes[0].Gateway
 		}
 	}
 }
@@ -288,6 +323,7 @@ func splitNetworkPrefix(s string) (string, int, bool) {
 
 // SubnetCreateInput parameters for Create method
 type SubnetCreateInput struct {
+	SubnetID                   *uuid.UUID
 	Name                       string
 	Description                *string
 	Org                        string
@@ -345,6 +381,8 @@ type SubnetClearInput struct {
 	IPv6Gateway                bool
 	IPv6BlockID                bool
 	Mtu                        bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // SubnetFilterInput input parameters for GetAll method
@@ -359,6 +397,8 @@ type SubnetFilterInput struct {
 	IPv6BlockIDs []uuid.UUID
 	Statuses     []string
 	SearchQuery  *string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*Subnet)(nil)
@@ -414,23 +454,24 @@ type SubnetDAO interface {
 type SubnetSQLDAO struct {
 	dbSession *db.Session
 	SubnetDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new Subnet from the given parameters
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreateInput) (*Subnet, error) {
+func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreateInput) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Create")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.Create")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
+	cotel.SetAttribute(sbDAOSpan, attribute.String("name", input.Name))
 
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "name", input.Name)
+	id := input.SubnetID
+	if id == nil {
+		id = cutil.GetPtr(uuid.New())
 	}
 
 	s := &Subnet{
-		ID:                         uuid.New(),
+		ID:                         *id,
 		Name:                       input.Name,
 		Description:                input.Description,
 		Org:                        input.Org,
@@ -469,14 +510,11 @@ func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreat
 // GetByID returns a Subnet by ID
 // includeRelation can be a subset of Vpc, Domain, Tenant
 // returns db.ErrDoesNotExist error if the record is not found
-func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Subnet, error) {
+func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.GetByID")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", id.String())
-	}
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.GetByID")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
+	cotel.SetAttribute(sbDAOSpan, attribute.String("id", id.String()))
 
 	s := &Subnet{}
 
@@ -500,12 +538,10 @@ func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, in
 // GetCountByStatus returns count of Subnets for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, vpcID *uuid.UUID) (map[string]int, error) {
+func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, vpcID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.GetCountByStatus")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
-	}
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.GetCountByStatus")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
 
 	s := &Subnet{}
 	var statusQueryResults []map[string]interface{}
@@ -513,11 +549,11 @@ func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantI
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(s)
 	if tenantID != nil {
 		query = query.Where("su.tenant_id = ?", *tenantID)
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "tenant_id", tenantID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("tenant_id", tenantID.String()))
 	}
 	if vpcID != nil {
 		query = query.Where("su.vpc_id = ?", *vpcID)
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "vpc_id", vpcID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("vpc_id", vpcID.String()))
 	}
 
 	err := query.Column("su.status").ColumnExpr("COUNT(*) AS total_count").GroupExpr("su.status").Scan(ctx, &statusQueryResults)
@@ -548,51 +584,44 @@ func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantI
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SubnetOrderByDefault in ascending order
-func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilterInput, page paginator.PageInput, includeRelations []string) ([]Subnet, int, error) {
+func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilterInput, page paginator.PageInput, includeRelations []string) (_ []Subnet, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.GetAll")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
-	}
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.GetAll")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
 
 	ss := []Subnet{}
 
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(&ss)
+	// Soft-deleted rows are excluded by default.
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.SubnetIDs != nil {
 		query = query.Where("su.id IN (?)", bun.In(filter.SubnetIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "subnet_ids", filter.SubnetIDs)
 	}
 	if filter.Names != nil {
 		query = query.Where("su.name IN (?)", bun.In(filter.Names))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "name", filter.Names)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("su.site_id IN (?)", bun.In(filter.SiteIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.VpcIDs != nil {
 		query = query.Where("su.vpc_id IN (?)", bun.In(filter.VpcIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "vpc_id", filter.VpcIDs)
 	}
 	if filter.DomainIDs != nil {
 		query = query.Where("su.domain_id IN (?)", bun.In(filter.DomainIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "domain_id", filter.DomainIDs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("su.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 	if filter.IPv4BlockIDs != nil {
 		query = query.Where("su.ipv4_block_id IN (?)", bun.In(filter.IPv4BlockIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv4_block_id", filter.IPv4BlockIDs)
 	}
 	if filter.IPv6BlockIDs != nil {
 		query = query.Where("su.ipv6_block_id IN (?)", bun.In(filter.IPv6BlockIDs))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv6_block_id", filter.IPv6BlockIDs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("su.status IN (?)", bun.In(filter.Statuses))
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "status", filter.Statuses)
 	}
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
 	if ok {
@@ -603,7 +632,7 @@ func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilt
 				WhereOr("su.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("su.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -634,14 +663,11 @@ func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilt
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdateInput) (*Subnet, error) {
+func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdateInput) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Update")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", input.SubnetId.String())
-	}
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.Update")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
+	cotel.SetAttribute(sbDAOSpan, attribute.String("id", input.SubnetId.String()))
 
 	s := &Subnet{
 		ID: input.SubnetId,
@@ -651,92 +677,89 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 	if input.Name != nil {
 		s.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		s.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.Org != nil {
 		s.Org = *input.Org
 		updatedFields = append(updatedFields, "org")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "org", *input.Org)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("org", *input.Org))
 	}
 	if input.SiteID != nil {
 		s.SiteID = *input.SiteID
 		updatedFields = append(updatedFields, "site_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "site_id", input.SiteID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("site_id", input.SiteID.String()))
 	}
 	if input.VpcID != nil {
 		s.VpcID = *input.VpcID
 		updatedFields = append(updatedFields, "vpc_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "vpc_id", input.VpcID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("vpc_id", input.VpcID.String()))
 	}
 	if input.DomainID != nil {
 		s.DomainID = input.DomainID
 		updatedFields = append(updatedFields, "domain_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "domain_id", input.DomainID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("domain_id", input.DomainID.String()))
 	}
 	if input.TenantID != nil {
 		s.TenantID = *input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "tenant_id", input.TenantID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("tenant_id", input.TenantID.String()))
 	}
 	if input.ControllerNetworkSegmentID != nil {
 		s.ControllerNetworkSegmentID = input.ControllerNetworkSegmentID
 		updatedFields = append(updatedFields, "controller_network_segment_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "controller_network_segment_id", input.ControllerNetworkSegmentID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("controller_network_segment_id", input.ControllerNetworkSegmentID.String()))
 	}
 	if input.IPv4Prefix != nil {
 		s.IPv4Prefix = input.IPv4Prefix
 		updatedFields = append(updatedFields, "ipv4_prefix")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv4_prefix", *input.IPv4Prefix)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("ipv4_prefix", *input.IPv4Prefix))
 	}
 	if input.IPv4Gateway != nil {
 		s.IPv4Gateway = input.IPv4Gateway
 		updatedFields = append(updatedFields, "ipv4_gateway")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv4_gateway", *input.IPv4Gateway)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("ipv4_gateway", *input.IPv4Gateway))
 	}
 	if input.IPv4BlockID != nil {
 		s.IPv4BlockID = input.IPv4BlockID
 		updatedFields = append(updatedFields, "ipv4_block_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv4_block_id", input.IPv4BlockID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("ipv4_block_id", input.IPv4BlockID.String()))
 	}
 	if input.IPv6Prefix != nil {
 		s.IPv6Prefix = input.IPv6Prefix
 		updatedFields = append(updatedFields, "ipv6_prefix")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv6_prefix", *input.IPv6Prefix)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("ipv6_prefix", *input.IPv6Prefix))
 	}
 	if input.IPv6Gateway != nil {
 		s.IPv6Gateway = input.IPv6Gateway
 		updatedFields = append(updatedFields, "ipv6_gateway")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv6_gateway", *input.IPv6Gateway)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("ipv6_gateway", *input.IPv6Gateway))
 	}
 	if input.IPv6BlockID != nil {
 		s.IPv6BlockID = input.IPv6BlockID
 		updatedFields = append(updatedFields, "ipv6_block_id")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "ipv6_block_id", input.IPv6BlockID.String())
+		cotel.SetAttribute(sbDAOSpan, attribute.String("ipv6_block_id", input.IPv6BlockID.String()))
 	}
 	if input.PrefixLength != nil {
 		s.PrefixLength = *input.PrefixLength
 		updatedFields = append(updatedFields, "prefix_length")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "prefix_length", *input.PrefixLength)
 	}
 	if input.Status != nil {
 		s.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(sbDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IsMissingOnSite != nil {
 		s.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 	if input.Mtu != nil {
 		s.MTU = input.Mtu
 		updatedFields = append(updatedFields, "mtu")
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "mtu", *input.Mtu)
 	}
 
 	if len(updatedFields) > 0 {
@@ -760,14 +783,11 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 // parameters description, tenantID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearInput) (*Subnet, error) {
+func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearInput) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Clear")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", input.SubnetId.String())
-	}
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.Clear")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
+	cotel.SetAttribute(sbDAOSpan, attribute.String("id", input.SubnetId.String()))
 
 	s := &Subnet{
 		ID: input.SubnetId,
@@ -815,11 +835,20 @@ func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearI
 		s.MTU = nil
 		updatedFields = append(updatedFields, "mtu")
 	}
+	if input.Deleted {
+		s.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(s).Column(updatedFields...).Where("id = ?", input.SubnetId).Exec(ctx)
+		query := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(s).Column(updatedFields...).Where("id = ?", input.SubnetId)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -835,14 +864,11 @@ func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearI
 // Delete deletes an Subnet by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (ssd SubnetSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ssd SubnetSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Delete")
-	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", id.String())
-	}
+	ctx, sbDAOSpan := cotel.StartSpan(ctx, "SubnetDAO.Delete")
+	defer func() { cotel.EndSpan(sbDAOSpan, retErr) }()
+	cotel.SetAttribute(sbDAOSpan, attribute.String("id", id.String()))
 
 	s := &Subnet{
 		ID: id,
@@ -981,7 +1007,6 @@ func (ssd SubnetSQLDAO) GetPrefixUsage(ctx context.Context, tx *db.Tx, subnets .
 // NewSubnetDAO returns a new SubnetDAO
 func NewSubnetDAO(dbSession *db.Session) SubnetDAO {
 	return &SubnetSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

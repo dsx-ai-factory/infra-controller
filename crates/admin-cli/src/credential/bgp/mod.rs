@@ -27,7 +27,7 @@ use crate::errors::CarbideCliResult;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(name = "set-sitewide", about = "Set the site-wide leaf BGP password")]
     Set(set_sitewide::Args),
     #[clap(

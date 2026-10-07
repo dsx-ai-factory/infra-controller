@@ -20,7 +20,7 @@ use prettytable::row;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn service_version(api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn service_version(api_client: &ApiClient) -> CarbideCliResult<()> {
     let services = api_client.get_dpf_service_versions().await?;
 
     if services.is_empty() {

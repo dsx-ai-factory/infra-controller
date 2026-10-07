@@ -389,6 +389,29 @@ func TestComponentConversion(t *testing.T) {
 	assert.Equal(t, &daoComponent, ComponentTo(&internalComponent, rackID))
 }
 
+func TestComponentFromNVLDomainMembership(t *testing.T) {
+	domainID := uuid.New()
+	tests := []struct {
+		name       string
+		rack       *model.Rack
+		want       uuid.UUID
+		externalID *string
+	}{
+		{name: "rack relation not loaded"},
+		{name: "rack is unassigned", rack: &model.Rack{}},
+		{name: "rack is assigned", rack: &model.Rack{NVLDomainID: domainID}, want: domainID},
+		{name: "external identity from domain table", rack: &model.Rack{NVLDomainID: domainID, NVLDomain: &model.NVLDomain{ID: domainID, ExternalID: new("group-01")}}, want: domainID, externalID: new("group-01")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComponentFrom(model.Component{Rack: tt.rack})
+			assert.Equal(t, tt.want, got.NVLDomainID)
+			assert.Equal(t, tt.externalID, got.NVLDomainExternalID)
+		})
+	}
+}
+
 func TestComponentConversionWithComponentID(t *testing.T) {
 	compID := uuid.New()
 	rackID := uuid.New()
@@ -454,7 +477,8 @@ func TestComponentConversionWithComponentID(t *testing.T) {
 func TestRackConversion(t *testing.T) {
 	// Test RackFrom and RackTo
 	rackID := uuid.New()
-	description := map[string]any{"description": "A rack"}
+	domainID := uuid.New()
+	description := map[string]any{"description": "A rack", "model": "NVL72"}
 	loc := `{"region":"US-West","data_center":"Santa Clara","room":"Mars","position":"Row 5"}`
 
 	daoRack := model.Rack{
@@ -465,6 +489,7 @@ func TestRackConversion(t *testing.T) {
 		Description:  description,
 		Location:     utils.JSONStringToMap("location", loc),
 		Components:   []model.Component{},
+		NVLDomainID:  domainID,
 	}
 
 	internalRack := rack.Rack{
@@ -472,13 +497,67 @@ func TestRackConversion(t *testing.T) {
 			ID:           rackID,
 			Name:         "Rack1",
 			Manufacturer: "NVIDIA",
+			Model:        "NVL72",
 			SerialNumber: "67890",
-			Description:  utils.MapToJSONString(description),
+			Description:  "A rack",
 		},
-		Loc:        location.New([]byte(loc)),
-		Components: []component.Component{},
+		Loc:         location.New([]byte(loc)),
+		Components:  []component.Component{},
+		NVLDomainID: domainID,
 	}
 
 	assert.Equal(t, &internalRack, RackFrom(&daoRack))
 	assert.Equal(t, &daoRack, RackTo(&internalRack))
+}
+
+func TestRackFromPropagatesNVLDomainMembershipToComponents(t *testing.T) {
+	domainID := uuid.New()
+	got := RackFrom(&model.Rack{
+		NVLDomainID: domainID,
+		NVLDomain:   &model.NVLDomain{ID: domainID, ExternalID: new("group-01")},
+		Components:  []model.Component{{ID: uuid.New()}},
+	})
+
+	assert.Equal(t, domainID, got.Components[0].NVLDomainID)
+	assert.Equal(t, new("group-01"), got.NVLDomainExternalID)
+	assert.Equal(t, got.NVLDomainExternalID, got.Components[0].NVLDomainExternalID)
+}
+
+func TestRackMetadataFromDescription(t *testing.T) {
+	tests := []struct {
+		name            string
+		stored          map[string]any
+		wantModel       string
+		wantDescription string
+	}{
+		{
+			name:            "Core model and text",
+			stored:          map[string]any{"model": "NVL72", "text": "Core rack"},
+			wantModel:       "NVL72",
+			wantDescription: "Core rack",
+		},
+		{
+			name:            "Flow description",
+			stored:          map[string]any{"description": "Flow rack"},
+			wantDescription: "Flow rack",
+		},
+		{
+			name:      "model only",
+			stored:    map[string]any{"model": "NVL72"},
+			wantModel: "NVL72",
+		},
+		{
+			name:            "unknown structured metadata remains JSON",
+			stored:          map[string]any{"owner": "ops", "zone": "west"},
+			wantDescription: `{"owner":"ops","zone":"west"}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotModel, gotDescription := rackMetadataFromDescription(tc.stored)
+			assert.Equal(t, tc.wantModel, gotModel)
+			assert.Equal(t, tc.wantDescription, gotDescription)
+		})
+	}
 }

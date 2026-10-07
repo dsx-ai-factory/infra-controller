@@ -32,6 +32,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     let expected_initial_states_json = serde_json::json!([
         {"state": "created"},
+        {"state": "configureastra", "configure_astra_state": {"state": "enablenics"}},
         {"state": "dpudiscoveringstate", "dpu_states": {"states": {&dpu_machine_id_string: {"dpudiscoverystate": "initializing"}}}},
         {"state": "dpudiscoveringstate", "dpu_states": {"states": {&dpu_machine_id_string: {"dpudiscoverystate": "configuring"}}}},
         {"state": "dpudiscoveringstate", "dpu_states": {"states": {&dpu_machine_id_string: {"dpudiscoverystate": "enablershim"}}}},
@@ -44,6 +45,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "installdpuos", "substate": {"installdpuosstate": "waitforinstallcomplete", "progress": "0", "task_id": "0"}}}}},
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "init"}}}},
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "waitingforplatformpowercycle", "substate": {"state": "off"}}}}},
+        {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "waitingforplatformpoweroff"}}}},
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "waitingforplatformpowercycle", "substate": {"state": "on"}}}}},
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "waitingforplatformconfiguration"}}}},
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "pollingbiossetup"}}}},
@@ -52,9 +54,6 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         {"state": "hostinit", "machine_state": {"state": "waitingforplatformconfiguration", "retry_count": 0}},
         {"state": "hostinit", "machine_state": {"state": "pollingbiossetup", "retry_count": 0}},
         {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "setbootorder"}}}},
-        {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "waitforsetbootorderjobscheduled"}}}},
-        {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "reboothost"}}}},
-        {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "waitforsetbootorderjobcompletion"}}}},
         {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "checkbootorder"}}}},
         {"state": "hostinit", "machine_state": {"state": "measuring", "measuring_state": "waitingformeasurements"}},
         {"state": "hostinit", "machine_state": {"state": "spdmmeasuring", "spdm_measuring_state": "triggermeasurements"}},
@@ -63,12 +62,12 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let expected_initial_states: Vec<serde_json::Value> =
         expected_initial_states_json.as_array().unwrap().clone();
 
-    for machine_id in &[host_machine_id, dpu_machine_id] {
+    for machine_id in [host_machine_id.into(), dpu_machine_id.into()] {
         let mut txn = env.pool.begin().await?;
 
         let machine = db::machine::find_one(
             txn.as_mut(),
-            &dpu_machine_id,
+            &machine_id,
             model::machine::machine_search_config::MachineSearchConfig {
                 include_history: true,
                 ..Default::default()
@@ -98,7 +97,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         let rpc_machine = env
             .api
             .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-                machine_ids: vec![*machine_id],
+                machine_ids: vec![machine_id],
                 include_history: true,
             }))
             .await?
@@ -119,7 +118,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .find_machine_state_histories(tonic::Request::new(
                 rpc::forge::MachineStateHistoriesRequest {
-                    machine_ids: vec![*machine_id],
+                    machine_ids: vec![machine_id],
                 },
             ))
             .await?
@@ -199,13 +198,17 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 delete_bmc_interfaces: false,
                 delete_bmc_credentials: false,
                 allow_delete_with_orphaned_dpf_crds: false,
+                delete_bmc_suppressions: false,
+                delete_retained_boot_interfaces: false,
+                release_preserved_addresses: false,
+                wait_for_instance_dpu: false,
             },
         ))
         .await
         .unwrap()
         .into_inner();
 
-    assert!(env.find_machine(host_machine_id).await.is_empty());
+    assert!(env.find_machine(&host_machine_id).await.is_empty());
 
     let mut txn = env.pool.begin().await?;
     let power_entry = db::power_options::get_all(&mut txn).await?;
@@ -215,7 +218,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         .api
         .find_machine_state_histories(tonic::Request::new(
             rpc::forge::MachineStateHistoriesRequest {
-                machine_ids: vec![host_machine_id],
+                machine_ids: vec![host_machine_id.into()],
             },
         ))
         .await?
@@ -242,7 +245,7 @@ async fn test_old_machine_state_history(
 
     let mut txn = env.pool.begin().await?;
 
-    let query = "INSERT INTO machine_state_history (machine_id, state, state_version) VALUES ($1, $2::jsonb, $3)";
+    let query = "INSERT INTO machine_state_history (object_id, state, state_version) VALUES ($1, $2::jsonb, $3)";
     sqlx::query(query)
         .bind(host_machine_id.to_string())
         .bind(r#"{"state": "hostinit", "machine_state": {"state": "nolongerarealstate"}}"#)

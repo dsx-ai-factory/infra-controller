@@ -163,6 +163,10 @@ spec:
                   spec:
                     description: Spec specifies the DPU specification.
                     properties:
+                      astraEnabled:
+                        description: AstraEnabled indicates whether E/W NIC configuration
+                          (Astra) is enabled
+                        type: boolean
                       bfb:
                         description: Specifies a BFB CR
                         properties:
@@ -172,9 +176,24 @@ spec:
                             minLength: 1
                             type: string
                         type: object
+                      blueFieldSoftware:
+                        description: Specifies a BlueFieldSoftware CR
+                        properties:
+                          name:
+                            description: Specifies name of the BlueFieldSoftware CR
+                              to use for this DPU
+                            minLength: 1
+                            type: string
+                        type: object
                       cluster:
                         description: Specifies details on the K8S cluster to join
                         properties:
+                          nodeAnnotations:
+                            additionalProperties:
+                              type: string
+                            description: NodeAnnotations specifies the annotations
+                              to be added to the node.
+                            type: object
                           nodeLabels:
                             additionalProperties:
                               type: string
@@ -230,8 +249,16 @@ spec:
                             x-kubernetes-map-type: atomic
                         type: object
                       dpuFlavor:
-                        description: DPUFlavor is the name of the DPUFlavor that will
-                          be used to deploy the DPU.
+                        description: |-
+                          DPUFlavor is the name of the DPUFlavor that will be used to deploy the DPU.
+                          Mutually exclusive with DPUFlavorTemplate.
+                        minLength: 1
+                        type: string
+                      dpuFlavorTemplate:
+                        description: |-
+                          DPUFlavorTemplate is the name of a DPUFlavorTemplate that is rendered per-DPU
+                          (against DPUDevice.spec.values) into a generated DPUFlavor. Mutually exclusive
+                          with DPUFlavor.
                         minLength: 1
                         type: string
                       nodeEffect:
@@ -309,20 +336,29 @@ spec:
                             type: object
                         type: object
                         x-kubernetes-validations:
-                        - message: only one of taint, noEffect, drain, customLabel,
-                            customAction, hold can be set
-                          rule: '(has(self.taint) ? 1 : 0) + (has(self.noEffect) ?
-                            1 : 0) + (has(self.customLabel) ? 1 : 0) + (has(self.drain)
-                            ? 1 : 0) + (has(self.customAction) ? 1 : 0) + (has(self.hold)
-                            ? 1 : 0) == 1'
+                        - message: exactly one of taint, noEffect=true, drain=true,
+                            non-empty customLabel, non-empty customAction, hold=true
+                            must be set
+                          rule: '(has(self.taint) ? 1 : 0) + ((has(self.noEffect)
+                            && self.noEffect) ? 1 : 0) + ((has(self.customLabel) &&
+                            size(self.customLabel) > 0) ? 1 : 0) + ((has(self.drain)
+                            && self.drain) ? 1 : 0) + ((has(self.customAction) &&
+                            size(self.customAction) > 0) ? 1 : 0) + ((has(self.hold)
+                            && self.hold) ? 1 : 0) == 1'
                       secureBoot:
                         description: SecureBoot specifies whether UEFI Secure Boot
                           should be enabled.
                         type: boolean
                     required:
-                    - dpuFlavor
                     - nodeEffect
                     type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of bfb or blueFieldSoftware must be set
+                      rule: '(has(self.bfb) && has(self.bfb.name) ? 1 : 0) + (has(self.blueFieldSoftware)
+                        && has(self.blueFieldSoftware.name) ? 1 : 0) == 1'
+                    - message: exactly one of dpuFlavor or dpuFlavorTemplate must
+                        be set
+                      rule: has(self.dpuFlavor) != has(self.dpuFlavorTemplate)
                 type: object
               strategy:
                 description: The rolling update strategy to use to updating existing

@@ -69,3 +69,15 @@ rateLimiter:
   rate: 10.0        # requests per second
   burst: 30         # maximum burst size
   expiresIn: 180    # expiration time in seconds (3 minutes)
+
+# Enable DPS when NICo must make direct, synchronous authenticated gRPC calls
+# to the configured service. It is disabled by default.
+powerProvisioning:
+  dps:
+    enabled: false
+    endpoint: ""
+    requestTimeout: 15s
+    tokenPath: ""
+    tls:
+      caPath: ""
+      serverName: ""

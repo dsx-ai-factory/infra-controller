@@ -4,6 +4,15 @@ package site_explorer;
 
 import "google/protobuf/duration.proto";
 
+message OperatorErrorSchema {
+  // Stable identifier for alerting and centralized log filtering.
+  string error_code = 1;
+  // Suggested operator action when NICo knows a specific mitigation.
+  optional string mitigation = 2;
+  // Human-readable problem description.
+  string text = 3;
+}
+
 // Data that we gathered about a particular endpoint during site exploration
 message EndpointExplorationReport {
   // The type of the endpoint
@@ -37,6 +46,8 @@ message EndpointExplorationReport {
   LockdownStatus lockdown_status = 18;
   // Parsed firmware component versions (e.g. {"bmc": "25.06-2", "uefi": "00000083", "hgxbmc": "97.00.B9.00.76"})
   map<string, string> firmware_versions = 19;
+  // Structured form of last_exploration_error for operator tooling.
+  optional OperatorErrorSchema last_exploration_error_schema = 20;
 }
 
 message ExploredEndpoint {
@@ -88,10 +99,43 @@ message SiteExplorationReport {
   repeated ExploredEndpoint endpoints = 1;
   // The managed-hosts which have been explored
   repeated ExploredManagedHost managed_hosts = 2;
+  // Metadata about the latest site explorer run
+  optional SiteExplorerLastRun last_run = 3;
+}
+
+message SiteExplorerLastRunResponse {
+  // Metadata about the latest site explorer run, if site explorer has run
+  optional SiteExplorerLastRun last_run = 1;
+}
+
+message SiteExplorerLastRun {
+  // When the run started
+  string started_at = 1;
+  // When the run finished
+  string finished_at = 2;
+  // Whether the run completed successfully
+  bool success = 3;
+  // Error string for a failed run
+  optional string error = 4;
+  // Number of endpoint exploration attempts made during the run
+  int64 endpoint_explorations = 5;
+  // Number of successful endpoint explorations during the run
+  int64 endpoint_explorations_success = 6;
+  // Number of endpoint exploration errors during the run
+  int64 endpoint_explorations_failed = 7;
+  // Failure category for a failed run
+  optional string failure_category = 8;
+  // When the most recent successful run finished
+  optional string last_successful_finished_at = 9;
+  // When the most recent failed run finished
+  optional string last_failed_finished_at = 10;
 }
 
 message ExploredEndpointSearchFilter {
-    // empty now, but maybe in the future we add a way to filter
+  // Match only endpoints whose exploration report has this machine ID.
+  // Omission returns all endpoints, including reports without a machine ID.
+  // Empty or malformed IDs return INVALID_ARGUMENT.
+  optional string machine_id = 1;
 }
 
 message ExploredEndpointIdList {
@@ -126,6 +170,72 @@ message ExploredManagedHostList {
   repeated ExploredManagedHost managed_hosts = 1;
 }
 
+// A Mellanox/BlueField device surfaced from a host's Redfish PCIe inventory
+// during site exploration -- the explored counterpart to scout's live
+// MlxDeviceReport. Reports a device's NIC firmware, part number and serial even
+// for a BlueField in NIC mode, whose Arm OS is down and so cannot report them
+// over its own management channel.
+message ExploredMlxDevice {
+  // The BMC IP of the host the device was found under.
+  string host_bmc_ip = 1;
+  // The host's MachineId, once it has been ingested far enough to derive one.
+  optional string machine_id = 2;
+  // The device kind, classified from its part number.
+  MlxDeviceKind device_kind = 3;
+  // Redfish PCIe device id / slot (e.g. "188-0").
+  optional string pcie_id = 4;
+  // Manufacturer part number (e.g. "900-9D3B4-00EN-EA0").
+  optional string part_number = 5;
+  // Board serial number (e.g. "MT2403X00984").
+  optional string serial_number = 6;
+  // The NIC firmware version currently installed (e.g. "32.42.1000").
+  optional string firmware_version = 7;
+  // The long device description as reported by Redfish.
+  optional string description = 8;
+  // The BMC IP of the device's own DPU endpoint, set when its serial matches a
+  // DPU we have explored -- the address to target for a firmware push.
+  optional string dpu_bmc_ip = 9;
+  // The DPU's authoritative operating mode, read from its own Redfish endpoint
+  // when matched. This is the mode the card is running in right now; it
+  // legitimately differs from the SKU-derived device_kind for a DPU
+  // reconfigured to run as a NIC.
+  optional NicMode nic_mode = 10;
+}
+
+// The kind of BlueField/Mellanox device, classified from its part number. The
+// part number identifies the factory SKU, not the operating mode: 900-9D3B6 is
+// a BlueField-3 DPU product, 900-9D3B4 and 900-9D3D4 are BlueField-3 SuperNIC
+// products. A DPU/NIC mode flip does not change it -- nic_mode carries the
+// operating mode. The *_MODE value names are frozen from when this was
+// believed to track the operating mode.
+enum MlxDeviceKind {
+  MLX_DEVICE_KIND_UNKNOWN = 0;
+  MLX_DEVICE_KIND_BF3_NIC_MODE = 1;
+  MLX_DEVICE_KIND_BF3_DPU_MODE = 2;
+  MLX_DEVICE_KIND_BF3_SUPER_NIC = 3;
+  MLX_DEVICE_KIND_BF2_DPU = 4;
+}
+
+message ExploredMlxDeviceList {
+  repeated ExploredMlxDevice devices = 1;
+}
+
+// Paginated like the other explored reads: list the host BMC IPs that carry
+// BlueField devices, then fetch the devices a page of hosts at a time.
+message ExploredMlxDeviceHostSearchFilter {
+    // empty now, but maybe in the future we add a way to filter
+}
+
+message ExploredMlxDeviceHostIdList {
+  // host bmc IP address is used as an ID
+  repeated string host_ids = 1;
+}
+
+message ExploredMlxDevicesByIdsRequest {
+  // host bmc IP address is used as an ID
+  repeated string host_ids = 1;
+}
+
 enum NicMode {
   DPU = 0;
   NIC = 1;
@@ -156,6 +266,8 @@ enum PowerState {
   PoweringOn = 3;
   Paused = 4;
   Unknown = 5;
+  Hibernating = 6;
+  Sleeping = 7;
 }
 
 // `Manager` definition. Matches redfish definition
@@ -191,6 +303,8 @@ message NetworkAdapter {
   optional string model = 3;
   optional string part_number = 4;
   optional string serial_number = 5;
+  // MAC addresses reported by Ports contained by this adapter.
+  repeated string port_mac_addresses = 6;
 }
 
 // `Service` definition. Matches redfish definition `UpdateService`
@@ -207,10 +321,32 @@ message Inventory {
   optional string release_date = 4;
 }
 
-// `MachineSetupStatus` definition. Matches redfish definition
+// The result of one Redfish machine-setup check, including the logical boot
+// interface target NICo asked the backend to assess.
 message MachineSetupStatus {
   bool is_done = 1;
   repeated MachineSetupDiff diffs = 2;
+  // The logical boot-interface target NICo asked the backend to assess. A
+  // backend may match with a subset (NvRedfish currently uses the MAC) while
+  // retaining Pair identity. Reports written before target capture leave this
+  // unset.
+  MachineBootInterfaceTarget evaluated_boot_interface = 3;
+}
+
+// The logical boot-interface target NICo asked a Redfish backend to assess. It
+// retains the complete pair when Site Explorer has it while keeping older
+// MAC-only endpoint records explicit.
+message MachineBootInterfaceTarget {
+  oneof target {
+    MachineBootInterfacePair pair = 1;
+    string mac_only = 2;
+  }
+}
+
+// MAC and vendor-native Redfish EthernetInterface.Id for one interface.
+message MachineBootInterfacePair {
+  string mac_address = 1;
+  string interface_id = 2;
 }
 
 // `MachineSetupDiff` definition. Matches redfish definition

@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmd;
+pub(super) mod args;
+mod cmd;
 
-pub use args::Args;
+pub(super) use args::Args;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -26,6 +26,10 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if let Err(error) = self.validate() {
+            error.exit();
+        }
+
         cmd::allocate(&ctx.api_client, self, ctx).await?;
         Ok(())
     }

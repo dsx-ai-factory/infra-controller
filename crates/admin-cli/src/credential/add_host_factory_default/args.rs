@@ -27,13 +27,13 @@ Add the factory-default host BMC credential for a vendor:
     --username admin --password mypassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, required(true), help = "Default username: root, ADMIN, etc")]
-    pub username: String,
+    username: String,
     #[clap(long, required(true), help = "Manufacturer default password")]
-    pub password: String,
+    password: String,
     #[clap(long, required(true))]
-    pub vendor: bmc_vendor::BMCVendor,
+    vendor: bmc_vendor::BMCVendor,
 }
 
 impl From<Args> for forgerpc::CredentialCreationRequest {
@@ -44,6 +44,7 @@ impl From<Args> for forgerpc::CredentialCreationRequest {
             password: args.password,
             mac_address: None,
             vendor: Some(args.vendor.to_string()),
+            credential_name: None,
         }
     }
 }

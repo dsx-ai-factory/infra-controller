@@ -19,9 +19,10 @@ use std::collections::{HashMap, HashSet};
 
 use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_ib_fabric::ib::{GetPartitionOptions, IBFabric, IBMtu, IBRateLimit, IBServiceLevel};
+use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::create_managed_host;
-use model::ib::{IBNetwork, IBQosConf};
+use model::ib::{DEFAULT_IB_FABRIC_NAME, IBNetwork, IBQosConf};
 use model::ib_partition::PartitionKey;
 
 use crate::tests::common;
@@ -56,14 +57,26 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
 
     for host_machine_id in host_machines.iter().copied() {
         println!("Testing host machine {host_machine_id}");
-        let rpc_machine_id: MachineId = host_machine_id;
+        let rpc_machine_id: MachineId = host_machine_id.into();
 
-        let machine = env.find_machine(rpc_machine_id).await.remove(0);
+        let machine = env.find_machine(&rpc_machine_id).await.remove(0);
 
-        let machine_guids = guids.entry(host_machine_id_1).or_default();
+        let machine_guids = guids.entry(host_machine_id.into()).or_default();
 
-        let discovery_info = machine.discovery_info.as_ref().unwrap();
-        let ib_status = machine.ib_status.expect("IB status is missing");
+        let discovery_info = machine
+            .status
+            .as_ref()
+            .unwrap()
+            .discovery_info
+            .as_ref()
+            .unwrap();
+        let ib_status = machine
+            .status
+            .as_ref()
+            .unwrap()
+            .infiniband
+            .clone()
+            .expect("IB status is missing");
         assert_eq!(
             discovery_info.infiniband_interfaces.len(),
             ib_status.ib_interfaces.len()
@@ -143,8 +156,38 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
         .pkey()
         .parse()
         .unwrap();
-    // Increment pkey1 by 1 to get a second partition key
-    let pkey2: PartitionKey = (u16::from(pkey1) + 1).try_into().unwrap();
+    // The allocated pkey is random. Pick a different value from the configured
+    // managed ranges instead of using `pkey1 + 1`. The cleanup path calls
+    // `is_pkey_in_managed_range`, which checks `start..end`, so the configured
+    // end value, such as 100 in the default test config, is out of range.
+    let allocated_pkey = u16::from(pkey1);
+    let parse_pkey_endpoint = |value: &str| {
+        let value = value.trim();
+
+        if let Some(hex) = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+        {
+            u16::from_str_radix(hex, 16).ok()
+        } else {
+            value.parse::<u16>().ok()
+        }
+    };
+
+    let pkey2_value = env
+        .config
+        .ib_fabrics
+        .get(DEFAULT_IB_FABRIC_NAME)
+        .into_iter()
+        .flat_map(|fabric| fabric.pkeys.iter())
+        .filter_map(|range| {
+            let start = parse_pkey_endpoint(&range.start)?;
+            let end = parse_pkey_endpoint(&range.end)?;
+            (start..end).find(|value| *value != allocated_pkey)
+        })
+        .next()
+        .expect("test IB fabric config should contain another managed pkey");
+    let pkey2: PartitionKey = pkey2_value.try_into().unwrap();
 
     let partition1 = IBNetwork {
         pkey: pkey1.into(),
@@ -201,7 +244,24 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
         Some(HashSet::from_iter([guid2.clone()]))
     );
 
+    let ufm_change_metrics = MetricsCapture::start();
     env.ib_fabric_monitor.run_single_iteration().await.unwrap();
+    let successful_unbinds = ufm_change_metrics.counter_delta(
+        "carbide_ib_monitor_ufm_changes_applied_total",
+        &[
+            ("fabric", "default"),
+            ("operation", "unbind_guid_from_pkey"),
+            ("status", "ok"),
+        ],
+    );
+    // Other API tests can drive the same process-global Event concurrently.
+    // The Event-level test pins exact counts; this check proves the monitor's
+    // reconciliation path reaches the UFM change Event.
+    assert!(
+        successful_unbinds >= 3.0,
+        "expected three successful UFM unbinds, observed {successful_unbinds}"
+    );
+    drop(ufm_change_metrics);
     assert_eq!(
         env.test_meter
             .formatted_metric("carbide_ib_monitor_machine_ib_status_updates_count")
@@ -248,41 +308,27 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
             .unwrap(),
         "1"
     );
-    // Automatic reconcilation unassigns the unexpected pkey
-    assert_eq!(
-        env.test_meter
-            .parsed_metrics("carbide_ib_monitor_ufm_changes_applied_total"),
-        vec![
-            (
-                "{fabric=\"default\",operation=\"bind_guid_to_pkey\",status=\"error\"}".to_string(),
-                "0".to_string()
-            ),
-            (
-                "{fabric=\"default\",operation=\"bind_guid_to_pkey\",status=\"ok\"}".to_string(),
-                "0".to_string()
-            ),
-            (
-                "{fabric=\"default\",operation=\"unbind_guid_from_pkey\",status=\"error\"}"
-                    .to_string(),
-                "0".to_string()
-            ),
-            (
-                "{fabric=\"default\",operation=\"unbind_guid_from_pkey\",status=\"ok\"}"
-                    .to_string(),
-                "3".to_string()
-            )
-        ]
-    );
-
     active_lids.clear();
     for host_machine_id in host_machines.iter().copied() {
         println!("Testing host machine {host_machine_id}");
-        let rpc_machine_id: MachineId = host_machine_id;
+        let rpc_machine_id: MachineId = host_machine_id.into();
 
-        let machine = env.find_machine(rpc_machine_id).await.remove(0);
+        let machine = env.find_machine(&rpc_machine_id).await.remove(0);
 
-        let discovery_info = machine.discovery_info.as_ref().unwrap();
-        let ib_status = machine.ib_status.expect("IB status is missing");
+        let discovery_info = machine
+            .status
+            .as_ref()
+            .unwrap()
+            .discovery_info
+            .as_ref()
+            .unwrap();
+        let ib_status = machine
+            .status
+            .as_ref()
+            .unwrap()
+            .infiniband
+            .clone()
+            .expect("IB status is missing");
         assert_eq!(
             discovery_info.infiniband_interfaces.len(),
             ib_status.ib_interfaces.len()
@@ -415,30 +461,5 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
             .formatted_metric("carbide_ib_monitor_machines_with_unknown_pkeys_count")
             .unwrap(),
         "0"
-    );
-    // No additional changes means the counter metric has the same values
-    assert_eq!(
-        env.test_meter
-            .parsed_metrics("carbide_ib_monitor_ufm_changes_applied_total"),
-        vec![
-            (
-                "{fabric=\"default\",operation=\"bind_guid_to_pkey\",status=\"error\"}".to_string(),
-                "0".to_string()
-            ),
-            (
-                "{fabric=\"default\",operation=\"bind_guid_to_pkey\",status=\"ok\"}".to_string(),
-                "0".to_string()
-            ),
-            (
-                "{fabric=\"default\",operation=\"unbind_guid_from_pkey\",status=\"error\"}"
-                    .to_string(),
-                "0".to_string()
-            ),
-            (
-                "{fabric=\"default\",operation=\"unbind_guid_from_pkey\",status=\"ok\"}"
-                    .to_string(),
-                "3".to_string()
-            )
-        ]
     );
 }

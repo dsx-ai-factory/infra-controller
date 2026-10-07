@@ -49,7 +49,7 @@ mod tests {
     // of records being inserted into the database, and also makes
     // sure the records themselves are correct.
     #[crate::sqlx_test]
-    pub async fn test_profile_crudl(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_profile_crudl(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
 
         let vals = HashMap::from([
@@ -172,9 +172,7 @@ mod tests {
     // It makes sure both of those cases fail, and that
     // the actual unique one works.
     #[crate::sqlx_test]
-    pub async fn test_profile_duplicates(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_profile_duplicates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let vals = HashMap::from([
             (String::from("sys_vendor"), String::from("dell")),
             (String::from("product_name"), String::from("poweredge_r750")),
@@ -223,9 +221,7 @@ mod tests {
     // different (but overlapping) attributes, and then makes sure
     // the matching logic works as expected.
     #[crate::sqlx_test]
-    pub async fn test_profile_matching(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_profile_matching(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
 
         let vals1 = HashMap::from([

@@ -20,6 +20,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+const STATIC_IPXE_MENU_TEMPLATE_ID: &str = "c816a939-0993-5ebf-82dd-5227ad215703";
+const STATIC_IPXE_MENU_TEMPLATE: &str = include_str!("../../../pxe/ipxe/local/embed.ipxe");
+
 /// iPXE OS definition with template-based rendering support
 #[derive(Debug, Clone)]
 pub struct IpxeScript {
@@ -60,11 +63,11 @@ pub struct IpxeTemplateArtifact {
     pub cached_url: Option<String>,
 }
 
-/// Scope for iPXE script templates.
+/// Visibility for iPXE script templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum IpxeTemplateScope {
-    /// Carbide-core usage only.
+pub enum IpxeTemplateVisibility {
+    /// NICo Core usage only.
     #[default]
     Internal,
     /// Usable by tenant.
@@ -84,8 +87,8 @@ pub struct IpxeTemplate {
     pub required_params: Vec<String>,
     #[serde(default)]
     pub required_artifacts: Vec<String>,
-    #[serde(default)]
-    pub scope: IpxeTemplateScope,
+    #[serde(default, alias = "scope")]
+    pub visibility: IpxeTemplateVisibility,
 }
 
 /// Template collection loaded from YAML
@@ -97,34 +100,34 @@ struct TemplateCollection {
 /// Error types for iPXE OS rendering
 #[derive(Debug, thiserror::Error)]
 pub enum IpxeScriptError {
-    #[error("Template not found: {0}")]
+    #[error("template not found: {0}")]
     TemplateNotFound(String),
 
-    #[error("Reserved parameter found in OS definition: {0}")]
+    #[error("reserved parameter found in OS definition: {0}")]
     ReservedParameterFound(String),
 
-    #[error("Required parameter missing or empty: {0}")]
+    #[error("required parameter missing or empty: {0}")]
     RequiredParameterMissing(String),
 
-    #[error("Optional parameters provided but {{{{extra}}}} not in template")]
+    #[error("optional parameters provided but {{{{extra}}}} not in template")]
     ExtraParametersNotSupported,
 
-    #[error("Hash mismatch: expected {expected}, got {actual}")]
+    #[error("hash mismatch: expected {expected}, got {actual}")]
     HashMismatch { expected: String, actual: String },
 
-    #[error("Artifact not found: {0}")]
+    #[error("artifact not found: {0}")]
     ArtifactNotFound(String),
 
-    #[error("Missing reserved parameter: {0}")]
+    #[error("missing reserved parameter: {0}")]
     MissingReservedParameter(String),
 
-    #[error("Unexpected reserved parameter: {0}")]
+    #[error("unexpected reserved parameter: {0}")]
     UnexpectedReservedParameter(String),
 
-    #[error("Unreplaced placeholders found: {0}")]
+    #[error("unreplaced placeholders found: {0}")]
     UnreplacedPlaceholders(String),
 
-    #[error("Artifact '{0}' has cache_strategy CachedOnly but no cached_url is available")]
+    #[error("artifact '{0}' has cache_strategy CachedOnly but no cached_url is available")]
     CachedOnlyNotCached(String),
 }
 
@@ -135,7 +138,7 @@ pub trait IpxeScriptRenderer {
     /// Render generates the final iPXE script from an IpxeScript object.
     /// Artifact URLs are replaced by local cached URLs when available (cached_url).
     /// `reserved_params` must contain exactly the reserved parameters defined
-    /// in the template (provided by carbide-core).
+    /// in the template (provided by NICo Core).
     fn render(
         &self,
         ipxeos: &IpxeScript,
@@ -190,7 +193,13 @@ impl DefaultIpxeScriptRenderer {
         let templates = template_collection
             .templates
             .into_iter()
-            .map(|t| (t.name.clone(), t))
+            .map(|mut t| {
+                if t.id == STATIC_IPXE_MENU_TEMPLATE_ID {
+                    t.template = STATIC_IPXE_MENU_TEMPLATE.to_string();
+                }
+
+                (t.name.clone(), t)
+            })
             .collect();
 
         Self { templates }
@@ -636,6 +645,9 @@ impl DefaultIpxeScriptRenderer {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases};
+
     use super::*;
 
     fn create_test_ipxeos() -> IpxeScript {
@@ -649,6 +661,253 @@ mod tests {
                 name: "image_url".to_string(),
                 value: "http://example.com/image.qcow2".to_string(),
             }],
+            artifacts: vec![],
+        }
+    }
+
+    /// One row of the cache-strategy URL-selection table: an artifact built from a
+    /// `cache_strategy` and whether a `cached_url` is present, resolved through
+    /// [`resolve_artifact_url`].
+    struct UrlSelectionRow {
+        cache_strategy: IpxeTemplateArtifactCacheStrategy,
+        cached_url: Option<&'static str>,
+    }
+
+    /// Build an artifact from a row and resolve its effective URL. The remote `url`
+    /// and the cached URL are distinct sentinels so the yielded value names which
+    /// one the strategy selected.
+    fn select_url(row: UrlSelectionRow) -> Result<String> {
+        let artifact = IpxeTemplateArtifact {
+            name: "artifact".to_string(),
+            url: "http://remote/url".to_string(),
+            sha: None,
+            auth_type: None,
+            auth_token: None,
+            cache_strategy: row.cache_strategy,
+            cached_url: row.cached_url.map(str::to_string),
+        };
+        resolve_artifact_url(&artifact)
+    }
+
+    #[test]
+    fn resolve_artifact_url_selects_per_cache_strategy() {
+        use IpxeTemplateArtifactCacheStrategy::*;
+
+        check_cases(
+            [
+                Case {
+                    scenario: "CacheAsNeeded prefers the cached URL",
+                    input: UrlSelectionRow {
+                        cache_strategy: CacheAsNeeded,
+                        cached_url: Some("http://cache/url"),
+                    },
+                    expect: Yields("http://cache/url".to_string()),
+                },
+                Case {
+                    scenario: "CacheAsNeeded falls back to the remote URL",
+                    input: UrlSelectionRow {
+                        cache_strategy: CacheAsNeeded,
+                        cached_url: None,
+                    },
+                    expect: Yields("http://remote/url".to_string()),
+                },
+                Case {
+                    scenario: "RemoteOnly always uses the remote URL, ignoring the cache",
+                    input: UrlSelectionRow {
+                        cache_strategy: RemoteOnly,
+                        cached_url: Some("http://cache/url"),
+                    },
+                    expect: Yields("http://remote/url".to_string()),
+                },
+                Case {
+                    scenario: "RemoteOnly uses the remote URL when uncached",
+                    input: UrlSelectionRow {
+                        cache_strategy: RemoteOnly,
+                        cached_url: None,
+                    },
+                    expect: Yields("http://remote/url".to_string()),
+                },
+                Case {
+                    scenario: "LocalOnly uses artifact.url directly, ignoring cached_url",
+                    input: UrlSelectionRow {
+                        cache_strategy: LocalOnly,
+                        cached_url: Some("http://cache/url"),
+                    },
+                    expect: Yields("http://remote/url".to_string()),
+                },
+                Case {
+                    scenario: "LocalOnly uses artifact.url when uncached",
+                    input: UrlSelectionRow {
+                        cache_strategy: LocalOnly,
+                        cached_url: None,
+                    },
+                    expect: Yields("http://remote/url".to_string()),
+                },
+                Case {
+                    scenario: "CachedOnly uses the cached URL when present",
+                    input: UrlSelectionRow {
+                        cache_strategy: CachedOnly,
+                        cached_url: Some("http://cache/url"),
+                    },
+                    expect: Yields("http://cache/url".to_string()),
+                },
+                Case {
+                    scenario: "CachedOnly fails when no cached URL is available",
+                    input: UrlSelectionRow {
+                        cache_strategy: CachedOnly,
+                        cached_url: None,
+                    },
+                    expect: FailsWith("CachedOnlyNotCached".to_string()),
+                },
+            ],
+            |row| select_url(row).map_err(error_variant),
+        );
+    }
+
+    /// A stable name for an [`IpxeScriptError`] variant, so error-matrix rows can
+    /// assert the exact failure with [`FailsWith`] without the error type needing
+    /// `PartialEq`.
+    fn error_variant(error: IpxeScriptError) -> String {
+        let name = match error {
+            IpxeScriptError::TemplateNotFound(_) => "TemplateNotFound",
+            IpxeScriptError::ReservedParameterFound(_) => "ReservedParameterFound",
+            IpxeScriptError::RequiredParameterMissing(_) => "RequiredParameterMissing",
+            IpxeScriptError::ExtraParametersNotSupported => "ExtraParametersNotSupported",
+            IpxeScriptError::HashMismatch { .. } => "HashMismatch",
+            IpxeScriptError::ArtifactNotFound(_) => "ArtifactNotFound",
+            IpxeScriptError::MissingReservedParameter(_) => "MissingReservedParameter",
+            IpxeScriptError::UnexpectedReservedParameter(_) => "UnexpectedReservedParameter",
+            IpxeScriptError::UnreplacedPlaceholders(_) => "UnreplacedPlaceholders",
+            IpxeScriptError::CachedOnlyNotCached(_) => "CachedOnlyNotCached",
+        };
+        name.to_string()
+    }
+
+    /// Build a single CacheAsNeeded artifact, used by error-matrix rows that need
+    /// the Ubuntu template's required artifacts to be present (or deliberately
+    /// absent).
+    fn artifact(name: &str) -> IpxeTemplateArtifact {
+        IpxeTemplateArtifact {
+            name: name.to_string(),
+            url: format!("http://example.com/{name}"),
+            sha: None,
+            auth_type: None,
+            auth_token: None,
+            cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
+            cached_url: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_each_invalid_definition() {
+        let renderer = DefaultIpxeScriptRenderer::new();
+
+        // qcow template: requires the `image_url` parameter, reserves `base_url`.
+        let qcow = "ea756ddd-add3-5e42-a202-44bfc2d5aac2";
+        // Ubuntu autoinstall template: requires install_iso, kernel, initrd artifacts.
+        let ubuntu = "a7850943-e3cd-5e9a-93ca-9e12f52939cc";
+
+        // A row hashes itself before running so only the failure under test fires
+        // (an unset hash would otherwise trip HashMismatch first); the HashMismatch
+        // row deliberately skips that step.
+        let run = |mut ipxeos: IpxeScript| {
+            if ipxeos.hash != "deliberately-wrong" {
+                ipxeos.hash = renderer.hash(&ipxeos);
+            }
+            renderer.validate(&ipxeos).map_err(error_variant)
+        };
+
+        check_cases(
+            [
+                Case {
+                    scenario: "globally reserved 'extra' parameter name",
+                    input: IpxeScript {
+                        parameters: vec![
+                            IpxeTemplateParameter {
+                                name: "image_url".to_string(),
+                                value: "http://example.com/image.qcow2".to_string(),
+                            },
+                            IpxeTemplateParameter {
+                                name: "extra".to_string(),
+                                value: "value".to_string(),
+                            },
+                        ],
+                        ..base_script(qcow)
+                    },
+                    expect: FailsWith("ReservedParameterFound".to_string()),
+                },
+                Case {
+                    scenario: "template-reserved 'base_url' parameter name",
+                    input: IpxeScript {
+                        parameters: vec![
+                            IpxeTemplateParameter {
+                                name: "image_url".to_string(),
+                                value: "http://example.com/image.qcow2".to_string(),
+                            },
+                            IpxeTemplateParameter {
+                                name: "base_url".to_string(),
+                                value: "http://bad".to_string(),
+                            },
+                        ],
+                        ..base_script(qcow)
+                    },
+                    expect: FailsWith("ReservedParameterFound".to_string()),
+                },
+                Case {
+                    scenario: "required 'image_url' parameter missing",
+                    input: IpxeScript {
+                        parameters: vec![],
+                        ..base_script(qcow)
+                    },
+                    expect: FailsWith("RequiredParameterMissing".to_string()),
+                },
+                Case {
+                    scenario: "required 'initrd' artifact missing",
+                    input: IpxeScript {
+                        parameters: vec![],
+                        artifacts: vec![artifact("install_iso"), artifact("kernel")],
+                        ..base_script(ubuntu)
+                    },
+                    expect: FailsWith("ArtifactNotFound".to_string()),
+                },
+                Case {
+                    scenario: "hash does not match the definition",
+                    input: IpxeScript {
+                        hash: "deliberately-wrong".to_string(),
+                        parameters: vec![IpxeTemplateParameter {
+                            name: "image_url".to_string(),
+                            value: "http://example.com/image.qcow2".to_string(),
+                        }],
+                        ..base_script(qcow)
+                    },
+                    expect: FailsWith("HashMismatch".to_string()),
+                },
+                Case {
+                    scenario: "well-formed qcow definition validates",
+                    input: IpxeScript {
+                        parameters: vec![IpxeTemplateParameter {
+                            name: "image_url".to_string(),
+                            value: "http://example.com/image.qcow2".to_string(),
+                        }],
+                        ..base_script(qcow)
+                    },
+                    expect: Yields(()),
+                },
+            ],
+            run,
+        );
+    }
+
+    /// A minimal script scaffold for the given template, with no parameters or
+    /// artifacts; error-matrix rows fill in only the fields their case exercises.
+    fn base_script(template_id: &str) -> IpxeScript {
+        IpxeScript {
+            name: "Test".to_string(),
+            description: None,
+            hash: String::new(),
+            tenant_id: None,
+            ipxe_template_id: template_id.to_string(),
+            parameters: vec![],
             artifacts: vec![],
         }
     }
@@ -673,105 +932,6 @@ mod tests {
             renderer.validate(&ipxeos),
             Err(IpxeScriptError::HashMismatch { .. })
         ));
-    }
-
-    #[test]
-    fn test_reserved_parameter_validation() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = create_test_ipxeos();
-
-        // Add a reserved parameter
-        ipxeos.parameters.push(IpxeTemplateParameter {
-            name: "base_url".to_string(),
-            value: "http://bad.com".to_string(),
-        });
-
-        // Update hash
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        // Validation should fail
-        assert!(matches!(
-            renderer.validate(&ipxeos),
-            Err(IpxeScriptError::ReservedParameterFound(_))
-        ));
-    }
-
-    #[test]
-    fn test_required_parameter_validation() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = create_test_ipxeos();
-
-        // Remove required parameter
-        ipxeos.parameters.clear();
-
-        // Update hash
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        // Validation should fail
-        assert!(matches!(
-            renderer.validate(&ipxeos),
-            Err(IpxeScriptError::RequiredParameterMissing(_))
-        ));
-    }
-
-    #[test]
-    fn test_required_artifact_validation() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = IpxeScript {
-            name: "Ubuntu 22.04".to_string(),
-            description: Some("Ubuntu autoinstall".to_string()),
-            hash: "placeholder".to_string(),
-            tenant_id: None,
-            ipxe_template_id: "a7850943-e3cd-5e9a-93ca-9e12f52939cc".to_string(),
-            parameters: vec![],
-            artifacts: vec![
-                IpxeTemplateArtifact {
-                    name: "install_iso".to_string(),
-                    url: "http://releases.ubuntu.com/22.04/ubuntu-22.04-live-server-amd64.iso"
-                        .to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "kernel".to_string(),
-                    url: "http://example.com/kernel".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                    cached_url: None,
-                },
-            ],
-        };
-
-        // Update hash
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        // Validation should fail due to missing initrd artifact
-        assert!(matches!(
-            renderer.validate(&ipxeos),
-            Err(IpxeScriptError::ArtifactNotFound(_))
-        ));
-
-        // Now add the missing artifact
-        ipxeos.artifacts.push(IpxeTemplateArtifact {
-            name: "initrd".to_string(),
-            url: "http://example.com/initrd".to_string(),
-            sha: None,
-            auth_type: None,
-            auth_token: None,
-            cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-            cached_url: None,
-        });
-
-        // Update hash
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        // Validation should now pass
-        assert!(renderer.validate(&ipxeos).is_ok());
     }
 
     #[test]
@@ -970,66 +1130,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fabricate_cached_urls() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let ipxeos = IpxeScript {
-            name: "Test with artifacts".to_string(),
-            description: Some("Test".to_string()),
-            hash: "test-hash".to_string(),
-            tenant_id: None,
-            ipxe_template_id: "a7850943-e3cd-5e9a-93ca-9e12f52939cc".to_string(),
-            parameters: vec![IpxeTemplateParameter {
-                name: "install_iso".to_string(),
-                value: "http://example.com/ubuntu.iso".to_string(),
-            }],
-            artifacts: vec![
-                IpxeTemplateArtifact {
-                    name: "kernel".to_string(),
-                    url: "http://example.com/kernel".to_string(),
-                    sha: Some("sha256:abc123".to_string()),
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "initrd".to_string(),
-                    url: "http://example.com/initrd".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::RemoteOnly,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "local-var".to_string(),
-                    url: "${base-url}/local.img".to_string(),
-                    sha: Some("sha256:local789".to_string()),
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                    cached_url: None,
-                },
-            ],
-        };
-
-        let result = renderer.fabricate_cached_urls(&ipxeos);
-
-        // First artifact should have cached_url using sha field directly
-        assert!(result.artifacts[0].cached_url.is_some());
-        let cached_url = result.artifacts[0].cached_url.as_ref().unwrap();
-        assert_eq!(cached_url, "${base_url}/sha256:abc123");
-
-        // Second artifact is RemoteOnly, should not have cached_url
-        assert!(result.artifacts[1].cached_url.is_none());
-
-        // Third artifact has iPXE variable but is still eligible for cached_url (no variable check)
-        assert!(result.artifacts[2].cached_url.is_some());
-        let cached_url3 = result.artifacts[2].cached_url.as_ref().unwrap();
-        assert_eq!(cached_url3, "${base_url}/sha256:local789");
-    }
-
-    #[test]
     fn test_list_templates() {
         let renderer = DefaultIpxeScriptRenderer::new();
         let templates = renderer.list_templates();
@@ -1047,6 +1147,132 @@ mod tests {
         assert!(templates.contains(&"carbide-menu-static-ipxe".to_string()));
         // Only assert minimum count (templates referenced in tests); new entries in templates.yaml are allowed
         assert!(templates.len() >= 11);
+    }
+
+    /// The host discovery templates must hand Scout its cloud-init datasource,
+    /// and the DPU template must not.
+    ///
+    /// This is the templated twin of the kernel command line that
+    /// `PxeInstructions::get_pxe_instruction_for_arch` builds by hand, and the
+    /// two have to agree: a host that boots through this path without
+    /// `ds=nocloud;s=` comes up with no datasource, so the site's discovery
+    /// snippets are silently never applied. Nothing about that failure is
+    /// visible from the outside, which is why it is pinned here. The DPU is
+    /// excluded deliberately -- it fetches a BlueField kickstart via `bfks=`
+    /// from its own route prefix and has no NoCloud datasource at all.
+    #[test]
+    fn discovery_templates_carry_the_right_cloud_init_datasource() {
+        const SCOUT_DATASOURCE: &str = "ds=nocloud;s=${scout-cloudinit-url}";
+
+        let renderer = DefaultIpxeScriptRenderer::new();
+
+        for name in ["discovery-scout-aarch64", "discovery-scout-x86_64"] {
+            let template = renderer
+                .get_template_by_name(name)
+                .unwrap_or_else(|| panic!("{name} should exist"));
+            assert!(
+                template.template.contains(SCOUT_DATASOURCE),
+                "{name} must give Scout its cloud-init datasource, or discovery \
+                 snippets silently never apply",
+            );
+        }
+
+        let dpu = renderer
+            .get_template_by_name("discovery-scout-aarch64-dpu")
+            .expect("discovery-scout-aarch64-dpu should exist");
+        assert!(
+            !dpu.template.contains("ds=nocloud"),
+            "the DPU boots a BlueField kickstart, not a NoCloud datasource",
+        );
+        assert!(
+            dpu.template.contains("bfks=${dpu-cloudinit-url}/user-data"),
+            "the DPU kickstart URL must come from the boot script's variable",
+        );
+        assert!(
+            !dpu.required_params.iter().any(|p| p == "cloudinit_url"),
+            "a stored kickstart URL goes stale when the route prefixes change; \
+             the boot script supplies it instead",
+        );
+    }
+
+    #[test]
+    fn test_static_ipxe_menu_uses_nico_branding() {
+        const BRANDING_H: &str = include_str!("../../../pxe/ipxe/local/branding.h");
+
+        let renderer = DefaultIpxeScriptRenderer::new();
+        let menu_template = renderer
+            .get_template_by_id(STATIC_IPXE_MENU_TEMPLATE_ID)
+            .expect("static iPXE menu template should exist");
+
+        assert_eq!(menu_template.template, STATIC_IPXE_MENU_TEMPLATE);
+
+        for (name, contents) in [
+            ("embedded iPXE script", STATIC_IPXE_MENU_TEMPLATE),
+            ("iPXE branding header", BRANDING_H),
+            (
+                "renderer static menu description",
+                menu_template.description.as_str(),
+            ),
+        ] {
+            assert!(contents.contains("NICo"), "{name} should mention NICo");
+        }
+
+        for (name, contents) in [
+            ("embedded iPXE script", STATIC_IPXE_MENU_TEMPLATE),
+            ("iPXE branding header", BRANDING_H),
+            (
+                "renderer static menu description",
+                menu_template.description.as_str(),
+            ),
+        ] {
+            assert!(
+                !contents.contains("Carbide") && !contents.contains("carbide"),
+                "{name} should not mention Carbide"
+            );
+            assert!(
+                !contents.contains("Forge") && !contents.contains("forge"),
+                "{name} should not mention Forge"
+            );
+        }
+    }
+
+    #[test]
+    fn static_ipxe_menu_uses_the_dhcp_pxe_http_endpoint() {
+        for path in ["whoami", "boot?buildarch=${buildarch}"] {
+            assert!(
+                STATIC_IPXE_MENU_TEMPLATE
+                    .contains(&format!("http://${{next-server}}/api/v0/pxe/{path}")),
+                "static iPXE menu should use next-server over the standard HTTP port for {path}"
+            );
+        }
+
+        assert!(
+            !STATIC_IPXE_MENU_TEMPLATE.contains("${next-server}:8080"),
+            "static iPXE menu should not use the PXE container's internal port"
+        );
+    }
+
+    #[test]
+    fn static_ipxe_menu_retries_only_marked_boot_scripts() {
+        assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
+            "imgfree nico-boot ||\n\
+             set nico-retry-provisioning 0\n\
+             time chain --name nico-boot http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot"
+        ));
+        assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
+            ":retry_nico_boot\n\
+             iseq ${nico-retry-provisioning} 1 || goto error_handler\n\
+             imgstat nico-boot || goto error_handler\n\
+             prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||\n\
+             time imgexec nico-boot && exit 1 || goto retry_nico_boot"
+        ));
+        assert_eq!(
+            STATIC_IPXE_MENU_TEMPLATE
+                .matches("/api/v0/pxe/boot?")
+                .count(),
+            1,
+            "retrying should reuse the served script instead of requesting it again"
+        );
     }
 
     #[test]
@@ -1128,15 +1354,12 @@ mod tests {
     #[test]
     fn test_unreplaced_placeholders() {
         let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = create_test_ipxeos();
-        // Remove the required parameter to cause unreplaced placeholder
-        ipxeos.parameters.clear();
-        ipxeos.hash = renderer.hash(&ipxeos);
 
-        // Validation will fail first, but let's test the unreplaced check by using a template
-        // that doesn't require this param
-        ipxeos.ipxe_template_id = "ea756ddd-add3-5e42-a202-44bfc2d5aac2".to_string();
-        ipxeos.parameters = vec![]; // Missing image_url
+        // render() never reaches the placeholder check -- required-parameter validation
+        // rejects the script first, which this test's own comment used to admit while
+        // asserting nothing more than "some error came back". Pin that rejection for real...
+        let mut ipxeos = create_test_ipxeos();
+        ipxeos.parameters.clear();
         ipxeos.hash = renderer.hash(&ipxeos);
 
         let reserved_params = vec![
@@ -1150,9 +1373,26 @@ mod tests {
             },
         ];
 
-        let result = renderer.render(&ipxeos, &reserved_params);
-        // Will fail on required parameter validation first
-        assert!(result.is_err());
+        assert!(matches!(
+            renderer.render(&ipxeos, &reserved_params),
+            Err(IpxeScriptError::RequiredParameterMissing(_))
+        ));
+
+        // ...and then reach `check_unreplaced_placeholders` directly, because nothing else
+        // in the suite does. Without this, `UnreplacedPlaceholders` is a variant we build
+        // and never assert.
+        let err = renderer
+            .check_unreplaced_placeholders("#!ipxe\nkernel {{image_url}} initrd={{initrd}}\n")
+            .expect_err("leftover {{...}} placeholders should be rejected");
+        assert!(matches!(
+            err,
+            IpxeScriptError::UnreplacedPlaceholders(ref found)
+                if found == "{{image_url}}, {{initrd}}"
+        ));
+
+        renderer
+            .check_unreplaced_placeholders("#!ipxe\nkernel http://pxe.local/vmlinuz\n")
+            .expect("a fully substituted script has nothing left to flag");
     }
 
     #[test]
@@ -1703,46 +1943,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_repeatability() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-
-        let ipxeos = IpxeScript {
-            name: "Test".to_string(),
-            description: Some("Test OS".to_string()),
-            hash: "".to_string(),
-            tenant_id: Some("tenant-123".to_string()),
-            ipxe_template_id: "ea756ddd-add3-5e42-a202-44bfc2d5aac2".to_string(),
-            parameters: vec![
-                IpxeTemplateParameter {
-                    name: "image_url".to_string(),
-                    value: "http://example.com/image.qcow2".to_string(),
-                },
-                IpxeTemplateParameter {
-                    name: "extra1".to_string(),
-                    value: "value1".to_string(),
-                },
-            ],
-            artifacts: vec![IpxeTemplateArtifact {
-                name: "test".to_string(),
-                url: "http://example.com/test".to_string(),
-                sha: Some("sha256:test123".to_string()),
-                auth_type: Some("Bearer".to_string()),
-                auth_token: Some("token".to_string()),
-                cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                cached_url: None,
-            }],
-        };
-
-        let hash1 = renderer.hash(&ipxeos);
-        let hash2 = renderer.hash(&ipxeos);
-        let hash3 = renderer.hash(&ipxeos);
-
-        // All hashes should be identical
-        assert_eq!(hash1, hash2);
-        assert_eq!(hash2, hash3);
-    }
-
-    #[test]
     fn test_double_space_cleanup() {
         let renderer = DefaultIpxeScriptRenderer::new();
         let mut ipxeos = create_test_ipxeos();
@@ -1985,197 +2185,6 @@ mod tests {
         assert_eq!(
             rendered_hash, template_hash,
             "Rendered script should match template exactly (static template with no placeholders)"
-        );
-    }
-
-    #[test]
-    fn test_render_artifact_remote_only_ignores_cached_url() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = IpxeScript {
-            name: "RemoteOnly test".to_string(),
-            description: None,
-            hash: "placeholder".to_string(),
-            tenant_id: None,
-            ipxe_template_id: "a7850943-e3cd-5e9a-93ca-9e12f52939cc".to_string(),
-            parameters: vec![],
-            artifacts: vec![
-                IpxeTemplateArtifact {
-                    name: "install_iso".to_string(),
-                    url: "http://releases.ubuntu.com/22.04/ubuntu.iso".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::RemoteOnly,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "kernel".to_string(),
-                    url: "http://remote.example.com/kernel".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::RemoteOnly,
-                    cached_url: Some("http://local-cache/kernel".to_string()),
-                },
-                IpxeTemplateArtifact {
-                    name: "initrd".to_string(),
-                    url: "http://remote.example.com/initrd".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::RemoteOnly,
-                    cached_url: Some("http://local-cache/initrd".to_string()),
-                },
-            ],
-        };
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        let reserved_params = vec![
-            IpxeTemplateParameter {
-                name: "base_url".to_string(),
-                value: "http://pxe.local".to_string(),
-            },
-            IpxeTemplateParameter {
-                name: "console".to_string(),
-                value: "ttyS0,115200".to_string(),
-            },
-        ];
-
-        let result = renderer.render(&ipxeos, &reserved_params);
-        assert!(result.is_ok(), "Render failed: {:?}", result.err());
-
-        let script = result.unwrap();
-        assert!(
-            script.contains("http://remote.example.com/kernel"),
-            "RemoteOnly should use remote URL, not local"
-        );
-        assert!(
-            !script.contains("http://local-cache/kernel"),
-            "RemoteOnly should NOT use cached_url"
-        );
-    }
-
-    #[test]
-    fn test_render_artifact_local_only_uses_site_url() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = IpxeScript {
-            name: "LocalOnly test".to_string(),
-            description: None,
-            hash: "placeholder".to_string(),
-            tenant_id: None,
-            ipxe_template_id: "a7850943-e3cd-5e9a-93ca-9e12f52939cc".to_string(),
-            parameters: vec![],
-            artifacts: vec![
-                IpxeTemplateArtifact {
-                    name: "install_iso".to_string(),
-                    url: "http://releases.ubuntu.com/22.04/ubuntu.iso".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::LocalOnly,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "kernel".to_string(),
-                    url: "http://site-local.example.com/kernel".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::LocalOnly,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "initrd".to_string(),
-                    url: "http://site-local.example.com/initrd".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::LocalOnly,
-                    cached_url: None,
-                },
-            ],
-        };
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        let reserved_params = vec![
-            IpxeTemplateParameter {
-                name: "base_url".to_string(),
-                value: "http://pxe.local".to_string(),
-            },
-            IpxeTemplateParameter {
-                name: "console".to_string(),
-                value: "ttyS0,115200".to_string(),
-            },
-        ];
-
-        let result = renderer.render(&ipxeos, &reserved_params);
-        assert!(result.is_ok(), "Render failed: {:?}", result.err());
-
-        let script = result.unwrap();
-        assert!(
-            script.contains("http://site-local.example.com/kernel"),
-            "LocalOnly should use url directly (site-local URL)"
-        );
-    }
-
-    #[test]
-    fn test_render_artifact_cached_only_fails_without_cached_url() {
-        let renderer = DefaultIpxeScriptRenderer::new();
-        let mut ipxeos = IpxeScript {
-            name: "CachedOnly missing test".to_string(),
-            description: None,
-            hash: "placeholder".to_string(),
-            tenant_id: None,
-            ipxe_template_id: "a7850943-e3cd-5e9a-93ca-9e12f52939cc".to_string(),
-            parameters: vec![],
-            artifacts: vec![
-                IpxeTemplateArtifact {
-                    name: "install_iso".to_string(),
-                    url: "http://releases.ubuntu.com/22.04/ubuntu.iso".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                    cached_url: None,
-                },
-                IpxeTemplateArtifact {
-                    name: "kernel".to_string(),
-                    url: "http://remote.example.com/kernel".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CachedOnly,
-                    cached_url: None, // not cached yet - should fail
-                },
-                IpxeTemplateArtifact {
-                    name: "initrd".to_string(),
-                    url: "http://remote.example.com/initrd".to_string(),
-                    sha: None,
-                    auth_type: None,
-                    auth_token: None,
-                    cache_strategy: IpxeTemplateArtifactCacheStrategy::CacheAsNeeded,
-                    cached_url: None,
-                },
-            ],
-        };
-        ipxeos.hash = renderer.hash(&ipxeos);
-
-        let reserved_params = vec![
-            IpxeTemplateParameter {
-                name: "base_url".to_string(),
-                value: "http://pxe.local".to_string(),
-            },
-            IpxeTemplateParameter {
-                name: "console".to_string(),
-                value: "ttyS0,115200".to_string(),
-            },
-        ];
-
-        let result = renderer.render(&ipxeos, &reserved_params);
-        assert!(
-            matches!(result, Err(IpxeScriptError::CachedOnlyNotCached(_))),
-            "CachedOnly without cached_url should fail: {:?}",
-            result
         );
     }
 }

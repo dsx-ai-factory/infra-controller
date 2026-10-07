@@ -3,6 +3,34 @@
 Provides a convenience wrapper around Tonic's generated client type, for a few moderate quality-of-life improvements.
 The aim is to avoid needing to make your own wrapper type, and use this one instead.
 
+## Descriptor input and service roots
+
+The `codegen` module is a descriptor-driven backend. It does not parse
+`.proto` files or invoke `protoc`. It receives a complete
+`prost_types::FileDescriptorSet`, the decoded form of protobuf's serialized
+schema intermediate representation (IR), from an upstream frontend such as
+`carbide-proto-compiler`.
+
+In Carbide, one `protoc` invocation produces a shared `Schema`. The Forge and
+NMX-C wrapper generators borrow its decoded `FileDescriptorSet`; tonic/prost
+then takes ownership of that same descriptor set to generate Rust. The exact
+serialized bytes take a separate branch to `forge.bin` for runtime gRPC
+reflection.
+
+The complete descriptor set and `Config::root_files` have different scopes:
+
+- The complete descriptor set contains root and imported files, allowing the
+  generator to resolve every request and response type used by selected
+  services.
+- `root_files` contains logical descriptor names, such as `forge.proto`, and
+  selects only the files whose services receive wrapper methods and
+  convenience converters. It is not a list of protobuf compilation inputs.
+
+The names in `root_files` must exactly match `FileDescriptorProto.name`. A
+physical compiler input such as `proto/my_service.proto` may therefore appear
+as the logical descriptor name `my_service.proto` when `proto` is an include
+path.
+
 ## Example
 
 For a gRPC method `version`:
@@ -83,9 +111,10 @@ Implementations can return `true` here if, for instance, the client certificate 
 
 ### Convenience conversions
 
-For every request type (that is, the request argument of every gRPC method), if the type has exactly one field, a
-`From<T: Into<FieldType>>` implementation is generated that allows any type that's convertible into that field, to be
-passed. So for a request like:
+For every request type used by a gRPC method in the selected root files, if the
+type has exactly one field, a `From<T: Into<FieldType>>` implementation is
+generated that allows any type convertible into that field to be passed. So
+for a request like:
 
 ```protobuf
 rpc SomeMethod(SomeRequest) returns (SomeResponse);
@@ -112,36 +141,48 @@ my_wrapper.some_method(some_string).await
 
 ## How to use
 
-In `build.rs`:
+In `build.rs`, compile the schema once, let the wrapper generator borrow the
+complete descriptor set, and transfer ownership to tonic/prost only after the
+wrapper output is complete:
 
 ```rust
+use std::fs;
+use std::path::PathBuf;
+
+use carbide_proto_compiler::{CompilerConfig, compile};
 use tonic_client_wrapper::codegen;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let schema = compile(&CompilerConfig {
+        proto_files: vec![PathBuf::from("proto/my_service.proto")],
+        include_paths: vec![PathBuf::from("proto")],
+        protoc_args: Vec::new(),
+    })?;
+
+    // Retain exact frontend bytes if the application provides gRPC reflection.
+    fs::write(out_dir.join("schema.bin"), &schema.raw_descriptor_set)?;
+
     let config = codegen::Config {
-        // The name of the generated type
         wrapper_name: "MyApiClient".to_string(),
-        // The client type you're already generating via tonic
         inner_rpc_client_type: "crate::my_client::MyClientT".to_string(),
-        // Your protobuf files
-        proto_files: vec!["proto/my_service.proto".to_string()],
-        // Your include paths
-        include_paths: vec!["proto".to_string()],
-        // Where the generated types live within your crate (not including 
-        // `crate::`, or the service name)
+        root_files: vec!["my_service.proto".to_string()],
         generated_types_path_within_crate: "protos".to_string(),
+        extern_paths: vec![],
     };
 
-    let code_generator = codegen::CodeGenerator::new(config)?;
+    let generator = codegen::CodeGenerator::new(config, &schema.file_descriptor_set)?;
+    generator.write_rpc_client_wrapper(out_dir.join("my_api_client.rs"))?;
+    generator.write_rpc_convenience_converters(out_dir.join("convenience_converters.rs"))?;
 
-    // Emit the wrapper itself
-    client_wrapper_generator.write_rpc_client_wrapper("src/protos/my_api_client.rs")?;
-    // Emit convenience converters
-    client_wrapper_generator
-        .write_rpc_convenience_converters("src/protos/convenience_converters.rs")?;
+    // The borrowing backend is finished, so tonic/prost can consume this view.
+    tonic_prost_build::configure().compile_fds(schema.file_descriptor_set)?;
     Ok(())
 }
 ```
+
+The in-memory schema is discarded when the build script exits. Generated Rust
+files and any retained reflection descriptor remain in Cargo's `OUT_DIR`.
 
 To use the client itself, you'll need to make an implementation of `ConnectionProvider` to yield an instance of
 `my_client::MyClientT`, like:

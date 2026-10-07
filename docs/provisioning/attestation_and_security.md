@@ -157,7 +157,7 @@ One issue with Measured Boot is that the PCR values can change quite frequently.
 When a site had just been set up and the attestation had been enabled, all machines will fail attestation unless it had been configured. In order to enable the "accept anything" type of attestation, the easiest way is to execute a command similar to this one:
 
 ```sh
-nico-admin-cli -c https://nico-api.forge/ measured-boot site trusted-machine approve \* persist --pcr-registers="0,3,5,6"
+nico-admin-cli -a https://nico-api.forge/ measured-boot site trusted-machine approve \* persist --pcr-registers="0,3,5,6"
 ```
 
 This will insert a rule to automatically approve all reports for all machines on site `az32`, that rule will persist and bundles will be created out of reports using PCR registers 0, 3, 5 and 6. Obviously, such attestation is not enforcing any specific PCR register values, so it should be used with caution.

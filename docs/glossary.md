@@ -6,7 +6,6 @@ Terms are grouped by domain rather than by repository. A reader looking up "Site
 
 This glossary focuses on NICo-specific concepts: terms that only make sense in the context of the NICo platform. Where a term has a general industry definition but carries additional NICo-specific meaning, this glossary explains the NICo-specific part.
 
-
 ## Platform Architecture
 
 ### NICo
@@ -49,7 +48,19 @@ In current deployments, the DPU is a [NVIDIA BlueField-2 or BlueField-3](https:/
 
 ### BlueField
 
-The NVIDIA DPU family used by NICo for tenant isolation and site management. A BlueField card has its own ARM complex, BMC, NIC firmware, and OS image. NICo provisions and manages the BlueField side of each ManagedHost before making the Host available to tenants.
+The NVIDIA accelerator and SuperNIC product family used by NICo for networking, tenant isolation, and site management. DPU-capable BlueField products have an Arm complex, BMC, NIC firmware, and OS image that NICo can provision and manage. NIC-only SuperNIC products do not expose that switchable DPU execution environment to NICo.
+
+### Host DPU Policy
+
+The operator's desired treatment of DPU hardware on a host. `HostDpuPolicy` has three values: `Manage`, which at the site or resolved level lets NICo provision and attach the DPUs; `Nic`, which asks NICo to run physically present DPU hardware as plain NICs; and `Ignore`, which tells NICo not to configure or attach DPU hardware. For backward compatibility, a per-host `Manage` declaration inherits the site policy rather than overriding it. This policy is intent, not a hardware observation.
+
+### BlueField Operating Mode
+
+The optional operating mode reported by a DPU-capable BlueField product's own BMC. When available, `BlueFieldOperatingMode` is either `Dpu` or `Nic`. NICo compares this observed state with the host DPU policy when deciding whether a DPU-capable card needs reconfiguration. NIC-only SuperNIC products do not need to report a switchable DPU mode. Existing protobuf and Redfish boundaries retain the legacy `NicMode` name for compatibility; model code uses `BlueFieldOperatingMode` so observed state is not confused with desired policy.
+
+### Mellanox/BlueField Device Kind
+
+The factory product classification NICo derives from a card's part number, independently of its current operating mode. Model code calls this `MlxDeviceKind`; some historical variant and protobuf names contain `Mode`, but those names are retained only for compatibility and identify a SKU rather than observed state. A DPU-capable product can therefore remain the same device kind when reconfigured from DPU mode to NIC mode. NIC-only SuperNIC products are classified by product without implying that they can enter DPU mode; future CX8 and CX9 SuperNIC support follows this model.
 
 ## REST API Services and Binaries
 
@@ -136,11 +147,26 @@ VXLAN solves this by wrapping an Ethernet frame in a VXLAN packet identified by 
 
 ### Network Segments
 
-A NICo concept for defining IP address pools. Underlay segments are used for management traffic on the underlying physical network, such as DPU OOB and BMC addresses. Overlay segments are used for tenant-facing networks built on top of VXLAN. NICo assigns IPs from overlay segments to Hosts when creating instances.
+A NICo concept for defining IP address pools. Underlay segments are normally
+used for management traffic on the underlying physical network, such as DPU OOB
+and BMC addresses. A supported zero-DPU exception places the host BMC on
+HostInband instead. Overlay segments are used for tenant-facing networks built
+on top of VXLAN. NICo assigns IPs from overlay segments to Hosts when creating
+instances.
 
 ### HostInband Network Segment
 
-A network segment type for the underlay network that a zero-DPU host's NIC attaches to directly. Unlike overlay (tenant) segments, a HostInband segment describes a real underlay subnet, exists before any VPC, and may remain unassociated with a VPC. It is the only segment type a Flat VPC accepts. Operators declare HostInband segments in the API server configuration (or create them through the segment API); tenant instances on zero-DPU hosts attach to them automatically rather than drawing a link-net from a VpcPrefix.
+A network segment type for the underlay network that a zero-DPU host's NIC
+attaches to directly. Unlike overlay (tenant) segments, a HostInband segment
+describes a real underlay subnet, exists before any VPC, and may remain
+unassociated with a VPC. It is the only segment type a Flat VPC accepts. A
+zero-DPU host BMC may share the same physical subnet/VLAN and segment with the
+host OS, using a distinct address; this does not extend to DPU BMC or DPU OOB
+interfaces. Operators declare HostInband segments in the API server
+configuration (or create them through the segment API); tenant instances on
+zero-DPU hosts attach to them automatically rather than drawing a link-net from
+a VpcPrefix. See
+[Shared HostInband for a Host BMC and Host OS](provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os).
 
 ### Flat VPC
 
@@ -148,7 +174,7 @@ A VPC virtualization type for tenant instances on zero-DPU hosts. A Flat VPC is 
 
 ### Zero-DPU Host
 
-A managed host that NICo operates without a NICo-managed DPU — either a host with no DPU hardware (`no_dpu`) or a host whose BlueField DPU is run as a plain NIC (`nic_mode`). NICo does not build an overlay for a zero-DPU host; its tenant instances attach directly to HostInband underlay segments and belong to Flat VPCs. DPU mode is set site-wide or per host in the API server configuration.
+A managed host that NICo operates without a NICo-managed DPU — either a host whose DPU policy is `ignore`, or a host whose BlueField DPU is run as a plain NIC through `nic`. NICo does not build an overlay for a zero-DPU host; its tenant instances attach directly to HostInband underlay segments and belong to Flat VPCs. DPU policy is set site-wide in the API server configuration or per host on its Expected Machine. Rack-manager deployments must resolve the applicable DPU policy to `nic` to run DPUs as plain NICs.
 
 ### HBN in NICo
 
@@ -185,9 +211,9 @@ NICo coordinates tenant isolation across four network fabrics, each with its own
 | Ethernet north-south | VXLAN with EVPN for VPC creation | DPU through HBN |
 | East-west Ethernet | ConnectX-based firmware paths where configured | Outside the current DPU HBN path |
 | InfiniBand | Partition key assignment | UFM |
-| NVLink | Partition management | NMX-M |
+| NVLink | Partition management | NMX-C |
 
-DPUs enforce Ethernet isolation in hardware, UFM enforces InfiniBand isolation, and NMX-M enforces NVLink isolation, all coordinated by NICo.
+DPUs enforce Ethernet isolation in hardware, UFM enforces InfiniBand isolation, and NMX-C enforces NVLink isolation, all coordinated by NICo.
 
 ### VRF
 
@@ -213,7 +239,7 @@ InfiniBand partition key. P_Keys are the isolation mechanism used by UFM for Inf
 
 ### NVLink
 
-The high-speed GPU-to-GPU fabric managed outside NICo Core by NMX-M. NICo coordinates with NVLink management so GPU partitioning aligns with tenant isolation.
+The high-speed GPU-to-GPU fabric managed outside NICo Core by NMX-C. NICo coordinates with NMX-C so GPU partitioning aligns with tenant isolation.
 
 ### FMDS
 
@@ -263,7 +289,12 @@ General reference: [Redfish](https://en.wikipedia.org/wiki/Redfish_(specificatio
 
 ### OOB
 
-Out of band. OOB management uses a path independent from the Host operating system, usually through BMC and DPU management networks, so NICo can discover, power-cycle, and repair machines even when the tenant OS is unavailable.
+Out of band. OOB management uses an endpoint independent from the Host operating
+system, usually through dedicated BMC and DPU management networks, so NICo can
+discover, power-cycle, and repair machines even when the tenant OS is
+unavailable. A host BMC can remain operationally out of band while sharing a
+HostInband L2 network with a zero-DPU host OS, but that topology lacks dedicated
+network isolation.
 
 ### IPMI
 
@@ -370,7 +401,7 @@ NICo Core is site-local and continues to manage hardware independently of the RE
 | LLDP | Link Layer Discovery Protocol | Neighbor discovery protocol used for network topology visibility |
 | NCP | NVIDIA Cloud Partner | Infrastructure partner operating NICo-managed environments |
 | NICo | NVIDIA Infra Controller | This platform, also known historically as NICo, NICo, and BMM |
-| NMX-M | NVLink Management | NVLink partition management for GPU-to-GPU isolation |
+| NMX-C | NMX Controller | NVLink partition management for GPU-to-GPU isolation |
 | OOB | Out of Band | Management network path independent from the Host OS |
 | P_Key | Partition Key | InfiniBand isolation identifier assigned by UFM |
 | protobuf | Protocol Buffers | Interface definition and serialization format for Core APIs |

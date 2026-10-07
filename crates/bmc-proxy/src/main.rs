@@ -14,44 +14,50 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
+
 use std::io;
 use std::sync::Arc;
 
 mod acl;
-mod bmc_proxy;
+mod class;
 mod config;
 mod metrics;
+mod net;
+mod pattern;
+mod proxy;
 mod setup;
+mod span_isolation;
 
-use bmc_proxy::{BmcProxyError, BmcProxyParams};
 use clap::Parser;
 use config::{Config, ConfigError};
+use proxy::{BmcProxyError, BmcProxyParams};
 use setup::{SetupError, setup_logging, setup_metrics};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[clap(name = "carbide-bmc-proxy")]
-pub struct Args {
+struct Args {
     #[clap(long, default_value = "false", help = "Print version number and exit")]
-    pub version: bool,
+    version: bool,
 
     #[clap(short, long)]
-    pub debug: bool,
+    debug: bool,
 
     #[clap(long)]
-    pub config_path: String,
+    config_path: String,
 }
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
-    #[error("Configuration error: {0}")]
+    #[error("configuration error: {0}")]
     Config(Box<ConfigError>),
-    #[error("Error setting up bmc-proxy: {0}")]
+    #[error("error setting up bmc-proxy: {0}")]
     Setup(#[from] SetupError),
-    #[error("Error running bmc-proxy: {0}")]
+    #[error("error running bmc-proxy: {0}")]
     BmcProxy(#[from] BmcProxyError),
-    #[error("Error running metrics endpoint: {0}")]
+    #[error("error running metrics endpoint: {0}")]
     Metrics(io::Error),
 }
 
@@ -69,9 +75,6 @@ async fn main() -> Result<(), Error> {
         return Ok(());
     }
 
-    let debug = args.debug;
-    setup_logging(debug)?;
-
     let config = tokio::fs::read_to_string(&args.config_path)
         .await
         .map_err(|e| {
@@ -82,12 +85,15 @@ async fn main() -> Result<(), Error> {
         })
         .and_then(|s| Config::parse(&s))?;
 
+    let tracing_guard = setup_logging(args.debug, &config.tracing)?;
+
     let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
 
     // Run metrics endpoint
     let metrics_setup = setup_metrics()?;
     let meter = metrics_setup.meter.clone();
+    carbide_instrument::log_events::register(&meter);
     metrics::start(
         config.metrics_endpoint,
         metrics_setup,
@@ -98,10 +104,9 @@ async fn main() -> Result<(), Error> {
     .map_err(Error::Metrics)?;
 
     // Run the BMC proxy
-    bmc_proxy::start(
+    proxy::start(
         BmcProxyParams {
             config: Arc::new(config),
-            meter,
         },
         cancel_token.clone(),
         &mut join_set,
@@ -116,6 +121,8 @@ async fn main() -> Result<(), Error> {
 
     // Wait until tasks are complete, propagating any panics
     join_set.join_all().await;
+
+    tracing_guard.shutdown().await;
 
     Ok(())
 }

@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -32,10 +33,13 @@ test-support = [
   "dep:opentelemetry-prometheus",
   "dep:rcgen",
 ]
+shutdown-handler = ["dep:tokio-util"]
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 carbide-network = { path = "../network" }
 
+base64 = { workspace = true }
 byte-unit = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -47,11 +51,15 @@ opentelemetry_sdk = { workspace = true, optional = true }
 prometheus = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 
 [lints]

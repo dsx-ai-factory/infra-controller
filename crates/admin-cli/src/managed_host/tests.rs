@@ -22,19 +22,19 @@
 //
 // Command Structure - Baseline debug_assert() of the entire command.
 // Argument Parsing  - Ensure required/optional arg combinations parse correctly.
-// ValueEnum Parsing - Test string parsing for types deriving claps ValueEnum.
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
+use carbide_uuid::machine::{HostMachineId, MachineId, StableHostMachineId};
 use clap::{CommandFactory, Parser};
 
-use super::maintenance::args::Args as MaintenanceAction;
-use super::power_options::args::{Args as PowerOptions, DesiredPowerState};
-use super::quarantine::args::Args as QuarantineAction;
 use super::*;
+use crate::test_support::{parse_leaf, raw_value};
 
 // Define a basic/working MachineId for testing.
 const TEST_MACHINE_ID: &str = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
+const TEST_DPU_ID: &str = "fm100ds3gfip02lfgleidqoitqgh8d8mdc4a3j2tdncbjrfjtvrrhn2kleg";
+const TEST_INTERFACE_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 // verify_cmd_structure runs a baseline clap debug_assert()
 // to do basic command configuration checking and validation,
@@ -60,18 +60,14 @@ fn verify_cmd_structure() {
 fn parse_show_routes_to_show() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Show(args) => (
-                        args.machine.is_some(),
-                        args.all,
-                        args.ips,
-                        args.more,
-                        args.fix,
-                    ),
-                    _ => panic!("expected Show variant"),
-                })
-                .map_err(drop)
+            let matches = parse_leaf::<Cmd>(argv, &["show"]).map_err(drop)?;
+            Ok::<_, ()>((
+                matches.get_one::<MachineId>("machine").is_some(),
+                matches.get_flag("all"),
+                matches.get_flag("ips"),
+                matches.get_flag("more"),
+                matches.get_flag("fix"),
+            ))
         };
         "no args (all hosts)" {
             &["managed-host", "show"][..] => Yields((false, false, false, false, false)),
@@ -94,17 +90,19 @@ fn parse_show_routes_to_show() {
 fn parse_maintenance_routes_to_maintenance() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Maintenance(MaintenanceAction::On(args)) => {
-                        (args.host.to_string(), args.reference)
-                    }
-                    Cmd::Maintenance(MaintenanceAction::Off(args)) => {
-                        (args.host.to_string(), String::new())
-                    }
-                    _ => panic!("expected Maintenance variant"),
-                })
-                .map_err(drop)
+            let action = argv[2];
+            let matches = parse_leaf::<Cmd>(argv, &["maintenance", action]).map_err(drop)?;
+            Ok::<_, ()>((
+                matches
+                    .get_one::<MachineId>("host")
+                    .copied()
+                    .expect("host is required"),
+                if action == "on" {
+                    raw_value(&matches, "reference").expect("reference is required")
+                } else {
+                    String::new()
+                },
+            ))
         };
         "on with host and reference" {
             &[
@@ -115,7 +113,7 @@ fn parse_maintenance_routes_to_maintenance() {
                 TEST_MACHINE_ID,
                 "--reference",
                 "TICKET-123",
-            ][..] => Yields((TEST_MACHINE_ID.to_string(), "TICKET-123".to_string())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), "TICKET-123".to_string())),
         }
 
         "off with host" {
@@ -125,7 +123,7 @@ fn parse_maintenance_routes_to_maintenance() {
                 "off",
                 "--host",
                 TEST_MACHINE_ID,
-            ][..] => Yields((TEST_MACHINE_ID.to_string(), String::new())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), String::new())),
         }
     );
 }
@@ -137,17 +135,19 @@ fn parse_maintenance_routes_to_maintenance() {
 fn parse_quarantine_routes_to_quarantine() {
     scenarios!(
         run = |argv| {
-            Cmd::try_parse_from(argv.iter().copied())
-                .map(|cmd| match cmd {
-                    Cmd::Quarantine(QuarantineAction::On(args)) => {
-                        (args.host.to_string(), args.reason)
-                    }
-                    Cmd::Quarantine(QuarantineAction::Off(args)) => {
-                        (args.host.to_string(), String::new())
-                    }
-                    _ => panic!("expected Quarantine variant"),
-                })
-                .map_err(drop)
+            let action = argv[2];
+            let matches = parse_leaf::<Cmd>(argv, &["quarantine", action]).map_err(drop)?;
+            Ok::<_, ()>((
+                matches
+                    .get_one::<HostMachineId>("host")
+                    .copied()
+                    .expect("host is required"),
+                if action == "on" {
+                    raw_value(&matches, "reason").expect("reason is required")
+                } else {
+                    String::new()
+                },
+            ))
         };
         "on with host and reason" {
             &[
@@ -158,7 +158,7 @@ fn parse_quarantine_routes_to_quarantine() {
                 TEST_MACHINE_ID,
                 "--reason",
                 "Security issue",
-            ][..] => Yields((TEST_MACHINE_ID.to_string(), "Security issue".to_string())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<HostMachineId>().unwrap(), "Security issue".to_string())),
         }
 
         "off with host" {
@@ -168,7 +168,7 @@ fn parse_quarantine_routes_to_quarantine() {
                 "off",
                 "--host",
                 TEST_MACHINE_ID,
-            ][..] => Yields((TEST_MACHINE_ID.to_string(), String::new())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<HostMachineId>().unwrap(), String::new())),
         }
     );
 }
@@ -177,45 +177,112 @@ fn parse_quarantine_routes_to_quarantine() {
 // reset-host-reprovisioning parses.
 #[test]
 fn parse_reset_host_reprovisioning() {
-    let cmd = Cmd::try_parse_from([
+    let argv = [
         "managed-host",
         "reset-host-reprovisioning",
         "--machine",
         TEST_MACHINE_ID,
-    ])
-    .expect("should parse reset-host-reprovisioning");
+    ];
+    let matches = parse_leaf::<Cmd>(&argv, &["reset-host-reprovisioning"])
+        .expect("should parse reset-host-reprovisioning");
 
-    match cmd {
-        Cmd::ResetHostReprovisioning(args) => {
-            assert_eq!(args.machine.to_string(), TEST_MACHINE_ID);
-        }
-        _ => panic!("expected ResetHostReprovisioning variant"),
-    }
+    assert_eq!(
+        matches.get_one::<StableHostMachineId>("machine"),
+        Some(&TEST_MACHINE_ID.parse().unwrap())
+    );
 }
 
-// power-options show/update route to the PowerOptions variant. show carries no
-// machine; update carries a machine and a desired power state. Each row yields
-// (machine, desired-power-state-string) -- show yields (empty, empty).
+// reset routes to the Reset variant across its subcommands: set with only a
+// machine, set acknowledging a live instance with an update message, and clear.
+// Each row yields (machine, allow_reset_with_instance, update_message).
+#[test]
+fn parse_reset_routes_to_reset() {
+    scenarios!(
+        run = |argv| {
+            let action = argv[2];
+            let matches = parse_leaf::<Cmd>(argv, &["reset", action]).map_err(drop)?;
+            let machine = matches
+                .get_one::<MachineId>("machine")
+                .copied()
+                .expect("machine is required");
+            // clear declares neither flag, so only read them for set.
+            let (allow_instance, update_message) = if action == "set" {
+                (
+                    matches.get_flag("allow_reset_with_instance"),
+                    raw_value(&matches, "update_message").unwrap_or_default(),
+                )
+            } else {
+                (false, String::new())
+            };
+            Ok::<_, ()>((machine, allow_instance, update_message))
+        };
+        "set with machine only" {
+            &["managed-host", "reset", "set", "--machine", TEST_MACHINE_ID][..]
+                => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), false, String::new())),
+        }
+
+        "set acknowledging a live instance, with an update message" {
+            &[
+                "managed-host",
+                "reset",
+                "set",
+                "--machine",
+                TEST_MACHINE_ID,
+                "--allow-reset-with-instance",
+                "--update-message",
+                "forced recovery",
+            ][..] => Yields((
+                TEST_MACHINE_ID.parse::<MachineId>().unwrap(),
+                true,
+                "forced recovery".to_string(),
+            )),
+        }
+
+        "clear with machine" {
+            &["managed-host", "reset", "clear", "--machine", TEST_MACHINE_ID][..]
+                => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), false, String::new())),
+        }
+    );
+}
+
+// decommission accepts exactly one managed-host id.
+#[test]
+fn parse_decommission_lifecycle_commands() {
+    scenarios!(
+        run = |argv| {
+            Cmd::try_parse_from(argv.iter().copied())
+                .map(|cmd| match cmd {
+                    Cmd::Decommission(args) => ("decommission", args.machine_id.to_string()),
+                    _ => panic!("expected managed-host decommission lifecycle command"),
+                })
+                .map_err(drop)
+        };
+        "start decommissioning" {
+            &["managed-host", "decommission", TEST_MACHINE_ID][..] =>
+                Yields(("decommission", TEST_MACHINE_ID.to_string())),
+        }
+    );
+}
+
+// power-options show/update route to the PowerOptions variant. Each row yields
+// the converted request's (machine_id, power_state); show has no request.
 #[test]
 fn parse_power_options_routes_to_power_options() {
     scenarios!(
         run = |argv| {
             Cmd::try_parse_from(argv.iter().copied())
                 .map(|cmd| match cmd {
-                    Cmd::PowerOptions(PowerOptions::Show(args)) => {
-                        assert!(args.machine.is_none());
-                        (String::new(), String::new())
+                    Cmd::PowerOptions(power_options::Args::Show(_)) => (None, None),
+                    Cmd::PowerOptions(power_options::Args::Update(args)) => {
+                        let request: rpc::forge::PowerOptionUpdateRequest = args.into();
+                        (request.machine_id, Some(request.power_state))
                     }
-                    Cmd::PowerOptions(PowerOptions::Update(args)) => (
-                        args.machine.to_string(),
-                        format!("{:?}", args.desired_power_state),
-                    ),
                     _ => panic!("expected PowerOptions variant"),
                 })
                 .map_err(drop)
         };
         "show with no machine" {
-            &["managed-host", "power-options", "show"][..] => Yields((String::new(), String::new())),
+            &["managed-host", "power-options", "show"][..] => Yields((None, None)),
         }
 
         "update with machine and desired power state" {
@@ -227,74 +294,88 @@ fn parse_power_options_routes_to_power_options() {
                 "--desired-power-state",
                 "on",
             ][..] => Yields((
-                TEST_MACHINE_ID.to_string(),
-                format!("{:?}", DesiredPowerState::On),
+                Some(TEST_MACHINE_ID.parse::<HostMachineId>().unwrap()),
+                Some(rpc::forge::PowerState::On as i32),
             )),
         }
     );
 }
 
-// parse_set_primary_dpu ensures set-primary-dpu parses
-// with required args.
 #[test]
-fn parse_set_primary_dpu() {
-    let cmd = Cmd::try_parse_from([
-        "managed-host",
-        "set-primary-dpu",
-        TEST_MACHINE_ID,
-        TEST_MACHINE_ID,
-    ])
-    .expect("should parse set-primary-dpu");
-
-    match cmd {
-        Cmd::SetPrimaryDpu(args) => {
-            assert!(!args.reboot);
+#[allow(deprecated)]
+fn parse_primary_interface_reconciliation_controls() {
+    scenarios!(
+        run = |(subcommand, target, flag): (&str, &str, Option<&str>)| {
+            let mut argv = vec!["managed-host", subcommand, TEST_MACHINE_ID, target];
+            argv.extend(flag);
+            Cmd::try_parse_from(argv)
+                .map(|cmd| match cmd {
+                    Cmd::SetPrimaryDpu(args) => {
+                        let request: rpc::forge::SetPrimaryDpuRequest = args.into();
+                        (request.force_reconcile, request.reboot)
+                    }
+                    Cmd::SetPrimaryInterface(args) => {
+                        let request: rpc::forge::SetPrimaryInterfaceRequest = args.into();
+                        (request.force_reconcile, request.reboot)
+                    }
+                    _ => panic!("expected a primary-interface command"),
+                })
+                .map_err(|error| error.to_string())
+        };
+        "DPU default" {
+            ("set-primary-dpu", TEST_DPU_ID, None) => Yields((false, false)),
         }
-        _ => panic!("expected SetPrimaryDpu variant"),
-    }
-}
-
-// parse_set_primary_interface ensures set-primary-interface parses
-// with required args (a host machine id and a machine interface id).
-#[test]
-fn parse_set_primary_interface() {
-    let cmd = Cmd::try_parse_from([
-        "managed-host",
-        "set-primary-interface",
-        TEST_MACHINE_ID,
-        "00000000-0000-0000-0000-000000000001",
-    ])
-    .expect("should parse set-primary-interface");
-
-    match cmd {
-        Cmd::SetPrimaryInterface(args) => {
-            assert!(!args.reboot);
+        "DPU force reconcile" {
+            ("set-primary-dpu", TEST_DPU_ID, Some("--force-reconcile"))
+                => Yields((true, false)),
         }
-        _ => panic!("expected SetPrimaryInterface variant"),
-    }
+        "DPU legacy reboot" {
+            ("set-primary-dpu", TEST_DPU_ID, Some("--reboot"))
+                => Yields((true, true)),
+        }
+        "interface default" {
+            ("set-primary-interface", TEST_INTERFACE_ID, None)
+                => Yields((false, false)),
+        }
+        "interface force reconcile" {
+            (
+                "set-primary-interface",
+                TEST_INTERFACE_ID,
+                Some("--force-reconcile"),
+            ) => Yields((true, false)),
+        }
+        "interface legacy reboot" {
+            (
+                "set-primary-interface",
+                TEST_INTERFACE_ID,
+                Some("--reboot"),
+            ) => Yields((true, true)),
+        }
+    );
 }
 
 // parse_debug_bundle ensures debug-bundle parses with
 // required args.
 #[test]
 fn parse_debug_bundle() {
-    let cmd = Cmd::try_parse_from([
+    let argv = [
         "managed-host",
         "debug-bundle",
         TEST_MACHINE_ID,
         "--start-time",
         "2025-01-01 00:00:00",
-    ])
-    .expect("should parse debug-bundle");
+    ];
+    let matches = parse_leaf::<Cmd>(&argv, &["debug-bundle"]).expect("should parse debug-bundle");
 
-    match cmd {
-        Cmd::DebugBundle(args) => {
-            assert_eq!(args.host_id, TEST_MACHINE_ID);
-            assert_eq!(args.start_time, "2025-01-01 00:00:00");
-            assert!(!args.utc);
-        }
-        _ => panic!("expected DebugBundle variant"),
-    }
+    assert_eq!(
+        raw_value(&matches, "host_id").as_deref(),
+        Some(TEST_MACHINE_ID)
+    );
+    assert_eq!(
+        raw_value(&matches, "start_time").as_deref(),
+        Some("2025-01-01 00:00:00"),
+    );
+    assert!(!matches.get_flag("utc"));
 }
 
 // Every malformed invocation is rejected at parse time.
@@ -308,41 +389,6 @@ fn invalid_invocations_are_rejected() {
         };
         "maintenance on without --host and --reference" {
             &["managed-host", "maintenance", "on"][..] => Fails,
-        }
-    );
-}
-
-/////////////////////////////////////////////////////////////////////////////
-// ValueEnum Parsing
-//
-// These tests are for testing argument values which derive
-// ValueEnum, ensuring the string representations of said
-// values correctly convert back into their expected variant,
-// or fail otherwise.
-
-// desired_power_state_value_enum ensures DesiredPowerState parses from its
-// string representations, and rejects an unknown value. Each row yields the
-// debug form of the parsed variant; the unknown value fails.
-#[test]
-fn desired_power_state_value_enum() {
-    use clap::ValueEnum;
-
-    scenarios!(
-        run = |s| DesiredPowerState::from_str(s, false).map(|v| format!("{v:?}"));
-        "on" {
-            "on" => Yields(format!("{:?}", DesiredPowerState::On)),
-        }
-
-        "off" {
-            "off" => Yields(format!("{:?}", DesiredPowerState::Off)),
-        }
-
-        "power-manager-disabled" {
-            "power-manager-disabled" => Yields(format!("{:?}", DesiredPowerState::PowerManagerDisabled)),
-        }
-
-        "invalid value" {
-            "invalid" => Fails,
         }
     );
 }

@@ -30,8 +30,8 @@ use model::expected_machine::ExpectedMachineData;
 use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareUpgradeState, Rack, RackConfig, RackMaintenanceState,
-    RackState, RackValidationState,
+    ConfigureNmxClusterState, FirmwareUpgradeState, MaintenanceScope, Rack, RackConfig,
+    RackErrorRecoveryPolicy, RackMaintenanceState, RackState, RackValidationState,
 };
 use rpc::forge::StateHistoryRecord;
 use rpc::forge::forge_server::Forge;
@@ -53,11 +53,11 @@ mod handler;
 use fixtures::rack::set_rack_controller_state;
 
 #[derive(Debug, Default, Clone)]
-pub struct TestRackStateHandler {
+pub(in crate::tests) struct TestRackStateHandler {
     /// The total count for the handler
-    pub count: Arc<AtomicUsize>,
+    pub(in crate::tests) count: Arc<AtomicUsize>,
     /// We count for every rack ID how often the handler was called
-    pub counts_per_id: Arc<Mutex<HashMap<String, usize>>>,
+    pub(in crate::tests) counts_per_id: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[async_trait::async_trait]
@@ -146,23 +146,48 @@ impl StateHandler for TestRackStateHandler {
 }
 
 fn validate_state_change_history(histories: &[StateHistoryRecord], expected: &[&str]) -> bool {
-    let parsed_histories = histories
+    let mut parsed_histories = histories
         .iter()
-        .filter_map(|history| serde_json::from_str::<serde_json::Value>(&history.state).ok())
-        .collect::<Vec<_>>();
+        .filter_map(|history| serde_json::from_str::<serde_json::Value>(&history.state).ok());
 
-    for &state in expected {
+    // Each search resumes after its match. Expected states therefore require
+    // distinct records in order, while unrelated records may appear anywhere.
+    expected.iter().all(|state| {
         let Ok(expected_state) = serde_json::from_str::<serde_json::Value>(state) else {
             return false;
         };
-        if !parsed_histories
-            .iter()
-            .any(|history| history == &expected_state)
-        {
-            return false;
-        }
-    }
-    true
+
+        parsed_histories.any(|history| history == expected_state)
+    })
+}
+
+#[test]
+fn validate_state_change_history_requires_distinct_ordered_records() {
+    const DISCOVERING: &str = r#"{"state":"discovering"}"#;
+    const MAINTENANCE: &str = r#"{"state":"maintenance"}"#;
+
+    let histories = [DISCOVERING, r#"{"state":"unrelated"}"#, MAINTENANCE]
+        .into_iter()
+        .map(|state| StateHistoryRecord {
+            state: state.to_string(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(validate_state_change_history(
+        &histories,
+        &[DISCOVERING, MAINTENANCE]
+    ));
+
+    assert!(!validate_state_change_history(
+        &histories,
+        &[MAINTENANCE, DISCOVERING]
+    ));
+
+    assert!(!validate_state_change_history(
+        &histories,
+        &[DISCOVERING, DISCOVERING]
+    ));
 }
 
 #[crate::sqlx_test]
@@ -266,31 +291,18 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iterations 3-6: FirmwareUpgrade -> Completed.
+    // Iterations 3-7: FirmwareUpgrade(Start) -> Validating(Pending).
     //
-    // The default maintenance sequence is:
-    // FirmwareUpgrade -> ConfigureNmxCluster(Start)
-    // -> ConfigureNmxCluster(DisableScaleUpFabricState) -> PowerSequence -> Completed.
-    controller.run_single_iteration().await; // FirmwareUpgrade(Start) -> ConfigureNmxCluster(Start)
-    controller.run_single_iteration().await; // ConfigureNmxCluster(Start) -> DisableScaleUpFabricState
-    controller.run_single_iteration().await; // DisableScaleUpFabricState -> PowerSequence
-    controller.run_single_iteration().await; // PowerSequence -> Completed
-
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    assert!(
-        matches!(
-            rack.controller_state.value,
-            RackState::Maintenance {
-                maintenance_state: RackMaintenanceState::Completed
-            }
-        ),
-        "Expected rack to be in Maintenance(Completed), got: {:?}",
-        rack.controller_state.value
-    );
-
-    // Iteration 7: Maintenance(Completed) -> Validating(Pending).
-    // The handler clears rv.* labels (none present yet) and transitions.
-    controller.run_single_iteration().await;
+    // Simple rack has no switches, so the real handler takes a shortened path:
+    // FirmwareUpgrade(Start) skips (no firmware-object JSON configured)
+    // -> NVOSUpdate(Start) skips (no switches)
+    // -> ConfigureNmxCluster(Start) skips (no switches)
+    // -> PowerSequence(PoweringOn) -> Completed -> Validating(Pending).
+    controller.run_single_iteration().await; // FirmwareUpgrade(Start) -> NVOSUpdate(Start)
+    controller.run_single_iteration().await; // NVOSUpdate(Start) -> ConfigureNmxCluster(Start)
+    controller.run_single_iteration().await; // ConfigureNmxCluster(Start) -> PowerSequence(PoweringOn)
+    controller.run_single_iteration().await; // PowerSequence(PoweringOn) -> Completed
+    controller.run_single_iteration().await; // Completed -> Validating(Pending)
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(
@@ -419,8 +431,8 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     let expected = vec![
         "{\"state\": \"discovering\"}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"FirmwareUpgrade\": {\"rack_firmware_upgrade\": \"Start\"}}}",
+        "{\"state\": \"maintenance\", \"maintenance_state\": {\"NVOSUpdate\": {\"nvos_update\": \"Start\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"ConfigureNmxCluster\": {\"configure_nmx_cluster\": \"Start\"}}}",
-        "{\"state\": \"maintenance\", \"maintenance_state\": {\"ConfigureNmxCluster\": {\"configure_nmx_cluster\": \"DisableScaleUpFabricState\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"PowerSequence\": {\"rack_power\": \"PoweringOn\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": \"Completed\"}",
         "{\"state\": \"validating\", \"validating_state\": \"Pending\"}",
@@ -456,6 +468,7 @@ async fn test_error_state_does_nothing_with_controller(
         &rack_id,
         RackState::Error {
             cause: "test error".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
         },
     )
     .await?;
@@ -586,7 +599,11 @@ async fn test_rack_controller_state_version_increment(
         &RackState::Discovering,
     )
     .await?;
-    assert!(updated, "update with correct version should succeed");
+    assert_eq!(
+        updated,
+        db::ConditionalWrite::Applied(()),
+        "update with correct version should succeed"
+    );
 
     // Verify version was incremented
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
@@ -605,8 +622,9 @@ async fn test_rack_controller_state_version_increment(
         &RackState::Ready,
     )
     .await?;
-    assert!(
-        !stale_update,
+    assert_eq!(
+        stale_update,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
         "update with stale version should be rejected"
     );
 
@@ -620,10 +638,147 @@ async fn test_rack_controller_state_version_increment(
         &RackState::Ready,
     )
     .await?;
-    assert!(updated_again, "update with current version should succeed");
+    assert_eq!(
+        updated_again,
+        db::ConditionalWrite::Applied(()),
+        "update with current version should succeed"
+    );
 
     txn.rollback().await?;
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_and_stale_config_write(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let mut txn = pool.begin().await?;
+    let rack = db_rack::create(
+        txn.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("Empty")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+
+    let maintenance_version = rack.controller_state.version.increment();
+    assert_eq!(
+        db_rack::try_update_controller_state(
+            txn.as_mut(),
+            &rack_id,
+            rack.controller_state.version,
+            maintenance_version,
+            &RackState::Maintenance {
+                maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+                    rack_firmware_upgrade: FirmwareUpgradeState::Start,
+                },
+            },
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+
+    let termination_config = RackConfig {
+        maintenance_requested: Some(MaintenanceScope::default()),
+        maintenance_termination_requested: true,
+        ..Default::default()
+    };
+    db_rack::update(txn.as_mut(), &rack_id, &termination_config).await?;
+
+    assert_eq!(
+        db_rack::try_update_controller_state(
+            txn.as_mut(),
+            &rack_id,
+            maintenance_version,
+            maintenance_version.increment(),
+            &RackState::Ready,
+        )
+        .await?,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
+        "an accepted termination must block an in-flight state transition"
+    );
+
+    let stale_update = db_rack::update(txn.as_mut(), &rack_id, &RackConfig::default()).await?;
+    assert!(
+        stale_update.config.maintenance_termination_requested,
+        "a stale RackConfig snapshot must not clear the termination latch"
+    );
+    assert!(
+        stale_update.config.maintenance_requested.is_some(),
+        "a stale RackConfig snapshot must not clear the termination scope"
+    );
+
+    let consumed = db_rack::consume_maintenance_termination_request(txn.as_mut(), &rack_id).await?;
+    assert!(!consumed.config.maintenance_termination_requested);
+    assert!(consumed.config.maintenance_requested.is_none());
+    assert_eq!(
+        db_rack::try_update_controller_state(
+            txn.as_mut(),
+            &rack_id,
+            maintenance_version,
+            maintenance_version.increment(),
+            &RackState::Ready,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(()),
+        "the rack controller can transition after consuming the termination latch"
+    );
+
+    txn.rollback().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_maintenance_transition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let mut txn = pool.begin().await?;
+    let rack = db_rack::create(
+        txn.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("Empty")),
+        &RackConfig {
+            maintenance_termination_requested: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(
+        db_rack::try_update_controller_state(
+            txn.as_mut(),
+            &rack_id,
+            rack.controller_state.version,
+            rack.controller_state.version.increment(),
+            &RackState::Ready,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(()),
+        "a stale termination latch outside Maintenance must not freeze the rack state machine"
+    );
+
+    let updated = db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope::default()),
+            maintenance_termination_requested: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert!(
+        !updated.config.maintenance_termination_requested,
+        "a config update outside Maintenance must clear a stale termination latch"
+    );
+    assert!(updated.config.maintenance_requested.is_some());
+
+    txn.rollback().await?;
     Ok(())
 }
 

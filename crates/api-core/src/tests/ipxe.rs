@@ -16,17 +16,21 @@
  */
 use std::collections::HashMap;
 
+use carbide_host_support::bootstrap_ca::BootstrapCaSource;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use chrono::Utc;
 use common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
 };
+use config_version::ConfigVersion;
 use db::{self};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
 use model::machine::{
     CleanupContext, DpuInitState, HostReprovisionState, MachineState, ManagedHostState,
+    ReadyBootConfigState, SetBootOrderInfo, SetBootOrderState,
 };
+use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::CloudInitInstructionsRequest;
 use rpc::forge::forge_server::Forge;
@@ -94,7 +98,7 @@ async fn get_pxe_instructions(
 async fn test_pxe_dpu_ready(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (_host_id, dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
-    move_machine_to_needed_state(dpu_id, &ManagedHostState::Ready, &env.pool).await;
+    move_machine_to_needed_state(dpu_id.into(), &ManagedHostState::Ready, &env.pool).await;
 
     let mut txn = env
         .pool
@@ -142,14 +146,14 @@ async fn test_pxe_dpu_waiting_for_network_install(pool: sqlx::PgPool) {
         machine.current_state(),
         &ManagedHostState::DPUInit {
             dpu_states: model::machine::DpuInitStates {
-                states: HashMap::from([(mh.dpu().id, DpuInitState::WaitingForNetworkConfig,)]),
+                states: HashMap::from([(mh.dpu_ids[0], DpuInitState::WaitingForNetworkConfig)]),
             },
         }
     );
 
     let instructions = get_pxe_instructions(
         &env,
-        machine.interfaces.first().unwrap().id,
+        machine.status.interfaces.first().unwrap().id,
         rpc::forge::MachineArchitecture::Arm,
         Some("Fake Bluefield".to_string()),
     )
@@ -209,6 +213,16 @@ async fn test_dpu_pxe_gets_correct_os_when_machine_is_not_created(
     assert!(
         instructions.pxe_script.contains("aarch64/carbide.efi"),
         "should PXE boot to carbide.efi for DPU agent OS"
+    );
+    assert!(
+        instructions
+            .pxe_script
+            .contains("bfks=${dpu-cloudinit-url}/user-data"),
+        "DPU should fetch its kickstart from the dpu cloud-init prefix"
+    );
+    assert!(
+        !instructions.pxe_script.contains("scout-cloudinit-url"),
+        "the Scout snippet datasource is for hosts, not DPUs"
     );
 
     Ok(())
@@ -303,7 +317,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
         .id;
     txn.commit().await.unwrap();
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::HostInit {
             machine_state: MachineState::WaitingForDiscovery,
         },
@@ -319,9 +333,15 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     )
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+    assert!(
+        instructions
+            .pxe_script
+            .contains("ds=nocloud;s=${scout-cloudinit-url}"),
+        "a host booting Scout should be given the discovery cloud-init datasource"
+    );
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::HostInit {
             machine_state: MachineState::Discovered {
                 skip_reboot_wait: false,
@@ -341,7 +361,36 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
+        &ManagedHostState::BootConfiguring {
+            desired_version: ConfigVersion::new(7),
+            desired_boot_interface: MachineBootInterfaceTarget::MacOnly(
+                "02:00:00:00:00:01".parse().unwrap(),
+            ),
+            post_lock_verification_retry_count: 0,
+            boot_config_state: ReadyBootConfigState::SetBootOrder {
+                set_boot_order_info: SetBootOrderInfo {
+                    set_boot_order_jid: None,
+                    set_boot_order_state: SetBootOrderState::SetBootOrder,
+                    retry_count: 0,
+                },
+            },
+        },
+        &env.pool,
+    )
+    .await;
+
+    let instructions = get_pxe_instructions(
+        &env,
+        host_interface_id,
+        rpc::forge::MachineArchitecture::X86,
+        None,
+    )
+    .await;
+    assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+
+    move_machine_to_needed_state(
+        host_id.into(),
         &ManagedHostState::HostReprovision {
             reprovision_state: HostReprovisionState::WaitingForManualUpgrade {
                 manual_upgrade_started: Utc::now(),
@@ -362,7 +411,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::WaitingForCleanup {
             cleanup_state: model::machine::CleanupState::Init,
             cleanup_context: CleanupContext::Deprovision,
@@ -404,7 +453,10 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
         .await;
 
-    assert_eq!(instructions.pxe_script, "SomeRandomiPxe".to_string());
+    assert_eq!(
+        instructions.pxe_script,
+        "set nico-retry-provisioning 1\nSomeRandomiPxe"
+    );
 }
 
 #[crate::sqlx_test]
@@ -442,11 +494,17 @@ async fn test_cloud_init_when_machine_is_not_created(pool: sqlx::PgPool) {
     assert!(cloud_init_cfg.discovery_instructions.is_some());
 }
 
-/// Verifies cloud-init discovery instructions carry the configured DPU VF count.
+/// Verifies cloud-init discovery instructions carry configured DPU provisioning values.
 #[crate::sqlx_test]
-async fn test_cloud_init_uses_configured_num_of_vfs(pool: sqlx::PgPool) {
+async fn test_cloud_init_uses_configured_dpu_provisioning_values(pool: sqlx::PgPool) {
     let mut config = get_config();
     config.dpu_config.num_of_vfs = 64;
+    config.dpu_config.bootstrap_ca_source = BootstrapCaSource::Embedded;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("test config should include VMaaS settings")
+        .hbn_reps = Some("pf0hpf,pf0vf0,pf0vf2".to_string());
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
 
     // Discover an unassigned interface so the API returns discovery instructions.
@@ -479,7 +537,15 @@ async fn test_cloud_init_uses_configured_num_of_vfs(pool: sqlx::PgPool) {
     let discovery_instructions = cloud_init_cfg
         .discovery_instructions
         .expect("expected discovery instructions");
+    assert_eq!(
+        discovery_instructions.hbn_reps.as_deref(),
+        Some("pf0hpf,pf0vf0,pf0vf2")
+    );
     assert_eq!(discovery_instructions.num_of_vfs, Some(64));
+    assert_eq!(
+        discovery_instructions.bootstrap_ca_source,
+        rpc::forge::BootstrapCaSource::Embedded as i32
+    );
 }
 
 #[crate::sqlx_test]
@@ -488,7 +554,7 @@ async fn test_cloud_init_after_dpu_update(pool: sqlx::PgPool) {
 
     let (_host_id, dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
     move_machine_to_needed_state(
-        dpu_id,
+        dpu_id.into(),
         &ManagedHostState::DPUInit {
             dpu_states: model::machine::DpuInitStates {
                 states: HashMap::from([(dpu_id, DpuInitState::Init)]),
@@ -499,13 +565,13 @@ async fn test_cloud_init_after_dpu_update(pool: sqlx::PgPool) {
     .await;
 
     // Interface is created. Let's fetch interface id.
-    let machine = env.find_machine(dpu_id).await.remove(0);
-    assert_eq!(machine.interfaces.len(), 1);
+    let machine = env.find_machine(&dpu_id).await.remove(0);
+    assert_eq!(machine.status.as_ref().unwrap().interfaces.len(), 1);
 
     let cloud_init_cfg = env
         .api
         .get_cloud_init_instructions(tonic::Request::new(CloudInitInstructionsRequest {
-            ip: machine.interfaces[0].address[0].clone(),
+            ip: machine.status.as_ref().unwrap().interfaces[0].address[0].clone(),
         }))
         .await
         .expect("get_cloud_init_instructions returned an error")

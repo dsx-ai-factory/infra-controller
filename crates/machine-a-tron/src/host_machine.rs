@@ -19,8 +19,11 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use bmc_mock::injection::InjectionStore;
+use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, HostMachineInfo, MachineInfo, SetSystemPowerResult, SystemPowerControl,
+    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
@@ -32,14 +35,19 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
-use crate::config::{MachineATronContext, MachineConfig, PersistedHostMachine};
+use crate::bmc_mock_wrapper::BmcCommand;
+use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay};
 use crate::dpu_machine::{DpuMachine, DpuMachineHandle};
-use crate::machine_state_machine::{LiveState, MachineStateMachine, PersistedMachine};
-use crate::saturating_add_duration_to_instant;
-use crate::tui::{HostDetails, UiUpdate};
+use crate::machine_state_machine::{
+    LiveState, LiveStateCallbacks, MachineStateMachine, PersistedMachine,
+};
+use crate::status::{
+    BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus, InfinibandPortStatus,
+};
+use crate::{Guid, InfinibandPortState, saturating_add_duration_to_instant};
 
-pub struct HostMachine {
+pub(super) struct HostMachine {
     mat_id: Uuid,
     machine_config_section: String,
     host_info: HostMachineInfo,
@@ -47,11 +55,12 @@ pub struct HostMachine {
     live_state: Arc<RwLock<LiveState>>,
     state_machine: MachineStateMachine,
     api_state: String,
-    tui_event_tx: Option<mpsc::Sender<UiUpdate>>,
 
     dpus: Vec<DpuMachineHandle>,
 
     bmc_control_rx: mpsc::UnboundedReceiver<BmcCommand>,
+    /// Kept so the handle can drive power the way the BMC mock does.
+    bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
     // This will be populated with callers waiting for the host to be MachineUp/Ready
     state_waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
     paused: bool,
@@ -59,27 +68,86 @@ pub struct HostMachine {
     sleep_until: Instant,
 }
 
+/// Return true when `entry` carries firmware versions for hosts of the given
+/// hardware type.  Vendor and model are compared case-insensitively against
+/// the Redfish-reported values stored in the API's desired-firmware table.
+fn firmware_entry_matches_host_hw_type(
+    hw_type: bmc_mock::HardwareType,
+    entry: &rpc::forge::DesiredFirmwareVersionEntry,
+) -> bool {
+    use bmc_mock::HardwareType::*;
+    let vendor = entry.vendor.to_lowercase();
+    let model = entry.model.to_lowercase().replace('-', " ");
+    match hw_type {
+        DellPowerEdgeR750 => vendor.contains("dell") && model.contains("r750"),
+        DellPowerEdgeR760Bf4 => vendor.contains("dell") && model.contains("r760"),
+        WiwynnGB200Nvl => {
+            (vendor.contains("wiwynn") || vendor.contains("nvidia")) && model.contains("gb200")
+        }
+        LenovoGB300Nvl => {
+            vendor.contains("lenovo") && (model.contains("gb300") || model == "hg635n_v2")
+        }
+        NvidiaDgxGb300 => vendor.contains("nvidia") && model.contains("gb300"),
+        NvidiaDgxVr => vendor.contains("nvidia") && model.contains("dgx vr"),
+        SupermicroGb300Nvl => vendor.contains("supermicro") && model.contains("gb300"),
+        NvidiaDgxH100 => vendor.contains("nvidia") && model.contains("h100"),
+        HpeProliantDl380aGen11 => {
+            (vendor.contains("hpe") || vendor.contains("hewlett")) && model.contains("proliant")
+        }
+        // All other types (generic, power shelves, switches) do not simulate host
+        // firmware upgrades — no matching entry exists for them.
+        _ => false,
+    }
+}
+
+/// Find the desired host firmware for `hw_type` from the API-configured entries.
+/// Both bmc and uefi versions are read from the **same** entry so they always
+/// come from a consistent hardware-specific record.
+///
+/// Uses `hw_type.host_bmc_version_key()` to look up the BMC component key,
+/// since DGX H100 uses `"combinedbmcuefi"` rather than `"bmc"`.
+fn desired_host_firmware(
+    hw_type: bmc_mock::HardwareType,
+    app_context: &MachineATronContext,
+) -> Option<HostFirmwareVersions> {
+    let versions = app_context.desired_firmware_versions.read().unwrap();
+    let entry = versions
+        .iter()
+        .find(|e| firmware_entry_matches_host_hw_type(hw_type, e))?;
+    let bmc = entry
+        .component_versions
+        .get(hw_type.host_bmc_version_key())
+        .cloned();
+    let uefi = entry.component_versions.get("uefi").cloned();
+    if bmc.is_some() || uefi.is_some() {
+        Some(HostFirmwareVersions { bmc, uefi })
+    } else {
+        None
+    }
+}
+
 impl HostMachine {
-    pub fn from_persisted(
-        persisted_host_machine: PersistedHostMachine,
+    pub(super) fn from_persisted(
+        persisted_device: PersistedDevice,
         machine_config_section: String,
         app_context: Arc<MachineATronContext>,
         config: Arc<MachineConfig>,
+        hw_mac_addr_pool: MacAddressPoolConfig,
     ) -> Self {
-        let mat_id = persisted_host_machine.mat_id;
+        let mat_id = persisted_device.mat_id;
         let (bmc_control_tx, bmc_control_rx) = mpsc::unbounded_channel();
         let (dpu_dhcp_tx, dpu_dhcp_rx) =
             mpsc::unbounded_channel::<oneshot::Sender<DhcpRelayResult<DhcpResponseInfo>>>();
         let mut dpu_dhcp_rx = Some(dpu_dhcp_rx);
         let dpus_in_nic_mode = config.dpus_in_nic_mode;
 
-        let dpu_machines = persisted_host_machine
+        let dpu_machines = persisted_device
             .dpus
             .iter()
             .map(|dpu| {
                 DpuMachine::from_persisted(
                     dpu.clone(),
-                    persisted_host_machine.mat_id,
+                    persisted_device.mat_id,
                     app_context.clone(),
                     config.clone(),
                     if dpus_in_nic_mode {
@@ -90,30 +158,45 @@ impl HostMachine {
                 )
             })
             .collect::<Vec<_>>();
-        let host_info = HostMachineInfo {
-            hw_type: persisted_host_machine.hw_type.unwrap_or_default(),
-            bmc_mac_address: persisted_host_machine.bmc_mac_address,
-            serial: persisted_host_machine.serial.clone(),
-            dpus: persisted_host_machine
+        let mut host_info = HostMachineInfo {
+            hw_type: persisted_device.hw_type,
+            rack_placement: config.rack_placement,
+            bmc_mac_address: persisted_device.bmc_mac_address,
+            serial: persisted_device.serial.clone(),
+            dpus: persisted_device
                 .dpus
                 .iter()
                 .cloned()
                 .map(Into::into)
                 .collect(),
-            non_dpu_mac_address: persisted_host_machine.non_dpu_mac_address,
-            nvos_mac_addresses: persisted_host_machine.nvos_mac_addresses.clone(),
-            switch_serial_number: persisted_host_machine.switch_serial_number.clone(),
+            non_dpu_mac_address: persisted_device.non_dpu_mac_address,
+            nvos_mac_addresses: persisted_device.nvos_mac_addresses.clone(),
+            switch_serial_number: persisted_device.switch_serial_number.clone(),
+            hw_mac_addr_pool,
+            delta_psu_power: None,
+            initial_host_firmware: None,
+            desired_host_firmware: None,
         };
+        // Restore the active firmware inventory persisted from the previous run so
+        // the mock starts at the versions last observed by carbide rather than the
+        // operator-configured starting point.  Falls back to the config's initial
+        // versions when no persisted inventory is available (first run after upgrade).
+        host_info.initial_host_firmware = persisted_device
+            .active_host_firmware
+            .clone()
+            .or_else(|| config.host_firmware_versions.clone());
+        host_info.desired_host_firmware =
+            desired_host_firmware(persisted_device.hw_type, &app_context);
         let dpus = dpu_machines
             .into_iter()
             .map(|d| d.start(true))
             .collect::<Vec<_>>();
-
         let state_machine = MachineStateMachine::from_persisted(
-            PersistedMachine::Host(persisted_host_machine),
+            PersistedMachine::Host(persisted_device),
+            MachineInfo::Host(host_info.clone()),
             config,
             app_context.clone(),
-            bmc_control_tx,
+            bmc_control_tx.clone(),
             if !dpus.is_empty() && !dpus_in_nic_mode {
                 Some(DpuDhcpRelay::HostEnd(dpu_dhcp_tx))
             } else {
@@ -132,8 +215,8 @@ impl HostMachine {
             api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
+            bmc_control_tx,
             state_waiters: HashMap::new(),
-            tui_event_tx: None,
             paused: true,
             sleep_until: Instant::now(),
             api_refresh_interval: tokio::time::interval(
@@ -143,10 +226,12 @@ impl HostMachine {
         }
     }
 
-    pub fn new(
+    pub(super) fn new(
         app_context: Arc<MachineATronContext>,
         machine_config_section: String,
         config: Arc<MachineConfig>,
+        mac_pool: &mut MacAddressPool,
+        hw_pool_config: MacAddressPoolConfig,
     ) -> Self {
         let mat_id = Uuid::new_v4();
         let (bmc_control_tx, bmc_control_rx) = mpsc::unbounded_channel();
@@ -167,6 +252,7 @@ impl HostMachine {
                     index,
                     app_context.clone(),
                     config.clone(),
+                    mac_pool,
                     if dpus_in_nic_mode {
                         None
                     } else {
@@ -175,20 +261,24 @@ impl HostMachine {
                 )
             })
             .collect::<Vec<_>>();
-        let host_info = HostMachineInfo::new(
+        let mut host_info = HostMachineInfo::new(
             config.hw_type,
             dpu_machines.iter().map(|d| d.dpu_info().clone()).collect(),
+            mac_pool,
+            hw_pool_config,
         );
+        host_info.rack_placement = config.rack_placement;
+        host_info.initial_host_firmware = config.host_firmware_versions.clone();
+        host_info.desired_host_firmware = desired_host_firmware(config.hw_type, &app_context);
         let dpus = dpu_machines
             .into_iter()
             .map(|d| d.start(true))
             .collect::<Vec<_>>();
-
         let state_machine = MachineStateMachine::new(
             MachineInfo::Host(host_info.clone()),
             config,
             app_context.clone(),
-            bmc_control_tx,
+            bmc_control_tx.clone(),
             Some(create_random_self_signed_cert()),
             if !dpus.is_empty() && !dpus_in_nic_mode {
                 Some(DpuDhcpRelay::HostEnd(dpu_dhcp_tx))
@@ -208,8 +298,8 @@ impl HostMachine {
             api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
+            bmc_control_tx,
             state_waiters: HashMap::new(),
-            tui_event_tx: None,
             paused: true,
             sleep_until: Instant::now(),
             api_refresh_interval: tokio::time::interval(
@@ -220,7 +310,7 @@ impl HostMachine {
     }
 
     #[instrument(skip_all, fields(mat_host_id = %self.mat_id))]
-    pub fn start(mut self, paused: bool) -> HostMachineHandle {
+    pub(crate) fn start(mut self, paused: bool) -> MachineHandle {
         self.paused = paused;
         let (message_tx, mut message_rx) = mpsc::unbounded_channel();
         let live_state = self.live_state.clone();
@@ -228,8 +318,8 @@ impl HostMachine {
         let host_info = self.host_info.clone();
         let dpus = self.dpus.clone();
         let machine_config_section = self.machine_config_section.clone();
-        let bmc_dhcp_id = self.state_machine.bmc_dhcp_id;
-        let machine_dhcp_id = self.state_machine.machine_dhcp_id;
+        let bmc_injection = self.state_machine.bmc_injection_store();
+        let bmc_control_tx = self.bmc_control_tx.clone();
 
         if !paused {
             self.resume_dpus();
@@ -249,15 +339,15 @@ impl HostMachine {
             })
             .unwrap();
 
-        HostMachineHandle(Arc::new(HostMachineActor {
+        MachineHandle(Arc::new(HostMachineActor {
             message_tx,
             live_state,
             mat_id,
             host_info,
             dpus,
             machine_config_section,
-            bmc_dhcp_id,
-            machine_dhcp_id,
+            bmc_injection,
+            bmc_control_tx,
 
             join_handle: Mutex::new(Some(join_handle)),
         }))
@@ -269,8 +359,6 @@ impl HostMachine {
         actor_message_rx: &mut mpsc::UnboundedReceiver<HostMachineMessage>,
         actor_message_tx: &mpsc::UnboundedSender<HostMachineMessage>,
     ) -> bool {
-        self.maybe_update_tui().await;
-
         // If the host is up, and if anyone is waiting for the current state to be
         // reached, notify them.
         if self.live_state.read().unwrap().is_up
@@ -284,8 +372,11 @@ impl HostMachine {
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {}
             _ = self.api_refresh_interval.tick() => {
-                // Wake up to refresh the API state and UI
-                if let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id {
+                self.refresh_desired_host_firmware();
+                // Wake up to refresh the API state
+                if DeviceKind::from(self.host_info.hw_type) == DeviceKind::Machine
+                    && let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id
+                {
                     let actor_message_tx = actor_message_tx.clone();
                     self.app_context.api_throttler.get_machine(machine_id, move |machine| {
                         if let Some(machine) = machine {
@@ -301,13 +392,16 @@ impl HostMachine {
                     tracing::info!("Command channel gone, stopping Host");
                     return false;
                 };
-                match self.handle_actor_message(cmd).await {
+                match self.handle_actor_message(cmd) {
                     HandleMessageResult::ContinuePolling => return true,
                     HandleMessageResult::ProcessStateNow => {},
                 }
             }
             Some(cmd) = self.bmc_control_rx.recv() => {
-                tracing::debug!("HOST set_system_power request: {cmd:?}");
+                tracing::debug!(
+                    command = ?cmd,
+                    "Received host power command",
+                );
                 match cmd {
                     BmcCommand::SetSystemPower { request, reply } => {
                         let response = self.set_system_power(request);
@@ -334,12 +428,48 @@ impl HostMachine {
             return Duration::MAX;
         }
 
+        self.maybe_converge_after_dpu_flip();
+
         let sleep_duration = self.state_machine.advance().await;
         tracing::trace!("state_machine.advance end");
         sleep_duration
     }
 
-    async fn handle_actor_message(&mut self, message: HostMachineMessage) -> HandleMessageResult {
+    /// When a managed DPU flips to NIC mode it becomes a plain NIC, so this host
+    /// must stop relaying its data-plane DHCP through the DPU and instead DHCP
+    /// directly (on the same former-DPU host MAC, so a retained boot interface
+    /// still matches). Detect the flip through the DPU handle and detach the
+    /// relay once; the host then re-ingests as a zero-managed-DPU NIC-mode
+    /// machine on its next power cycle.
+    fn maybe_converge_after_dpu_flip(&mut self) {
+        if self.state_machine.has_dpu_dhcp_relay()
+            && self.dpus.iter().any(|dpu| dpu.flipped_to_nic_mode())
+        {
+            tracing::info!(
+                "a managed DPU flipped to NIC mode; converging the host to zero managed DPUs (detaching its DPU DHCP relay and dropping the DPU from its reported inventory) so it re-ingests as a NIC-mode host"
+            );
+            self.state_machine.detach_dpu_dhcp_relay();
+            self.state_machine.drop_managed_dpus();
+        }
+    }
+
+    /// Pick up refreshed desired firmware versions and re-stage the pending upgrades.
+    fn refresh_desired_host_firmware(&mut self) {
+        let desired = desired_host_firmware(self.host_info.hw_type, &self.app_context);
+        if desired == self.host_info.desired_host_firmware {
+            return;
+        }
+        tracing::info!(
+            machine_config_section = %self.machine_config_section,
+            previous_desired_host_firmware = ?self.host_info.desired_host_firmware,
+            desired_host_firmware = ?desired,
+            "Desired host firmware changed; re-staging pending upgrades",
+        );
+        self.host_info.desired_host_firmware = desired.clone();
+        self.state_machine.set_desired_host_firmware(desired);
+    }
+
+    fn handle_actor_message(&mut self, message: HostMachineMessage) -> HandleMessageResult {
         match message {
             HostMachineMessage::WaitUntilMachineUpWithApiState(state, reply) => {
                 if let Some(state_waiters) = self.state_waiters.get_mut(&state) {
@@ -347,11 +477,6 @@ impl HostMachine {
                 } else {
                     self.state_waiters.insert(state, vec![reply]);
                 }
-                HandleMessageResult::ContinuePolling
-            }
-            HostMachineMessage::AttachToUI(tui_event_tx) => {
-                self.tui_event_tx = tui_event_tx;
-                self.maybe_update_tui().await;
                 HandleMessageResult::ContinuePolling
             }
             HostMachineMessage::SetPaused(value) => {
@@ -367,22 +492,23 @@ impl HostMachine {
                 HandleMessageResult::ContinuePolling
             }
             HostMachineMessage::SetApiState(api_state) => {
-                self.api_state = api_state;
+                self.api_state = api_state.clone();
+                self.live_state.write().unwrap().api_state = api_state;
                 HandleMessageResult::ContinuePolling
             }
         }
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        tracing::debug!("Host set_system_power request: {request:?}");
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
+        tracing::debug!(?request, "Received host system-power request",);
 
         match request {
             // Force-restart does not restart DPUs
-            SystemPowerControl::ForceRestart => {}
+            ResourceResetType::ForceRestart => {}
             // Other power actions happen on the DPUs too (power cycle, force-off, etc.)
             _ => {
                 // Graceful restart might not restart DPUs if an OS is running (let's emulate that)
-                if matches!(request, SystemPowerControl::GracefulRestart)
+                if matches!(request, ResourceResetType::GracefulRestart)
                     && self.live_state.read().unwrap().booted_os.0.is_some()
                 {
                     tracing::debug!(
@@ -393,7 +519,8 @@ impl HostMachine {
                         _ = dpu.set_system_power(request).inspect_err(|e| {
                             tracing::error!(
                                 error = %e,
-                                "Could not send power request to DPU {dpu_index}",
+                                dpu_index,
+                                "Could not send power request to DPU",
                             )
                         });
                     }
@@ -401,52 +528,6 @@ impl HostMachine {
             }
         }
         self.state_machine.set_system_power(request)
-    }
-
-    async fn maybe_update_tui(&self) {
-        let Some(tui_event_tx) = self.tui_event_tx.as_ref() else {
-            return;
-        };
-        _ = tui_event_tx
-            .send(UiUpdate::Machine(self.host_details()))
-            .await
-            .inspect_err(|e| tracing::warn!(error = %e, "Error sending TUI event"));
-    }
-
-    // Note: We can't implment From<HostMachine> for HostDetails, because we need this to be async
-    // in order to query DPU state.
-    fn host_details(&self) -> HostDetails {
-        let mut dpu_details = Vec::with_capacity(self.dpus.len());
-        for dpu in &self.dpus {
-            dpu_details.push(dpu.host_details());
-        }
-
-        let live_state = self.live_state.read().unwrap();
-
-        HostDetails {
-            mat_id: self.mat_id,
-            hw_type: Some(self.host_info.hw_type),
-            machine_id: live_state
-                .observed_machine_id
-                .as_ref()
-                .map(|m| m.to_string()),
-            mat_state: live_state.state_string,
-            api_state: self.api_state.clone(),
-            oob_ip: live_state
-                .bmc_ip
-                .as_ref()
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            machine_ip: live_state
-                .machine_ip
-                .as_ref()
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            dpus: dpu_details,
-            booted_os: live_state.booted_os.to_string(),
-            next_boot_kind: live_state.ui_next_boot_kind().into(),
-            power_state: live_state.power_state,
-        }
     }
 
     fn pause(&mut self) {
@@ -481,7 +562,7 @@ impl HostMachine {
 }
 
 // Shared with DpuMachine
-pub enum HandleMessageResult {
+pub(super) enum HandleMessageResult {
     ContinuePolling,
     ProcessStateNow,
 }
@@ -489,7 +570,6 @@ pub enum HandleMessageResult {
 enum HostMachineMessage {
     GetApiState(oneshot::Sender<String>),
     WaitUntilMachineUpWithApiState(String, oneshot::Sender<()>),
-    AttachToUI(Option<mpsc::Sender<UiUpdate>>),
     SetPaused(bool),
     SetApiState(String),
 }
@@ -503,19 +583,95 @@ struct HostMachineActor {
     host_info: HostMachineInfo,
     dpus: Vec<DpuMachineHandle>,
     machine_config_section: String,
-    bmc_dhcp_id: Uuid,
-    machine_dhcp_id: Uuid,
+    bmc_injection: Arc<InjectionStore>,
+    bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
 }
 
 #[derive(Debug, Clone)]
-pub struct HostMachineHandle(Arc<HostMachineActor>);
+pub(crate) struct MachineHandle(Arc<HostMachineActor>);
 
-impl HostMachineHandle {
-    pub fn mat_id(&self) -> Uuid {
+impl MachineHandle {
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        LiveStateCallbacks::new(self.0.live_state.clone(), self.0.bmc_control_tx.clone())
+            .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
+        Self::for_control_test_in_section(dpus, ipmi_port, "test")
+    }
+
+    /// A host handle for control-router tests configured by `machine_config_section`.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_in_section(
+        dpus: Vec<DpuMachineHandle>,
+        ipmi_port: Option<u16>,
+        machine_config_section: &str,
+    ) -> Self {
+        let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 2]);
+        let host_info = HostMachineInfo {
+            hw_type: Default::default(),
+            rack_placement: None,
+            bmc_mac_address: mac,
+            serial: "test-host".to_string(),
+            dpus: Vec::new(),
+            non_dpu_mac_address: None,
+            nvos_mac_addresses: Vec::new(),
+            switch_serial_number: None,
+            hw_mac_addr_pool: MacAddressPoolConfig::new(mac, 24).unwrap(),
+            delta_psu_power: None,
+            initial_host_firmware: None,
+            desired_host_firmware: None,
+        };
+        let handle = Self::for_control_test_host(host_info, dpus, machine_config_section);
+        handle.0.live_state.write().unwrap().ipmi_port = ipmi_port;
+        handle
+    }
+
+    /// A handle for `host_info` with no actor behind it.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        dpus: Vec<DpuMachineHandle>,
+        machine_config_section: &str,
+    ) -> Self {
+        let (message_tx, _message_rx) = mpsc::unbounded_channel();
+        Self(Arc::new(HostMachineActor {
+            message_tx,
+            join_handle: Mutex::new(None),
+            live_state: Arc::new(RwLock::new(LiveState::default())),
+            mat_id: Uuid::new_v4(),
+            host_info,
+            dpus,
+            machine_config_section: machine_config_section.to_string(),
+            bmc_injection: Arc::new(InjectionStore::new()),
+            bmc_control_tx: mpsc::unbounded_channel().0,
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_control_test_ssh_endpoint(self, port: u16) -> Self {
+        self.0.live_state.write().unwrap().ssh_endpoint_port = Some(port);
+        self
+    }
+
+    /// Stand in for the DHCP lease the actor would otherwise record.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_bmc_ip(&self, ip: Option<Ipv4Addr>) {
+        self.0.live_state.write().unwrap().bmc_ip = ip;
+    }
+
+    pub(super) fn mat_id(&self) -> Uuid {
         self.0.mat_id
     }
 
-    pub fn observed_machine_id(&self) -> Option<MachineId> {
+    pub(super) fn observed_machine_id(&self) -> Option<MachineId> {
         self.0
             .live_state
             .read()
@@ -525,7 +681,7 @@ impl HostMachineHandle {
             .map(|m| m.to_owned())
     }
 
-    pub async fn api_state(&self) -> eyre::Result<String> {
+    pub(super) async fn api_state(&self) -> eyre::Result<String> {
         let (tx, rx) = oneshot::channel();
         self.0
             .message_tx
@@ -533,7 +689,11 @@ impl HostMachineHandle {
         Ok(rx.await?)
     }
 
-    pub async fn wait_until_machine_up_with_api_state(
+    pub(crate) fn bmc_injection_store(&self) -> Arc<InjectionStore> {
+        self.0.bmc_injection.clone()
+    }
+
+    pub(super) async fn wait_until_machine_up_with_api_state(
         &self,
         state: &str,
         timeout: Duration,
@@ -545,44 +705,90 @@ impl HostMachineHandle {
                 state.to_owned(),
                 tx,
             ))?;
-        tokio::time::timeout(timeout, rx).await?.wrap_err(format!(
-            "timed out waiting for machine up with state {state}"
-        ))
+        tokio::time::timeout(timeout, rx)
+            .await
+            .wrap_err_with(|| format!("timed out waiting for machine up with state {state}"))?
+            .wrap_err_with(|| format!("machine stopped while waiting for state {state}"))?;
+        Ok(())
     }
 
-    pub fn attach_to_tui(&self, tui_event_tx: Option<mpsc::Sender<UiUpdate>>) -> eyre::Result<()> {
-        Ok(self
-            .0
-            .message_tx
-            .send(HostMachineMessage::AttachToUI(tui_event_tx))?)
-    }
-
-    pub fn pause(&self) -> eyre::Result<()> {
+    pub(super) fn pause(&self) -> eyre::Result<()> {
         self.0
             .message_tx
             .send(HostMachineMessage::SetPaused(true))?;
         Ok(())
     }
 
-    pub fn resume(&self) -> eyre::Result<()> {
+    pub(super) fn resume(&self) -> eyre::Result<()> {
         self.0
             .message_tx
             .send(HostMachineMessage::SetPaused(false))?;
         Ok(())
     }
 
-    pub fn host_info(&self) -> &HostMachineInfo {
+    pub(super) fn host_info(&self) -> &HostMachineInfo {
         &self.0.host_info
     }
 
-    pub fn machine_config_section(&self) -> &str {
+    pub(super) fn machine_config_section(&self) -> &str {
         &self.0.machine_config_section
     }
 
-    pub fn persisted(&self) -> PersistedHostMachine {
+    pub(super) fn set_infiniband_port_state(
+        &self,
+        guid: Guid,
+        state: InfinibandPortState,
+    ) -> eyre::Result<()> {
+        let mut live_state = self.0.live_state.write().unwrap();
+        let port_state = live_state
+            .infiniband_port_states
+            .get_mut(&guid)
+            .ok_or_else(|| eyre::eyre!("infiniband port {guid} not found"))?;
+        *port_state = state;
+        Ok(())
+    }
+
+    pub(super) fn status(&self, config: &DeviceStatusConfig) -> DeviceStatus {
         let live_state = self.0.live_state.read().unwrap();
-        PersistedHostMachine {
-            hw_type: Some(self.0.host_info.hw_type),
+        let mut infiniband_ports = live_state
+            .infiniband_port_states
+            .iter()
+            .map(|(&guid, &state)| InfinibandPortStatus { guid, state })
+            .collect::<Vec<_>>();
+        infiniband_ports.sort_by_key(|port| port.guid);
+        DeviceStatus {
+            mat_id: self.0.mat_id.to_string(),
+            device_kind: DeviceKind::Machine,
+            device_id: live_state
+                .observed_machine_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| self.0.mat_id.to_string()),
+            machine_id: live_state
+                .observed_machine_id
+                .as_ref()
+                .map(ToString::to_string),
+            hardware_type: Some(self.0.host_info.hw_type),
+            mat_state: live_state.state_string.map(ToOwned::to_owned),
+            api_state: live_state.api_state.clone(),
+            power_state: live_state.power_state.to_string(),
+            machine_ip: live_state.machine_ip.map(|ip| ip.to_string()),
+            nvos_ip: None,
+            infiniband_ports: (!infiniband_ports.is_empty()).then_some(infiniband_ports),
+            bmc: BmcStatus {
+                ip: live_state.bmc_ip.map(|ip| ip.to_string()),
+                redfish: EndpointStatus::redfish(config),
+                ipmi: live_state.ipmi_port.map(EndpointStatus::same_port),
+                ssh: live_state.ssh_endpoint_port.map(EndpointStatus::same_port),
+            },
+            dpus: self.0.dpus.iter().map(|dpu| dpu.status(config)).collect(),
+        }
+    }
+
+    pub(super) fn persisted(&self) -> PersistedDevice {
+        let live_state = self.0.live_state.read().unwrap();
+        PersistedDevice {
+            hw_type: self.0.host_info.hw_type,
             mat_id: self.0.mat_id,
             machine_config_section: self.0.machine_config_section.clone(),
             bmc_mac_address: self.0.host_info.bmc_mac_address,
@@ -594,16 +800,20 @@ impl HostMachineHandle {
             observed_machine_id: live_state.observed_machine_id,
             installed_os: live_state.installed_os,
             tpm_ek_certificate: live_state.tpm_ek_certificate.clone(),
-            machine_dhcp_id: self.0.machine_dhcp_id,
-            bmc_dhcp_id: self.0.bmc_dhcp_id,
+            hw_mac_addr_pool: Some(config::MacAddressPoolConfig {
+                base: self.0.host_info.hw_mac_addr_pool.base(),
+                host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
+            }),
+            active_host_firmware: live_state.active_host_firmware.clone(),
+            bmc_accounts: live_state.bmc_accounts_for_snapshot(),
         }
     }
 
-    pub fn dpus(&self) -> &[DpuMachineHandle] {
+    pub(super) fn dpus(&self) -> &[DpuMachineHandle] {
         &self.0.dpus
     }
 
-    pub async fn delete_from_api(self, api_client: ApiClient) -> eyre::Result<()> {
+    pub(super) async fn delete_from_api(self, api_client: ApiClient) -> eyre::Result<()> {
         let delete_by = match self
             .0
             .live_state
@@ -614,8 +824,8 @@ impl HostMachineHandle {
         {
             Some(machine_id) => {
                 tracing::info!(
-                    "Attempting to delete machine with id: {} from db.",
-                    machine_id
+                    %machine_id,
+                    "Attempting to delete machine from database",
                 );
                 machine_id.to_string()
             }
@@ -623,7 +833,10 @@ impl HostMachineHandle {
                 // force_delete_machine also supports sending MAC address (which could break if there is 0 DPUs on this host)
                 match self.0.host_info.system_mac_address() {
                     Some(mac) => {
-                        tracing::info!("Attempting to delete machine with mac: {} from db.", mac);
+                        tracing::info!(
+                            mac_address = %mac,
+                            "Attempting to delete machine from database",
+                        );
                         mac.to_string()
                     }
                     None => {
@@ -640,7 +853,7 @@ impl HostMachineHandle {
         Ok(())
     }
 
-    pub fn abort(&self) {
+    pub(super) fn abort(&self) {
         for dpu in &self.0.dpus {
             dpu.abort();
         }
@@ -649,11 +862,121 @@ impl HostMachineHandle {
         }
     }
 
-    pub fn bmc_ssh_host_pubkey(&self) -> Option<String> {
+    pub(super) async fn abort_and_wait(&self) -> eyre::Result<()> {
+        let mut join_handles = self
+            .0
+            .dpus
+            .iter()
+            .filter_map(DpuMachineHandle::abort_task)
+            .collect::<Vec<_>>();
+        if let Some(join_handle) = self.0.join_handle.lock().unwrap().take() {
+            join_handle.abort();
+            join_handles.push(join_handle);
+        }
+
+        for join_handle in join_handles {
+            match join_handle.await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn bmc_ssh_host_pubkey(&self) -> Option<String> {
         self.0.live_state.read().unwrap().ssh_host_key.clone()
     }
 
-    pub fn bmc_ip(&self) -> Option<Ipv4Addr> {
+    pub(super) fn bmc_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().bmc_ip
+    }
+}
+
+#[cfg(test)]
+mod firmware_catalog_tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn gb300_matches_host_and_hgx_model_names() {
+        check_values(
+            [
+                Check {
+                    scenario: "host system model",
+                    input: ("LenovoAMI", "HG635N_V2"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "HGX system model",
+                    input: ("LenovoAMI", "GB300 1CPU:2GPU Board PC"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "different Lenovo platform",
+                    input: ("Lenovo", "ThinkSystem HS350X V3"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "different GB300 vendor",
+                    input: ("Nvidia", "GB300"),
+                    expect: false,
+                },
+            ],
+            |(vendor, model)| {
+                firmware_entry_matches_host_hw_type(
+                    bmc_mock::HardwareType::LenovoGB300Nvl,
+                    &rpc::forge::DesiredFirmwareVersionEntry {
+                        vendor: vendor.to_string(),
+                        model: model.to_string(),
+                        component_versions: Default::default(),
+                    },
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn gb200_matches_explored_vendor_and_retains_configured_vendor() {
+        check_values(
+            [
+                Check {
+                    scenario: "explored Nvidia vendor",
+                    input: ("Nvidia", "GB200 NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "configured Wiwynn vendor",
+                    input: ("Wiwynn", "GB200 NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "case and separator normalization",
+                    input: ("NVIDIA", "GB200-NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "different Nvidia platform",
+                    input: ("Nvidia", "GB300 NVL"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "different vendor",
+                    input: ("Dell", "GB200 NVL"),
+                    expect: false,
+                },
+            ],
+            |(vendor, model)| {
+                firmware_entry_matches_host_hw_type(
+                    bmc_mock::HardwareType::WiwynnGB200Nvl,
+                    &rpc::forge::DesiredFirmwareVersionEntry {
+                        vendor: vendor.to_string(),
+                        model: model.to_string(),
+                        component_versions: Default::default(),
+                    },
+                )
+            },
+        );
     }
 }

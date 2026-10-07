@@ -33,38 +33,38 @@ Rotate the image URL's auth token:
     --auth-type Bearer --auth-token <token>
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "uuid of the OS image to update.")]
-    pub id: String,
+    id: String,
     #[clap(short = 'n', long, help = "Optional, name of the OS image entry.")]
-    pub name: Option<String>,
+    name: Option<String>,
     #[clap(
         short = 'd',
         long,
         help = "Optional, description of the OS image entry."
     )]
-    pub description: Option<String>,
+    description: Option<String>,
     #[clap(
         short = 'y',
         long,
         help = "Optional, Authentication type, usually Bearer."
     )]
-    pub auth_type: Option<String>,
+    auth_type: Option<String>,
     #[clap(
         short = 'p',
         long,
         help = "Optional, Authentication token, usually in base64."
     )]
-    pub auth_token: Option<String>,
+    auth_token: Option<String>,
 }
 
 /// Parsed update request with a validated UUID.
-pub struct UpdateRequest {
-    pub id: ::rpc::common::Uuid,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub auth_type: Option<String>,
-    pub auth_token: Option<String>,
+pub(super) struct UpdateRequest {
+    pub(super) id: ::rpc::common::Uuid,
+    pub(super) name: Option<String>,
+    pub(super) description: Option<String>,
+    pub(super) auth_type: Option<String>,
+    pub(super) auth_token: Option<String>,
 }
 
 impl TryFrom<Args> for UpdateRequest {

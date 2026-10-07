@@ -23,16 +23,13 @@ mod disassociate;
 mod show;
 mod update;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Clone, Dispatch)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Create an instance type", visible_alias = "c")]
     Create(create::Args),
 

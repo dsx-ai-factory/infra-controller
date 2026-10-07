@@ -41,6 +41,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use crate::forge::VersionRequest;
 use crate::forge_resolver::resolver::ResolverError;
 use crate::forge_tls_client::ConfigurationError::CouldNotReadRootCa;
+use crate::node_jwt::{BearerAuthService, NodeJwtMinter, NodeTokenProvider};
 use crate::protos::forge::forge_client::ForgeClient;
 use crate::protos::nmx_c::nmx_controller_client::NmxControllerClient;
 use crate::{forge_resolver, protos};
@@ -64,21 +65,59 @@ fn format_error_chain<E: std::error::Error + ?Sized>(err: &E) -> String {
     }
 }
 
+/// Concrete, non-trait-object wrapper around a transport-level `tower::BoxError` (which includes
+/// a request having hit `REQUEST_TIMEOUT`). `ForgeClientT`/`NmxCClientT` carry this as their
+/// `BoxCloneService` error type instead of a bare `tower::BoxError` (`Box<dyn Error + Send +
+/// Sync>`) alias, because that raw trait-object alias trips a known rustc/async_trait HRTB
+/// inference bug ("implementation of `From` is not general enough", rust-lang/rust#102211) in
+/// every `#[async_trait]` fn that returns `Result<ForgeClientT, _>` (e.g.
+/// `ConnectionProvider::provide_connection`). A concrete newtype sidesteps it.
+#[derive(Debug)]
+pub struct TransportError(tower::BoxError);
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // The wrapped error itself, not its own source -- skipping straight to
+        // `self.0.source()` would hide `self.0` from any downstream source-chain walk (e.g.
+        // tonic's `Status::try_from_error`, which downcasts each link looking for a nested
+        // `tonic::Status` to recover its gRPC code). A transparent wrapper must expose what it
+        // wraps as the very next link, not jump past it.
+        Some(&*self.0)
+    }
+}
+
+impl From<tower::BoxError> for TransportError {
+    fn from(e: tower::BoxError) -> Self {
+        Self(e)
+    }
+}
+
 pub type NmxCClientT = NmxControllerClient<
-    BoxCloneService<
-        hyper::Request<Body>,
-        hyper::Response<Incoming>,
-        hyper_util::client::legacy::Error,
-    >,
+    BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
 >;
 
-pub type ForgeClientT = ForgeClient<
-    BoxCloneService<
-        hyper::Request<Body>,
-        hyper::Response<Incoming>,
-        hyper_util::client::legacy::Error,
-    >,
->;
+pub type ForgeClientT =
+    ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>>;
+
+/// Default ceiling on connection acquisition + time-to-response-headers for a single gRPC
+/// request, applied at the transport layer so a connection that's accepted but never answered
+/// can't block a caller (and its admission-retry budget) forever. Overridable via
+/// [`ForgeClientConfig::request_timeout`] for callers that need to exceed it (e.g. a
+/// server-side `pending_timeout` configured above this default -- see that field's doc comment).
+///
+/// Doesn't bound the body/trailer phase after headers arrive, and the HTTP/2 keepalive PING
+/// above doesn't either: PING is connection-scoped, so a peer can keep acking it while one
+/// individual gRPC stream on that connection stalls after sending its headers. Set comfortably
+/// above the largest admission-retry cumulative backoff used anywhere in admin-cli (120s) and
+/// above legitimate large-batch call latency, so it should never fire against a healthy,
+/// just-slow server.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const DEFAULT_DOMAIN: &str = "forge.local";
 
@@ -89,11 +128,31 @@ pub struct ForgeClientConfig {
     pub root_ca_path: String,
     pub client_cert: Option<ClientCert>,
     pub enforce_tls: bool,
+    #[cfg(feature = "test-support")]
+    pub suppress_insecure_tls_warning: bool,
     pub use_mgmt_vrf: bool,
     pub max_decoding_message_size: Option<usize>,
+    /// Overrides [`REQUEST_TIMEOUT`]. `None` (the default) keeps the built-in ceiling. Exists
+    /// because `api_admission_control.pending_timeout` (`crates/api-core/src/cfg`) has no
+    /// enforced upper bound -- an operator can legally configure a server-side admission wait
+    /// longer than the client's default transport timeout, which would otherwise cancel the
+    /// call before the server's own deadline.
+    ///
+    /// [`ForgeClientConfig::new`] seeds this from `FORGE_CLIENT_REQUEST_TIMEOUT_SECS` (whole
+    /// seconds; zero and non-numeric values are rejected -- logged and ignored, falling back to
+    /// [`REQUEST_TIMEOUT`] -- since a zero timeout would fail every request immediately). A
+    /// value assigned directly to this field after construction takes precedence over the
+    /// environment, same as every other knob on this struct.
+    pub request_timeout: Option<Duration>,
     pub socks_proxy: Option<String>,
     pub connect_retries_max: Option<u32>,
     pub connect_retries_interval: Option<Duration>,
+    /// Optional node-auth token provider (issue #355). When set, each request
+    /// carries an `Authorization: Bearer <jwt>` — either self-signed with the
+    /// client certificate's own private key ([`NodeJwtMinter`]) or fetched
+    /// from the dpu-agent's local API (`SocketTokenSource`). Independent of
+    /// mTLS: the channel may present a client cert, a token, or both.
+    pub node_token_provider: Option<Arc<dyn NodeTokenProvider>>,
 }
 
 impl ForgeClientConfig {
@@ -105,13 +164,31 @@ impl ForgeClientConfig {
         let max_decoding_message_size = std::env::var("TONIC_MAX_DECODING_MESSAGE_SIZE")
             .ok()
             .and_then(|ms| ms.parse::<usize>().ok());
+        let request_timeout = std::env::var("FORGE_CLIENT_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| match raw.parse::<u64>() {
+                Ok(secs) if secs > 0 => Some(Duration::from_secs(secs)),
+                _ => {
+                    tracing::warn!(
+                        env_var = "FORGE_CLIENT_REQUEST_TIMEOUT_SECS",
+                        value = %raw,
+                        default_secs = REQUEST_TIMEOUT.as_secs(),
+                        "ignoring invalid request timeout override, a zero or malformed value \
+                         would fail every request immediately"
+                    );
+                    None
+                }
+            });
 
         Self {
             root_ca_path,
             client_cert,
             enforce_tls: !disabled,
+            #[cfg(feature = "test-support")]
+            suppress_insecure_tls_warning: false,
             use_mgmt_vrf: false,
             max_decoding_message_size,
+            request_timeout,
             socks_proxy: None,
 
             // Default connect retry configuration to start.
@@ -130,7 +207,57 @@ impl ForgeClientConfig {
             // MR though, I think.
             connect_retries_max: Some(3),
             connect_retries_interval: Some(Duration::from_secs(20)),
+            node_token_provider: None,
         }
+    }
+
+    /// Restores server-certificate validation on a config built without a
+    /// client certificate.
+    ///
+    /// [`ForgeClientConfig::new`] disables TLS enforcement whenever
+    /// `client_cert` is `None`, which predates node-auth: back then "no client
+    /// cert" meant "no credentials at all", and such callers were not expected
+    /// to reach the API over verified TLS. A node-token client does hold
+    /// credentials — a bearer JWT brokered by the dpu-agent (issue #355) — and
+    /// must still authenticate the server against `root_ca_path` rather than
+    /// fall back to [`DummyTlsVerifier`]. Callers that never opt in keep the
+    /// previous behavior.
+    ///
+    /// `DISABLE_TLS_ENFORCEMENT` continues to win, so local-development
+    /// overrides work the same as they do for mTLS clients.
+    #[must_use]
+    pub fn require_tls_enforcement(mut self) -> Self {
+        self.enforce_tls = std::env::var("DISABLE_TLS_ENFORCEMENT").is_err();
+        self
+    }
+
+    /// Enables node-auth JWTs: requests built from this config mint and carry
+    /// short-lived bearer tokens signed with the configured client cert's key.
+    /// A no-op when no client cert is configured.
+    #[must_use]
+    pub fn with_node_jwt(mut self) -> Self {
+        self.node_token_provider = self.client_cert.as_ref().map(|client_cert| {
+            NodeJwtMinter::new(client_cert.cert_path.clone(), client_cert.key_path.clone())
+                as Arc<dyn NodeTokenProvider>
+        });
+        self
+    }
+
+    /// Attaches an explicit node-auth token provider — e.g. a pre-built
+    /// [`NodeJwtMinter`] the caller also serves through the agent's local
+    /// API, or a `SocketTokenSource` in a process that holds no key at all.
+    ///
+    /// Implies [`require_tls_enforcement`](Self::require_tls_enforcement).
+    /// A bearer token IS the client's credential, so the server must always
+    /// be authenticated before one is handed over — a token-only config
+    /// (no client cert) would otherwise sit on [`DummyTlsVerifier`] and
+    /// present its token to whatever answered. Enforcing it here rather than
+    /// asking every caller to remember the pairing keeps the type hard to
+    /// misuse; `DISABLE_TLS_ENFORCEMENT` still wins for local development.
+    #[must_use]
+    pub fn with_token_provider(mut self, provider: Arc<dyn NodeTokenProvider>) -> Self {
+        self.node_token_provider = Some(provider);
+        self.require_tls_enforcement()
     }
 
     /// This is required when using `ForgeTlsConfig` on a DPU to communicate with site-controller.
@@ -214,7 +341,7 @@ impl ForgeClientConfig {
                     });
 
                 if !errors.is_empty() {
-                    tracing::warn!( certs = ?errors, "Found error parsing one or more certificates");
+                    tracing::warn!(error = ?errors, "Found error parsing one or more certificates");
                 }
 
                 valid_certificates
@@ -383,9 +510,9 @@ impl<'a> ForgeTlsClient<'a> {
                     .await
                     .inspect_err(|err| {
                         tracing::error!(
-                            "error connecting client to forge api (url: {}), will retry: {}",
-                            api_config.url,
-                            format_error_chain(err)
+                            url = %api_config.url,
+                            error = %format_error_chain(err),
+                            "Failed to connect client to Forge API; retrying",
                         );
                     })
                     .map_err(|e| ForgeTlsClientError::Connection(format_error_chain(&e)))?;
@@ -397,10 +524,10 @@ impl<'a> ForgeTlsClient<'a> {
             .await
             .inspect_err(|err| {
                 tracing::error!(
-                    "error connecting client to forge api (url: {}, attempts: {}): {}",
-                    api_config.url,
-                    api_config.retry_config.retries,
-                    err
+                    url = %api_config.url,
+                    retries = api_config.retry_config.retries,
+                    error = %err,
+                    "Failed to connect client to Forge API after retries",
                 );
             });
 
@@ -427,6 +554,32 @@ impl<'a> ForgeTlsClient<'a> {
             error: e,
         })?;
 
+        // A bearer token is the client's credential, so it may only be sent to
+        // a server this client has authenticated. Both ways that can fail are
+        // checked here rather than in the builders: `enforce_tls` and
+        // `node_token_provider` are public fields, so a caller can clear
+        // enforcement after `with_token_provider` or build the struct
+        // literally, and the handshake only happens at all for an https:// URL
+        // — a plaintext one skips TLS setup entirely while `BearerAuthService`
+        // below still stamps the token. `DISABLE_TLS_ENFORCEMENT` is honored
+        // for parity with the rest of this config so local development works.
+        if self.forge_client_config.node_token_provider.is_some()
+            && std::env::var("DISABLE_TLS_ENFORCEMENT").is_err()
+        {
+            if uri.scheme() != Some(&tonic::codegen::http::uri::Scheme::HTTPS) {
+                return Err(ConfigurationError::BearerTokenOverPlaintext {
+                    uri_string: url.as_ref().to_string(),
+                }
+                .into());
+            }
+            if !self.forge_client_config.enforce_tls {
+                return Err(ConfigurationError::BearerTokenWithoutTlsEnforcement {
+                    uri_string: url.as_ref().to_string(),
+                }
+                .into());
+            }
+        }
+
         let connector = self.build_https_client(url.as_ref()).await?;
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
@@ -443,7 +596,27 @@ impl<'a> ForgeTlsClient<'a> {
             // We never make more than a single connection to carbide at a time.
             .pool_max_idle_per_host(2)
             .timer(TokioTimer::new())
-            .build(connector)
+            .build(connector);
+        // Stamp a freshly-minted node-auth bearer token onto each request when
+        // configured (issue #355). A `None` minter is a transparent pass-through,
+        // so the boxed service type is identical in both modes.
+        let hyper_client = BearerAuthService::new(
+            hyper_client,
+            self.forge_client_config.node_token_provider.clone(),
+        );
+        // Inject the issuing span's W3C trace context into every request this client sends
+        // (issue #2438). Wrapping before `boxed_clone` keeps the erased `BoxCloneService` type.
+        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client);
+        let request_timeout = self
+            .forge_client_config
+            .request_timeout
+            .unwrap_or(REQUEST_TIMEOUT);
+        let hyper_client: BoxCloneService<
+            hyper::Request<Body>,
+            hyper::Response<Incoming>,
+            TransportError,
+        > = tower::timeout::Timeout::new(hyper_client, request_timeout)
+            .map_err(TransportError)
             .boxed_clone();
 
         let mut forge_client = ForgeClient::with_origin(hyper_client, uri);
@@ -522,11 +695,17 @@ impl<'a> ForgeTlsClient<'a> {
                 if self.forge_client_config.enforce_tls {
                     base_config_builder().with_root_certificates(roots)
                 } else {
+                    #[cfg(feature = "test-support")]
+                    let verifier = if self.forge_client_config.suppress_insecure_tls_warning {
+                        DummyTlsVerifier::new_for_tests()
+                    } else {
+                        DummyTlsVerifier::new_for_prod()
+                    };
+                    #[cfg(not(feature = "test-support"))]
+                    let verifier = DummyTlsVerifier::new_for_prod();
                     base_config_builder()
                         .dangerous()
-                        .with_custom_certificate_verifier(
-                            Arc::new(DummyTlsVerifier::new_for_prod()),
-                        )
+                        .with_custom_certificate_verifier(Arc::new(verifier))
                 }
             };
 
@@ -640,7 +819,20 @@ impl<'a> ForgeTlsClient<'a> {
             // We never make more than a single connection to carbide at a time.
             .pool_max_idle_per_host(2)
             .timer(TokioTimer::new())
-            .build(connector)
+            .build(connector);
+        // Inject the issuing span's W3C trace context into every request this client sends
+        // (issue #2438). Wrapping before `boxed_clone` keeps the erased `BoxCloneService` type.
+        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client);
+        let request_timeout = self
+            .forge_client_config
+            .request_timeout
+            .unwrap_or(REQUEST_TIMEOUT);
+        let hyper_client: BoxCloneService<
+            hyper::Request<Body>,
+            hyper::Response<Incoming>,
+            TransportError,
+        > = tower::timeout::Timeout::new(hyper_client, request_timeout)
+            .map_err(TransportError)
             .boxed_clone();
 
         let mut nmx_c_client = NmxControllerClient::with_origin(hyper_client, uri);
@@ -684,9 +876,9 @@ impl<'a> ForgeTlsClient<'a> {
                     .await
                     .inspect_err(|err| {
                         tracing::error!(
-                            "error connecting client to forge api (url: {}), will retry: {}",
-                            api_config.url,
-                            format_error_chain(err)
+                            url = %api_config.url,
+                            error = %format_error_chain(err),
+                            "Failed to connect client to NMX-C API; retrying",
                         );
                     })
                     .map_err(|e| ForgeTlsClientError::Connection(format_error_chain(&e)))?;
@@ -698,10 +890,10 @@ impl<'a> ForgeTlsClient<'a> {
             .await
             .inspect_err(|err| {
                 tracing::error!(
-                    "error connecting client to nmx-c api (url: {}, attempts: {}): {}",
-                    api_config.url,
-                    api_config.retry_config.retries,
-                    err
+                    url = %api_config.url,
+                    retries = api_config.retry_config.retries,
+                    error = %err,
+                    "Failed to connect client to NMX-C API after retries",
                 );
             });
 
@@ -717,22 +909,33 @@ impl<'a> ForgeTlsClient<'a> {
 pub enum ForgeTlsClientError {
     #[error("ConnectError error: {0}")]
     Connection(String),
-    #[error("Configuration error: {0}")]
+    #[error("configuration error: {0}")]
     Configuration(#[from] ConfigurationError),
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigurationError {
-    #[error("Invalid URI {uri_string}: {error}")]
+    #[error("invalid URI {uri_string}: {error}")]
     InvalidUri {
         uri_string: String,
         error: hyper::http::uri::InvalidUri,
     },
-    #[error("Could not read Root CA cert at {path}: {error}")]
+    #[error("could not read root CA cert at {path}: {error}")]
     CouldNotReadRootCa { path: String, error: io::Error },
-    #[error("Invalid client cert: {0}")]
+    #[error(
+        "refusing to send node-auth bearer tokens to non-HTTPS URL {uri_string}: \
+         the token would travel in cleartext"
+    )]
+    BearerTokenOverPlaintext { uri_string: String },
+    #[error(
+        "refusing to send node-auth bearer tokens to {uri_string} with TLS enforcement \
+         disabled: the server's certificate would not be verified, so the token could \
+         be handed to an impersonator"
+    )]
+    BearerTokenWithoutTlsEnforcement { uri_string: String },
+    #[error("invalid client cert: {0}")]
     InvalidClientCert(rustls::Error),
-    #[error("Error configuring resolver: {0}")]
+    #[error("error configuring resolver: {0}")]
     Resolver(#[from] ResolverError),
 }
 
@@ -747,6 +950,7 @@ pub type ForgeHttpsClientResult<T> = Result<T, ForgeTlsClientError>;
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::net::SocketAddr;
 
     use carbide_test_support::value_scenarios;
@@ -754,6 +958,131 @@ mod tests {
     use hyper_rustls::HttpsConnector;
 
     use super::*;
+
+    /// A node-token client presents no client certificate, which by itself
+    /// drops the channel onto `DummyTlsVerifier`. `require_tls_enforcement`
+    /// puts it back on root-CA validation.
+    #[test]
+    fn require_tls_enforcement_restores_validation_without_a_client_cert() {
+        if std::env::var("DISABLE_TLS_ENFORCEMENT").is_ok() {
+            // The override wins by design; the assertions below would not hold.
+            return;
+        }
+
+        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        assert!(
+            !config.enforce_tls,
+            "a config without a client cert starts out unenforced"
+        );
+
+        let config = config.require_tls_enforcement();
+        assert!(
+            config.enforce_tls,
+            "opting in must restore server certificate validation"
+        );
+    }
+
+    #[derive(Debug)]
+    struct FixedToken;
+
+    impl NodeTokenProvider for FixedToken {
+        fn current(&self) -> Option<String> {
+            Some("a.b.c".to_string())
+        }
+    }
+
+    /// The bearer token IS the credential, so the server must be authenticated
+    /// before one is sent. Callers must not have to remember to pair
+    /// `with_token_provider` with `require_tls_enforcement` — forgetting it
+    /// would hand tokens to whatever answered the connection.
+    #[test]
+    fn with_token_provider_enforces_tls_without_being_asked() {
+        if std::env::var("DISABLE_TLS_ENFORCEMENT").is_ok() {
+            // The override wins by design; the assertion below would not hold.
+            return;
+        }
+
+        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+            .with_token_provider(Arc::new(FixedToken));
+
+        assert!(
+            config.enforce_tls,
+            "attaching a token provider must restore server validation by itself"
+        );
+    }
+
+    /// TLS setup only runs for an https:// URL, so `enforce_tls` alone does not
+    /// cover a plaintext one — the token would still be stamped and travel in
+    /// the clear. Building such a client has to fail.
+    #[tokio::test]
+    async fn bearer_tokens_are_refused_over_plaintext() {
+        if std::env::var("DISABLE_TLS_ENFORCEMENT").is_ok() {
+            // The override deliberately permits plaintext development.
+            return;
+        }
+
+        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+            .with_token_provider(Arc::new(FixedToken));
+
+        let error = ForgeTlsClient::new(&config)
+            .build("http://carbide-api.local:8080")
+            .await
+            .expect_err("a token client must refuse a plaintext endpoint");
+
+        assert!(
+            error.to_string().contains("cleartext"),
+            "the error should explain the refusal, got: {error}"
+        );
+    }
+
+    /// `enforce_tls` and `node_token_provider` are both public, so the builder
+    /// pairing is not the last word: a caller can clear enforcement afterwards
+    /// or build the struct literally. Over https:// that still selects
+    /// `DummyTlsVerifier`, so the check has to live at client construction.
+    #[tokio::test]
+    async fn bearer_tokens_are_refused_when_tls_enforcement_is_cleared() {
+        if std::env::var("DISABLE_TLS_ENFORCEMENT").is_ok() {
+            // The override deliberately permits unverified development setups.
+            return;
+        }
+
+        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+            .with_token_provider(Arc::new(FixedToken));
+        // Exactly what a caller ordering the builders the other way round, or
+        // assigning the public field, would end up with.
+        config.enforce_tls = false;
+
+        let error = ForgeTlsClient::new(&config)
+            .build("https://carbide-api.local:8080")
+            .await
+            .expect_err("an unverified token client must be refused");
+
+        assert!(
+            error.to_string().contains("TLS enforcement disabled"),
+            "the error should explain the refusal, got: {error}"
+        );
+    }
+
+    /// The same client over https:// must still build — the guard above is
+    /// scoped to the scheme, not to token clients in general.
+    #[tokio::test]
+    async fn bearer_tokens_are_allowed_over_https() {
+        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+            .with_token_provider(Arc::new(FixedToken));
+
+        // Reaching a root-CA read means the plaintext guard let it through;
+        // the file itself need not exist in a unit test.
+        let result = ForgeTlsClient::new(&config)
+            .build("https://carbide-api.local:8080")
+            .await;
+
+        if let Err(error) = result {
+            assert!(
+                !error.to_string().contains("cleartext"),
+                "https must not trip the plaintext guard, got: {error}"
+            );
+        }
+    }
 
     #[tokio::test]
     // test_max_retries builds up an instance of hyper client using
@@ -862,7 +1191,7 @@ mod tests {
         struct Inner;
 
         #[derive(thiserror::Error, Debug)]
-        #[error("client error (Connect)")]
+        #[error("client error (connect)")]
         struct Outer(#[from] Inner);
 
         #[derive(thiserror::Error, Debug)]
@@ -874,7 +1203,7 @@ mod tests {
         value_scenarios!(
             run = |err| format_error_chain(err.as_ref());
             "walks source chain to the root cause" {
-                Box::new(Outer::from(Inner)) as Box<dyn std::error::Error> => "client error (Connect): invalid peer certificate: UnknownIssuer"
+                Box::new(Outer::from(Inner)) as Box<dyn std::error::Error> => "client error (connect): invalid peer certificate: UnknownIssuer"
                 .to_string(),
             }
 
@@ -882,5 +1211,123 @@ mod tests {
                 Box::new(Plain) as Box<dyn std::error::Error> => "only message".to_string(),
             }
         );
+    }
+
+    /// Binds a listener that accepts TCP connections and then holds each one open forever
+    /// without writing a single byte back -- no HTTP/2 preface ack, no headers, nothing. Used to
+    /// prove `REQUEST_TIMEOUT`/`request_timeout` actually bounds a real RPC against a peer that
+    /// never answers, not just client construction.
+    async fn spawn_silent_peer() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binding a loopback listener must not fail in a test");
+        let addr = listener
+            .local_addr()
+            .expect("bound listener has a local addr");
+        tokio::spawn(async move {
+            // Hold each socket open (never write, never close) so the client's read side
+            // blocks indefinitely -- exactly the "accepted but never answered" scenario
+            // REQUEST_TIMEOUT exists for. Leaking each connection is fine: the listener task,
+            // and every connection it's holding, dies with the test process.
+            while let Ok((socket, _)) = listener.accept().await {
+                std::mem::forget(socket);
+            }
+        });
+        addr
+    }
+
+    /// A silent peer must not hang a Forge RPC forever -- `request_timeout` (here overridden far
+    /// below the 300s default so the test itself stays fast) has to fire and return an error
+    /// within roughly that bound.
+    #[tokio::test]
+    async fn version_call_times_out_against_a_silent_peer() {
+        let addr = spawn_silent_peer().await;
+        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        config.request_timeout = Some(Duration::from_millis(300));
+
+        let mut client = ForgeTlsClient::new(&config)
+            .build(format!("http://{addr}"))
+            .await
+            .expect("building a client against a plaintext loopback URL must not fail");
+
+        let started = tokio::time::Instant::now();
+        let result = client
+            .version(tonic::Request::new(VersionRequest {
+                display_config: false,
+            }))
+            .await;
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("a peer that never answers must not yield a response");
+        // Bounded on both ends and keyed to the timeout's own error text -- an upper bound
+        // alone would also pass for an unrelated early transport/handshake failure, which
+        // wouldn't prove `request_timeout` is what's actually stopping the call.
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(5),
+            "expected the 300ms request_timeout override to bound the call, took {elapsed:?}: {error}"
+        );
+        assert!(
+            format_error_chain(&error).contains("timed out"),
+            "the failure must come from the transport deadline (tower::timeout::error::Elapsed), got: {error}"
+        );
+    }
+
+    /// Same guarantee as `version_call_times_out_against_a_silent_peer`, for the NMX-C client
+    /// built by `build_nmx_c_client` -- CodeRabbit review r3962056313 asked for coverage on both
+    /// builders, not just the Forge one, since they duplicate the same timeout-wrapping logic.
+    #[tokio::test]
+    async fn hello_call_times_out_against_a_silent_peer() {
+        let addr = spawn_silent_peer().await;
+        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        config.request_timeout = Some(Duration::from_millis(300));
+
+        let mut client = ForgeTlsClient::new(&config)
+            .build_nmx_c_client(format!("http://{addr}"))
+            .await
+            .expect("building a client against a plaintext loopback URL must not fail");
+
+        let started = tokio::time::Instant::now();
+        let result = client
+            .hello(tonic::Request::new(protos::nmx_c::ClientHello {
+                gateway_id: String::new(),
+                major_version: i32::from(protos::nmx_c::ProtoMsgMajorVersion::ProtoMsgMajorVersion),
+                minor_version: i32::from(protos::nmx_c::ProtoMsgMinorVersion::ProtoMsgMinorVersion),
+            }))
+            .await;
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("a peer that never answers must not yield a response");
+        // Bounded on both ends and keyed to the timeout's own error text -- an upper bound
+        // alone would also pass for an unrelated early transport/handshake failure, which
+        // wouldn't prove `request_timeout` is what's actually stopping the call.
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(5),
+            "expected the 300ms request_timeout override to bound the call, took {elapsed:?}: {error}"
+        );
+        assert!(
+            format_error_chain(&error).contains("timed out"),
+            "the failure must come from the transport deadline (tower::timeout::error::Elapsed), got: {error}"
+        );
+    }
+
+    /// `TransportError::source()` must expose the wrapped error itself as the next link in the
+    /// chain, not skip past it to *its* source -- otherwise a `tonic::Status` boxed inside
+    /// `tower::BoxError` (as tonic's own transport-error path can produce) becomes unreachable
+    /// to anything walking `Error::source()`, e.g. tonic's own `Status::try_from_error`, which
+    /// downcasts each link looking for a nested `Status` to recover its original gRPC code.
+    #[test]
+    fn transport_error_source_exposes_the_wrapped_error() {
+        let status = tonic::Status::unavailable("backend down");
+        let boxed: tower::BoxError = Box::new(status.clone());
+        let wrapped = TransportError::from(boxed);
+
+        let source = wrapped
+            .source()
+            .expect("a non-empty TransportError must expose its wrapped error as its source");
+        let recovered = source
+            .downcast_ref::<tonic::Status>()
+            .expect("the wrapped tonic::Status must be reachable via source(), not skipped over");
+        assert_eq!(recovered.code(), status.code());
+        assert_eq!(recovered.message(), status.message());
     }
 }

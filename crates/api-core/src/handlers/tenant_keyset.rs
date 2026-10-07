@@ -50,7 +50,7 @@ pub(crate) async fn create(
         organization_id = keyset_request.keyset_identifier.organization_id.to_string(),
         keyset_id = keyset_request.keyset_identifier.keyset_id,
         public_key_suffixes = PublicKeySuffixes(public_keys).to_string(),
-        public_key_suffixes_num = public_keys.len(),
+        public_key_suffix_count = public_keys.len(),
         version = keyset_request.version,
         "Tenant keyset created"
     );
@@ -142,7 +142,7 @@ pub(crate) async fn update(
         organization_id = update_request.keyset_identifier.organization_id.to_string(),
         keyset_id = update_request.keyset_identifier.keyset_id,
         public_key_suffixes = PublicKeySuffixes(public_keys).to_string(),
-        public_key_suffixes_num = public_keys.len(),
+        public_key_suffix_count = public_keys.len(),
         version = update_request.version,
         "Tenant keyset updated"
     );

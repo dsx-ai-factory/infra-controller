@@ -49,6 +49,8 @@ spec:
             - name: temporal-tls-certs
               mountPath: /var/secrets/temporal/certs
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             httpGet:
               path: /healthz
@@ -69,13 +71,23 @@ spec:
               memory: "512Mi"
               cpu: "500m"
           securityContext:
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:
               drop:
-                - NET_RAW
+                - ALL
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
       securityContext:
-        runAsNonRoot: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp.
+        - name: tmp
+          emptyDir: {}
         - name: config
           configMap:
             name: nico-rest-workflow-config
@@ -137,6 +149,8 @@ spec:
             - name: temporal-tls-certs
               mountPath: /var/secrets/temporal/certs
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             httpGet:
               path: /healthz
@@ -157,13 +171,23 @@ spec:
               memory: "512Mi"
               cpu: "500m"
           securityContext:
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:
               drop:
-                - NET_RAW
+                - ALL
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
       securityContext:
-        runAsNonRoot: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp.
+        - name: tmp
+          emptyDir: {}
         - name: config
           configMap:
             name: nico-rest-workflow-config

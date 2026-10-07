@@ -20,7 +20,7 @@ use rpc::forge::AdminForceDeleteRackRequest;
 use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub async fn force_delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
+pub(super) async fn force_delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
     let response = api_client
         .0
         .admin_force_delete_rack(AdminForceDeleteRackRequest {

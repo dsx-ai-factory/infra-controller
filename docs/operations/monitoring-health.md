@@ -21,6 +21,7 @@ For reference, see:
 - [Health Probe IDs](../architecture/health/health_probe_ids.md)
 - [Health Alert Classifications](../architecture/health/health_alert_classifications.md)
 - [Redfish Workflow](../architecture/redfish_workflow.md)
+- [Leak Detection and Handling](leak-detection-handling.md)
 
 ## Health Sources
 
@@ -33,6 +34,7 @@ alerts from a reporting source. Common health sources are:
 | DPU agent | DPU service health, DPU networking health, BGP state, DHCP service health, and agent heartbeat. |
 | Validation and discovery | SKU validation, host validation, endpoint discovery, and inventory checks. |
 | Rack health | Rack-level health input when rack health reporting is configured. |
+| NVLink domain health | NMX-C controller health for an NVLink domain when domain health reporting is configured. |
 | Health overrides | Manual or service-created health reports used for maintenance, repair, validation, or other controlled workflows. |
 
 Each alert has an ID, an optional target, a message, a start time, and one or
@@ -40,6 +42,21 @@ more classifications. Classifications define operational impact. For example,
 `PreventAllocations` blocks new allocations while the alert is active, and
 `ExcludeFromStateMachineSla` excludes the host from state-machine SLA
 evaluation.
+
+## Rack and Tray Health Snapshots
+
+Rack and tray list and detail responses expose Core aggregate health in the
+nullable `health` field. Rack responses also expose component health when
+`includeComponents=true`. These values are Flow inventory snapshots, not live
+Core reads, so their freshness follows the inventory synchronization interval.
+Before the first successful synchronization, or when Core successfully reports
+no aggregate health, the field is `null`. A failed refresh or an omitted object
+preserves the last snapshot; an explicitly empty report clears it.
+
+Use the [Rack](api:GET/v2/org/:org/nico/rack) and
+[Tray](api:GET/v2/org/:org/nico/tray) inventory endpoints for these snapshots.
+For leak-specific fields and their location in responses, see
+[Leak Detection and Handling](leak-detection-handling.md#health-reporting-and-allocation-protection).
 
 ## Hardware Health Monitoring
 
@@ -49,22 +66,18 @@ NICo monitors hardware through the hardware health service. The Helm chart is
 The service discovers BMC endpoints from NICo and queries them through Redfish.
 It monitors host BMCs, DPU BMCs, and configured switch or power-shelf BMCs. The
 primary monitoring path is sensor collection. Additional collectors can gather
-firmware, log, NMX-T, NVUE REST, and leak-related data when configured.
+entity metrics (see [Hardware Entity Metrics](#hardware-entity-metrics)),
+firmware, log, NMX-T, NMX-C, NVUE REST, and leak-related data when configured.
 
 ### Helm Configuration
 
-Enable hardware health in Helm values:
-
-```yaml
-nico-hardware-health:
-  enabled: true
-```
+`nico-hardware-health` is a core component of the umbrella chart and is
+always installed; it has no `enabled` toggle.
 
 Enable metrics scraping with its ServiceMonitor:
 
 ```yaml
 nico-hardware-health:
-  enabled: true
   replicas: 1
 
   serviceMonitor:
@@ -98,7 +111,7 @@ hardware-health example config currently names that source
 root_ca = "/var/run/secrets/spiffe.io/ca.crt"
 client_cert = "/var/run/secrets/spiffe.io/tls.crt"
 client_key = "/var/run/secrets/spiffe.io/tls.key"
-api_url = "https://nico-api.forge-system.svc.cluster.local:1079"
+api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
 ```
 
 Static BMC endpoints are supported for local, mock, or special deployments:
@@ -110,27 +123,81 @@ port = 443
 mac = "aa:bb:cc:dd:ee:ff"
 username = "admin"
 password = "secret"
+labels = { site = "rno-dev7", cluster = "cluster-01", environment = "development" }
 ```
+
+Configure direct switch host endpoints separately when desired:
+
+```toml
+[[endpoint_sources.static_switch_host_endpoints]]
+ip = "10.0.1.2"
+port = 443
+mac = "11:22:33:44:55:77"
+username = "admin"
+password = "secret"
+switch = { serial = "SN-SWITCH-HOST-001", is_primary = true }
+```
+
+This list is optional. Each entry requires `switch` metadata. The
+`endpoint_role` field defaults to `host`, and only `host` is accepted in this
+list. Switch host entries under `static_bmc_endpoints` use the same `host`
+default when `endpoint_role` is omitted. MAC addresses in
+`static_switch_host_endpoints` must be unique across both static lists.
+
+For a switch host entry, `port` selects the NVUE REST HTTPS port and defaults
+to `443`. The gNMI and NMX-C ports use the global
+`collectors.nvue.gnmi.gnmi_port` and `collectors.nmxc.grpc_port` settings,
+respectively. NMX-T uses its fixed port `9352`.
+
+Static endpoints can define up to 32 custom telemetry labels. Label names must
+match `[a-zA-Z_][a-zA-Z0-9_]*`. Names owned by the health service, such as
+`machine_id`, `system_uuid`, `endpoint_ip`, and `collector_type`, are reserved.
+Custom labels are exported as Prometheus labels and OTLP resource attributes,
+as a `labels` object in JSONL logs, and as a structured map in tracing events.
 
 Collector defaults from the example config:
 
 | Area | Parameter | Example value | Meaning |
 |---|---:|---|---|
+| Redfish | `bmc_request_concurrency` | `4` | Maximum number of concurrent Redfish operations per BMC. |
 | Rate limiting | `bucket_burst` | `200` | Burst size for outbound requests. |
 | Rate limiting | `bucket_replenish` | `"35ms"` | Token replenish interval. |
 | Sensor collector | `sensor_fetch_interval` | `"1m"` | Sensor polling cadence. |
 | Sensor collector | `rediscover_interval` | `"5m"` | Sensor inventory rediscovery cadence. |
 | Sensor collector | `state_refresh_interval` | `"30m"` | Broader BMC state refresh cadence. |
-| Sensor collector | `sensor_fetch_concurrency` | `10` | Concurrent sensor fetch limit. |
 | Sensor collector | `include_sensor_thresholds` | `true` | Include BMC threshold data when available. |
+| Entity discovery | `refresh_interval` | `"5m"` | Redfish entity inventory rediscovery cadence. |
+| Entity discovery | `discovery_concurrency` | `1` | Concurrent endpoint identity resolutions. |
+| Entity metrics collector | `fetch_interval` | `"2m"` | Entity metrics polling cadence. |
 | Firmware collector | `firmware_refresh_interval` | `"30m"` | Firmware refresh cadence. |
+| Manager collector | `poll_interval` | `"5m"` | Power-shelf manager (PMC) status polling cadence. Power-shelf endpoints only. |
 | Logs collector | `mode` | `"sse"` | Preferred BMC log collection mode. |
+| NMX-C collector | `grpc_port` | `9370` | Switch-host NMX-C gRPC endpoint port. |
+| NMX-C collector | `heartbeat_rate` | `30` | Subscribe heartbeat for NMX-C `DomainStateInfo` updates. |
+| NMX-C collector | `connect_timeout` | `"10s"` | TCP connect timeout for the NMX-C gRPC endpoint. |
+| NMX-C collector | `rpc_timeout` | `"10s"` | Timeout for NMX-C Hello, Subscribe, and initial Subscribe acknowledgement. |
 | NMX-T collector | `scrape_interval` | `"1m"` | Switch telemetry scrape cadence. |
 | NVUE REST collector | `poll_interval` | `"1m"` | NVUE REST polling cadence. |
 | Leak processor | `minimum_alerts_per_report` | `1` | Leak alert threshold for health reports. |
 | Rack leak processor | `leaking_tray_threshold` | `2` | Rack-level leak threshold. |
-| Metrics | `endpoint` | `"0.0.0.0:9009"` | Metrics listener. |
+| Metrics | `endpoint` | `"0.0.0.0:9009"` | Explicit IPv4 listener override. The binary default is `[::]:9009` (dual-stack with IPv4 fallback when IPv6 socket setup is unavailable). [NICo Metrics](../observability/metrics.md#metrics-services-and-ipv6) describes configuration precedence. |
 | Metrics | `prefix` | `"carbide_hardware_health"` | Hardware-health metric prefix. |
+
+NMX-C connects directly to eligible primary switch-host gRPC endpoints whose
+switch config has NMX-C enabled; it does not use BMC or NICo API TLS material.
+For static switch-host endpoints, `switch.nmxc_enabled` controls this target
+eligibility after the `endpoint_role = "host"` and `is_primary = true` checks;
+it defaults to `switch.is_primary` when omitted.
+NMX-C notifications emit log events for tracing, log-file, and OTLP log sinks.
+With `[collectors.nmxc]` and `[sinks.nvlink_domain_health_report]` enabled,
+supported `DomainStateInfo` controller health states also produce NVLink domain
+health reports. Both settings are disabled by default. Configuration validation
+rejects enabling the sink with `[collectors.nmxc.schema_override]`. See
+[NVLink Domain Health Reports](./nvlink-domain-health-reports.md) for state
+mapping, identity checks, report persistence, and configuration behavior.
+
+NMX-C collection uses plaintext gRPC over HTTP/2. TLS, certificate
+bypass, custom certificate loading, and mTLS are intentionally separate scope; do not model them with the NICo API SPIFFE certificate fields.
 
 ### BMC Proxy
 
@@ -164,6 +231,61 @@ If numeric threshold data indicates a problem but the BMC reports the sensor as
 healthy, NICo treats the sensor as healthy. In that case the BMC health state is
 the authority.
 
+### Hardware Entity Metrics
+
+Beyond sensors, BMCs expose scalar values on Redfish `*Metrics` resources —
+error counters, throttle durations, bandwidth utilization, power figures — that
+have no sensor backing. The entity metrics collector polls these and exports
+them as Prometheus series.
+
+The entity metrics collector is **disabled by default**. Add the `[collectors.metrics]`
+section to the hardware health service config to enable it:
+
+```toml
+[collectors.metrics]
+fetch_interval = "2m"     # default
+```
+
+What it collects, per entity type discovered on the BMC:
+
+| Redfish source | Examples |
+|---|---|
+| `ProcessorMetrics` | Core/other error counters, PCIe error counters (fatal, non-fatal, correctable, replay, NAK, bad TLP/DLLP), power/thermal throttle durations, bandwidth, frequency, temperature, consumed power, core voltage. |
+| `MemoryMetrics` | Corrected volatile/persistent errors, current-period and lifetime ECC counters, dirty shutdowns, bandwidth, operating speed, capacity utilization. |
+| `DriveMetrics` | Correctable/uncorrectable read and write I/O errors, bad blocks, power-on hours, read/write volume. |
+| `PowerSupplyMetrics` | Input voltage/current/power, output power, energy, frequency, temperature, fan speed. |
+
+Sensor-backed values (carrying a Redfish `DataSourceUri`) are skipped:
+the sensor collector already publishes them as `hw_sensor` series, so nothing
+is double-reported.
+
+Exported series are named
+`{prefix}_hw_metric_{metric_type}_{unit}` — with the default
+`carbide_hardware_health` prefix, for example:
+
+```text
+carbide_hardware_health_hw_metric_correctable_core_errors_count
+carbide_hardware_health_hw_metric_pcie_fatal_errors_count
+carbide_hardware_health_hw_metric_bandwidth_percent
+carbide_hardware_health_hw_metric_input_power_watts
+```
+
+On the Prometheus endpoint, series carry entity labels (`processor_id`,
+`memory_id`, `drive_id`, `powersupply_id`, `system_id`, `model`, ...) plus the
+standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
+`serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
+
+The OTLP sink (`[sinks.otlp]`) emits the same metric *names*, but places the
+identity context on OTLP resource attributes rather than datapoint labels;
+whether those appear as query labels depends on the backend (VictoriaMetrics,
+for example, flattens resource attributes onto every series).
+
+Entity discovery runs as its own periodic task (`[collectors.discovery]`,
+always on) that walks each BMC's Redfish Systems and Chassis trees and
+publishes an inventory snapshot; the metrics collector only reads that
+snapshot. Until the first discovery pass completes, the metrics collector
+emits nothing.
+
 ### Hardware Health Logs
 
 Use Loki or Grafana Explore to inspect hardware health logs for a host:
@@ -188,11 +310,26 @@ For leak-related events, look for:
 report_source=tray-leak-detection
 ```
 
+Health report records exported over OTLP carry versioned routing fields, counts, and structured success entries by default. Refer to the [OTLP health-report log contract](../architecture/health_aggregation.md#otlp-health-report-log-contract) for the complete attribute schema.
+
+Keep the following in mind when configuring health report records:
+
+- The per-target `include_alert_details` setting defaults to `false`. This omits `health_report.alerts` and `health_report.alerts.dropped`. Set `include_alert_details` to `true` on a `[[sinks.otlp.targets]]` entry to add `health_report.alerts` when the report has alerts.
+
+- *The setting is per-target*. This means that, for example, a debugging destination can receive detail, while a long-term store receives the routing, count, and success evidence without needing to store free-form alert messages.
+
+- The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one. Sensor alerts also carry `powersupply_id` and `physical_context` when the sensor reports them, so a consumer can attribute the alert to a power supply without parsing the sensor name.
+
+- `health_report.alerts.dropped` appears only when details are enabled *and* the report has more than 64 alerts. It contains the number of omitted alerts beyond those first 64.
+
+- Probe IDs use health API names: for example, OOB GPU inventory alerts appear as `SkuValidation` to deduplicate with the in-band SKU alerts.
+
 ## DPU Health Checks
 
 `dpu-agent` runs on managed DPUs and reports DPU health to NICo. The BlueField
-chart is named `nico-dpu-agent`. In service names and logs, the DPU agent
-currently appears as `forge-dpu-agent.service`.
+chart is named `nico-dpu-agent`. A systemd deployment uses
+`forge-dpu-agent.service`. A DPF deployment runs the `nico-dpu-agent` container,
+and centralized logs identify it as `nico-dpu-agent`.
 
 The agent checks DPU service health, networking state, HBN/NVUE configuration,
 DHCP behavior, BGP status, and heartbeat. DPU health is part of aggregate host
@@ -219,6 +356,8 @@ Key `nico-dpu-agent` chart values:
 | `dhcp_server.interface_prepend` | empty by default | Optional DHCP interface prefix argument. |
 | `dhcp_server.service_name` | set by DPF service integration | DHCP gRPC service name. |
 | `fmds.service_name` | set by DPF service integration | FMDS gRPC service name. |
+| `lldpSidecar.resources.requests` | `10m` CPU, `64Mi` memory | Default scheduler request for DPF LLDP collection. |
+| `lldpSidecar.resources.limits` | `250m` CPU, `128Mi` memory | Default resource limit for DPF LLDP collection. |
 
 The DaemonSet renders these core arguments:
 
@@ -250,6 +389,24 @@ The pod sets these runtime environment variables:
 | `NVUE_PASSWORD` | Secret key from `hbn.nvue_credentials_secret_name`. |
 | `RUST_LOG` | `info`. |
 
+### DPF LLDP Collection
+
+A DPF-managed DPU pod includes a `nico-lldp-sidecar` container. It captures
+LLDP-MED data through the DPU host's `lldpcli` and publishes `/data/lldp` for
+the `nico-dpu-agent` container. A successful capture is refreshed every 120
+seconds; a failure is retried after 30 seconds. The previous successful file is
+retained across a collection failure, but the agent rejects it after five
+minutes.
+
+When physical uplink discovery is missing or stale, inspect both containers in
+the DPU pod. Confirm that the sidecar can execute the host `lldpcli`, that
+`/data/lldp` is being refreshed, and that the agent has not rejected the file as
+too old. Centralized DPF logs identify the sidecar with
+`systemd.unit=nico-lldp-sidecar`. A systemd-managed DPU does not use the
+snapshot; its agent queries the local `lldpd` service directly.
+
+The deployment and freshness contract is documented in [DPU LLDP Collection](../dpu-management/dpu_configuration.md#dpu-lldp-collection).
+
 ### Common DPU Alerts
 
 Common DPU alert IDs include:
@@ -270,27 +427,45 @@ Common DPU alert IDs include:
 from the DPU agent. Check whether the DPU is powered, the agent is running, DPU
 time is correct, and the DPU can reach NICo.
 
+For `BgpPeeringTor`, start with the alert target and message. A p0 transport
+failure includes `PreventAllocations` and blocks normal PXE readiness. A lone
+p1 transport failure does not prevent allocation or block host state
+transitions. An FRR message that states the session did not negotiate IPv6
+unicast is an address family warning, not evidence that the transport session
+is down.
+
+`PostConfigCheckWait` is expected in one report after the agent changes HBN or
+reloads local DHCP in ContainerExec mode. It includes `PreventAllocations` and
+`PreventHostStateChanges`, then clears when the agent sends a fresh sample. If
+it appears in consecutive reports, check the DPU agent logs for repeated
+configuration applications.
+
+Refer to [DPU ToR Uplink Health](../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+for the configuration values, classifications, and complete transport matrix.
+
 ### DPU Logs
 
-Use Loki to inspect DPU-agent logs:
+Use Loki to inspect DPU agent logs. Select the query for the deployment path:
 
 ```logql
 {systemd_unit="forge-dpu-agent.service", machine_id="<machine-id>"}
+{systemd_unit="nico-dpu-agent", machine_id="<machine-id>"}
 ```
 
-Alternative labels can be used when available:
+Use the hostname label when the DPU has not learned its machine ID:
 
 ```logql
 {systemd_unit="forge-dpu-agent.service", host_name="<host-name>"}
+{systemd_unit="nico-dpu-agent", host_name="<host-name>"}
 ```
 
-On the DPU, use `journalctl` for direct service logs:
+On a systemd DPU, use `journalctl` for direct service logs:
 
 ```bash
 journalctl -u forge-dpu-agent.service -e --no-pager
 ```
 
-Restart the agent when required:
+Restart the systemd agent when required:
 
 ```bash
 systemctl restart forge-dpu-agent.service
@@ -381,6 +556,7 @@ for common workflows:
 | `MarkHealthy` | Force healthy. |
 | `StopRebootForAutomaticRecoveryFromStateMachine` | Block automatic recovery reboots during manual work. |
 | `TenantReportedIssue` | Tenant-reported issue while releasing an instance. |
+| `RequestOnlineRepair` | Keep an unhealthy instance assigned until the online repair override is cleared. |
 | `RequestRepair` | Tenant-reported issue requiring repair. |
 
 Examples:
@@ -500,6 +676,98 @@ sum by(classification) (
 )
 ```
 
+### Per-Object Health Metrics
+
+The aggregate metrics above report *counts* of unhealthy objects. To identify
+*which* objects carry a given health-alert classification, NICo can emit one
+additional time series per affected object:
+
+```text
+carbide_object_unhealthy_by_classification_count{object_type="machine",object_id="fm100...",classification="Hardware",in_use="true"} 1
+```
+
+Labels:
+
+| Label | Values |
+|---|---|
+| `object_type` | `machine`, `switch`, `rack`, `power_shelf` |
+| `object_id` | The object's NICo id. |
+| `classification` | The health-alert classification. |
+| `in_use` | Machines only: whether a tenant instance uses the host. |
+
+Emission is opt-in per classification to contain cardinality: series count
+still scales with fleet size (one series per matching object per listed
+classification — an object carrying two enabled classifications emits two
+series), but only for the classifications you list. It is disabled by
+default; enable it in the NICo API config by listing the classifications to
+emit:
+
+```toml
+[observability]
+per_object_metrics_for_classifications = ["Hardware", "PreventAllocations"]
+```
+
+With an empty list (the default) the metric is not registered at all; the
+aggregate health metrics are unaffected either way. Series disappear
+automatically when the object becomes healthy, loses the classification, or
+is deleted — entries are retained for the registry's hold period, which is
+configured slightly longer than the state controllers' `metric_hold_time`.
+
+For example, use the following PromQL query to list hosts blocked from allocations by a hardware problem, or alert when hardware-unhealthy machines accumulate fleet-wide:
+
+```promql
+carbide_object_unhealthy_by_classification_count{object_type="machine",classification="Hardware",in_use="false"}
+
+count(carbide_object_unhealthy_by_classification_count{object_type="machine",classification="Hardware"}) > 10
+```
+
+### Per-object state progress metrics
+
+NICo can expose current state progress for individual machines, switches,
+power shelves, and racks (plus network segments, VPC prefixes, SPDM
+attestation, and IB partitions) from a dedicated Prometheus listener. This
+endpoint is disabled by default and uses a separate registry, so enabling it
+does not add high-cardinality series to the existing `/metrics` endpoint.
+
+```toml
+[observability.per_object_state_metrics]
+enabled = true
+listen_address = "[::]:9091"
+# Defaults to all supported object types; also valid: "network_segment",
+# "vpc_prefix", "spdm_attestation", "ib_partition".
+object_types = ["machine", "switch", "power_shelf", "rack"]
+```
+
+Scrape `/metrics` on the configured address at a relatively slow interval
+(60–120 seconds is normally sufficient). Queries joining these metrics with
+aggregate or health metrics require both the main and per-object endpoints to
+be scraped into the same Prometheus.
+
+When deploying with the Helm chart, set
+`nico-api.service.perObjectStateMetrics.enabled=true`; this configures the
+application listener, container port, and Service together. Enable its
+ServiceMonitor with `nico-api.perObjectStateMetricsServiceMonitor.enabled=true`.
+If `configFiles.nicoApiConfig` replaces the chart's bundled application
+configuration, that custom TOML must include the section above explicitly.
+
+| Metric | Meaning |
+|---|---|
+| `carbide_object_state_entered_timestamp_seconds` | One series per live object, labeled with its normalized current `state` and `substate`. Subtract it from `time()` to calculate state age. |
+| `carbide_object_state_sla_seconds` | The resolved SLA for the current state. States without an SLA emit no series. |
+| `carbide_object_manual_intervention_required` | Value `1` while the latest handler result or a terminal failed/error state requires operator action; `reason` is a bounded token (`error` for object types whose stored cause is free text). |
+| `carbide_object_info` | Stable traits used for joins: rack, SKU, vendor, and model where known. |
+| `carbide_machine_dpu_info` | One series for each host-to-DPU association. |
+| `carbide_machine_instance_info` | The current machine-to-instance and tenant association. |
+
+For example, this query finds objects that have exceeded their own resolved
+SLA:
+
+```promql
+(time() - carbide_object_state_entered_timestamp_seconds)
+  > on(object_type, object_id, state, substate) group_left()
+    carbide_object_state_sla_seconds
+```
+
 DPU metrics:
 
 | Metric | Use |
@@ -555,6 +823,7 @@ Common Loki patterns:
 
 ```logql
 {systemd_unit="forge-dpu-agent.service", machine_id="<machine-id>"}
+{systemd_unit="nico-dpu-agent", machine_id="<machine-id>"}
 ```
 
 ```logql
@@ -613,6 +882,7 @@ For example:
 ```bash
 logcli query --since=1h '{k8s_container_name="nico-hardware-health"} |= "<machine-id>"'
 logcli query --since=1h '{systemd_unit="forge-dpu-agent.service"} |= "<machine-id>"'
+logcli query --since=1h '{systemd_unit="nico-dpu-agent"} |= "<machine-id>"'
 ```
 
 ### Dashboard Starting Points
@@ -637,7 +907,7 @@ Classifications.
 | Symptom | Check | Next action |
 |---|---|---|
 | Host is unhealthy with `PoweredOff` | Admin Web UI health page and hardware-health logs around `inAlertSince`. | Confirm BMC power state and whether the alert target is the expected BMC IP. |
-| Host is unhealthy with `HeartbeatTimeout` for `forge-dpu-agent` | `journalctl -u forge-dpu-agent.service -e --no-pager` and Loki query for the DPU agent. | Confirm the DPU is powered, time-synced, and able to reach NICo. Restart `forge-dpu-agent.service` only when service-level remediation requires it. |
+| Host is unhealthy with `HeartbeatTimeout` for the DPU agent | For systemd, use `journalctl -u forge-dpu-agent.service -e --no-pager`. For DPF, query the `nico-dpu-agent` logs in Loki. | Confirm the DPU is powered, its time is synchronized, and it can reach NICo. Restart the systemd service or DPF pod only when service remediation requires it. |
 | Host has active overrides | `nico-admin-cli machine health-override show <machine-id>` and the Health Overrides dashboard panel. | Verify the override reason is still valid. Remove temporary overrides after the condition ends. |
 | Health metrics are missing | `kubectl get servicemonitor -n nico-system` and the component-specific ServiceMonitor. | Enable the chart `serviceMonitor` block or fix the Prometheus selector/namespace match. |
 | Hardware-health logs do not show reports for a host | Loki query for `k8s_container_name="nico-hardware-health"` and the machine ID. | Confirm hardware-health is running, BMC discovery found the endpoint, and the collector is enabled for the source. |

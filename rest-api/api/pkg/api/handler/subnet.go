@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -36,7 +37,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
@@ -44,29 +45,28 @@ const DefaultReservedIPCount = 2
 
 // ~~~~~ Create Handler ~~~~~ //
 
-// CreateSubnetHandler is the API Handler for creating new Subnet
+// CreateSubnetHandler creates IPv4 Subnets for Ethernet virtualizer VPCs.
+// FNN VPCs use the separate VPC Prefix resource.
 type CreateSubnetHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateSubnetHandler initializes and returns a new handler for creating Subnet
 func NewCreateSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateSubnetHandler {
 	return CreateSubnetHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
-// @Summary Create a Subnet
-// @Description Create a Subnet
+// @Summary Create Subnet
+// @Description Creates an IPv4 Subnet in an Ethernet virtualizer VPC. FNN VPCs use VPC Prefixes.
 // @Tags Subnet
 // @Accept json
 // @Produce json
@@ -76,7 +76,7 @@ func NewCreateSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, sc
 // @Success 201 {object} model.APISubnet
 // @Router /v2/org/{org}/nico/subnet [post]
 func (csh CreateSubnetHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -134,9 +134,9 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant for VPC in request does not match tenant in org", nil)
 	}
 
-	// Verify if vpc is ethernet virtualized
+	// A nil `NetworkVirtualizationType` represents legacy Ethernet virtualizer VPCs.
 	if vpc.NetworkVirtualizationType != nil && *vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnets", vpc.ID), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v must be an Ethernet virtualizer VPC for REST Subnet creation", vpc.ID), nil)
 	}
 
 	// Verify if vpc is ready
@@ -161,24 +161,25 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the Subnet is being created must be in Registered state in order to proceed", nil)
 	}
 
-	// Validate IPBlocks in request
-	// NOTE: model validation ensures non-nil IPv4BlockID
-	ipv4Block, err := common.GetIPBlockFromIDString(ctx, nil, *apiRequest.IPv4BlockID, csh.dbSession)
+	// Validate the Ready, tenant-allocated IPv4 IP block for this Subnet.
+	// Model validation ensures IPv4BlockID is non-nil.
+	ipBlockFilter := cdbm.IPBlockFilterInput{}
+	ipBlockFilter.TenantAllocated(tenant.ID)
+	ipBlockFilter.Statuses = []string{cdbm.IPBlockStatusReady}
+	ipv4Block, err := common.GetIPBlockFromIDString(ctx, nil, *apiRequest.IPv4BlockID, ipBlockFilter, csh.dbSession)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error getting IPv4 IPBlock in request")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving ipv4 IPBlock from request", nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find a Ready, tenant-allocated IPv4 IP block specified by ipv4BlockId", nil)
 	}
-	// ipv4block is derived, check if it belongs to tenant via an allocation
-	if ipv4Block.TenantID == nil || *ipv4Block.TenantID != tenant.ID {
-		logger.Warn().Msg("IPv4 IPBlock in request does not belong to tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "ipv4 IPBlock in request does not belong to tenant", nil)
+	if ipv4Block.ProtocolVersion != cdbm.IPBlockProtocolVersionV4 {
+		logger.Warn().Msg("ipv4BlockId must reference an IPv4 IP block for Subnet creation")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "ipv4BlockId must reference an IPv4 IP block for Subnet creation", nil)
 	}
 	if vpc.SiteID != ipv4Block.SiteID {
 		logger.Warn().Msg("IPv4 Block specified in request and VPC do not belong to the same Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "IPv4 Block specified in request and VPC do not belong to the same Site", nil)
 	}
-	// NOTE: validation ensures that IPv6BlockID will be nil, ie, it is not supported yet
-	// when IPv6 is supported, further validations must ensure that the RoutingType of v4 and v6 must match
+	// A REST Subnet uses one IPv4 block, so its routing type comes from that block.
 	routingType := ipv4Block.RoutingType
 
 	// Check for name uniqueness for the tenant, ie, Tenant cannot have another Subnet with same name at the Site
@@ -277,14 +278,13 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		}
 
 		// create the status detail record
-		ssd, derr = sdDAO.CreateFromParams(ctx, tx, subnet.ID.String(), *cutil.GetPtr(cdbm.SubnetStatusPending),
-			cutil.GetPtr("received subnet creation request, pending"))
+		ssd, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: subnet.ID.String(), Status: *cutil.GetPtr(cdbm.SubnetStatusPending), Message: cutil.GetPtr("received subnet creation request, pending")})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for Subnet", nil)
 		}
 		if ssd == nil {
-			logger.Error().Msg("Status Detail DB entry not returned from CreateFromParams")
+			logger.Error().Msg("Status Detail DB entry not returned from Create")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to get new Status Detail for Subnet", nil)
 		}
 
@@ -364,19 +364,17 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 
 // GetAllSubnetHandler is the API Handler for getting all Subnets
 type GetAllSubnetHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSubnetHandler initializes and returns a new handler for getting all Subnets
 func NewGetAllSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllSubnetHandler {
 	return GetAllSubnetHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -400,7 +398,7 @@ func NewGetAllSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} []model.APISubnet
 // @Router /v2/org/{org}/nico/subnet [get]
 func (gash GetAllSubnetHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "GetAll", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -515,7 +513,7 @@ func (gash GetAllSubnetHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 		subnetFilter.SearchQuery = searchQuery
 	}
 
@@ -524,7 +522,7 @@ func (gash GetAllSubnetHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.SubnetStatusMap[statusQuery]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -617,19 +615,17 @@ func (gash GetAllSubnetHandler) Handle(c echo.Context) error {
 
 // GetSubnetHandler is the API Handler for retrieving Subnet
 type GetSubnetHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetSubnetHandler initializes and returns a new handler to retrieve Subnet
 func NewGetSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetSubnetHandler {
 	return GetSubnetHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -647,7 +643,7 @@ func NewGetSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Success 200 {object} model.APISubnet
 // @Router /v2/org/{org}/nico/subnet/{id} [get]
 func (gsh GetSubnetHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Get", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -698,7 +694,7 @@ func (gsh GetSubnetHandler) Handle(c echo.Context) error {
 	// Get subnet ID from URL param
 	sStrID := c.Param("id")
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("subnet_id", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("subnet_id", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -768,19 +764,17 @@ func (gsh GetSubnetHandler) Handle(c echo.Context) error {
 
 // UpdateSubnetHandler is the API Handler for updating a Subnet
 type UpdateSubnetHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateSubnetHandler initializes and returns a new handler for updating Subnet
 func NewUpdateSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateSubnetHandler {
 	return UpdateSubnetHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -797,7 +791,7 @@ func NewUpdateSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} model.APISubnet
 // @Router /v2/org/{org}/nico/subnet/{id} [patch]
 func (ush UpdateSubnetHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -826,7 +820,7 @@ func (ush UpdateSubnetHandler) Handle(c echo.Context) error {
 	// Get subnet ID from URL param
 	sStrID := c.Param("id")
 
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("subnet_id", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("subnet_id", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -906,7 +900,7 @@ func (ush UpdateSubnetHandler) Handle(c echo.Context) error {
 	// get status details for the response — best-effort, the PATCH has already
 	// committed so a transient read failure here must not surface as 500.
 	sdDAO := cdbm.NewStatusDetailDAO(ush.dbSession)
-	ssds, _, err := sdDAO.GetAllByEntityID(ctx, nil, subnet.ID.String(), nil, cutil.GetPtr(pagination.MaxPageSize), nil)
+	ssds, _, err := sdDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{subnet.ID.String()}}, paginator.PageInput{Limit: cutil.GetPtr(pagination.MaxPageSize)})
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Status Details for subnet after update commit")
 		ssds = nil
@@ -922,21 +916,19 @@ func (ush UpdateSubnetHandler) Handle(c echo.Context) error {
 
 // DeleteSubnetHandler is the API Handler for deleting a Subnet
 type DeleteSubnetHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteSubnetHandler initializes and returns a new handler for deleting Subnet
 func NewDeleteSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteSubnetHandler {
 	return DeleteSubnetHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -952,7 +944,7 @@ func NewDeleteSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, sc
 // @Success 202
 // @Router /v2/org/{org}/nico/subnet/{id} [delete]
 func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -981,7 +973,7 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 	// Get subnet ID from URL param
 	sStrID := c.Param("id")
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("subnet_id", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("subnet_id", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -1075,7 +1067,7 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Subnet status, DB error", nil)
 		}
 
-		_, derr = sdDAO.CreateFromParams(ctx, tx, subnet.ID.String(), status, &statusMsg)
+		_, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: subnet.ID.String(), Status: status, Message: &statusMsg})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail for Subnet")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Subnet status detail, DB error", nil)
@@ -1089,8 +1081,8 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 		}
 
 		// Prepare the delete/release request workflow object
-		deleteSubnetRequest := &cwssaws.NetworkSegmentDeletionRequest{
-			Id: &cwssaws.NetworkSegmentId{Value: subnet.GetSiteID().String()},
+		deleteSubnetRequest := &corev1.NetworkSegmentDeletionRequest{
+			Id: &corev1.NetworkSegmentId{Value: subnet.GetSiteID().String()},
 		}
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
@@ -1164,5 +1156,5 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 
 	// Create response
 	logger.Info().Msg("finishing API handler")
-	return c.String(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

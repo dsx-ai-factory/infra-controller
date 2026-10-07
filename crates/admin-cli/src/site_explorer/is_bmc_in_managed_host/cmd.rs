@@ -21,7 +21,7 @@ use mac_address::MacAddress;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn is_bmc_in_managed_host(
+pub(super) async fn is_bmc_in_managed_host(
     api_client: &ApiClient,
     address: &str,
     mac: Option<MacAddress>,

@@ -292,7 +292,7 @@ pub mod tests {
 
     use russh::keys::signature::digest::common::getrandom::SysRng;
     use russh::keys::ssh_key::rand_core::UnwrapErr;
-    use russh::server::{Auth, Config, Msg, Server as _, Session, run_stream};
+    use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, run_stream};
     use russh::{Channel, ChannelId, MethodKind, MethodSet, server};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -411,9 +411,11 @@ pub mod tests {
         async fn channel_open_session(
             &mut self,
             _channel: Channel<Msg>,
+            reply: ChannelOpenHandle,
             _session: &mut Session,
-        ) -> Result<bool, Self::Error> {
-            Ok(true)
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
         }
 
         async fn exec_request(

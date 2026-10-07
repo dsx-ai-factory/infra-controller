@@ -27,7 +27,7 @@ use model::hardware_info::HardwareInfo;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use sqlx::PgConnection;
 
-pub fn load_topology_json(path: &str) -> HardwareInfo {
+pub(super) fn load_topology_json(path: &str) -> HardwareInfo {
     const TEST_DATA_DIR: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/measured_boot/tests/test_data"
@@ -38,7 +38,7 @@ pub fn load_topology_json(path: &str) -> HardwareInfo {
     serde_json::from_slice::<HardwareInfo>(&data).unwrap()
 }
 
-pub async fn create_test_machine(
+pub(super) async fn create_test_machine(
     txn: &mut PgConnection,
     machine_id: &str,
     topology: &HardwareInfo,

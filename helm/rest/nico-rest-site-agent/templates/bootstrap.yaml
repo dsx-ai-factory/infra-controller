@@ -74,7 +74,7 @@ spec:
       serviceAccountName: {{ include "nico-rest-site-agent.name" . }}-bootstrap
       containers:
         - name: bootstrap
-          image: {{ .Values.bootstrap.image }}
+          image: {{ if and .Values.bootstrap.repository .Values.bootstrap.tag }}{{ .Values.bootstrap.repository }}:{{ .Values.bootstrap.tag }}{{ else }}{{ .Values.bootstrap.image }}{{ end }}
           env:
             - name: SITE_UUID
               value: {{ .Values.envConfig.CLUSTER_ID | quote }}

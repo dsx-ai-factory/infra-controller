@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -101,7 +101,7 @@ func TestManageSSHKeyGroupInventory_DiscoverSSHKeyGroupInventory(t *testing.T) {
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.SSHKeyGroupInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.SSHKeyGroupInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -110,12 +110,12 @@ func TestManageSSHKeyGroupInventory_DiscoverSSHKeyGroupInventory(t *testing.T) {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.TenantKeysets))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnEveryPage(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -133,7 +133,7 @@ func TestManageSSHKeyGroup_CreateSSHKeyGroupOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.CreateTenantKeysetRequest
+		request *corev1.CreateTenantKeysetRequest
 	}
 	tests := []struct {
 		name    string
@@ -148,8 +148,8 @@ func TestManageSSHKeyGroup_CreateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -165,8 +165,8 @@ func TestManageSSHKeyGroup_CreateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: "",
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -182,8 +182,8 @@ func TestManageSSHKeyGroup_CreateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "",
 					},
@@ -199,8 +199,8 @@ func TestManageSSHKeyGroup_CreateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -247,7 +247,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.UpdateTenantKeysetRequest
+		request *corev1.UpdateTenantKeysetRequest
 	}
 	tests := []struct {
 		name    string
@@ -262,8 +262,8 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -279,8 +279,8 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: "",
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -296,8 +296,8 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "",
 					},
@@ -313,8 +313,8 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.UpdateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -361,7 +361,7 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.DeleteTenantKeysetRequest
+		request *corev1.DeleteTenantKeysetRequest
 	}
 	tests := []struct {
 		name    string
@@ -376,8 +376,8 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.DeleteTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -392,8 +392,8 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.DeleteTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: "",
 						KeysetId:       "547f73dc-16e6-4cc0-a0c1-3911dbc2aec3",
 					},
@@ -408,8 +408,8 @@ func TestManageSSHKeyGroup_DeleteSSHKeyGroupOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteTenantKeysetRequest{
-					KeysetIdentifier: &cwssaws.TenantKeysetIdentifier{
+				request: &corev1.DeleteTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						OrganizationId: orgID,
 						KeysetId:       "",
 					},

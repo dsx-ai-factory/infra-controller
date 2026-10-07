@@ -21,7 +21,7 @@ REPO_ROOT = { script = [
 ] }
 # e.g. 2024.05.24-rc1-0-0-g786e94757
 DPU_AGENT_PKG_VERSION = { script = [
-  "v=$(git describe --tags --first-parent --always --long | sed 's/^v//'); case \"$v\" in [0-9]*) echo \"$v\" ;; *) echo \"0.0.0-$v\" ;; esac",
+  "if [ -n \"$VERSION\" ]; then echo \"$VERSION\" | sed 's/^v//'; else v=$(git describe --tags --first-parent --always --long | sed 's/^v//'); case \"$v\" in [0-9]*) echo \"$v\" ;; *) echo \"0.0.0-$v\" ;; esac; fi",
 ] }
 
 [tasks.cleanup-local-pkg-files]
@@ -249,7 +249,7 @@ description = "Download go"
 workspace = false
 condition = { files_not_exist = ["{REPO_ROOT}/bluefield/otel/go"] }
 script = '''
-  GO_VERSION="1.22.0"
+  GO_VERSION="1.26.4"
   PLATFORM=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
   TARFILE=go${GO_VERSION}.linux-${PLATFORM}.tar.gz
   OTEL=${REPO_ROOT}/bluefield/otel
@@ -288,9 +288,16 @@ script = '''
       otelcol_builder_config_yaml.txt > ocb_config.yaml
   export GOROOT="${OTEL}/go"
   export PATH="${GOROOT}/bin:${PATH}"
-  export GOPATH="${GOROOT}/gopath"
-  export GOCACHE="${GOROOT}/gocache"
-  GOOS=linux GOARCH=arm64 ./ocb --config ocb_config.yaml
+  export GOPATH="${OTEL}/go/gopath"
+  export GOCACHE="${OTEL}/go/gocache"
+  # Generate Go source only — skip go mod tidy to keep the module graph
+  # deterministic. The committed ocb-generated/go.mod and go.sum (produced by
+  # update-ocb-modules.sh) are copied in afterwards to pin exact versions.
+  ./ocb --config ocb_config.yaml --skip-compilation --skip-get-modules
+  cp ${OTEL}/ocb-generated/go.mod ${OTEL}/ocb-build/go.mod
+  cp ${OTEL}/ocb-generated/go.sum ${OTEL}/ocb-build/go.sum
+  cd ${OTEL}/ocb-build
+  CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -o otelcol-contrib .
 '''
 dependencies = ["check-otelcol-builder", "download-go"]
 
@@ -320,6 +327,8 @@ condition = { files_modified = { input = [
   "${REPO_ROOT}/bluefield/Makefile.toml",
   "${REPO_ROOT}/bluefield/otel/ocb_url.txt",
   "${REPO_ROOT}/bluefield/otel/otelcol_version.txt",
+  "${REPO_ROOT}/bluefield/otel/ocb-generated/go.mod",
+  "${REPO_ROOT}/bluefield/otel/ocb-generated/go.sum",
   "${REPO_ROOT}/bluefield/otel/fileresourceprocessor/go.mod",
   "${REPO_ROOT}/bluefield/otel/fileresourceprocessor/config.go",
   "${REPO_ROOT}/bluefield/otel/fileresourceprocessor/factory.go",
@@ -575,6 +584,8 @@ script = '''
     cp otel/site-controller/otel-agent/Dockerfile "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
     cp otel/site-controller/otel-agent/otel-agent.sh "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/" && chmod u+x "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/otel-agent.sh"
     cp otel/site-controller/otel-agent/otel-agent.yaml.template "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
+    cp otel/site-controller/otel-agent/render_pod.py "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
+    cp otel/site-controller/otel-agent/resolve_host.py "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
     cp otel/site-controller/scripts/map_endpoints.sh "otel-dpu_${vers}_arm64/usr/local/sbin/" && chmod u+x "otel-dpu_${vers}_arm64/usr/local/sbin/map_endpoints.sh"
     cp otel/site-controller/scripts/localhost_alias.sh "otel-dpu_${vers}_arm64/usr/local/sbin/" && chmod u+x "otel-dpu_${vers}_arm64/usr/local/sbin/localhost_alias.sh"
     cp otel/site-controller/scripts/otel_post_install.sh "otel-dpu_${vers}_arm64/usr/local/sbin/" && chmod u+x "otel-dpu_${vers}_arm64/usr/local/sbin/otel_post_install.sh"

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use model::compute_allocation::ComputeAllocation;
 
 use crate::errors::RpcDataConversionError;
@@ -46,11 +47,7 @@ impl TryFrom<ComputeAllocation> for rpc::ComputeAllocation {
                     .iter()
                     .map(|(key, value)| rpc::Label {
                         key: key.to_owned(),
-                        value: if value.is_empty() {
-                            None
-                        } else {
-                            Some(value.to_owned())
-                        },
+                        value: value.to_owned().none_if_empty(),
                     })
                     .collect(),
             }),

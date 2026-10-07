@@ -25,7 +25,7 @@ Add every certificate in a directory as a CA certificate:
     $ nico-admin-cli tpm-ca add-bulk --dirname /path/to/tpm-ca-certs/
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, help = "Directory path containing all CA certs")]
-    pub dirname: String,
+    pub(super) dirname: String,
 }

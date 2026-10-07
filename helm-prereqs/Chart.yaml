@@ -1,7 +1,7 @@
 apiVersion: v2
 name: nico-prereqs
 description: >-
-  Prerequisites for ncx-infra-controller-core/helm.
+  Prerequisites for infra-controller/helm.
   Creates namespace, PostgreSQL, all required Secrets and ConfigMaps,
   bootstrap PKI, Vault PKI config, ESO resources, and ClusterIssuers.
 type: application

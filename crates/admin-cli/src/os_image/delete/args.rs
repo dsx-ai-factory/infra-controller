@@ -30,15 +30,15 @@ Delete an OS image (must be unused by any instance):
     --tenant-org-id fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'i', long, help = "uuid of the OS image to delete.")]
-    pub id: String,
+    id: String,
     #[clap(
         short = 't',
         long,
         help = "Tenant organization identifier of OS image to delete."
     )]
-    pub tenant_org_id: String,
+    tenant_org_id: String,
 }
 
 impl TryFrom<Args> for DeleteOsImageRequest {

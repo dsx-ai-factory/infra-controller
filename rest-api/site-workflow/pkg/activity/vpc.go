@@ -8,9 +8,9 @@ import (
 	"errors"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -40,7 +40,7 @@ func NewManageVPC(coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient) ManageVPC 
 func (mvi *ManageVPCInventory) DiscoverVPCInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverVPCInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[*cwssaws.VpcId, *cwssaws.Vpc, *cwssaws.VPCInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.VpcId, *corev1.Vpc, *corev1.VPCInventory]{
 		itemType:                          "Vpc",
 		config:                            mvi.config,
 		internalFindIDs:                   vpcFindIDs,
@@ -58,18 +58,18 @@ func NewManageVPCInventory(config ManageInventoryConfig) ManageVPCInventory {
 	}
 }
 
-func vpcFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.VpcId, error) {
+func vpcFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.VpcId, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	idList, err := grpcServiceClient.FindVpcIds(ctx, &cwssaws.VpcSearchFilter{})
+	idList, err := grpcServiceClient.FindVpcIds(ctx, &corev1.VpcSearchFilter{})
 	if err != nil {
 		return nil, err
 	}
 	return idList.GetVpcIds(), nil
 }
 
-func vpcFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.VpcId) ([]*cwssaws.Vpc, error) {
+func vpcFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.VpcId) ([]*corev1.Vpc, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	list, err := grpcServiceClient.FindVpcsByIds(ctx, &cwssaws.VpcsByIdsRequest{
+	list, err := grpcServiceClient.FindVpcsByIds(ctx, &corev1.VpcsByIdsRequest{
 		VpcIds: ids,
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func vpcFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids [
 // instancePagedInventoryPostProcess will attach NSG propagation
 // information for the inventory page of VPCs.
 // This will only be called for pages with inventory.
-func vpcPagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.CoreGrpcClient, inventory *cwssaws.VPCInventory) (*cwssaws.VPCInventory, error) {
+func vpcPagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.CoreGrpcClient, inventory *corev1.VPCInventory) (*corev1.VPCInventory, error) {
 	vpcIds := make([]string, len(inventory.GetVpcs()))
 
 	for i, vpc := range inventory.GetVpcs() {
@@ -90,7 +90,7 @@ func vpcPagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.CoreG
 	}
 
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	propList, err := grpcServiceClient.GetNetworkSecurityGroupPropagationStatus(ctx, &cwssaws.GetNetworkSecurityGroupPropagationStatusRequest{
+	propList, err := grpcServiceClient.GetNetworkSecurityGroupPropagationStatus(ctx, &corev1.GetNetworkSecurityGroupPropagationStatusRequest{
 		VpcIds: vpcIds,
 	})
 
@@ -103,14 +103,14 @@ func vpcPagedInventoryPostProcess(ctx context.Context, grpcClient *cClient.CoreG
 	return inventory, nil
 }
 
-func vpcPagedInventory(allItemIDs []*cwssaws.VpcId, pagedItems []*cwssaws.Vpc, input *pagedInventoryInput) *cwssaws.VPCInventory {
+func vpcPagedInventory(allItemIDs []*corev1.VpcId, pagedItems []*corev1.Vpc, input *pagedInventoryInput) *corev1.VPCInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of VPCs
-	inventory := &cwssaws.VPCInventory{
+	inventory := &corev1.VPCInventory{
 		Vpcs: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),
@@ -126,7 +126,7 @@ func vpcPagedInventory(allItemIDs []*cwssaws.VpcId, pagedItems []*cwssaws.Vpc, i
 }
 
 // Function to create VPCS with NICo
-func (mv *ManageVPC) CreateVpcOnSite(ctx context.Context, request *cwssaws.VpcCreationRequest) (*cwssaws.Vpc, error) {
+func (mv *ManageVPC) CreateVpcOnSite(ctx context.Context, request *corev1.VpcCreationRequest) (*corev1.Vpc, error) {
 	logger := log.With().Str("Activity", "CreateVpcOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -158,19 +158,20 @@ func (mv *ManageVPC) CreateVpcOnSite(ctx context.Context, request *cwssaws.VpcCr
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	controllerVpc, err := grpcServiceClient.CreateVpc(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create VPC using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create VPC using Core gRPC API")
 		return nil, swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return controllerVpc, nil
 }
 
 // Function to update VPCS with NICo
-func (mv *ManageVPC) UpdateVpcOnSite(ctx context.Context, request *cwssaws.VpcUpdateRequest) error {
+func (mv *ManageVPC) UpdateVpcOnSite(ctx context.Context, request *corev1.VpcUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateVpcOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -198,19 +199,20 @@ func (mv *ManageVPC) UpdateVpcOnSite(ctx context.Context, request *cwssaws.VpcUp
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateVpc(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update VPC using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update VPC using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to delete VPCS with NICo
-func (mv *ManageVPC) DeleteVpcOnSite(ctx context.Context, request *cwssaws.VpcDeletionRequest) error {
+func (mv *ManageVPC) DeleteVpcOnSite(ctx context.Context, request *corev1.VpcDeletionRequest) error {
 	logger := log.With().Str("Activity", "DeleteVpcOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -237,19 +239,20 @@ func (mv *ManageVPC) DeleteVpcOnSite(ctx context.Context, request *cwssaws.VpcDe
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteVpc(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete VPC using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete VPC using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // UpdateVpcVirtualizationOnSite updates VPC virtualization on Site
-func (mv *ManageVPC) UpdateVpcVirtualizationOnSite(ctx context.Context, request *cwssaws.VpcUpdateVirtualizationRequest) error {
+func (mv *ManageVPC) UpdateVpcVirtualizationOnSite(ctx context.Context, request *corev1.VpcUpdateVirtualizationRequest) error {
 	logger := log.With().Str("Activity", "UpdateVpcOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -275,13 +278,14 @@ func (mv *ManageVPC) UpdateVpcVirtualizationOnSite(ctx context.Context, request 
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateVpcVirtualization(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update VPC virtualization using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update VPC virtualization using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }

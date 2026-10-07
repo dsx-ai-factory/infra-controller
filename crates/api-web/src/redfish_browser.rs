@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use askama::Template;
@@ -23,6 +24,7 @@ use axum::extract::{Query as AxumQuery, State as AxumState};
 use axum::response::{Html, IntoResponse, Response};
 use axum_extra::extract::PrivateCookieJar;
 use carbide_api_core::{Api, NUM_REQUIRED_APPROVALS};
+use carbide_utils::redfish::parse_uri_host_ip;
 use carbide_uuid::machine::MachineId;
 use http::HeaderMap;
 use hyper::http::StatusCode;
@@ -53,20 +55,37 @@ struct Header {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct QueryParams {
+pub(super) struct QueryParams {
     url: Option<String>,
+}
+
+fn bmc_base_url(uri: &http::Uri, bmc_ip: IpAddr) -> Result<String, http::uri::InvalidUri> {
+    let host = match bmc_ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    let authority = match uri.port_u16() {
+        Some(port) => http::uri::Authority::try_from(format!("{host}:{port}"))?,
+        None => http::uri::Authority::try_from(host)?,
+    };
+
+    Ok(format!(
+        "{}://{authority}",
+        uri.scheme_str().unwrap_or("https")
+    ))
 }
 
 /// Queries the redfish endpoint in the query parameter
 /// and displays the result
-pub async fn query(
+pub(super) async fn query(
     AxumState(state): AxumState<Arc<Api>>,
     AxumQuery(query): AxumQuery<QueryParams>,
-    Extension(oauth2_layer): Extension<Option<Oauth2Layer>>,
+    Extension(oauth2_layer): Extension<Option<Arc<Oauth2Layer>>>,
     request_headers: HeaderMap,
 ) -> Response {
-    let cookiejar = oauth2_layer
-        .map(|layer| PrivateCookieJar::from_headers(&request_headers, layer.private_cookiejar_key));
+    let cookiejar = oauth2_layer.map(|layer| {
+        PrivateCookieJar::from_headers(&request_headers, layer.private_cookiejar_key.clone())
+    });
 
     let mut browser = RedfishBrowser {
         url: query.url.clone().unwrap_or_default(),
@@ -101,33 +120,30 @@ pub async fn query(
         }
     };
 
-    browser.bmc_ip = match uri.host() {
-        Some(host) => host.to_string(),
+    let host = match uri.host() {
+        Some(host) => host,
         None => {
             browser.error = format!("Missing host in URL {}", browser.url);
             return (StatusCode::OK, Html(browser.render().unwrap())).into_response();
         }
     };
 
-    let bmc_ip: std::net::IpAddr = match browser.bmc_ip.parse() {
-        Ok(ip) => ip,
-        Err(_) => {
+    let bmc_ip = match parse_uri_host_ip(host) {
+        Some(ip) => ip,
+        None => {
             browser.error = format!("host in URL {} is not a valid IP", browser.url);
             return (StatusCode::OK, Html(browser.render().unwrap())).into_response();
         }
     };
+    browser.bmc_ip = bmc_ip.to_string();
 
     // This variable is used in order to allow building absolute path easier from
     // Javascript
-    browser.base_bmc_url = {
-        let scheme = match uri.scheme_str() {
-            Some(scheme) => scheme.to_string(),
-            None => "https".to_string(),
-        };
-        if let Some(port) = uri.port_u16() {
-            format!("{scheme}://{bmc_ip}:{port}")
-        } else {
-            format!("{scheme}://{bmc_ip}")
+    browser.base_bmc_url = match bmc_base_url(&uri, bmc_ip) {
+        Ok(url) => url,
+        Err(_) => {
+            browser.error = format!("Invalid URL {}", browser.url);
+            return (StatusCode::OK, Html(browser.render().unwrap())).into_response();
         }
     };
 
@@ -139,7 +155,7 @@ pub async fn query(
     {
         Ok(r) => r.into_inner(),
         Err(err) => {
-            tracing::error!(%err, %bmc_ip, %browser.url, "redfish_browse");
+            tracing::error!(error = %err, bmc_ip_address = %bmc_ip, %browser.url, "redfish_browse");
             browser.error = format!("Failed to retrieve Redfish from API {err}");
             return (StatusCode::OK, Html(browser.render().unwrap())).into_response();
         }
@@ -149,7 +165,7 @@ pub async fn query(
         Ok(Some(machine_id)) => machine_id.to_string(),
         Ok(None) => String::new(),
         Err(err) => {
-            tracing::error!(%err, url = browser.url, "find_machine_id");
+            tracing::error!(error = %err, url = browser.url, "find_machine_id");
             browser.error = format!("Failed to look up Machine for URL {}", browser.url);
             return (StatusCode::OK, Html(browser.render().unwrap())).into_response();
         }
@@ -168,7 +184,7 @@ pub async fn query(
             .map(TryInto::try_into)
             .collect::<Result<_, _>>(),
         Err(err) => {
-            tracing::error!(%err, bmc_ip = browser.bmc_ip, "fetch_action_requests");
+            tracing::error!(error = %err, bmc_ip_address = browser.bmc_ip, "fetch_action_requests");
             browser.error = format!(
                 "Failed to look up action requests for bmc_ip {}",
                 browser.bmc_ip
@@ -179,7 +195,7 @@ pub async fn query(
     browser.actions.action_requests = match requests {
         Ok(ok) => ok,
         Err(err) => {
-            tracing::error!(%err, bmc_ip = browser.bmc_ip, "fetch_action_requests");
+            tracing::error!(error = %err, bmc_ip_address = browser.bmc_ip, "fetch_action_requests");
             browser.error = format!(
                 "Failed to deserialize action requests for bmc_ip {}",
                 browser.bmc_ip
@@ -224,8 +240,46 @@ async fn find_machine_id(
     Ok(None)
 }
 
-pub mod filters {
-    pub use super::super::filters::*;
+mod filters {
+    pub(super) use super::super::filters::*;
 }
 
 impl super::Base for RedfishBrowser {}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::{bmc_base_url, parse_uri_host_ip};
+
+    #[test]
+    fn bmc_url_parts_support_ipv4_and_ipv6() {
+        value_scenarios!(run = |raw_uri| {
+            let uri: http::Uri = raw_uri.parse().unwrap();
+            let ip = parse_uri_host_ip(uri.host().unwrap()).unwrap();
+            (ip.to_string(), bmc_base_url(&uri, ip).unwrap())
+        };
+            "IPv4" {
+                "https://192.0.2.10/redfish/v1" => (
+                    "192.0.2.10".to_string(),
+                    "https://192.0.2.10".to_string(),
+                ),
+                "http://192.0.2.10:8080/redfish/v1" => (
+                    "192.0.2.10".to_string(),
+                    "http://192.0.2.10:8080".to_string(),
+                ),
+            }
+
+            "bracketed IPv6" {
+                "https://[2001:db8::10]/redfish/v1" => (
+                    "2001:db8::10".to_string(),
+                    "https://[2001:db8::10]".to_string(),
+                ),
+                "https://[2001:db8::10]:8443/redfish/v1" => (
+                    "2001:db8::10".to_string(),
+                    "https://[2001:db8::10]:8443".to_string(),
+                ),
+            }
+        );
+    }
+}

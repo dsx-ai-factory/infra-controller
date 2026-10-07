@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -86,7 +86,7 @@ func TestManageVpcPrefixInventory_DiscoverVpcPrefixInventory(t *testing.T) {
 
 			ctx := context.Background()
 			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
-			ctx = context.WithValue(ctx, "wantDeletedFilter", cwssaws.DeletedFilter_DELETED_FILTER_INCLUDE)
+			ctx = context.WithValue(ctx, "wantDeletedFilter", corev1.DeletedFilter_DELETED_FILTER_INCLUDE)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {
@@ -102,7 +102,7 @@ func TestManageVpcPrefixInventory_DiscoverVpcPrefixInventory(t *testing.T) {
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.VpcPrefixInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.VpcPrefixInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -111,12 +111,12 @@ func TestManageVpcPrefixInventory_DiscoverVpcPrefixInventory(t *testing.T) {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.VpcPrefixes))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -135,7 +135,7 @@ func TestManageVpcPrefix_CreateVpcPrefixOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcPrefixCreationRequest
+		request *corev1.VpcPrefixCreationRequest
 	}
 	tests := []struct {
 		name    string
@@ -150,11 +150,11 @@ func TestManageVpcPrefix_CreateVpcPrefixOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPrefixCreationRequest{
-					Id:     &cwssaws.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcPrefixCreationRequest{
+					Id:     &corev1.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 					Name:   name,
 					Prefix: prefix,
-					VpcId:  &cwssaws.VpcId{Value: uuid.NewString()},
+					VpcId:  &corev1.VpcId{Value: uuid.NewString()},
 				},
 			},
 			wantErr: false,
@@ -166,11 +166,11 @@ func TestManageVpcPrefix_CreateVpcPrefixOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPrefixCreationRequest{
+				request: &corev1.VpcPrefixCreationRequest{
 					Id:     nil,
 					Name:   name,
 					Prefix: prefix,
-					VpcId:  &cwssaws.VpcId{Value: uuid.NewString()},
+					VpcId:  &corev1.VpcId{Value: uuid.NewString()},
 				},
 			},
 			wantErr: true,
@@ -211,7 +211,7 @@ func TestManageVpcPrefix_UpdateVpcPrefixOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcPrefixUpdateRequest
+		request *corev1.VpcPrefixUpdateRequest
 	}
 	tests := []struct {
 		name    string
@@ -226,8 +226,8 @@ func TestManageVpcPrefix_UpdateVpcPrefixOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPrefixUpdateRequest{
-					Id: &cwssaws.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcPrefixUpdateRequest{
+					Id: &corev1.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 				},
 			},
 			wantErr: false,
@@ -239,7 +239,7 @@ func TestManageVpcPrefix_UpdateVpcPrefixOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPrefixUpdateRequest{
+				request: &corev1.VpcPrefixUpdateRequest{
 					Id: nil,
 				},
 			},
@@ -281,7 +281,7 @@ func TestManageVpcPrefix_DeleteVpcPrefixOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcPrefixDeletionRequest
+		request *corev1.VpcPrefixDeletionRequest
 	}
 	tests := []struct {
 		name    string
@@ -296,8 +296,8 @@ func TestManageVpcPrefix_DeleteVpcPrefixOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPrefixDeletionRequest{
-					Id: &cwssaws.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcPrefixDeletionRequest{
+					Id: &corev1.VpcPrefixId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 				},
 			},
 			wantErr: false,
@@ -309,8 +309,8 @@ func TestManageVpcPrefix_DeleteVpcPrefixOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPrefixDeletionRequest{
-					Id: &cwssaws.VpcPrefixId{Value: ""},
+				request: &corev1.VpcPrefixDeletionRequest{
+					Id: &corev1.VpcPrefixId{Value: ""},
 				},
 			},
 			wantErr: true,

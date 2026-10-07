@@ -19,7 +19,7 @@ use crate::hw::BiosAttr;
 
 pub const EXPECTED_BIOS_ATTRS: [BiosAttr; 8] = [
     BiosAttr::new_str("PCIS007", "PCIS007Enabled"), // SR-IOV Support
-    BiosAttr::new_int("LEM0001", 3),                // PXE retry count
+    BiosAttr::new_int("LEM0001", 0),                // PXE retry count
     BiosAttr::new_str("NWSK000", "NWSK000Enabled"), // Network Stack
     BiosAttr::new_str("NWSK001", "NWSK001Disabled"), // IPv4 PXE Support
     BiosAttr::new_str("NWSK006", "NWSK006Enabled"), // IPv4 HTTP Support

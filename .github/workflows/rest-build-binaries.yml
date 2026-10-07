@@ -5,60 +5,148 @@ name: Build Go Binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      identity_source:
+        description: 'Source for the manual build identity'
+        required: true
+        default: 'selected-ref'
+        type: choice
+        options:
+          - 'selected-ref'
+      runner:
+        description: 'Runner type for the build jobs'
+        required: false
+        default: 'linux-amd64-cpu4'
+        type: string
+      upload_artifact:
+        description: 'Whether to upload target bundles'
+        required: false
+        default: true
+        type: boolean
   workflow_call:
     inputs:
-        runner:
-          description: 'Runner type for the build job'
-          required: false
-          default: 'linux-amd64-cpu4'
-          type: string
-        upload_artifact:
-          description: 'Whether to upload artifacts'
-          required: false
-          default: false
-          type: boolean
+      runner:
+        description: 'Runner type for the build jobs'
+        required: false
+        default: 'linux-amd64-cpu4'
+        type: string
+      upload_artifact:
+        description: 'Whether to upload target bundles'
+        required: false
+        default: false
+        type: boolean
+      binary_version:
+        description: 'Version embedded in production command binaries'
+        required: true
+        type: string
+      build_timestamp:
+        description: 'UTC RFC3339 timestamp embedded in production command binaries'
+        required: true
+        type: string
+      short_sha:
+        description: 'Short candidate SHA embedded in flow'
+        required: true
+        type: string
+      full_sha:
+        description: 'Full candidate SHA recorded in each target manifest'
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 defaults:
   run:
     working-directory: rest-api
 
 env:
-  GO_VERSION: "1.25.4"
+  GO_VERSION: "1.26.4"
 
 jobs:
+  resolve-manual-identity:
+    name: Resolve Manual Build Identity
+    # This single-option input exists only for direct dispatch. Reusable callers
+    # cannot set it and must supply the four required identity inputs instead.
+    if: inputs.identity_source == 'selected-ref'
+    runs-on: ${{ inputs.runner || 'linux-amd64-cpu4' }}
+    outputs:
+      binary_version: ${{ steps.identity.outputs.binary_version }}
+      build_timestamp: ${{ steps.identity.outputs.build_timestamp }}
+      short_sha: ${{ steps.identity.outputs.short_sha }}
+      full_sha: ${{ steps.identity.outputs.full_sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve identity
+        id: identity
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          full_sha=$(git rev-parse HEAD)
+          short_sha=$(git rev-parse --short HEAD)
+          semantic_version=$(git describe --tags --first-parent --always)
+          branch_name=$(printf '%s' "${REF_NAME}" | sed 's/[^a-zA-Z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+
+          # Keep this manual-only precedence aligned with
+          # rest-prepare-build-info.yml's normal CI identity.
+          if [ "${REF}" = "refs/heads/main" ]; then
+            binary_version=${semantic_version}
+          elif [[ "${REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            binary_version=${REF_NAME}
+          elif [ -n "${branch_name}" ]; then
+            binary_version=${branch_name}-${short_sha}
+          else
+            echo "::error::cannot derive a binary version from ${REF_NAME}"
+            exit 1
+          fi
+          build_timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          if [[ ! "${binary_version}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::derived binary version is not safe: ${binary_version}"
+            exit 1
+          fi
+          {
+            echo "binary_version=${binary_version}"
+            echo "build_timestamp=${build_timestamp}"
+            echo "short_sha=${short_sha}"
+            echo "full_sha=${full_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
   build-binaries:
-    name: Build Binaries (${{ matrix.name }}, ${{ matrix.path }})
-    runs-on: ${{ inputs.runner }}
+    name: Build Binaries (${{ matrix.target }})
+    needs: resolve-manual-identity
+    if: >-
+      ${{ !cancelled() &&
+          (needs.resolve-manual-identity.result == 'success' ||
+           needs.resolve-manual-identity.result == 'skipped') }}
+    runs-on: ${{ inputs.runner || 'linux-amd64-cpu8' }}
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+      BINARY_VERSION: ${{ inputs.identity_source == 'selected-ref' && needs.resolve-manual-identity.outputs.binary_version || inputs.binary_version }}
+      BUILD_TIMESTAMP: ${{ inputs.identity_source == 'selected-ref' && needs.resolve-manual-identity.outputs.build_timestamp || inputs.build_timestamp }}
+      SHORT_SHA: ${{ inputs.identity_source == 'selected-ref' && needs.resolve-manual-identity.outputs.short_sha || inputs.short_sha }}
+      FULL_SHA: ${{ inputs.identity_source == 'selected-ref' && needs.resolve-manual-identity.outputs.full_sha || inputs.full_sha }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: api
-            path: ./api/cmd/api
-          - name: migrations
-            path: ./db/cmd/migrations
-          - name: sitemgr
-            path: ./site-manager/cmd/sitemgr
-          - name: workflow
-            path: ./workflow/cmd/workflow
-          - name: site-agent
-            path: ./site-agent/cmd/site-agent
-          - name: mock-core
-            path: ./site-agent/cmd/mock-core
-          - name: mock-flow
-            path: ./site-agent/cmd/mock-flow
-          - name: credsmgr
-            path: ./cert-manager/cmd/credsmgr
-          - name: flow
-            path: ./flow
-          - name: psm
-            path: ./powershelf-manager
-          - name: nsm
-            path: ./nvswitch-manager
+        target:
+          - linux-amd64
+          - linux-arm64
+          - darwin-arm64
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -67,26 +155,75 @@ jobs:
           cache: true
           cache-dependency-path: rest-api/go.sum
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Download dependencies
         run: go mod download
 
-      - name: Build ${{ matrix.name }} (linux/amd64)
+      - name: Validate bundle prerequisites and identity
         run: |
-          mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -o dist/${{ matrix.name }}-linux-amd64 ${{ matrix.path }}
+          set -euo pipefail
 
-      - name: Build ${{ matrix.name }} (linux/arm64)
+          python3 -c 'import sys; sys.exit("error: Python 3.10 or newer is required") if sys.version_info < (3, 10) else None'
+
+          # `file` is part of the existing REST image-runner contract. Check it
+          # before compilation because the bundle verifier needs it afterward.
+          file --version
+
+          actual_full_sha=$(git rev-parse HEAD)
+          if [ "${FULL_SHA}" != "${actual_full_sha}" ]; then
+            echo "::error::requested candidate ${FULL_SHA} does not match checkout ${actual_full_sha}"
+            exit 1
+          fi
+          if [[ "${actual_full_sha}" != "${SHORT_SHA}"* ]]; then
+            echo "::error::short candidate ${SHORT_SHA} is not a prefix of ${actual_full_sha}"
+            exit 1
+          fi
+          if [[ ! "${BINARY_VERSION}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::binary version is not safe: ${BINARY_VERSION}"
+            exit 1
+          fi
+          if [[ ! "${BUILD_TIMESTAMP}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::build timestamp must use UTC RFC3339 seconds: ${BUILD_TIMESTAMP}"
+            exit 1
+          fi
+
+      - name: Build and verify ${{ matrix.target }} bundle
         run: |
-          GOOS=linux GOARCH=arm64 go build -o dist/${{ matrix.name }}-linux-arm64 ${{ matrix.path }}
+          python3 ../.github/ci/rest_command_bundle.py build \
+            --target "${TARGET}" \
+            --output-dir "build/rest-command-bundles/${TARGET}" \
+            --version "${BINARY_VERSION}" \
+            --build-timestamp "${BUILD_TIMESTAMP}" \
+            --candidate-sha "${FULL_SHA}" \
+            --short-sha "${SHORT_SHA}"
 
-      - name: Build ${{ matrix.name }} (darwin/arm64)
+      - name: Record ${{ matrix.target }} bundle
         run: |
-          GOOS=darwin GOARCH=arm64 go build -o dist/${{ matrix.name }}-darwin-arm64 ${{ matrix.path }}
+          set -euo pipefail
 
-      - name: Upload ${{ matrix.name }} binaries
+          bundle="build/rest-command-bundles/${TARGET}/rest-command-bundle-${TARGET}.tar.gz"
+          {
+            echo "### REST command bundle: ${TARGET}"
+            echo ""
+            echo "- Candidate: \`${FULL_SHA}\`"
+            echo "- Version: \`${BINARY_VERSION}\`"
+            echo "- Bundle bytes: \`$(stat -c %s "${bundle}")\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload ${{ matrix.target }} bundle
         if: inputs.upload_artifact == true
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-binaries
-          path: rest-api/dist/${{ matrix.name }}-*
+          name: rest-command-bundle-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            rest-api/build/rest-command-bundles/${{ matrix.target }}/rest-command-bundle-${{ matrix.target }}.tar.gz
+            rest-api/build/rest-command-bundles/${{ matrix.target }}/rest-command-bundle-${{ matrix.target }}.tar.gz.sha256
+            rest-api/build/rest-command-bundles/${{ matrix.target }}/rest-command-bundle-${{ matrix.target }}.manifest.json
+          if-no-files-found: error
+          # The bundle is already gzip-compressed; another deflate pass only burns runner time.
+          compression-level: 0
           retention-days: 7

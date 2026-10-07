@@ -27,7 +27,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
@@ -99,23 +99,23 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 	pagedInvIds := []string{}
 
 	for i := 0; i < 38; i++ {
-		tn := cwu.TestBuildTenant(t, dbSession, fmt.Sprintf("test-tenant-org-%v", i), fmt.Sprintf("Test Tenant %v", i), nil, ipu)
+		tn := cwu.TestBuildTenant(t, dbSession, fmt.Sprintf("Test Tenant %v", i), fmt.Sprintf("test-tenant-org-%v", i), nil, ipu)
 		cwu.TestBuildTenantSiteAssociation(t, dbSession, tn.Org, tn.ID, st.ID, ipu.ID)
 		cwu.TestBuildTenantSiteAssociation(t, dbSession, tn.Org, tn.ID, st3.ID, ipu.ID)
 
 		// Update creation timestamp to be earlier than inventory processing interval
-		_, err := dbSession.DB.Exec("UPDATE tenant SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval*2)), tn.ID.String())
+		_, err := dbSession.DB.Exec("UPDATE tenant SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)), tn.ID.String())
 		assert.NoError(t, err)
 		pagedTenants = append(pagedTenants, tn)
 		pagedInvIds = append(pagedInvIds, tn.Org)
 	}
 
 	tenantsToUpdate := []*cdbm.Tenant{}
-	pagedCtrlTenants := []*cwssaws.Tenant{}
+	pagedCtrlTenants := []*corev1.Tenant{}
 	for i := 0; i < 34; i++ {
-		ctrlTenant := &cwssaws.Tenant{
+		ctrlTenant := &corev1.Tenant{
 			OrganizationId: pagedTenants[i].Org,
-			Metadata: &cwssaws.Metadata{
+			Metadata: &corev1.Metadata{
 				Name: pagedTenants[i].Name,
 			},
 		}
@@ -159,7 +159,7 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 	type args struct {
 		ctx          context.Context
 		siteID       uuid.UUID
-		vpcInventory *cwssaws.TenantInventory
+		vpcInventory *corev1.TenantInventory
 	}
 
 	tests := []struct {
@@ -181,8 +181,8 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: uuid.New(),
-				vpcInventory: &cwssaws.TenantInventory{
-					Tenants: []*cwssaws.Tenant{},
+				vpcInventory: &corev1.TenantInventory{
+					Tenants: []*corev1.Tenant{},
 				},
 			},
 			wantErr: true,
@@ -198,11 +198,11 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st2.ID,
-				vpcInventory: &cwssaws.TenantInventory{
-					Tenants:         []*cwssaws.Tenant{},
+				vpcInventory: &corev1.TenantInventory{
+					Tenants:         []*corev1.Tenant{},
 					Timestamp:       timestamppb.Now(),
-					InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  0,
 						PageSize:    25,
@@ -223,10 +223,10 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st3.ID,
-				vpcInventory: &cwssaws.TenantInventory{
+				vpcInventory: &corev1.TenantInventory{
 					Tenants:   pagedCtrlTenants[0:20],
 					Timestamp: timestamppb.Now(),
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  2,
 						PageSize:    20,
@@ -249,10 +249,10 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st3.ID,
-				vpcInventory: &cwssaws.TenantInventory{
+				vpcInventory: &corev1.TenantInventory{
 					Tenants:   pagedCtrlTenants[20:34],
 					Timestamp: timestamppb.Now(),
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 2,
 						TotalPages:  2,
 						PageSize:    20,
@@ -284,7 +284,7 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			for _, tenant := range tt.tenantsToCreate {
 				found := false
 				for _, scCall := range tt.fields.clientPoolClient.Calls {
-					scReq := scCall.Arguments[3].(*cwssaws.CreateTenantRequest)
+					scReq := scCall.Arguments[3].(*corev1.CreateTenantRequest)
 					if scReq.OrganizationId == tenant.Org {
 						found = true
 					}
@@ -295,7 +295,7 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			for _, tenant := range tt.tenantsToUpdate {
 				found := false
 				for _, scCall := range tt.fields.clientPoolClient.Calls {
-					scReq := scCall.Arguments[3].(*cwssaws.UpdateTenantRequest)
+					scReq := scCall.Arguments[3].(*corev1.UpdateTenantRequest)
 					if scReq.OrganizationId == tenant.Org {
 						found = true
 					}

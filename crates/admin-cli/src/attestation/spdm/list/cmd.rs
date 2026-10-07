@@ -26,7 +26,7 @@ use crate::attestation::spdm::list::args::{Args, Selector};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let variant = match (args.machine_id, args.selector) {
         (Some(machine_id), None) => Some(Variant::MachineId(machine_id)),
         (None, Some(Selector::InProgress)) => Some(Variant::Selector(

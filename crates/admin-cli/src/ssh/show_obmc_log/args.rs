@@ -30,7 +30,7 @@ Dump the OpenBMC log from a DPU BMC:
     $ nico-admin-cli ssh show-obmc-log 192.0.2.10:22 admin mypassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: SshArgs,
+    pub(super) inner: SshArgs,
 }

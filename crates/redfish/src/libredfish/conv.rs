@@ -19,7 +19,9 @@ use bmc_vendor::BMCVendor;
 use model::attestation::spdm::{CaCertificate, Evidence};
 use model::firmware::FirmwareComponentType;
 use model::machine::{MachineLastRebootRequestedMode, PowerState as MachinePowerState};
-use model::site_explorer::{BootOption, NicMode, PCIeDevice, PowerState, SystemStatus};
+use model::site_explorer::{
+    BlueFieldOperatingMode, BootOption, PCIeDevice, PowerState, SystemStatus,
+};
 
 pub trait IntoLibredfish<T> {
     fn into_libredfish(self) -> T;
@@ -113,16 +115,16 @@ impl IntoModel<BootOption> for libredfish::model::BootOption {
     }
 }
 
-impl IntoModel<NicMode> for libredfish::model::oem::nvidia_dpu::NicMode {
-    fn into_model(self) -> NicMode {
+impl IntoModel<BlueFieldOperatingMode> for libredfish::model::oem::nvidia_dpu::NicMode {
+    fn into_model(self) -> BlueFieldOperatingMode {
         match self {
-            Self::Dpu => NicMode::Dpu,
-            Self::Nic => NicMode::Nic,
+            Self::Dpu => BlueFieldOperatingMode::Dpu,
+            Self::Nic => BlueFieldOperatingMode::Nic,
         }
     }
 }
 
-impl IntoLibredfish<libredfish::model::oem::nvidia_dpu::NicMode> for NicMode {
+impl IntoLibredfish<libredfish::model::oem::nvidia_dpu::NicMode> for BlueFieldOperatingMode {
     fn into_libredfish(self) -> libredfish::model::oem::nvidia_dpu::NicMode {
         match self {
             Self::Dpu => libredfish::model::oem::nvidia_dpu::NicMode::Dpu,
@@ -155,14 +157,16 @@ pub fn bmc_vendor(r: libredfish::model::service_root::RedfishVendor) -> BMCVendo
         | RedfishVendor::NvidiaGBx00
         | RedfishVendor::NvidiaGH200
         | RedfishVendor::NvidiaGBSwitch
-        | RedfishVendor::P3809 => BMCVendor::Nvidia,
+        | RedfishVendor::P3809
+        | RedfishVendor::VeraRubin => BMCVendor::Nvidia,
         RedfishVendor::Dell => BMCVendor::Dell,
         RedfishVendor::Hpe => BMCVendor::Hpe,
         RedfishVendor::Lenovo => BMCVendor::Lenovo,
-        RedfishVendor::LenovoAMI => BMCVendor::LenovoAMI,
+        RedfishVendor::LenovoAMI | RedfishVendor::LenovoGB300 => BMCVendor::LenovoAMI,
         RedfishVendor::LiteOnPowerShelf => BMCVendor::Liteon,
         RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
         RedfishVendor::Supermicro => BMCVendor::Supermicro,
+        RedfishVendor::Sushy => BMCVendor::Sushy,
         RedfishVendor::Unknown => BMCVendor::Unknown,
     }
 }
@@ -190,5 +194,41 @@ impl IntoModel<Evidence> for libredfish::model::component_integrity::Evidence {
             signing_algorithm: self.signing_algorithm,
             version: self.version,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+    use libredfish::model::service_root::RedfishVendor;
+
+    use super::*;
+
+    #[test]
+    fn redfish_vendors_map_to_bmc_vendors() {
+        value_scenarios!(bmc_vendor:
+            "NVIDIA Redfish implementations" {
+                RedfishVendor::AMI => BMCVendor::Nvidia,
+                RedfishVendor::NvidiaDpu => BMCVendor::Nvidia,
+                RedfishVendor::NvidiaGBx00 => BMCVendor::Nvidia,
+                RedfishVendor::NvidiaGH200 => BMCVendor::Nvidia,
+                RedfishVendor::NvidiaGBSwitch => BMCVendor::Nvidia,
+                RedfishVendor::P3809 => BMCVendor::Nvidia,
+                RedfishVendor::VeraRubin => BMCVendor::Nvidia,
+            }
+
+            "vendor-specific Redfish implementations" {
+                RedfishVendor::Dell => BMCVendor::Dell,
+                RedfishVendor::Hpe => BMCVendor::Hpe,
+                RedfishVendor::Lenovo => BMCVendor::Lenovo,
+                RedfishVendor::LenovoAMI => BMCVendor::LenovoAMI,
+                RedfishVendor::LenovoGB300 => BMCVendor::LenovoAMI,
+                RedfishVendor::LiteOnPowerShelf => BMCVendor::Liteon,
+                RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
+                RedfishVendor::Supermicro => BMCVendor::Supermicro,
+                RedfishVendor::Sushy => BMCVendor::Sushy,
+                RedfishVendor::Unknown => BMCVendor::Unknown,
+            }
+        );
     }
 }

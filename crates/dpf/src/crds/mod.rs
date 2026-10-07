@@ -15,4 +15,13 @@
  * limitations under the License.
  */
 
+#![allow(
+    unreachable_pub,
+    reason = "kopium emits public re-exports inside private generated prelude modules"
+)]
+#![allow(
+    clippy::enum_variant_names,
+    reason = "kopium-generated CRD enums preserve upstream variant names"
+)]
+
 include!(concat!(env!("OUT_DIR"), "/crds/mod.rs"));

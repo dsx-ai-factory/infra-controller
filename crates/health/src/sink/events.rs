@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use carbide_uuid::machine::MachineId;
@@ -27,25 +29,43 @@ use health_report::{
     HealthReport as CarbideHealthReport, HealthReportConversionError,
 };
 use nv_redfish::resource::Health as BmcHealth;
+use serde::Serialize;
 
-use crate::endpoint::{BmcAddr, BmcEndpoint, EndpointMetadata, SwitchEndpointRole};
+use crate::endpoint::{BmcAddr, BmcEndpoint, EndpointMetadata, MachineData, SwitchEndpointRole};
 use crate::metrics::MetricLabel;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
 pub enum HealthReportTarget {
     Machine,
+
+    /// NVLink domain identified by the event context.
+    NvLinkDomain,
+
     PowerShelf,
     Rack,
     Switch,
 }
 
-#[derive(Clone, Debug)]
+impl HealthReportTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Machine => "machine",
+            Self::NvLinkDomain => "nvlink-domain",
+            Self::PowerShelf => "power-shelf",
+            Self::Rack => "rack",
+            Self::Switch => "switch",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct EventContext {
     pub endpoint_key: String,
     pub addr: BmcAddr,
     pub collector_type: &'static str,
     pub metadata: Option<EndpointMetadata>,
     pub rack_id: Option<RackId>,
+    pub labels: BTreeMap<String, String>,
 }
 
 impl EventContext {
@@ -56,6 +76,7 @@ impl EventContext {
             collector_type,
             metadata: endpoint.metadata.clone(),
             rack_id: endpoint.rack_id.clone(),
+            labels: endpoint.labels.clone(),
         }
     }
 
@@ -63,31 +84,67 @@ impl EventContext {
         &self.endpoint_key
     }
 
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+
+    /// Returns machine metadata when this context belongs to a machine endpoint.
+    fn machine_metadata(&self) -> Option<&MachineData> {
+        let Some(EndpointMetadata::Machine(machine)) = self.metadata.as_ref() else {
+            return None;
+        };
+
+        Some(machine)
+    }
+
+    /// Returns the stable NICo machine ID when the endpoint is a machine.
     pub fn machine_id(&self) -> Option<MachineId> {
-        match &self.metadata {
-            Some(EndpointMetadata::Machine(machine)) => Some(machine.machine_id),
-            _ => None,
-        }
+        self.machine_metadata()
+            .and_then(|machine| machine.machine_id)
     }
 
+    /// Returns the machine chassis serial when the endpoint is a machine.
+    pub fn machine_serial(&self) -> Option<&str> {
+        self.machine_metadata()
+            .and_then(|machine| machine.machine_serial.as_deref())
+    }
+
+    /// Returns the UUID reported by the primary Redfish ComputerSystem.
+    pub fn system_uuid(&self) -> Option<uuid::Uuid> {
+        self.machine_metadata()
+            .and_then(|machine| machine.system_uuid.get())
+    }
+
+    /// Returns the uniform GPU driver version when it is known for the machine.
+    pub fn driver_version(&self) -> Option<&str> {
+        self.machine_metadata()
+            .and_then(|machine| machine.driver_version.as_deref())
+    }
+
+    /// Returns the component category for endpoints with typed metadata.
+    pub fn component_type(&self) -> Option<&'static str> {
+        self.metadata.as_ref().map(EndpointMetadata::component_type)
+    }
+
+    /// Returns the physical rack slot number when the endpoint is a machine.
     pub fn slot_number(&self) -> Option<i32> {
-        match &self.metadata {
-            Some(EndpointMetadata::Machine(machine)) => machine.slot_number,
-            _ => None,
-        }
+        self.machine_metadata()
+            .and_then(|machine| machine.slot_number)
     }
 
+    /// Returns the compute tray index when the endpoint is a machine.
     pub fn tray_index(&self) -> Option<i32> {
-        match &self.metadata {
-            Some(EndpointMetadata::Machine(machine)) => machine.tray_index,
-            _ => None,
-        }
+        self.machine_metadata()
+            .and_then(|machine| machine.tray_index)
     }
 
+    /// Returns the NVLink domain UUID associated with the endpoint, when known.
     pub fn nvlink_domain_uuid(&self) -> Option<NvLinkDomainId> {
         match &self.metadata {
             Some(EndpointMetadata::Machine(machine)) => machine.nvlink_domain_uuid,
-            _ => None,
+            Some(EndpointMetadata::Switch(switch)) => switch.nvlink_domain_uuid,
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => power_shelf.nvlink_domain_uuid,
+            None => None,
         }
     }
 
@@ -186,11 +243,171 @@ pub struct MetricSample {
     pub context: Option<SensorThresholdContext>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogSeverity {
+    Unspecified,
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl LogSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "UNSPECIFIED",
+            Self::Trace => "TRACE",
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+            Self::Fatal => "FATAL",
+        }
+    }
+}
+
+impl std::fmt::Display for LogSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Log event emitted by collectors and consumed by sinks.
 #[derive(Clone, Debug)]
 pub struct LogRecord {
+    /// Human-readable log message or emitted structured body.
     pub body: String,
-    pub severity: String,
+
+    /// Severity, decoded by the collector from its source's own vocabulary.
+    pub severity: LogSeverity,
+
+    /// Sink-visible metadata used for filtering, grouping, and correlation.
     pub attributes: Vec<MetricLabel>,
+
+    /// Optional diagnostic payload carrier kept separate until a sink opts in.
+    pub diagnostic_record: Option<DiagnosticLogRecord>,
+}
+
+impl LogRecord {
+    pub(crate) const DECODED_PROTOBUF_PAYLOAD_ATTRIBUTE: &'static str = "protobuf.decoded_payload";
+
+    /// Converts the collector-internal log record into the record a sink emits.
+    ///
+    /// Diagnostic payloads stay in a separate carrier until this boundary so
+    /// sinks can drop them by default. When diagnostics are enabled, the
+    /// opaque payload is embedded in the log body and diagnostic metadata is
+    /// retained as attributes for filtering and correlation.
+    /// Records without a diagnostic carrier are borrowed unchanged.
+    pub(crate) fn emitted_log_record(&self, include_diagnostics: bool) -> Cow<'_, Self> {
+        let Some(diagnostic_record) = &self.diagnostic_record else {
+            return Cow::Borrowed(self);
+        };
+
+        /// Serializes parent and diagnostic fields into an emitted log body.
+        fn diagnostic_body(
+            message: &str,
+            diagnostic_record: &DiagnosticLogRecord,
+        ) -> Option<String> {
+            let diagnostic_data = if diagnostic_record.body.is_empty() {
+                None
+            } else {
+                Some(diagnostic_record.body.as_str())
+            };
+
+            let diagnostic_attributes = diagnostic_record
+                .attributes
+                .iter()
+                .map(|(key, value)| DiagnosticLogBodyAttribute {
+                    key: key.as_ref(),
+                    value: value.as_str(),
+                })
+                .collect();
+
+            let body = DiagnosticLogBody {
+                message,
+                diagnostic_data,
+                diagnostic_attributes,
+            };
+
+            serde_json::to_string(&body).ok()
+        }
+
+        let mut body = self.body.clone();
+        let mut attributes = self.attributes.clone();
+
+        if include_diagnostics {
+            if let Some(diagnostic_body) = diagnostic_body(self.body.as_str(), diagnostic_record) {
+                body = diagnostic_body;
+            }
+
+            attributes.extend_from_slice(&diagnostic_record.attributes);
+        }
+
+        Cow::Owned(Self {
+            body,
+            severity: self.severity,
+            attributes,
+            diagnostic_record: None,
+        })
+    }
+
+    /// Removes decoded protobuf JSON while preserving all other log content.
+    pub(crate) fn without_decoded_protobuf_payload(&self) -> Cow<'_, Self> {
+        if !self
+            .attributes
+            .iter()
+            .any(|(key, _)| key.as_ref() == Self::DECODED_PROTOBUF_PAYLOAD_ATTRIBUTE)
+        {
+            return Cow::Borrowed(self);
+        }
+
+        Cow::Owned(Self {
+            body: self.body.clone(),
+            severity: self.severity,
+            attributes: self
+                .attributes
+                .iter()
+                .filter(|(key, _)| key.as_ref() != Self::DECODED_PROTOBUF_PAYLOAD_ATTRIBUTE)
+                .cloned()
+                .collect(),
+            diagnostic_record: self.diagnostic_record.clone(),
+        })
+    }
+}
+
+/// Diagnostic payload attached to a primary log record.
+///
+/// The payload body stays opaque. Sinks that opt in fold the parent message and
+/// diagnostic payload into emitted log bodies, while retaining Redfish metadata
+/// as attributes for filtering and correlation.
+#[derive(Clone, Debug)]
+pub struct DiagnosticLogRecord {
+    /// Opaque diagnostic payload body, such as base64-encoded CPER text.
+    pub body: String,
+
+    /// Redfish diagnostic metadata and parent correlation attributes.
+    pub attributes: Vec<MetricLabel>,
+}
+
+/// JSON body emitted when a sink folds diagnostics into a parent log record.
+#[derive(Serialize)]
+struct DiagnosticLogBody<'a> {
+    message: &'a str,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_data: Option<&'a str>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostic_attributes: Vec<DiagnosticLogBodyAttribute<'a>>,
+}
+
+/// Diagnostic metadata entry embedded in an emitted diagnostic log body.
+#[derive(Serialize)]
+struct DiagnosticLogBodyAttribute<'a> {
+    key: &'a str,
+    value: &'a str,
 }
 
 #[derive(Clone, Debug)]
@@ -200,10 +417,26 @@ pub struct FirmwareInfo {
     pub attributes: Vec<MetricLabel>,
 }
 
+/// Placement of the sensor behind a sensor probe result.
+///
+/// Lets a consumer attribute a reading to its power supply without parsing
+/// the sensor name. Each field is present only when the sensor carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SensorAttribution {
+    /// Redfish `PowerSupply` `Id` the sensor belongs to. `None` when the sensor
+    /// is not related to a power supply.
+    pub powersupply_id: Option<String>,
+    /// Sensor `PhysicalContext` in snake case, for example `power_supply`.
+    /// `None` for probes that are not sensors.
+    pub physical_context: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HealthReportSuccess {
     pub probe_id: Probe,
     pub target: Option<String>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +445,8 @@ pub struct HealthReportAlert {
     pub target: Option<String>,
     pub message: String,
     pub classifications: Vec<Classification>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -243,18 +478,29 @@ pub enum CollectorEvent {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum ReportSource {
     BmcSensors,
+    BmcEvents,
     BmcLeakDetectors,
+
+    /// NMX-C `DomainStateInfo` health observations.
+    NmxcDomainState,
+
     TrayLeakDetection,
     RackLeakDetection,
+    NvueLeakage,
+    GpuInventory,
 }
 
 impl ReportSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BmcSensors => "bmc-sensors",
+            Self::BmcEvents => "bmc-events",
             Self::BmcLeakDetectors => "bmc-leak-detectors",
+            Self::NmxcDomainState => "nmxc-domain-state",
             Self::TrayLeakDetection => "tray-leak-detection",
             Self::RackLeakDetection => "rack-leak-detection",
+            Self::NvueLeakage => "nvue-leakage",
+            Self::GpuInventory => "gpu-inventory",
         }
     }
 }
@@ -262,14 +508,27 @@ impl ReportSource {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum Probe {
     Sensor,
+    IntrusionSensorTriggered,
     LeakDetection,
+
+    /// Health state reported by the NMX-C controller.
+    NmxControllerHealth,
+
+    NvueLeakage,
+    GpuInventory,
 }
 
 impl Probe {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Sensor => "BmcSensor",
+            Self::IntrusionSensorTriggered => "IntrusionSensorTriggered",
             Self::LeakDetection => "BmcLeakDetection",
+            Self::NmxControllerHealth => "NmxControllerHealth",
+            Self::NvueLeakage => "NvueLeakage",
+            // Reuse the existing shared "SkuValidation" probe id so OOB GPU-count
+            // alerts dedup with the machine-controller's in-band SKU alerts.
+            Self::GpuInventory => "SkuValidation",
         }
     }
 }
@@ -281,6 +540,7 @@ pub enum Classification {
     SensorCritical,
     SensorFatal,
     SensorFailure,
+    PreventAllocations,
     Leak,
     LeakDetector,
 }
@@ -293,6 +553,7 @@ impl Classification {
             Self::SensorCritical => "SensorCritical",
             Self::SensorFatal => "SensorFatal",
             Self::SensorFailure => "SensorFailure",
+            Self::PreventAllocations => "PreventAllocations",
             Self::Leak => "Leak",
             Self::LeakDetector => "LeakDetector",
         }
@@ -389,7 +650,7 @@ mod tests {
     use mac_address::MacAddress;
 
     use super::*;
-    use crate::endpoint::{MachineData, PowerShelfData, SwitchData};
+    use crate::endpoint::{MachineData, PowerShelfData, SharedSystemUuid, SwitchData};
 
     #[derive(Clone, Copy)]
     enum ContextKind {
@@ -406,6 +667,9 @@ mod tests {
         slot_number: Option<i32>,
         tray_index: Option<i32>,
         nvlink_domain_uuid: Option<String>,
+        machine_serial: Option<String>,
+        driver_version: Option<String>,
+        component_type: Option<&'static str>,
         switch_id: Option<String>,
         switch_serial: Option<String>,
         switch_endpoint_role: Option<SwitchEndpointRole>,
@@ -433,6 +697,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum AlertCase {
         WithTarget,
+        Intrusion,
         WithoutClassifications,
     }
 
@@ -477,15 +742,15 @@ mod tests {
     }
 
     fn nvlink_domain_id() -> NvLinkDomainId {
-        NvLinkDomainId::from_str("00000000-0000-0000-0000-000000000000")
-            .expect("valid NVLink domain id")
+        NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
+            .expect("valid non-nil NVLink domain id")
     }
 
     fn addr() -> BmcAddr {
         BmcAddr {
             ip: IpAddr::from_str("10.0.0.1").expect("valid IP"),
             port: Some(443),
-            mac: MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC"),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC")),
         }
     }
 
@@ -493,24 +758,29 @@ mod tests {
         let metadata = match kind {
             ContextKind::Empty => None,
             ContextKind::Machine => Some(EndpointMetadata::Machine(MachineData {
-                machine_id: machine_id(),
+                machine_id: Some(machine_id()),
                 machine_serial: Some("MN-001".to_string()),
+                system_uuid: SharedSystemUuid::default(),
                 slot_number: Some(7),
                 tray_index: Some(3),
                 nvlink_domain_uuid: Some(nvlink_domain_id()),
+                driver_version: Some("570.82".to_string()),
             })),
             ContextKind::Switch => Some(EndpointMetadata::Switch(SwitchData {
                 id: Some(switch_id()),
                 serial: "SW-001".to_string(),
                 slot_number: Some(9),
                 tray_index: Some(4),
+                nvlink_domain_uuid: Some(nvlink_domain_id()),
                 endpoint_role: SwitchEndpointRole::Host,
                 is_primary: true,
+                nmxc_enabled: true,
                 nmxt_enabled: true,
             })),
             ContextKind::PowerShelf => Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id()),
-                serial: "PS-001".to_string(),
+                serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: None,
             })),
         };
 
@@ -520,7 +790,27 @@ mod tests {
             collector_type: "unit-test",
             metadata,
             rack_id: Some(RackId::new("rack-1")),
+            labels: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn cloned_event_context_observes_later_system_uuid_resolution() {
+        let system_uuid = SharedSystemUuid::default();
+        let mut context = context(ContextKind::Machine);
+        let Some(EndpointMetadata::Machine(machine)) = context.metadata.as_mut() else {
+            panic!("machine context");
+        };
+        machine.system_uuid = system_uuid.clone();
+        let collector_context = context.clone();
+        let expected = uuid::uuid!("4c4c4544-0044-4710-8052-cac04f4b4632");
+
+        system_uuid
+            .get_or_try_init(|| async { Ok::<_, std::convert::Infallible>(Some(expected)) })
+            .await
+            .expect("infallible UUID initialization");
+
+        assert_eq!(collector_context.system_uuid(), Some(expected));
     }
 
     fn summarize_context(context: EventContext) -> ContextSummary {
@@ -530,6 +820,9 @@ mod tests {
             slot_number: context.slot_number(),
             tray_index: context.tray_index(),
             nvlink_domain_uuid: context.nvlink_domain_uuid().map(|id| id.to_string()),
+            machine_serial: context.machine_serial().map(str::to_string),
+            driver_version: context.driver_version().map(str::to_string),
+            component_type: context.component_type(),
             switch_id: context.switch_id().map(|id| id.to_string()),
             switch_serial: context.switch_serial().map(str::to_string),
             switch_endpoint_role: context.switch_endpoint_role(),
@@ -561,12 +854,24 @@ mod tests {
     fn convert_alert(case: AlertCase) -> AlertSummary {
         let alert = match case {
             AlertCase::WithTarget => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
                 message: "fan warning".to_string(),
                 classifications: vec![Classification::SensorWarning, Classification::SensorFailure],
             },
+            AlertCase::Intrusion => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::IntrusionSensorTriggered,
+                target: Some("HostBMC".to_string()),
+                message: "Physical Chassis Intrusion Alert".to_string(),
+                classifications: vec![
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
             AlertCase::WithoutClassifications => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "rack leak".to_string(),
@@ -590,10 +895,12 @@ mod tests {
             },
             observed_at: Some(observed_at),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some("tray-1".to_string()),
             }],
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("temp0".to_string()),
                 message: "temperature critical".to_string(),
@@ -640,8 +947,16 @@ mod tests {
                 ReportSource::BmcSensors => "bmc-sensors",
             }
 
+            "BMC events" {
+                ReportSource::BmcEvents => "bmc-events",
+            }
+
             "BMC leak detectors" {
                 ReportSource::BmcLeakDetectors => "bmc-leak-detectors",
+            }
+
+            "NMX-C domain state" {
+                ReportSource::NmxcDomainState => "nmxc-domain-state",
             }
 
             "tray leak detection" {
@@ -650,6 +965,40 @@ mod tests {
 
             "rack leak detection" {
                 ReportSource::RackLeakDetection => "rack-leak-detection",
+            }
+
+            "NVUE leakage" {
+                ReportSource::NvueLeakage => "nvue-leakage",
+            }
+
+            "GPU inventory" {
+                ReportSource::GpuInventory => "gpu-inventory",
+            }
+        );
+    }
+
+    #[test]
+    fn report_target_strings() {
+        value_scenarios!(
+            run = HealthReportTarget::as_str;
+            "machine" {
+                HealthReportTarget::Machine => "machine",
+            }
+
+            "NVLink domain" {
+                HealthReportTarget::NvLinkDomain => "nvlink-domain",
+            }
+
+            "power shelf" {
+                HealthReportTarget::PowerShelf => "power-shelf",
+            }
+
+            "rack" {
+                HealthReportTarget::Rack => "rack",
+            }
+
+            "switch" {
+                HealthReportTarget::Switch => "switch",
             }
         );
     }
@@ -671,10 +1020,42 @@ mod tests {
                 },
             }
 
+            "intrusion sensor triggered" {
+                Probe::IntrusionSensorTriggered => ProbeSummary {
+                    as_str: "IntrusionSensorTriggered",
+                    health_report_id: "IntrusionSensorTriggered".to_string(),
+                },
+            }
+
             "leak detection" {
                 Probe::LeakDetection => ProbeSummary {
                     as_str: "BmcLeakDetection",
                     health_report_id: "BmcLeakDetection".to_string(),
+                },
+            }
+
+            "NMX-C controller health" {
+                Probe::NmxControllerHealth => ProbeSummary {
+                    as_str: "NmxControllerHealth",
+                    health_report_id: "NmxControllerHealth".to_string(),
+                },
+            }
+
+            "NVUE leakage" {
+                Probe::NvueLeakage => ProbeSummary {
+                    as_str: "NvueLeakage",
+                    health_report_id: "NvueLeakage".to_string(),
+                },
+            }
+
+            // GpuInventory is the one probe whose id is not just its own name -- it
+            // deliberately reuses "SkuValidation" so out-of-band GPU-count alerts dedup
+            // against the machine-controller's in-band SKU alerts. That makes it the row
+            // most worth pinning, and it was the only one missing.
+            "GPU inventory reuses the SkuValidation probe id" {
+                Probe::GpuInventory => ProbeSummary {
+                    as_str: "SkuValidation",
+                    health_report_id: "SkuValidation".to_string(),
                 },
             }
         );
@@ -726,6 +1107,13 @@ mod tests {
                 },
             }
 
+            "prevent allocations" {
+                Classification::PreventAllocations => ClassificationSummary {
+                    as_str: "PreventAllocations",
+                    health_report_classification: "PreventAllocations".to_string(),
+                },
+            }
+
             "leak" {
                 Classification::Leak => ClassificationSummary {
                     as_str: "Leak",
@@ -739,6 +1127,7 @@ mod tests {
                     health_report_classification: "LeakDetector".to_string(),
                 },
             }
+
         );
     }
 
@@ -762,6 +1151,7 @@ mod tests {
                     target: Some(HealthReportTarget::Machine),
                     observed_at: None,
                     successes: vec![HealthReportSuccess {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                     }],
@@ -776,6 +1166,7 @@ mod tests {
                     observed_at: None,
                     successes: vec![],
                     alerts: vec![HealthReportAlert {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                         message: "alert".to_string(),
@@ -795,6 +1186,7 @@ mod tests {
             };
             "success with target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::Sensor,
                     target: Some("fan0".to_string()),
                 } => ("BmcSensor".to_string(), Some("fan0".to_string())),
@@ -802,6 +1194,7 @@ mod tests {
 
             "success without target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 } => ("BmcLeakDetection".to_string(), None),
@@ -823,6 +1216,21 @@ mod tests {
                     classifications: vec![
                         "SensorWarning".to_string(),
                         "SensorFailure".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "intrusion alert" {
+                AlertCase::Intrusion => AlertSummary {
+                    id: "IntrusionSensorTriggered".to_string(),
+                    target: Some("HostBMC".to_string()),
+                    message: "Physical Chassis Intrusion Alert".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
                         "Hardware".to_string(),
                     ],
                 },
@@ -866,6 +1274,9 @@ mod tests {
                     slot_number: None,
                     tray_index: None,
                     nvlink_domain_uuid: None,
+                    machine_serial: None,
+                    driver_version: None,
+                    component_type: None,
                     switch_id: None,
                     switch_serial: None,
                     switch_endpoint_role: None,
@@ -886,6 +1297,9 @@ mod tests {
                     slot_number: Some(7),
                     tray_index: Some(3),
                     nvlink_domain_uuid: Some(nvlink_domain_id().to_string()),
+                    machine_serial: Some("MN-001".to_string()),
+                    driver_version: Some("570.82".to_string()),
+                    component_type: Some("compute_node"),
                     switch_id: None,
                     switch_serial: None,
                     switch_endpoint_role: None,
@@ -905,7 +1319,10 @@ mod tests {
                     machine_id: None,
                     slot_number: None,
                     tray_index: None,
-                    nvlink_domain_uuid: None,
+                    nvlink_domain_uuid: Some(nvlink_domain_id().to_string()),
+                    machine_serial: None,
+                    driver_version: None,
+                    component_type: Some("nvlink_switch"),
                     switch_id: Some(switch_id().to_string()),
                     switch_serial: Some("SW-001".to_string()),
                     switch_endpoint_role: Some(SwitchEndpointRole::Host),
@@ -926,6 +1343,9 @@ mod tests {
                     slot_number: None,
                     tray_index: None,
                     nvlink_domain_uuid: None,
+                    machine_serial: None,
+                    driver_version: None,
+                    component_type: Some("power_shelf"),
                     switch_id: None,
                     switch_serial: None,
                     switch_endpoint_role: None,

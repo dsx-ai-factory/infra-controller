@@ -28,17 +28,17 @@ use crate::errors::CarbideCliResult;
 use crate::health_utils;
 use crate::rpc::ApiClient;
 
-pub fn get_empty_template() -> HealthReport {
+pub(crate) fn get_empty_template() -> HealthReport {
     HealthReport {
         source: "".to_string(),
         triggered_by: None,
         observed_at: Some(Utc::now()),
         successes: vec![HealthProbeSuccess {
-            id: HealthProbeId::from_str("test").unwrap(),
+            id: HealthProbeId::from_str("test").expect("should be valid HealthProbeId"),
             target: Some("".to_string()),
         }],
         alerts: vec![HealthProbeAlert {
-            id: HealthProbeId::from_str("test").unwrap(),
+            id: HealthProbeId::from_str("test").expect("should be valid HealthProbeId"),
             target: None,
             in_alert_since: None,
             message: "".to_string(),
@@ -52,14 +52,17 @@ pub fn get_empty_template() -> HealthReport {
     }
 }
 
-pub fn get_health_report(template: HealthReportTemplates, message: Option<String>) -> HealthReport {
+pub(crate) fn get_health_report(
+    template: HealthReportTemplates,
+    message: Option<String>,
+) -> HealthReport {
     let mut report = HealthReport {
         source: "admin-cli".to_string(),
         triggered_by: None,
         observed_at: Some(Utc::now()),
         successes: vec![],
         alerts: vec![HealthProbeAlert {
-            id: HealthProbeId::from_str("Maintenance").unwrap(),
+            id: HealthProbeId::from_str("Maintenance").expect("should be valid HealthProbeId"),
             target: None,
             in_alert_since: None,
             message: message.unwrap_or_default(),
@@ -74,7 +77,8 @@ pub fn get_health_report(template: HealthReportTemplates, message: Option<String
     match template {
         HealthReportTemplates::HostUpdate => {
             report.source = "host-update".to_string();
-            report.alerts[0].id = HealthProbeId::from_str("HostUpdateInProgress").unwrap();
+            report.alerts[0].id = HealthProbeId::from_str("HostUpdateInProgress")
+                .expect("should be valid HealthProbeId");
             report.alerts[0].target = Some("admin-cli".to_string());
         }
         HealthReportTemplates::InternalMaintenance => {
@@ -165,7 +169,7 @@ pub fn get_health_report(template: HealthReportTemplates, message: Option<String
     report
 }
 
-pub async fn handle_health_report(
+pub(super) async fn handle_health_report(
     command: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -183,13 +187,13 @@ pub async fn handle_health_report(
             )?;
 
             if options.print_only {
-                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                println!("{}", serde_json::to_string_pretty(&report)?);
                 return Ok(());
             }
 
             api_client
                 .machine_insert_health_report_override(
-                    options.machine_id,
+                    &options.machine_id,
                     report.into(),
                     options.replace,
                 )
@@ -213,240 +217,341 @@ pub async fn handle_health_report(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::collections::HashSet;
 
-    use health_report::{HealthAlertClassification, HealthProbeId};
+    use carbide_test_support::{Check, check_values};
 
     use super::*;
 
-    #[test]
-    fn test_tenant_reported_issue_template() {
-        let report = get_health_report(
-            HealthReportTemplates::TenantReportedIssue,
-            Some("Customer reported network connectivity issues".to_string()),
-        );
+    struct TemplateInput {
+        template: HealthReportTemplates,
+        message: Option<&'static str>,
+    }
 
-        assert_eq!(report.source, "tenant-reported-issue");
-        assert_eq!(report.alerts.len(), 1);
+    #[derive(Debug, PartialEq, Eq)]
+    struct ReportProjection {
+        source: String,
+        triggered_by: Option<String>,
+        observed_at_present: bool,
+        successes: Vec<SuccessProjection>,
+        alerts: Vec<AlertProjection>,
+    }
 
-        let alert = &report.alerts[0];
-        assert_eq!(
-            alert.id,
-            HealthProbeId::from_str("TenantReportedIssue").unwrap()
-        );
-        assert_eq!(alert.target, Some("tenant-reported".to_string()));
-        assert_eq!(
-            alert.message,
-            "Customer reported network connectivity issues"
-        );
-        assert!(alert.tenant_message.is_none());
+    #[derive(Debug, PartialEq, Eq)]
+    struct SuccessProjection {
+        id: String,
+        target: Option<String>,
+    }
 
-        // Check classifications
-        assert_eq!(alert.classifications.len(), 2);
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::prevent_allocations())
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
+    #[derive(Debug, PartialEq, Eq)]
+    struct AlertProjection {
+        id: String,
+        target: Option<String>,
+        in_alert_since_present: bool,
+        message: String,
+        tenant_message: Option<String>,
+        classifications: Vec<String>,
+    }
+
+    struct ExpectedReport<'a> {
+        source: &'a str,
+        alert_id: &'a str,
+        target: Option<&'a str>,
+        message: &'a str,
+        classifications: &'a [&'a str],
+    }
+
+    fn project_report(report: HealthReport) -> ReportProjection {
+        let HealthReport {
+            source,
+            triggered_by,
+            observed_at,
+            successes,
+            alerts,
+        } = report;
+
+        ReportProjection {
+            source,
+            triggered_by,
+            observed_at_present: observed_at.is_some(),
+            successes: successes
+                .into_iter()
+                .map(|success| {
+                    let HealthProbeSuccess { id, target } = success;
+                    SuccessProjection {
+                        id: id.as_str().to_string(),
+                        target,
+                    }
+                })
+                .collect(),
+            alerts: alerts
+                .into_iter()
+                .map(|alert| {
+                    let HealthProbeAlert {
+                        id,
+                        target,
+                        in_alert_since,
+                        message,
+                        tenant_message,
+                        classifications,
+                    } = alert;
+                    AlertProjection {
+                        id: id.as_str().to_string(),
+                        target,
+                        in_alert_since_present: in_alert_since.is_some(),
+                        message,
+                        tenant_message,
+                        classifications: classifications
+                            .into_iter()
+                            .map(|classification| classification.as_str().to_string())
+                            .collect(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn expected_report(expected: ExpectedReport<'_>) -> ReportProjection {
+        ReportProjection {
+            source: expected.source.to_string(),
+            triggered_by: None,
+            observed_at_present: true,
+            successes: vec![],
+            alerts: vec![AlertProjection {
+                id: expected.alert_id.to_string(),
+                target: expected.target.map(str::to_string),
+                in_alert_since_present: false,
+                message: expected.message.to_string(),
+                tenant_message: None,
+                classifications: expected
+                    .classifications
+                    .iter()
+                    .map(|classification| (*classification).to_string())
+                    .collect(),
+            }],
+        }
+    }
+
+    fn expected_report_without_alerts(source: &str) -> ReportProjection {
+        ReportProjection {
+            source: source.to_string(),
+            triggered_by: None,
+            observed_at_present: true,
+            successes: vec![],
+            alerts: vec![],
+        }
     }
 
     #[test]
-    fn test_request_repair_template() {
-        let report = get_health_report(
-            HealthReportTemplates::RequestRepair,
-            Some("Hardware diagnostics indicate memory failure".to_string()),
-        );
+    fn health_report_templates() {
+        let message = "test message";
 
-        assert_eq!(report.source, health_report::REPAIR_REQUEST_MERGE_SOURCE);
-        assert_eq!(report.alerts.len(), 1);
+        let checks = [
+            Check {
+                scenario: "host update",
+                input: TemplateInput {
+                    template: HealthReportTemplates::HostUpdate,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "host-update",
+                    alert_id: "HostUpdateInProgress",
+                    target: Some("admin-cli"),
+                    message,
+                    classifications: &["PreventAllocations", "SuppressExternalAlerting"],
+                }),
+            },
+            Check {
+                scenario: "internal maintenance",
+                input: TemplateInput {
+                    template: HealthReportTemplates::InternalMaintenance,
+                    message: None,
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "maintenance",
+                    alert_id: "Maintenance",
+                    target: None,
+                    message: "",
+                    classifications: &[
+                        "PreventAllocations",
+                        "SuppressExternalAlerting",
+                        "ExcludeFromStateMachineSla",
+                    ],
+                }),
+            },
+            Check {
+                scenario: "out for repair",
+                input: TemplateInput {
+                    template: HealthReportTemplates::OutForRepair,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "manual-maintenance",
+                    alert_id: "Maintenance",
+                    target: Some("OutForRepair"),
+                    message,
+                    classifications: &[
+                        "PreventAllocations",
+                        "SuppressExternalAlerting",
+                        "ExcludeFromStateMachineSla",
+                    ],
+                }),
+            },
+            Check {
+                scenario: "degraded",
+                input: TemplateInput {
+                    template: HealthReportTemplates::Degraded,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "manual-maintenance",
+                    alert_id: "Maintenance",
+                    target: Some("Degraded"),
+                    message,
+                    classifications: &["PreventAllocations", "SuppressExternalAlerting"],
+                }),
+            },
+            Check {
+                scenario: "validation",
+                input: TemplateInput {
+                    template: HealthReportTemplates::Validation,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "manual-maintenance",
+                    alert_id: "Maintenance",
+                    target: Some("Validation"),
+                    message,
+                    classifications: &["SuppressExternalAlerting"],
+                }),
+            },
+            Check {
+                scenario: "suppress external alerting",
+                input: TemplateInput {
+                    template: HealthReportTemplates::SuppressExternalAlerting,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "suppress-paging",
+                    alert_id: "Maintenance",
+                    target: Some("SuppressExternalAlerting"),
+                    message,
+                    classifications: &["SuppressExternalAlerting"],
+                }),
+            },
+            Check {
+                scenario: "mark healthy",
+                input: TemplateInput {
+                    template: HealthReportTemplates::MarkHealthy,
+                    message: Some(message),
+                },
+                expect: expected_report_without_alerts("admin-cli"),
+            },
+            Check {
+                scenario: "stop automatic recovery reboot",
+                input: TemplateInput {
+                    template: HealthReportTemplates::StopRebootForAutomaticRecoveryFromStateMachine,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "manual-maintenance",
+                    alert_id: "Maintenance",
+                    target: Some("admin-cli"),
+                    message,
+                    classifications: &["StopRebootForAutomaticRecoveryFromStateMachine"],
+                }),
+            },
+            Check {
+                scenario: "tenant reported issue",
+                input: TemplateInput {
+                    template: HealthReportTemplates::TenantReportedIssue,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "tenant-reported-issue",
+                    alert_id: "TenantReportedIssue",
+                    target: Some("tenant-reported"),
+                    message,
+                    classifications: &["PreventAllocations", "SuppressExternalAlerting"],
+                }),
+            },
+            Check {
+                scenario: "online repair request",
+                input: TemplateInput {
+                    template: HealthReportTemplates::RequestOnlineRepair,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "request-online-repair",
+                    alert_id: "RequestOnlineRepair",
+                    target: Some("request-online-repair"),
+                    message,
+                    classifications: &[
+                        "PreventAllocations",
+                        "SuppressExternalAlerting",
+                        "PreventInstanceDeletion",
+                    ],
+                }),
+            },
+            Check {
+                scenario: "repair request",
+                input: TemplateInput {
+                    template: HealthReportTemplates::RequestRepair,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "repair-request",
+                    alert_id: "RequestRepair",
+                    target: Some("repair-requested"),
+                    message,
+                    classifications: &["PreventAllocations", "SuppressExternalAlerting"],
+                }),
+            },
+        ];
 
-        let alert = &report.alerts[0];
-        assert_eq!(alert.id, HealthProbeId::from_str("RequestRepair").unwrap());
-        assert_eq!(alert.target, Some("repair-requested".to_string()));
+        let covered_templates = checks
+            .iter()
+            .map(|check| format!("{:?}", check.input.template))
+            .collect::<HashSet<_>>();
+        let defined_templates = <HealthReportTemplates as clap::ValueEnum>::value_variants()
+            .iter()
+            .map(|template| format!("{template:?}"))
+            .collect::<HashSet<_>>();
         assert_eq!(
-            alert.message,
-            "Hardware diagnostics indicate memory failure"
+            covered_templates, defined_templates,
+            "every health-report template must have a table row"
         );
-        assert!(alert.tenant_message.is_none());
 
-        // Check classifications
-        assert_eq!(alert.classifications.len(), 2);
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::prevent_allocations())
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
+        check_values(checks, |TemplateInput { template, message }| {
+            project_report(get_health_report(template, message.map(str::to_string)))
+        });
     }
 
     #[test]
-    fn test_tenant_reported_issue_template_with_empty_message() {
-        let report = get_health_report(HealthReportTemplates::TenantReportedIssue, None);
-
-        assert_eq!(report.source, "tenant-reported-issue");
-        assert_eq!(report.alerts[0].message, "");
-    }
-
-    #[test]
-    fn test_request_repair_template_with_empty_message() {
-        let report = get_health_report(HealthReportTemplates::RequestRepair, None);
-
-        assert_eq!(report.source, health_report::REPAIR_REQUEST_MERGE_SOURCE);
-        assert_eq!(report.alerts[0].message, "");
-    }
-
-    #[test]
-    fn test_new_templates_have_suppress_external_alerting() {
-        // Verify both new templates include SuppressExternalAlerting classification
-        let tenant_report = get_health_report(
-            HealthReportTemplates::TenantReportedIssue,
-            Some("test".to_string()),
-        );
-        let repair_report = get_health_report(
-            HealthReportTemplates::RequestRepair,
-            Some("test".to_string()),
-        );
-
-        // Both should suppress external alerting
-        assert!(
-            tenant_report.alerts[0]
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
-        assert!(
-            repair_report.alerts[0]
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
-
-        let request_online_repair = get_health_report(
-            HealthReportTemplates::RequestOnlineRepair,
-            Some("test".to_string()),
-        );
-        assert!(
-            request_online_repair.alerts[0]
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
-        assert!(
-            request_online_repair.alerts[0]
-                .classifications
-                .contains(&HealthAlertClassification::prevent_instance_deletion())
-        );
-    }
-
-    #[test]
-    fn test_request_online_repair_template() {
-        let report = get_health_report(
-            HealthReportTemplates::RequestOnlineRepair,
-            Some("Online repair handoff for stuck repair workflow".to_string()),
-        );
-
+    fn empty_health_report_template() {
         assert_eq!(
-            report.source,
-            health_report::REQUEST_ONLINE_REPAIR_MERGE_SOURCE
-        );
-        assert_eq!(report.alerts.len(), 1);
-
-        let alert = &report.alerts[0];
-        assert_eq!(
-            alert.id,
-            HealthProbeId::from_str("RequestOnlineRepair").unwrap()
-        );
-        assert_eq!(
-            alert.target,
-            Some(health_report::REQUEST_ONLINE_REPAIR_MERGE_SOURCE.to_string())
-        );
-        assert_eq!(
-            alert.message,
-            "Online repair handoff for stuck repair workflow"
-        );
-        assert!(alert.tenant_message.is_none());
-
-        assert_eq!(alert.classifications.len(), 3);
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::prevent_allocations())
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::prevent_instance_deletion())
-        );
-    }
-
-    #[test]
-    fn test_request_online_repair_template_with_empty_message() {
-        let report = get_health_report(HealthReportTemplates::RequestOnlineRepair, None);
-
-        assert_eq!(
-            report.source,
-            health_report::REQUEST_ONLINE_REPAIR_MERGE_SOURCE
-        );
-        assert_eq!(report.alerts[0].message, "");
-    }
-
-    #[test]
-    fn test_internal_maintenance_template_excludes_from_state_machine_sla() {
-        let report = get_health_report(HealthReportTemplates::InternalMaintenance, None);
-
-        assert_eq!(report.source, "maintenance");
-        let alert = &report.alerts[0];
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::exclude_from_state_machine_sla()),
-            "InternalMaintenance should carry ExcludeFromStateMachineSla"
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::prevent_allocations())
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
-        );
-    }
-
-    #[test]
-    fn test_out_for_repair_template_excludes_from_state_machine_sla() {
-        let report = get_health_report(HealthReportTemplates::OutForRepair, None);
-
-        assert_eq!(report.source, "manual-maintenance");
-        let alert = &report.alerts[0];
-        assert_eq!(alert.target, Some("OutForRepair".to_string()));
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::exclude_from_state_machine_sla()),
-            "OutForRepair should carry ExcludeFromStateMachineSla"
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::prevent_allocations())
-        );
-        assert!(
-            alert
-                .classifications
-                .contains(&HealthAlertClassification::suppress_external_alerting())
+            project_report(get_empty_template()),
+            ReportProjection {
+                source: String::new(),
+                triggered_by: None,
+                observed_at_present: true,
+                successes: vec![SuccessProjection {
+                    id: "test".to_string(),
+                    target: Some(String::new()),
+                }],
+                alerts: vec![AlertProjection {
+                    id: "test".to_string(),
+                    target: None,
+                    in_alert_since_present: false,
+                    message: String::new(),
+                    tenant_message: None,
+                    classifications: vec![
+                        "PreventAllocations".to_string(),
+                        "PreventHostStateChanges".to_string(),
+                        "SuppressExternalAlerting".to_string(),
+                    ],
+                }],
+            }
         );
     }
 }

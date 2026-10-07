@@ -25,8 +25,9 @@ When an attribute of an API object is being deprecated:
 ```json
 {
     "id": "123e4567-e89b-12d3-a456-426614174000",
-    "name": "test-object",
-    "description": "Test object",
+    "org": "example-org",
+    "displayName": "Example Org", // Deprecated in favor of orgDisplayName
+    "orgDisplayName": "Example Org",
     "status": "Pending",
     "deprecations": [
         {
@@ -49,14 +50,14 @@ When an API endpoint is being deprecated:
 ```json
 {
     "id": "123e4567-e89b-12d3-a456-426614174000",
-    "name": "test-endpoint",
-    "description": "Test endpoint",
+    "name": "example-endpoint-resource",
+    "description": "Example endpoint resource",
     "status": "Pending",
     "deprecations": [
         {
-            "endpoint": "POST /org/:orgName/nico/infrastructure-provider",
+            "endpoint": "POST /org/:orgName/nico/resource/example",
             "takeActionBy": "2026-06-08T00:00:00Z",
-            "notice": "`POST /org/:orgName/nico/infrastructure-provider` has been deprecated. Please take action prior to the specified date"
+            "notice": "`POST /org/:orgName/nico/resource/example` has been deprecated. Please take action prior to the specified date"
         }
     ]
 }
@@ -74,8 +75,8 @@ When a query param is being deprecated:
 ```json
 {
     "id": "123e4567-e89b-12d3-a456-426614174000",
-    "name": "test-query-param",
-    "description": "Test query param",
+    "name": "example-endpoint-resource",
+    "description": "Example endpoint resource",
     "status": "Pending",
     "deprecations": [
         {
@@ -101,13 +102,39 @@ Deprecation notices continue to be returned for one more release cycle after the
 
 Endpoints that have deprecations will be grouped here. Following deprecations are in effect:
 
-- Currently there are no active deprecations
+### Operating System
+
+- `isCloudInit` on create and update requests is deprecated and ignored. The value returned in API responses is derived from whether `userData` is non-empty.
+
+### Tenant Account
+
+- `accountNumber`, `subscriptionId`, and `subscriptionTier` attributes were deprecated and will be removed on **September 10th, 2026 0:00 UTC**. Please update your usage accordingly.
+
+### Allocation
+
+- `ResourceTypeID` attribute on Allocation Constraint was deprecated in favor of `resourceTypeId` and will be removed on **September 10th, 2026 0:00 UTC**. Please use `resourceTypeId` instead.
+
+### Instance Type
+
+- `id` attribute on Machine Instance Type association was deprecated in favor of `machineId` and will be removed on **September 10th, 2026 0:00 UTC**. Please use `machineId` instead.
+
+### NVLink Logical Partition
+
+- `nvLinklogicalPartitionId` attribute on NVLink Interface was deprecated in favor of `nvLinkLogicalPartitionId` and will be removed on **September 10th, 2026 0:00 UTC**. Please use `nvLinkLogicalPartitionId` instead.
+
+### Network Security Group
+
+- `object_id` attribute on Network Security Group propagation details was deprecated in favor of `objectId` and will be removed on **September 10th, 2026 0:00 UTC**. Please use `objectId` instead.
+
+### Instance
+
+- `infrastructureProviderId` query parameter on the list Instances endpoint was deprecated and will be removed on **October 10th, 2026 0:00 UTC**. Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use the `siteId` parameter to scope results to a specific Infrastructure Provider's Sites.
 
 ## Recent Deprecations
 
-Following deprecations were introduced in the recent past:
+Following deprecations were removed from the API in the recent past:
 
 ### Site
 
-- `rackLevelAdministration` capability attribute was deprecated in favor of `flow` and was removed on May 13th, 2026 0:00 UTC. Please use `flow` instead.
-- `isRackLevelAdministrationEnabled` query parameter was deprecated in favor of `isFlowEnabled` and was removed on May 13th, 2026 0:00 UTC. Please use `isFlowEnabled` instead.
+- `rackLevelAdministration` capability attribute was deprecated in favor of `flow` and was removed on **May 13th, 2026 0:00 UTC**. Please use `flow` instead.
+- `isRackLevelAdministrationEnabled` query parameter was deprecated in favor of `isFlowEnabled` and was removed on **May 13th, 2026 0:00 UTC**. Please use `isFlowEnabled` instead.

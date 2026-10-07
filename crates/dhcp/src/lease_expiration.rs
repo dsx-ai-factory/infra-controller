@@ -28,8 +28,9 @@ use crate::{CONFIG, CarbideDhcpContext, tls};
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LeaseExpirationResult {
     Success = 0,
-    InvalidAddress = 1,
-    ApiError = 2,
+    FeatureDisabled = 1,
+    InvalidAddress = 2,
+    ApiError = 3,
 }
 
 /// Called from the C++ lease4_expire / lease6_expire callouts to release
@@ -44,6 +45,8 @@ pub unsafe extern "C" fn carbide_expire_lease(
     ip_address: *const c_char,
     mac_address: *const c_char,
 ) -> LeaseExpirationResult {
+    // SAFETY: Kea keeps the required IP C string readable and NUL-terminated
+    // through this synchronous call, including its nested `block_on`.
     let ip_str = unsafe {
         match CStr::from_ptr(ip_address).to_str() {
             Ok(s) => s,
@@ -54,6 +57,8 @@ pub unsafe extern "C" fn carbide_expire_lease(
     let mac_str = if mac_address.is_null() {
         None
     } else {
+        // SAFETY: A non-null optional MAC is a NUL-terminated Kea string that
+        // remains readable through this synchronous call.
         unsafe {
             match CStr::from_ptr(mac_address).to_str() {
                 Ok(s) if !s.is_empty() => Some(s),
@@ -101,6 +106,10 @@ fn expire_lease_at(
                 }
                 rpc::ExpireDhcpLeaseStatus::NotFound => {
                     log::info!("No allocation found for expired lease {ip_str}");
+                }
+                rpc::ExpireDhcpLeaseStatus::FeatureDisabled => {
+                    log::info!("Feature is disabled at NICo");
+                    return LeaseExpirationResult::FeatureDisabled;
                 }
             }
             LeaseExpirationResult::Success

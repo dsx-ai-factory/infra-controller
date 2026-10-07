@@ -49,16 +49,16 @@ const CLIENT_SECRET_HEADER: &str = "client_secret";
 const CLIENT_CREDENTIALS_FLOW_SESSION_EXPIRATION_SECONDS: u32 = 600;
 
 #[derive(Debug, Deserialize)]
-pub struct AuthRequest {
+pub(super) struct AuthRequest {
     code: Option<String>,
     state: Option<String>,
 }
 
-pub async fn callback(
+pub(super) async fn callback(
     AxumState(_state): AxumState<Arc<Api>>,
     request_headers: HeaderMap,
     Query(query): Query<AuthRequest>,
-    Extension(oauth2_layer): Extension<Option<Oauth2Layer>>,
+    Extension(oauth2_layer): Extension<Option<Arc<Oauth2Layer>>>,
 ) -> AuthCallbackResponse {
     use AuthCallbackError::*;
     let Some(oauth2_layer) = oauth2_layer else {
@@ -85,6 +85,7 @@ pub async fn callback(
         // which includes an access token.
         let _ = match oauth2_layer
             .client
+            .clone()
             .set_client_secret(ClientSecret::new(client_secret.to_string()))
             .exchange_client_credentials()
             .add_scope(Scope::new(format!("{client_id}/.default")))
@@ -373,13 +374,13 @@ pub async fn callback(
 ///
 /// Note: Use the Error variant to return INTERNAL_SERVER_ERROR, don't use
 /// (INTERNAL_SERVER_ERROR, "error string"), as the latter will not be logged properly.
-pub enum AuthCallbackResponse {
+pub(super) enum AuthCallbackResponse {
     Response(Response),
     Error(AuthCallbackError),
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum AuthCallbackError {
+pub(super) enum AuthCallbackError {
     #[error("expected oauth2 extension layer is empty")]
     EmptyOauth2Layer,
     #[error(
@@ -423,7 +424,10 @@ impl IntoResponse for AuthCallbackResponse {
         match self {
             AuthCallbackResponse::Response(response) => response,
             AuthCallbackResponse::Error(error) => {
-                tracing::error!("internal server error running auth_callback: {error}");
+                tracing::error!(
+                    error = %error,
+                    "internal server error running auth_callback",
+                );
                 (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
             }
         }
@@ -439,9 +443,9 @@ where
     fn from(value: (StatusCode, S)) -> Self {
         if !value.0.is_success() {
             tracing::info!(
-                "auth_callback was unsuccessful with status code {}: {}",
-                value.0.as_u16(),
-                value.1.to_string()
+                http_status = value.0.as_u16(),
+                response_detail = %value.1.to_string(),
+                "auth_callback returned an unsuccessful response",
             );
         }
         AuthCallbackResponse::Response((value.0, value.1.to_string()).into_response())
@@ -466,7 +470,7 @@ impl From<Response> for AuthCallbackResponse {
 /// What's really being parsed in the claims portion
 /// of the JWT, which holds a lot of user-data.
 #[derive(Debug, Deserialize)]
-pub struct OauthUserData {
+struct OauthUserData {
     oid: String,
     name: String,
     unique_name: String,
@@ -475,7 +479,7 @@ pub struct OauthUserData {
 /// A container for the list of groups return in
 /// a graph response to a /transitiveMemberOf call
 #[derive(Debug, Deserialize)]
-pub struct OauthUserGroups {
+struct OauthUserGroups {
     value: Vec<OauthUserGroup>,
 }
 
@@ -483,7 +487,7 @@ pub struct OauthUserGroups {
 /// returned in a graph response to a
 /// /transitiveMemberOf call
 #[derive(Debug, Deserialize)]
-pub struct OauthUserGroup {
+struct OauthUserGroup {
     id: String,
 }
 
@@ -494,7 +498,7 @@ struct AsyncRequestHandlerWithTimeouts<'a> {
 }
 
 impl<'a> AsyncRequestHandlerWithTimeouts<'a> {
-    pub fn new(client: &'a reqwest::Client) -> Self {
+    fn new(client: &'a reqwest::Client) -> Self {
         Self { client }
     }
 }
@@ -504,7 +508,9 @@ impl<'c> oauth2::AsyncHttpClient<'c> for AsyncRequestHandlerWithTimeouts<'_> {
     type Future =
         Pin<Box<dyn Future<Output = Result<http::Response<Vec<u8>>, Self::Error>> + Send + 'c>>;
 
-    fn call(&'c self, request: HttpRequest) -> Self::Future {
+    fn call(&'c self, mut request: HttpRequest) -> Self::Future {
+        // Inject the issuing span's W3C trace context into the outgoing OAuth2 request (#2438).
+        trace_propagation::inject_current_context(request.headers_mut());
         Box::pin(async move {
             let response = self.client.execute(request.try_into()?).await?;
             let mut result = http::Response::builder().status(response.status());
@@ -517,7 +523,7 @@ impl<'c> oauth2::AsyncHttpClient<'c> for AsyncRequestHandlerWithTimeouts<'_> {
 
             if status.is_server_error() || status.is_client_error() {
                 let body_str = std::str::from_utf8(&body).unwrap_or_default();
-                tracing::error!(body_str=%body_str,"error response when making http request for oauth2 flow");
+                tracing::error!(response_body = %body_str,"error response when making http request for oauth2 flow");
             }
 
             Ok(result.body(body).unwrap())

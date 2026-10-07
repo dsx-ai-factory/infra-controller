@@ -46,11 +46,30 @@ spec:
           spec:
             description: DPUDeviceSpec defines the content of DPUDevice
             properties:
+              bmcCredentialSecretName:
+                description: |-
+                  BMCCredentialSecretName is the name of a Secret in the same namespace containing
+                  per-device BMC credentials. The secret must contain a "password" key with the BMC credential value.
+                  If specified, this password takes precedence over the shared bmc-shared-password secret.
+                type: string
+              bmcFactoryResetPolicy:
+                default: OnInitialization
+                description: |-
+                  BMCFactoryResetPolicy controls whether DPF resets this DPU BMC to factory defaults
+                  while initializing the DPUDevice. The reset clears all BMC configuration, including
+                  network settings, so the BMC must obtain its address via DHCP.
+                  - OnInitialization (default): reset the BMC once, while the DPUDevice is initialized.
+                  - Never: never reset.
+                  The value is honored only until the factory reset step finishes; changing it
+                  after BMCFactoryResetReady is True has no effect.
+                enum:
+                - OnInitialization
+                - Never
+                type: string
               bmcIp:
                 description: |-
                   BMCIP is the IP address of the BMC (Base Management Controller) on the device.
                   This is used for remote management and monitoring of the device.
-                  This value is immutable and should not be changed once set.
                   Example: "10.1.2.3"
                 format: ipv4
                 type: string
@@ -66,6 +85,32 @@ spec:
                 type: integer
                 x-kubernetes-validations:
                 - message: BMCPort is immutable
+                  rule: self == oldSelf
+              cluster:
+                description: Specifies details on the K8S cluster to join
+                properties:
+                  nodeAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: NodeAnnotations specifies annotations to be added
+                      to the DPU cluster node for this device.
+                    type: object
+                  nodeLabels:
+                    additionalProperties:
+                      type: string
+                    description: NodeLabels specifies labels to be added to the DPU
+                      cluster node for this device.
+                    type: object
+                type: object
+              nicDeviceCount:
+                description: |-
+                  NICDeviceCount is the expected number of NIC devices used by dpu-agent provisioning.
+                  Valid range is 1 to 8. When unspecified, it defaults to 8.
+                maximum: 8
+                minimum: 1
+                type: integer
+                x-kubernetes-validations:
+                - message: NICDeviceCount is immutable
                   rule: self == oldSelf
               numberOfPFs:
                 default: 1
@@ -86,7 +131,6 @@ spec:
                   Example: "900-9D3B4-00SV-EA0"
 
                   Deprecated: This field is deprecated and will be removed in a future version. Use status.opn instead.
-                pattern: ^\d{3}-[A-Z0-9]{5}-[A-Z0-9]{4}-[A-Z0-9]{3}$
                 type: string
                 x-kubernetes-validations:
                 - message: OPN is immutable
@@ -110,7 +154,6 @@ spec:
                   Example: "MT_0001234567", "MT25066004C7"
 
                   Deprecated: This field is deprecated and will be removed in a future version. Use status.psid instead.
-                pattern: ^MT_?[A-Z0-9]+$
                 type: string
                 x-kubernetes-validations:
                 - message: PSID is immutable
@@ -126,11 +169,28 @@ spec:
                 x-kubernetes-validations:
                 - message: Serial Number is immutable
                   rule: self == oldSelf
+              values:
+                description: |-
+                  Values contains free-form per-device values used to render a DPUFlavorTemplate
+                  into a concrete generated DPUFlavor for this device.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - serialNumber
             type: object
           status:
             properties:
+              bmcCredentialSecretName:
+                description: BMCCredentialSecretName is the name of the Secret last
+                  used successfully for BMC authentication.
+                type: string
+              bmcFactoryResetRequestTime:
+                description: |-
+                  BMCFactoryResetRequestTime is when DPF submitted ResetToDefaults to the BMC.
+                  It is nil until the request has been accepted, and once set it is never cleared:
+                  it is what keeps the BMC from being reset again for this DPUDevice.
+                format: date-time
+                type: string
               bmcIp:
                 description: |-
                   BMCIP is the IP address of the BMC (Base Management Controller) on the device.
@@ -149,6 +209,41 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              bmcServerCertificate:
+                description: BMCServerCertificate reports the BMC mTLS server certificate
+                  rotation state.
+                properties:
+                  lastRotationTime:
+                    description: LastRotationTime is the time DPF last successfully
+                      rotated the certificate.
+                    format: date-time
+                    type: string
+                  notAfter:
+                    description: |-
+                      NotAfter is the expiry time of the certificate currently installed. It is taken
+                      from the issued certificate at rotation time.
+                    format: date-time
+                    type: string
+                  observedManualTrigger:
+                    description: |-
+                      ObservedManualTrigger records the value of the manual rotation annotation that
+                      was last honored, so the same trigger is not processed twice.
+                    type: string
+                type: object
+              caTrustBundle:
+                description: CATrustBundle stores trust bundle reconciliation progress
+                  for the DPUDevice.
+                properties:
+                  lastUpdateTime:
+                    description: LastUpdateTime is when the last successful reconciliation
+                      completed.
+                    format: date-time
+                    type: string
+                  observedBundleHash:
+                    description: ObservedBundleHash records the last successfully
+                      applied bundle hash.
+                    type: string
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -255,7 +350,6 @@ spec:
                   It's used to track the device's lifecycle and for inventory management.
                   This value is discovered and should not be changed once set.
                   Example: "MT_0001234567", "MT25066004C7"
-                pattern: ^MT_?[A-Z0-9]+$
                 type: string
               secureBoot:
                 description: SecureBoot indicates the current UEFI Secure Boot state.

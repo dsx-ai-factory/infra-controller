@@ -21,9 +21,13 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use nv_redfish::bmc_http::{BmcCredentials, CacheableError, HttpClient};
+use nv_redfish::bmc_http::{
+    BmcCredentials, CacheableError, HttpClient, RejectedUriReferenceError, RequestError,
+};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
-use nv_redfish::core::{BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse};
+use nv_redfish::core::{
+    BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tower::ServiceExt;
@@ -39,6 +43,7 @@ pub enum Error {
     Json(serde_json::Error),
     Http(axum::http::Error),
     Cache(String),
+    RejectedUriReference(String),
     NotSupported(&'static str),
 }
 
@@ -51,12 +56,33 @@ impl fmt::Display for Error {
             Self::Json(err) => write!(f, "json error: {err}"),
             Self::Http(err) => write!(f, "http build error: {err}"),
             Self::Cache(reason) => write!(f, "cache error: {reason}"),
+            Self::RejectedUriReference(reason) => {
+                write!(f, "rejected URI reference: {reason}")
+            }
             Self::NotSupported(what) => write!(f, "not supported in test client: {what}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl BmcError for Error {
+    fn error_class(&self) -> BmcErrorClass {
+        match self {
+            Self::InvalidResponse { status, .. } => BmcErrorClass::HttpResponse {
+                status: status.as_u16(),
+            },
+            Self::Json(_) => BmcErrorClass::ResponseParse,
+            _ => BmcErrorClass::Other,
+        }
+    }
+}
+
+impl RequestError for Error {
+    fn rejected_uri_reference(error: RejectedUriReferenceError) -> Self {
+        Self::RejectedUriReference(error.reason)
+    }
+}
 
 impl CacheableError for Error {
     fn is_cached(&self) -> bool {
@@ -153,6 +179,18 @@ impl HttpClient for AxumRouterHttpClient {
         serde_json::from_value(value).map_err(Error::Json)
     }
 
+    async fn poll<T>(
+        &self,
+        _: Url,
+        _: &BmcCredentials,
+        _: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        Err(Error::NotSupported("Task polling is not supported yet"))
+    }
+
     async fn post<B, T>(
         &self,
         _: Url,
@@ -229,5 +267,35 @@ impl HttpClient for AxumRouterHttpClient {
         V: Serialize + Send + Sync,
     {
         Err(Error::NotSupported("Multipart update is not supported yet"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn bmc_error_classification_distinguishes_http_and_parse_failures() {
+        let cases = [
+            Check {
+                scenario: "server failure must not be skipped as an unclassified account slot",
+                input: Error::InvalidResponse {
+                    url: Url::parse("http://bmc.example/redfish/v1/AccountService/Accounts/1")
+                        .unwrap(),
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    text: String::new(),
+                },
+                expect: BmcErrorClass::HttpResponse { status: 503 },
+            },
+            Check {
+                scenario: "malformed response",
+                input: Error::Json(serde_json::from_str::<bool>("invalid").unwrap_err()),
+                expect: BmcErrorClass::ResponseParse,
+            },
+        ];
+
+        check_values(cases, |error| error.error_class());
     }
 }

@@ -31,9 +31,9 @@ Clear the boot override on a machine interface:
     $ nico-admin-cli boot-override clear 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: BootOverride,
+    inner: BootOverride,
 }
 
 impl From<Args> for MachineInterfaceId {

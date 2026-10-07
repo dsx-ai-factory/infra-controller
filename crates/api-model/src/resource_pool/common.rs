@@ -15,16 +15,17 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
 use crate::resource_pool::{ResourcePool, ResourcePoolStats};
 
-/// DPU VPC loopback IP pool
-/// Must match a pool defined in dev/resource_pools.toml
+/// IPv4 DPU loopback IP pool.
 pub const LOOPBACK_IP: &str = "lo-ip";
+/// IPv6 DPU loopback IP pool used by the FNN underlay.
+pub const LOOPBACK_IP_V6: &str = "lo-ip-v6";
 /// VNI pool. FabricNetworkConfiguration
 /// Must match a pool defined in dev/resource_pools.toml
 pub const VNI: &str = "vni";
@@ -46,11 +47,6 @@ pub const VPC_DPU_LOOPBACK: &str = "vpc-dpu-lo";
 // DPA VNI pool: VNI for the DPA
 pub const DPA_VNI: &str = "dpa-vni";
 
-/// IPs used for creating a secondary overlay on
-/// a separate set of VTEPs.  The initial use-case is
-/// VMAAS GENEVE VTEPs.
-pub const SECONDARY_VTEP_IP: &str = "secondary-vtep-ip";
-
 /// Returns the name of the resource pool used for a certain IB fabric
 pub fn ib_pkey_pool_name(fabric: &str) -> String {
     format!("ib_fabrics.{fabric}.pkey")
@@ -71,6 +67,7 @@ pub struct CommonPools {
 #[derive(Debug)]
 pub struct EthernetPools {
     pub pool_loopback_ip: Arc<ResourcePool<IpAddr>>,
+    pub pool_loopback_ip_v6: Arc<ResourcePool<Ipv6Addr>>,
     pub pool_vlan_id: Arc<ResourcePool<i16>>,
     pub pool_vni: Arc<ResourcePool<i32>>,
     pub pool_vpc_vni: Arc<ResourcePool<i32>>,
@@ -78,7 +75,6 @@ pub struct EthernetPools {
     pub pool_dpa_vni: Arc<ResourcePool<i32>>,
     pub pool_fnn_asn: Arc<ResourcePool<u32>>,
     pub pool_vpc_dpu_loopback_ip: Arc<ResourcePool<IpAddr>>,
-    pub pool_secondary_vtep_ip: Arc<ResourcePool<IpAddr>>,
 }
 
 /// ResourcePools that are used for infiniband

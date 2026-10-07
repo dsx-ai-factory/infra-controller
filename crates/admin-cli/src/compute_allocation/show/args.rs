@@ -36,26 +36,26 @@ Filter by instance type:
     $ nico-admin-cli compute-allocation show --instance-type-id DGX-H100-640GB
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'i',
         long,
         help = "Optional, compute allocation ID to restrict the search"
     )]
-    pub id: Option<ComputeAllocationId>,
+    pub(crate) id: Option<ComputeAllocationId>,
 
     #[clap(
         short = 't',
         long,
         help = "Optional, tenant organization ID used to filter results"
     )]
-    pub tenant_organization_id: Option<String>,
+    pub(crate) tenant_organization_id: Option<String>,
 
     #[clap(short = 'n', long, help = "Optional, name used to filter results")]
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
 
     #[clap(long, help = "Optional, instance type ID used to filter results")]
-    pub instance_type_id: Option<String>,
+    pub(crate) instance_type_id: Option<String>,
 }
 
 impl From<Args> for FindComputeAllocationIdsRequest {

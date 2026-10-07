@@ -22,19 +22,21 @@
 
 carbide_api_url = "https://carbide-api.forge:443"
 
-# tui_enabled enables a TUI view of machine-a-tron. If set to true, you need to
-# specify log_file to redirect logs.
-#
-# tui_enabled = true
-
-# Logs will be written here, because machine-a-tron shows a TUI by default. You
-# can omit this if tui_enabled = false
+# Logs will be written here.
 log_file = "/tmp/mat.log"
 
-# Network interface to bind to when creating addresses for BMC mocks. BMC mocks
-# will be configured with whatever IP address carbide assigns them, so they will
-# assign new addresses to this interface via `ip address add`.
-interface = "cni0"
+# Log format can be "compact" (the default) or "logfmt". Kubernetes deployments
+# use logfmt on stdout so log collectors can preserve structured tracing fields.
+log_format = "compact"
+
+# DHCP uses the Carbide API directly by default. To exercise the DHCP server's
+# relayed packet path, select udp_relay and configure its destination, local
+# reply socket, and a reply address reachable from the DHCP server. In
+# Kubernetes, the listen address can be 0.0.0.0 while the advertised address is
+# supplied from the pod IP. The listen port must match the DHCP server's relay
+# response port.
+#
+# dhcp = { type = "udp_relay", server_address = "127.0.0.1:6767", listen_address = "127.0.0.1:6768", advertise_address = "127.0.0.1" }
 
 # Set use_pxe_api to true if you want to avoid running a PXE server and instead
 # have machine-a-tron use the carbide API to simulate PXE requests.
@@ -58,17 +60,43 @@ pxe_server_port = "8080"
 #
 bmc_mock_port = 2000
 
+# Set to true to start an independent IPMI/SOL simulator for each IPMI-capable
+# host BMC. This requires ipmi_sim and ipmitool to be available in PATH.
+#
+enable_ipmi_simulation = false
+
 # If set, host/DPU BMC mocks start with the factory default password rotated
 # to this value. Leave unset to keep the factory default.
 #
 # host_bmc_password = "vault-password"
 # dpu_bmc_password = "vault-password"
 
+# A rack type creates all of its devices automatically:
+# - wiwynn_gb200_nvl72: 18 compute trays, 9 ND5200 switches, 8 power shelves
+# - lenovo_gb300_nvl72: 18 compute trays, 9 N5700 switches, 6 power shelves
+# A rack no expected rack group declares yet is declared as its own group
+# (protocol NVLINK_V5), and an existing group is used as is. rack_profile_id
+# must be the profile nico-api derives from the rack's group: GB200_NVL72R1_C2G4_WIWYNN
+# for wiwynn_gb200_nvl72 and GB300_NVL72R1_C2G4_LENOVO for lenovo_gb300_nvl72 when
+# machine-a-tron declares the group. machine-a-tron checks this at startup. The
+# nico-api chart ships both.
+#
+# [racks.default]
+# type = "lenovo_gb300_nvl72"
+# rack_profile_id = "GB300_NVL72R1_C2G4_LENOVO"
+# ids = ["rack-001", "rack-002"]
+# dpu_reboot_delay = 20
+# host_reboot_delay = 10
+# oob_dhcp_relay_address = "192.168.192.1"
+# admin_dhcp_relay_address = "192.168.176.1"
+# host_inband_dhcp_relay_address = "192.168.177.1"
+
 [machines.config]
+# Standalone devices can share any rack ID. They cannot be added to one of the
+# atomic racks declared above.
+# rack_id = "rack-001"
 host_count = 3
-vpc_count = 10
 dpu_per_host_count = 1
-subnets_per_vpc = 2
 dpu_reboot_delay = 20  # in units of seconds
 host_reboot_delay = 20 # in units of seconds
 
@@ -78,11 +106,8 @@ host_reboot_delay = 20 # in units of seconds
 # (which carbide uses to determine what network the request came from.)
 oob_dhcp_relay_address = "192.168.2.1"
 admin_dhcp_relay_address = "192.164.0.1"
-
-# Configures the location of some JSON templates machine-a-tron uses as a basis
-# for mocking certain data. There is no reason to change this from the default.
-#
-# template_dir = "dev/machine-a-tron/templates"
+# Direct host DHCP for zero-DPU hosts and DPUs operating as plain NICs.
+host_inband_dhcp_relay_address = "192.165.0.1"
 
 # Set this to a hostname or IP If you want machine-a-tron to register its BMC-mock as the bmc_proxy host through the
 # dynamic configuration API. (this will be combined with bmc_mock_port to form a host:port pair.) This is useful if you

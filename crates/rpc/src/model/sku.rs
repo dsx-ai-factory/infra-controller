@@ -235,6 +235,9 @@ impl From<rpc::forge::SkuComponentStorage> for SkuComponentStorage {
         SkuComponentStorage {
             model: value.model,
             count: value.count,
+            min_size_mb: value.min_size_mb,
+            max_size_mb: value.max_size_mb,
+            pci_patterns: value.pci_patterns,
         }
     }
 }
@@ -246,6 +249,9 @@ impl From<SkuComponentStorage> for rpc::forge::SkuComponentStorage {
             model: value.model,
             capacity_mb: 0u32,
             count: value.count,
+            min_size_mb: value.min_size_mb,
+            max_size_mb: value.max_size_mb,
+            pci_patterns: value.pci_patterns,
         }
     }
 }

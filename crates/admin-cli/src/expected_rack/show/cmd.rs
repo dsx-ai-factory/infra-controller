@@ -23,7 +23,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn show(
+pub(super) async fn show(
     query: &Args,
     api_client: &ApiClient,
     output_format: OutputFormat,

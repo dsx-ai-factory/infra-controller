@@ -12,6 +12,29 @@ exposedPorts:
 ### Cert directory on the host (also used as the container mountPath).
 certsDir: /opt/forge
 
+### Bootstrap CA source. The default preserves the legacy PXE download and
+### renders the historical bare `init-container` invocation.
+bootstrapCa:
+  source: legacy_download
+  # Empty uses the agent's historical built-in URL. Set only to override it in
+  # legacy_download mode.
+  url: ""
+  # Required only for mounted mode. kind must be Secret or ConfigMap. The
+  # selected key is projected as /var/run/secrets/nico-bootstrap-ca/ca.pem.
+  # Mounted mode requires certsDir=/opt/forge, the dpu-agent's CA output path.
+  # Use a new, versioned object name for CA rotation. Updating data under the
+  # same name does not change the pod template or rerun the init container.
+  object: {}
+  # object:
+  #   kind: Secret
+  #   name: nico-bootstrap-ca-v1
+  #   key: ca.crt
+  # ConfigMap example:
+  # object:
+  #   kind: ConfigMap
+  #   name: nico-bootstrap-ca-v1
+  #   key: ca.crt
+
 ### Service specific values ###
 image:
   repository: ""
@@ -30,6 +53,15 @@ securityContext:
       - NET_RAW
 tolerations: []
 
+lldpSidecar:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
 ### Values for agent operation
 hbn:
   nvue_https_address: "nvue"
@@ -44,3 +76,38 @@ dhcp_server:
 fmds:
   # Will be updated in dpf_services.rs
   service_name: ""
+  # Empty keeps NICo's Forge signer.
+  sign_proxy_url: ""
+
+### Serves the agent's Prometheus /metrics and /ready on metricsPort
+### (default 8888). /ready is bound to this endpoint and backs the
+### readinessProbe, so setting this to false removes the metrics port and the
+### readinessProbe and writes `prometheus-enabled = false` into the agent config.
+prometheusEnabled: true
+
+### Readiness probe for the dpu-agent container, rendered verbatim. /ready
+### turns 200 after the first successful HBN, DHCP and FMDS apply. Set to {}
+### to disable the probe. Not rendered when prometheusEnabled is false.
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+### Supplemental NVUE network config (operator escape hatch, e.g. the DPF
+### storage test bed). References an externally managed ConfigMap in the
+### release namespace holding an RFC 7386 JSON Merge Patch document that the
+### dpu-agent merges into the `set` section of its generated NVUE config
+### before every apply. Top-level keys must be NVUE sections the agent models
+### (bridge, evpn, interface, nve, router, system, vrf, acl); a `null` value
+### deletes a key. Applies uniformly to every DPU in this release's
+### DaemonSet. The ConfigMap is not part of this chart; the chart only mounts
+### it. An empty name disables the mount and the merge. key defaults to
+### supplemental.json.
+supplementalNetworkConfig: {}
+# supplementalNetworkConfig:
+#   name: my-supplemental-network-config
+#   key: supplemental.json

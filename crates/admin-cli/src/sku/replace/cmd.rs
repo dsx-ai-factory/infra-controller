@@ -22,7 +22,7 @@ use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 use crate::sku::show::cmd::show_skus_table;
 
-pub async fn replace(
+pub(super) async fn replace(
     args: CreateSkuOptions,
     api_client: &ApiClient,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,

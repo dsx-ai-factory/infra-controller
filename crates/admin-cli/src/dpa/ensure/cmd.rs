@@ -33,7 +33,7 @@ use crate::rpc::ApiClient;
 // interface already exists, while ensure will create the
 // interface if it doesn't exist, or return the existing
 // interface otherwise.
-pub async fn ensure(
+pub(super) async fn ensure(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

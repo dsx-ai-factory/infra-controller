@@ -42,11 +42,13 @@ use carbide_uuid::measured_boot::{
 use clap::Parser;
 use measured_boot::records::MeasurementApprovedType;
 
+use crate::cfg::dispatch::Dispatch;
+
 /// CmdSite provides a container for the `site` subcommand, which itself
 /// contains other subcommands for working with the site (i.e. export
 /// and import).
-#[derive(Parser, Debug)]
-pub enum CmdSite {
+#[derive(Parser, Debug, Dispatch)]
+pub(crate) enum CmdSite {
     #[clap(about = "Import a site from an export file.", visible_alias = "i")]
     Import(Import),
 
@@ -54,9 +56,11 @@ pub enum CmdSite {
     Export(Export),
 
     #[clap(subcommand, about = "Managed trusted machines.", visible_alias = "m")]
+    #[dispatch]
     TrustedMachine(TrustedMachine),
 
     #[clap(subcommand, about = "Managed trusted profiles.", visible_alias = "p")]
+    #[dispatch]
     TrustedProfile(TrustedProfile),
 }
 
@@ -69,9 +73,9 @@ Import a site model (profiles + bundles) from a JSON file:
     $ nico-admin-cli attestation measured-boot site import ./site.json
 
 ")]
-pub struct Import {
+pub(crate) struct Import {
     #[clap(help = "The path of the input JSON file.")]
-    pub path: String,
+    pub(super) path: String,
 }
 
 /// Export exports a site to stdout, a file, etc.
@@ -86,13 +90,13 @@ Export the site model to a file:
     $ nico-admin-cli attestation measured-boot site export --path ./site.json
 
 ")]
-pub struct Export {
+pub(crate) struct Export {
     #[clap(long, help = "An optional path to write the file to.")]
-    pub path: Option<String>,
+    pub(super) path: Option<String>,
 }
 
 /// TrustedMachine configures trusted machine settings.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Dispatch)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -108,7 +112,7 @@ Remove an approval by machine ID:
     by-machine-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub enum TrustedMachine {
+pub(crate) enum TrustedMachine {
     #[clap(
         about = "Approve a trusted machine for auto-promoting its measurements.",
         visible_alias = "a"
@@ -120,6 +124,7 @@ pub enum TrustedMachine {
         about = "Remove a trusted machine approval.",
         visible_alias = "r"
     )]
+    #[dispatch]
     Remove(RemoveMachine),
 
     #[clap(about = "List all active machine approvals.", visible_alias = "l")]
@@ -127,7 +132,7 @@ pub enum TrustedMachine {
 }
 
 /// TrustedProfile configures trusted profile settings.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Dispatch)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -143,7 +148,7 @@ Remove an approval by profile ID:
     by-profile-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub enum TrustedProfile {
+pub(crate) enum TrustedProfile {
     #[clap(
         about = "Allow auto-promoting of measurements from machines matching a profile.",
         visible_alias = "a"
@@ -155,6 +160,7 @@ pub enum TrustedProfile {
         about = "Remove a trusted profile approval.",
         visible_alias = "r"
     )]
+    #[dispatch]
     Remove(RemoveProfile),
 
     #[clap(about = "List all active profile approvals.", visible_alias = "l")]
@@ -176,18 +182,18 @@ Approve all machines persistently, restricted to specific PCR registers, with a 
     persist --pcr-registers 0,7 --comments \"trusted fleet\"
 
 ")]
-pub struct ApproveMachine {
+pub(crate) struct ApproveMachine {
     #[clap(help = "The machine-id to approve (or '*' for all).")]
-    pub machine_id: TrustedMachineId,
+    machine_id: TrustedMachineId,
 
     #[clap(required = true, help = "Whether to set `oneshot` or `persist`.")]
-    pub approval_type: MeasurementApprovedType,
+    approval_type: MeasurementApprovedType,
 
     #[clap(long, help = "Specific PCR register selector. All if unset.")]
-    pub pcr_registers: Option<String>,
+    pcr_registers: Option<String>,
 
     #[clap(long, help = "Optional comments about this approval.")]
-    pub comments: Option<String>,
+    comments: Option<String>,
 }
 
 /// RemoveMachine removes a machine from auto-approval, by approval ID
@@ -196,7 +202,7 @@ pub struct ApproveMachine {
 // The compiler yells it starts by "By", not really
 // understanding that its a part of the CLI UX.
 #[allow(clippy::enum_variant_names)]
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Dispatch)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -209,7 +215,7 @@ Remove a machine approval by machine ID:
     by-machine-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub enum RemoveMachine {
+pub(crate) enum RemoveMachine {
     #[clap(about = "Remove by approval ID.")]
     ByApprovalId(RemoveMachineByApprovalId),
 
@@ -228,9 +234,9 @@ Remove a machine approval by approval ID:
     by-approval-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct RemoveMachineByApprovalId {
+pub(crate) struct RemoveMachineByApprovalId {
     #[clap(help = "The approval-id to remove.")]
-    pub approval_id: MeasurementApprovedMachineId,
+    approval_id: MeasurementApprovedMachineId,
 }
 
 /// RemoveMachineByMachineId removes a trusted machine approval
@@ -244,9 +250,9 @@ Remove a machine approval by machine ID:
     by-machine-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct RemoveMachineByMachineId {
+pub(crate) struct RemoveMachineByMachineId {
     #[clap(help = "The machine-id to remove.")]
-    pub machine_id: TrustedMachineId,
+    machine_id: TrustedMachineId,
 }
 
 /// ListMachines is used to list all active machine approvals.
@@ -258,7 +264,7 @@ List all active machine approvals:
     $ nico-admin-cli attestation measured-boot site trusted-machine list
 
 ")]
-pub struct ListMachines {}
+pub(crate) struct ListMachines {}
 
 /// ApproveProfile approves a profile for auto-promoting its
 /// measurement journal entries into a golden measurement bundle.
@@ -275,18 +281,18 @@ Approve a profile persistently, restricted to specific PCR registers, with a com
     12345678-1234-5678-90ab-cdef01234567 persist --pcr-registers 0,7 --comments \"trusted SKU\"
 
 ")]
-pub struct ApproveProfile {
+pub(crate) struct ApproveProfile {
     #[clap(help = "The profile-id to approve.")]
-    pub profile_id: MeasurementSystemProfileId,
+    profile_id: MeasurementSystemProfileId,
 
     #[clap(required = true, help = "Whether to set `oneshot` or `persist`.")]
-    pub approval_type: MeasurementApprovedType,
+    approval_type: MeasurementApprovedType,
 
     #[clap(long, help = "Specific PCR register selector. All if unset.")]
-    pub pcr_registers: Option<String>,
+    pcr_registers: Option<String>,
 
     #[clap(long, help = "Optional comments about this approval.")]
-    pub comments: Option<String>,
+    comments: Option<String>,
 }
 
 /// RemoveProfile removes a machine from auto-approval, by approval ID
@@ -295,7 +301,7 @@ pub struct ApproveProfile {
 // The compiler yells it starts by "By", not really
 // understanding that its a part of the CLI UX.
 #[allow(clippy::enum_variant_names)]
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Dispatch)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -308,7 +314,7 @@ Remove a profile approval by profile ID:
     by-profile-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub enum RemoveProfile {
+pub(crate) enum RemoveProfile {
     #[clap(about = "Remove by approval ID.")]
     ByApprovalId(RemoveProfileByApprovalId),
 
@@ -327,9 +333,9 @@ Remove a profile approval by approval ID:
     by-approval-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct RemoveProfileByApprovalId {
+pub(crate) struct RemoveProfileByApprovalId {
     #[clap(help = "The approval-id to remove.")]
-    pub approval_id: MeasurementApprovedProfileId,
+    approval_id: MeasurementApprovedProfileId,
 }
 
 /// RemoveProfileByProfileId removes a trusted profile approval
@@ -343,9 +349,9 @@ Remove a profile approval by profile ID:
     by-profile-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct RemoveProfileByProfileId {
+pub(crate) struct RemoveProfileByProfileId {
     #[clap(help = "The profile-id to remove.")]
-    pub profile_id: MeasurementSystemProfileId,
+    profile_id: MeasurementSystemProfileId,
 }
 
 /// ListProfiles is used to list all active profile approvals.
@@ -357,7 +363,7 @@ List all active profile approvals:
     $ nico-admin-cli attestation measured-boot site trusted-profile list
 
 ")]
-pub struct ListProfiles {}
+pub(crate) struct ListProfiles {}
 
 impl From<ApproveMachine> for AddMeasurementTrustedMachineRequest {
     fn from(approve: ApproveMachine) -> Self {

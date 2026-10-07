@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateInfiniBandPartitionTestSuite struct {
@@ -37,13 +37,13 @@ func (s *UpdateInfiniBandPartitionTestSuite) Test_UpdateInfiniBandPartitionInven
 	var ibpManager ibpActivity.ManageInfiniBandPartition
 
 	siteID := uuid.New()
-	ibpInventory := &cwssaws.InfiniBandPartitionInventory{
-		IbPartitions: []*cwssaws.IBPartition{
+	ibpInventory := &corev1.InfiniBandPartitionInventory{
+		IbPartitions: []*corev1.IBPartition{
 			{
-				Id: &cwssaws.IBPartitionId{Value: uuid.NewString()},
+				Id: &corev1.IBPartitionId{Value: uuid.NewString()},
 			},
 			{
-				Id: &cwssaws.IBPartitionId{Value: uuid.NewString()},
+				Id: &corev1.IBPartitionId{Value: uuid.NewString()},
 			},
 		},
 	}
@@ -63,13 +63,13 @@ func (s *UpdateInfiniBandPartitionTestSuite) Test_UpdateInfiniBandPartitionInven
 	var ibpManager ibpActivity.ManageInfiniBandPartition
 
 	siteID := uuid.New()
-	InfiniBandPartitionInventory := &cwssaws.InfiniBandPartitionInventory{
-		IbPartitions: []*cwssaws.IBPartition{
+	InfiniBandPartitionInventory := &corev1.InfiniBandPartitionInventory{
+		IbPartitions: []*corev1.IBPartition{
 			{
-				Id: &cwssaws.IBPartitionId{Value: uuid.NewString()},
+				Id: &corev1.IBPartitionId{Value: uuid.NewString()},
 			},
 			{
-				Id: &cwssaws.IBPartitionId{Value: uuid.NewString()},
+				Id: &corev1.IBPartitionId{Value: uuid.NewString()},
 			},
 		},
 	}

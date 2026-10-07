@@ -56,6 +56,16 @@ impl HealthReportSources {
                 .contains_key(health_report::REQUEST_ONLINE_REPAIR_MERGE_SOURCE)
     }
 
+    /// The currently stored report for `source`, whichever mode it was applied
+    /// with. Used to carry per-alert state (such as `in_alert_since`) over from
+    /// the previous report when the same source reports again.
+    pub fn by_source(&self, source: &str) -> Option<&HealthReport> {
+        self.replace
+            .as_ref()
+            .filter(|r| r.source == source)
+            .or_else(|| self.merges.get(source))
+    }
+
     #[allow(clippy::should_implement_trait)]
     pub fn iter(&self) -> impl Iterator<Item = (&HealthReport, HealthReportApplyMode)> {
         self.merges
@@ -102,6 +112,70 @@ mod tests {
         assert!(sources.replace.is_none());
         assert!(sources.merges.is_empty());
         assert_eq!(sources.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn health_reports_by_source() {
+        // `by_source` finds the stored report for a source under either apply
+        // mode, checking `replace` first and falling back to `merges`. Each row
+        // projects the result to the found report's own source name, or None.
+        // Infallible, so every row `Yields`.
+        check_cases(
+            [
+                Case {
+                    scenario: "empty finds nothing",
+                    input: (sources(None, &[]), "absent"),
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "finds a merge source",
+                    input: (sources(None, &["source-a", "source-b"]), "source-b"),
+                    expect: Yields(Some("source-b".to_string())),
+                },
+                Case {
+                    scenario: "finds the replace source",
+                    input: (sources(Some("admin-replace"), &[]), "admin-replace"),
+                    expect: Yields(Some("admin-replace".to_string())),
+                },
+                Case {
+                    // A replace source under a different name must not shadow a
+                    // matching merge source.
+                    scenario: "falls through a non-matching replace to merges",
+                    input: (
+                        sources(Some("sre-override"), &["bmc-sensors"]),
+                        "bmc-sensors",
+                    ),
+                    expect: Yields(Some("bmc-sensors".to_string())),
+                },
+                Case {
+                    // Mirrors the removal path, which resolves replace before merges.
+                    // The lookup keys on the `merges` map key, so the entry's own
+                    // `source` field is free to carry a marker that reveals which
+                    // branch answered; a merges-first regression yields the marker.
+                    scenario: "replace wins when both hold the same source",
+                    input: (
+                        HealthReportSources {
+                            replace: Some(HealthReport::empty("dup".to_string())),
+                            merges: [(
+                                "dup".to_string(),
+                                HealthReport::empty("dup-from-merges".to_string()),
+                            )]
+                            .into(),
+                        },
+                        "dup",
+                    ),
+                    expect: Yields(Some("dup".to_string())),
+                },
+                Case {
+                    scenario: "unknown source finds nothing",
+                    input: (sources(Some("sre-override"), &["bmc-sensors"]), "other"),
+                    expect: Yields(None),
+                },
+            ],
+            |(sources, source): (HealthReportSources, &str)| {
+                Ok::<_, ()>(sources.by_source(source).map(|r| r.source.clone()))
+            },
+        );
     }
 
     #[test]

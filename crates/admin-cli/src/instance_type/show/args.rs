@@ -31,18 +31,18 @@ List instance types with allocation counts:
     $ nico-admin-cli instance-type show --show-stats true
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'i',
         long,
         help = "Optional, instance type ID to restrict the search"
     )]
-    pub id: Option<String>,
+    pub(super) id: Option<String>,
 
     #[clap(
         short = 's',
         long,
         help = "Optional, show counts for allocations of instance types"
     )]
-    pub show_stats: Option<bool>,
+    pub(super) show_stats: Option<bool>,
 }

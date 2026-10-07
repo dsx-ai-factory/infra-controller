@@ -33,18 +33,18 @@ List the peerings for one VPC:
     $ nico-admin-cli vpc-peering show --vpc-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         long,
         conflicts_with = "vpc_id",
         help = "The ID of the VPC peering to show"
     )]
-    pub id: Option<VpcPeeringId>,
+    pub(super) id: Option<VpcPeeringId>,
 
     #[clap(
         long,
         conflicts_with = "id",
         help = "The ID of the VPC to show VPC peerings for"
     )]
-    pub vpc_id: Option<VpcId>,
+    pub(super) vpc_id: Option<VpcId>,
 }

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -26,13 +26,13 @@ Snapshot the DPF CRs for a host machine:
     $ nico-admin-cli dpf snapshot 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: SnapshotQuery,
+    pub(super) inner: SnapshotQuery,
 }
 
 #[derive(Parser, Debug)]
-pub struct SnapshotQuery {
+pub(super) struct SnapshotQuery {
     /// Host machine id to snapshot. Must be a host (not a DPU) machine id.
-    pub host_machine_id: MachineId,
+    pub(super) host_machine_id: HostMachineId,
 }

@@ -15,18 +15,21 @@
  * limitations under the License.
  */
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ::db::work_lock_manager::WorkLockManagerHandle;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
+use rand::RngExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::config::IterationConfig;
 use crate::controller::{ControllerIteration, ControllerIterationId, IterationError, db};
 use crate::io::StateControllerIO;
+use crate::per_object::PerObjectStateRecorder;
 
 /// Periodically enqueues state handling tasks for all objects that are managed by the
 /// state controller.
@@ -39,6 +42,16 @@ pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
     pub(super) metric_emitter: Option<EnqueuerMetricsEmitter>,
     pub(super) cancel_token: CancellationToken,
     pub(super) iteration_config: IterationConfig,
+    /// When set, objects that disappear from the live set between iterations
+    /// have their per-object series cleared (they were deleted outside the
+    /// controller, so no handler iteration will ever observe the deletion).
+    pub(super) per_object_state: Option<PerObjectStateRecorder>,
+    /// The live object ids seen by the previous iteration.
+    pub(super) known_object_ids: HashSet<String>,
+    /// Removed ids re-cleared each iteration until the deadline, so a handler
+    /// task that was already running when its object was deleted cannot
+    /// resurrect the series after the first clear.
+    pub(super) pending_clears: HashMap<String, Instant>,
 }
 
 pub(super) struct SingleIterationResult {
@@ -59,7 +72,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         let err_jitter = (self.iteration_config.iteration_time.as_millis() / 5) as u64;
         let timer = PeriodicTimer::new(self.iteration_config.iteration_time);
 
-        loop {
+        while !self.cancel_token.is_cancelled() {
             let tick = timer.tick();
             let iteration_result = self.run_single_iteration().await;
 
@@ -68,7 +81,6 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
             // If a controller got the lock, the maximum delay is higher than for controllers
             // which failed to get the lock, which aims to give another bias to
             // a different controller.
-            use rand::RngExt;
             let iteration_max_jitter = if iteration_result.skipped_iteration {
                 err_jitter
             } else {
@@ -83,17 +95,15 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
                 .remaining()
                 .saturating_add(Duration::from_millis(jitter));
 
-            let cancelled_future = self.cancel_token.cancelled();
-            tokio::pin!(cancelled_future);
-            tokio::select! {
-                biased;
-                _ = &mut cancelled_future => {
-                    tracing::info!(controller=IO::LOG_SPAN_CONTROLLER_NAME, "PeriodicEnqueuer stop was requested");
-                    return;
-                }
-                _ = tokio::time::sleep(sleep_time) => {}
-            }
+            self.cancel_token
+                .run_until_cancelled(tokio::time::sleep(sleep_time))
+                .await;
         }
+
+        tracing::info!(
+            controller = IO::LOG_SPAN_CONTROLLER_NAME,
+            "PeriodicEnqueuer stop was requested"
+        );
     }
 
     /// Performs a single enqueuer iteration
@@ -144,7 +154,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
                 iteration_result.skipped_iteration = true;
             }
             Err(e) => {
-                tracing::error!(controller=IO::LOG_SPAN_CONTROLLER_NAME, err=?e, "PeriodicEnqueuer iteration failed");
+                tracing::error!(controller=IO::LOG_SPAN_CONTROLLER_NAME, error=?e, "PeriodicEnqueuer iteration failed");
                 controller_span.record("otel.status_code", "error");
                 // Writing this field will set the span status to error
                 // Therefore we only write it on errors
@@ -183,7 +193,11 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
             }
         };
 
-        tracing::trace!(iteration_data = ?locked_controller_iteration.iteration_data, "Starting iteration with ID ");
+        tracing::trace!(
+            iteration_id = locked_controller_iteration.iteration_data.id.0,
+            iteration_data = ?locked_controller_iteration.iteration_data,
+            "Starting controller iteration"
+        );
         iteration_metrics.iteration_id = Some(locked_controller_iteration.iteration_data.id);
 
         self.enqueue_objects(iteration_metrics).await?;
@@ -210,6 +224,37 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
             .map(|object_id| object_id.to_string())
             .collect();
         txn.commit().await?;
+
+        // Objects that vanished from the live set were deleted outside the
+        // controller, so no handler iteration will ever clear their
+        // per-object series — do it here, where the live set is known. The
+        // known set is rebuilt by moving ids out of the previous one, so the
+        // steady state allocates nothing.
+        if let Some(recorder) = &self.per_object_state {
+            let now = Instant::now();
+            let mut previous = std::mem::take(&mut self.known_object_ids);
+            for id in &queued_objects {
+                if let Some(known) = previous.take(id.as_str()) {
+                    self.known_object_ids.insert(known);
+                } else {
+                    // Re-created while a deletion re-clear was pending: it is
+                    // live again, stop clearing it.
+                    self.pending_clears.remove(id);
+                    self.known_object_ids.insert(id.clone());
+                }
+            }
+            // A handler task dispatched before the deletion may still be
+            // running and re-record after a clear, so removed ids stay on a
+            // re-clear list until no in-flight handler can outlive them.
+            let clear_until = now + self.iteration_config.max_object_handling_time;
+            for gone in previous {
+                self.pending_clears.insert(gone, clear_until);
+            }
+            self.pending_clears.retain(|id, deadline| {
+                recorder.clear(id);
+                *deadline > now
+            });
+        }
 
         // The transactions for listing and enqueuing are decoupled to avoid
         // any locking side-effects
@@ -266,7 +311,7 @@ impl EnqueuerMetricsEmitter {
         let num_enqueued_objects_counter = meter
             .u64_counter(format!("{object_type}_object_tasks_enqueued"))
             .with_description(format!(
-                "The amount of types that object handling tasks that have been freshly enqueued for objects of type {object_type}"
+                "Number of object handling tasks freshly enqueued for objects of type {object_type}"
             ))
             .build();
 

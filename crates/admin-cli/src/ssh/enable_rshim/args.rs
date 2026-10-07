@@ -30,7 +30,7 @@ Enable the RSHIM interface on a DPU BMC:
     $ nico-admin-cli ssh enable-rshim 192.0.2.10:22 admin mypassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: SshArgs,
+    pub(super) inner: SshArgs,
 }

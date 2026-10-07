@@ -8,29 +8,47 @@ description: "Overview of the NICo administrative web interface, authentication 
 NICo includes a built-in administrative web interface intended for operational debugging and inspection. It is served at the `/admin` path of the NICo API server and provides read-oriented views of infrastructure state alongside a limited set of administrative actions.
 
 <Warning>
-**Hardcoded Basic Auth has been removed as of NICo v0.7.0.**
-
-Previously, if SSO was not configured, the WebUI defaulted to basic authentication with a hardcoded credential. This fallback has been removed to resolve a P0 security vulnerability.
-
-- **Production / secure deployments**: Enable OIDC/SSO (`CARBIDE_WEB_AUTH_TYPE=oauth2`). See [Azure OIDC for Infra Controller Web UI](../playbooks/nico_web_oauth2.md) for setup instructions.
-- **Development / lab environments**: The WebUI operates with no authentication by default. Bind the service to localhost or restrict access using a network ACL or auth proxy (for example, `mod_proxy`).
-
-If your current workflows rely on the default basic auth credentials, transition to an OIDC provider or proxy-based authentication before updating to v0.7.0 or later.
+The WebUI defaults to Basic authentication. Helm installations generate and
+persist a password in `nico-api-web-basic-auth`. As a last-resort safeguard for
+non-Helm or older deployment manifests, if `CARBIDE_WEB_BASIC_AUTH_PASSWORD` is
+unset or empty, NICo generates a temporary 32-character password for that
+process and logs it at warning level. That fallback password is not persisted
+and changes on every process launch. Use the WebUI only through the
+TLS-protected endpoint.
 </Warning>
 
 ## Authentication
 
-Authentication mode is controlled by the `CARBIDE_WEB_AUTH_TYPE` environment variable.
+For Helm installations, configure `nico-api.webAuth.mode`. The default is
+`basic`; `oauth2` and `none` are explicit alternatives. A
+`CARBIDE_WEB_AUTH_TYPE` entry in `nico-api.extraEnv` takes precedence as a
+backward-compatibility contract.
 
 | Value | Behavior |
 |-------|----------|
-| *(unset)* or `none` | No authentication. A warning is logged at startup. Restrict access using network controls or a reverse proxy. |
+| *(unset)* or `basic` | HTTP Basic Auth with fixed username `admin`. Uses `CARBIDE_WEB_BASIC_AUTH_PASSWORD`, or a temporary password reported in the service logs when unset or empty. |
 | `oauth2` | Microsoft Entra (Azure AD) OIDC via PKCE flow. Group-based access enforcement via MS Graph API. |
-| `basic` | **Not supported.** The service returns an error on startup if this value is set. |
+| `none` | No in-process authentication. A warning is logged at startup; restrict access using network controls or an authenticating proxy. |
+
+For a default Helm installation, retrieve the generated password with the
+`kubectl` command printed in the release notes. To use an operator-managed
+credential instead:
+
+```yaml
+nico-api:
+  webAuth:
+    mode: basic
+    basic:
+      existingSecret:
+        name: nico-web-password
+        key: password
+```
 
 ### OAuth2 (Entra) Configuration
 
-When `CARBIDE_WEB_AUTH_TYPE=oauth2`, the following environment variables are required:
+When Helm's `nico-api.webAuth.mode` is `oauth2` (or the legacy
+`CARBIDE_WEB_AUTH_TYPE=oauth2` override is used), provide the following
+provider settings through `nico-api.extraEnv`:
 
 | Variable | Description |
 |----------|-------------|
@@ -54,7 +72,7 @@ The WebUI exposes views grouped by entity type. All views are read-only unless n
 | View | Path | Description |
 |------|------|-------------|
 | Home | `/admin/` | NICo version, DPU agent upgrade policy, active log filter, dynamic feature flags, and operator-configured tool links |
-| Machines | `/admin/machine` | All managed hosts; per-machine detail, health, validation status |
+| Machines | `/admin/machine` | All managed hosts; per-machine detail, health, validation status; assign/remove SKU on hosts (write) |
 | DPUs | `/admin/dpu` | DPU inventory and per-DPU detail; DPU agent version list at `/admin/dpu/versions` |
 | DPAs | `/admin/dpa` | DPA (Data Processing Accelerator) inventory |
 | Hosts | `/admin/host` | Host-only view of managed machines |

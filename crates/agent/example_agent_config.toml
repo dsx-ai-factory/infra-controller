@@ -18,6 +18,9 @@
 api-server = "http://localhost:50051"
 pxe-server = "http://127.0.0.1:8080"
 root-ca = "/home/amaslennikov/pcarbide/credentials/localhost.pem"
+# Unix socket where the agent serves node tokens to co-located services
+# (issue #355). Same default containerized (DPF) and on plain DPU OS.
+#local-api-socket = "/opt/forge/run/agent.sock"
 
 [machine]
 interface-id = "3048d658-0b13-4a5e-91cc-f47e45a031f9"
@@ -29,6 +32,8 @@ address = "0.0.0.0:7777"
 
 [telemetry]
 metrics-address = "0.0.0.0:8888"
+# Set to false to stop serving /metrics and /ready (readiness is bound to this endpoint). Default: true.
+prometheus-enabled = true
 
 # Optional [machine-identity]: rate limits and timeouts for GET …/meta-data/identity (e.g. /latest/meta-data/identity).
 # If you omit this section, defaults are: requests-per-second=3, burst=8,
@@ -44,3 +49,13 @@ metrics-address = "0.0.0.0:8888"
 [hbn]
 root-dir = "/var/lib/hbn"
 skip-reload = false
+
+# Optional [network]: agent-local network configuration knobs.
+# supplemental-config-path points at an RFC 7386 JSON Merge Patch document
+# (e.g. a mounted ConfigMap file) that the agent merges into the `set` section
+# of its generated NVUE config before every apply. Top-level keys must be NVUE
+# sections the agent models (bridge, evpn, interface, nve, router, system,
+# vrf, acl). The file's contents participate in change detection, so in-place
+# edits re-apply without an agent restart. If set, the file must be readable.
+# [network]
+# supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"

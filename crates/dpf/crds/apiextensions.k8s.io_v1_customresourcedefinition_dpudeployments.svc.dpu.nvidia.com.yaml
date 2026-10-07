@@ -31,8 +31,8 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          DPUDeployment is the Schema for the dpudeployments API. This object connects DPUServices with specific BFBs and
-          DPUServiceChains.
+          DPUDeployment is an object that describes a set of DPUServices and a DPUServiceChain that run a on a set of DPUs with
+          a given BFB or BlueFieldSoftware and DPUFlavor.
         properties:
           apiVersion:
             description: |-
@@ -57,10 +57,21 @@ spec:
               dpus:
                 description: DPUs contains the DPU related configuration
                 properties:
+                  astraEnabled:
+                    description: AstraEnabled indicates whether E/W NIC configuration
+                      (Astra) is enabled
+                    type: boolean
                   bfb:
                     description: |-
                       BFB is the name of the BFB object to be used in this DPUDeployment. It must be in the same namespace as the
                       DPUDeployment.
+                    minLength: 1
+                    type: string
+                  blueFieldSoftware:
+                    description: |-
+                      BlueFieldSoftware is the name of the BlueFieldSoftware object to be used in this DPUDeployment. It must be in the
+                      same namespace as the DPUDeployment.
+                    minLength: 1
                     type: string
                   dpuSetStrategy:
                     description: DPUSetStrategy is the strategy to use for the DPUSets
@@ -295,7 +306,15 @@ spec:
                   flavor:
                     description: |-
                       Flavor is the name of the DPUFlavor object to be used in this DPUDeployment. It must be in the same namespace as
-                      the DPUDeployment.
+                      the DPUDeployment. Exactly one of flavor or flavorTemplate must be set (mutually exclusive).
+                    minLength: 1
+                    type: string
+                  flavorTemplate:
+                    description: |-
+                      FlavorTemplate is the name of the DPUFlavorTemplate object to be rendered per-DPU (against each
+                      DPUDevice.spec.values) into a generated DPUFlavor. It must be in the same namespace as the DPUDeployment.
+                      Exactly one of flavor or flavorTemplate must be set (mutually exclusive).
+                    minLength: 1
                     type: string
                   nodeEffect:
                     description: NodeEffect is the effect the DPU has on Nodes during
@@ -358,16 +377,28 @@ spec:
                         - key
                         type: object
                     type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of taint, noEffect=true, drain=true, non-empty
+                        customLabel, non-empty customAction, hold=true must be set
+                      rule: '(has(self.taint) ? 1 : 0) + ((has(self.noEffect) && self.noEffect)
+                        ? 1 : 0) + ((has(self.customLabel) && size(self.customLabel)
+                        > 0) ? 1 : 0) + ((has(self.drain) && self.drain) ? 1 : 0)
+                        + ((has(self.customAction) && size(self.customAction) > 0)
+                        ? 1 : 0) + ((has(self.hold) && self.hold) ? 1 : 0) == 1'
                   secureBoot:
                     description: SecureBoot specifies whether UEFI Secure Boot should
                       be enabled.
                     type: boolean
                 required:
-                - bfb
                 - dpuSetStrategy
-                - flavor
                 - nodeEffect
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one of bfb or blueFieldSoftware must be specified
+                  rule: (has(self.bfb) && !has(self.blueFieldSoftware)) || (!has(self.bfb)
+                    && has(self.blueFieldSoftware))
+                - message: exactly one of flavor or flavorTemplate must be set
+                  rule: has(self.flavor) != has(self.flavorTemplate)
               revisionHistoryLimit:
                 default: 10
                 description: |-

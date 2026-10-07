@@ -144,6 +144,7 @@ impl TryFrom<Switch> for rpc::Switch {
                         lifecycle: Some(lifecycle),
                         fabric_manager_status,
                         fabric_manager_status_details,
+                        nvos_ports: Vec::new(),
                     }
                 }
                 (None, fabric_manager_status, fabric_manager_status_details) => rpc::SwitchStatus {
@@ -158,6 +159,7 @@ impl TryFrom<Switch> for rpc::Switch {
                     lifecycle: Some(lifecycle),
                     fabric_manager_status,
                     fabric_manager_status_details,
+                    nvos_ports: Vec::new(),
                 },
             },
         );
@@ -186,8 +188,10 @@ impl TryFrom<Switch> for rpc::Switch {
             status,
             deleted,
             controller_state,
-            bmc_info: None,
+            bmc_info: src.bmc_info.map(Into::into),
+            #[allow(deprecated)]
             nvos_info: None,
+            nvlink_domain_uuid: src.nvlink_domain_uuid,
             state_version,
             metadata: Some(src.metadata.into()),
             version: src.version.version_string(),
@@ -222,6 +226,10 @@ mod tests {
 
     #[test]
     fn try_from_switch_populates_state_reason() {
+        let nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e"
+            .parse()
+            .expect("valid NVLink domain UUID");
+
         let switch = Switch {
             id: SwitchId::from(uuid::Uuid::new_v4()),
             config: SwitchConfig {
@@ -236,6 +244,9 @@ mod tests {
             }),
             deleted: None,
             bmc_mac_address: None,
+            bmc_info: None,
+            bmc_credential_rotation_requested: false,
+            decommission_requested: false,
             controller_state: Versioned::new(
                 SwitchControllerState::Ready,
                 config_version::ConfigVersion::initial(),
@@ -253,6 +264,7 @@ mod tests {
                 reason: Some(String::new()),
                 error_message: None,
             }),
+            nvlink_domain_uuid: Some(nvlink_domain_uuid),
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
             is_primary: true,
@@ -272,9 +284,11 @@ mod tests {
         assert_eq!(status.power_state, Some("on".to_string()));
         assert_eq!(status.health_status, Some("ok".to_string()));
         assert_eq!(status.fabric_manager_status, Some("running".to_string()));
+
         let details = status
             .fabric_manager_status_details
             .expect("fabric_manager_status_details should be populated");
+
         assert_eq!(
             details.fabric_manager_state,
             rpc::FabricManagerState::Ok as i32
@@ -284,6 +298,7 @@ mod tests {
             Some("CONTROL_PLANE_STATE_CONFIGURED".to_string())
         );
         assert!(rpc_switch.is_primary);
+        assert_eq!(rpc_switch.nvlink_domain_uuid, Some(nvlink_domain_uuid));
     }
 
     #[test]
@@ -298,6 +313,9 @@ mod tests {
             status: None,
             deleted: None,
             bmc_mac_address: None,
+            bmc_info: None,
+            bmc_credential_rotation_requested: false,
+            decommission_requested: false,
             controller_state: Versioned::new(
                 SwitchControllerState::Created,
                 config_version::ConfigVersion::initial(),
@@ -311,6 +329,7 @@ mod tests {
             firmware_upgrade_status: None,
             nvos_update_status: None,
             fabric_manager_status: None,
+            nvlink_domain_uuid: None,
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
             is_primary: false,
@@ -333,5 +352,6 @@ mod tests {
         assert_eq!(status.fabric_manager_status, None);
         assert_eq!(status.fabric_manager_status_details, None);
         assert!(!rpc_switch.is_primary);
+        assert_eq!(rpc_switch.nvlink_domain_uuid, None);
     }
 }

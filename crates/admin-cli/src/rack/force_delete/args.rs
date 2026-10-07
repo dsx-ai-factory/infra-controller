@@ -19,7 +19,7 @@ use carbide_uuid::rack::RackId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Rack ID to force delete.")]
-    pub rack_id: RackId,
+    pub(super) rack_id: RackId,
 }

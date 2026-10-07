@@ -32,27 +32,27 @@ Create a remediation with descriptive metadata and a label:
     --meta-name \"clear-eeprom\" --meta-description \"Clears stale EEPROM state\" --label DATACENTER:XYZ
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The filename of the script to run", long)]
-    pub script_filename: String,
+    pub(super) script_filename: String,
     #[clap(
         help = "specify the amount of retries for the remediation, defaults to no retries",
         long
     )]
-    pub retries: Option<u32>,
+    pub(super) retries: Option<u32>,
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
         help = "The name that should be used as part of the Metadata for newly created Remediations.  Completely optional."
     )]
-    pub meta_name: Option<String>,
+    meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
         help = "The description that should be used as part of the Metadata for newly created Remediations.  Completely optional."
     )]
-    pub meta_description: Option<String>,
+    meta_description: Option<String>,
 
     #[clap(
         long = "label",
@@ -60,11 +60,11 @@ pub struct Args {
         help = "A label that will be added as metadata for the newly created Remediation. The labels key and value must be separated by a : character. E.g. DATACENTER:XYZ.  Completely optional.",
         action = clap::ArgAction::Append
     )]
-    pub labels: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
 }
 
 impl Args {
-    pub fn into_metadata(self) -> Option<::rpc::forge::Metadata> {
+    pub(super) fn into_metadata(self) -> Option<::rpc::forge::Metadata> {
         if self.labels.is_none() && self.meta_name.is_none() && self.meta_description.is_none() {
             return None;
         }

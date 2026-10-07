@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -26,7 +26,7 @@ func TestManageVpcPeering_CreateVpcPeeringOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcPeeringCreationRequest
+		request *corev1.VpcPeeringCreationRequest
 	}
 
 	tests := []struct {
@@ -42,10 +42,10 @@ func TestManageVpcPeering_CreateVpcPeeringOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPeeringCreationRequest{
-					Id:        &cwssaws.VpcPeeringId{Value: uuid.NewString()},
-					VpcId:     &cwssaws.VpcId{Value: uuid.NewString()},
-					PeerVpcId: &cwssaws.VpcId{Value: uuid.NewString()},
+				request: &corev1.VpcPeeringCreationRequest{
+					Id:        &corev1.VpcPeeringId{Value: uuid.NewString()},
+					VpcId:     &corev1.VpcId{Value: uuid.NewString()},
+					PeerVpcId: &corev1.VpcId{Value: uuid.NewString()},
 				},
 			},
 			wantErr: false,
@@ -57,9 +57,9 @@ func TestManageVpcPeering_CreateVpcPeeringOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPeeringCreationRequest{
+				request: &corev1.VpcPeeringCreationRequest{
 					VpcId:     nil,
-					PeerVpcId: &cwssaws.VpcId{Value: uuid.NewString()},
+					PeerVpcId: &corev1.VpcId{Value: uuid.NewString()},
 				},
 			},
 			wantErr: true,
@@ -71,8 +71,8 @@ func TestManageVpcPeering_CreateVpcPeeringOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPeeringCreationRequest{
-					VpcId:     &cwssaws.VpcId{Value: uuid.NewString()},
+				request: &corev1.VpcPeeringCreationRequest{
+					VpcId:     &corev1.VpcId{Value: uuid.NewString()},
 					PeerVpcId: nil,
 				},
 			},
@@ -85,9 +85,9 @@ func TestManageVpcPeering_CreateVpcPeeringOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPeeringCreationRequest{
-					VpcId:     &cwssaws.VpcId{Value: uuid.NewString()},
-					PeerVpcId: &cwssaws.VpcId{Value: uuid.NewString()},
+				request: &corev1.VpcPeeringCreationRequest{
+					VpcId:     &corev1.VpcId{Value: uuid.NewString()},
+					PeerVpcId: &corev1.VpcId{Value: uuid.NewString()},
 				},
 			},
 			wantErr: true,
@@ -129,7 +129,7 @@ func TestManageVpcPeering_DeleteVpcPeeringOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcPeeringDeletionRequest
+		request *corev1.VpcPeeringDeletionRequest
 	}
 
 	tests := []struct {
@@ -145,8 +145,8 @@ func TestManageVpcPeering_DeleteVpcPeeringOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPeeringDeletionRequest{
-					Id: &cwssaws.VpcPeeringId{Value: uuid.NewString()},
+				request: &corev1.VpcPeeringDeletionRequest{
+					Id: &corev1.VpcPeeringId{Value: uuid.NewString()},
 				},
 			},
 			wantErr: false,
@@ -158,7 +158,7 @@ func TestManageVpcPeering_DeleteVpcPeeringOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcPeeringDeletionRequest{
+				request: &corev1.VpcPeeringDeletionRequest{
 					Id: nil,
 				},
 			},
@@ -288,7 +288,7 @@ func TestManageVpcPeeringInventory_DiscoverVpcPeeringInventory(t *testing.T) {
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.VPCPeeringInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.VPCPeeringInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -297,12 +297,12 @@ func TestManageVpcPeeringInventory_DiscoverVpcPeeringInventory(t *testing.T) {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.VpcPeerings))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

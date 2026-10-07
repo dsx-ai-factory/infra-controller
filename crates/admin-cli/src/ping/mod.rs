@@ -15,25 +15,25 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
-
-#[cfg(test)]
-mod tests;
+mod args;
+mod cmd;
 
 // Export so the CLI builder can just pull in ping::Opts.
 // This is different than others that pull in Cmd, since
 // this is just a single top-level command without any
 // subcommands.
-pub use args::Opts;
+pub(crate) use args::Opts;
 
-use crate::cfg::dispatch::Dispatch;
+use crate::cfg::dispatch::dispatch_via_run;
+use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
-impl Dispatch for Opts {
-    async fn dispatch(self, ctx: RuntimeContext) -> CarbideCliResult<()> {
-        cmds::ping(&ctx.api_client, &self).await?;
+impl Run for Opts {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::ping(&ctx.api_client, &self).await?;
         Ok(())
     }
 }
+
+dispatch_via_run!(Opts);

@@ -2,7 +2,7 @@
 
 VPCs, peerings, prefixes, network segments and devices, security groups, IB/NVLink fabric partitions, IP/domain lookups, and resource pools.
 
-For global flags and setup, see [the overview](./README.md) and [`setup.md`](./setup.md). For task-oriented sequences see [`workflows.md`](./workflows.md).
+For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). Browse all command groups in the [CLI reference index](./README.md).
 
 | Command | Description |
 |---|---|
@@ -16,6 +16,7 @@ For global flags and setup, see [the overview](./README.md) and [`setup.md`](./s
 | [`nvl-domain`](./commands/nvl-domain/nvl-domain.md) | NVLink domain related handling. |
 | [`resource-pool`](./commands/resource-pool/resource-pool.md) | Resource pool handling. |
 | [`route-server`](./commands/route-server/route-server.md) | Route server handling. |
+| [`site-prefix`](./commands/site-prefix/site-prefix.md) | SitePrefix management. |
 | [`spx-partition`](./commands/spx-partition/spx-partition.md) | SPX Partition related handling. |
 | [`vpc`](./commands/vpc/vpc.md) | VPC related handling. |
 | [`vpc-peering`](./commands/vpc-peering/vpc-peering.md) | VPC peering handling. |

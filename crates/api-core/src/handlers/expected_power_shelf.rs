@@ -16,16 +16,24 @@
  */
 
 use ::rpc::forge as rpc;
+use carbide_instrument::emit;
 use db::{DatabaseError, expected_power_shelf as db_expected_power_shelf};
 use mac_address::MacAddress;
 use model::expected_power_shelf::{ExpectedPowerShelf, ExpectedPowerShelfRequest};
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
-use crate::api::Api;
+use crate::api::{Api, log_request_data_redacted};
+use crate::handlers::expected_component_patch::{
+    ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
+    validate_bmc_mac,
+};
 use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
+use crate::handlers::static_address_metrics::{
+    PreallocationSuccess, StaticAddressPreallocationCompleted,
+};
 
-pub async fn add_expected_power_shelf(
+pub(crate) async fn add_expected_power_shelf(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelf>,
 ) -> Result<Response<()>, Status> {
@@ -56,7 +64,7 @@ pub async fn add_expected_power_shelf(
     Ok(Response::new(()))
 }
 
-pub async fn delete_expected_power_shelf(
+pub(crate) async fn delete_expected_power_shelf(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelfRequest>,
 ) -> Result<Response<()>, Status> {
@@ -87,7 +95,7 @@ pub async fn delete_expected_power_shelf(
     Ok(Response::new(()))
 }
 
-pub async fn update_expected_power_shelf(
+pub(crate) async fn update_expected_power_shelf(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelf>,
 ) -> Result<Response<()>, Status> {
@@ -107,28 +115,119 @@ pub async fn update_expected_power_shelf(
             message: format!("Database error: {}", e),
         })?;
 
-    if let Some(bmc_ip) = power_shelf.bmc_ip_address {
-        update_preallocated_machine_interface(
-            &mut txn,
-            power_shelf.bmc_mac_address,
-            bmc_ip,
-            api.runtime_config.retained_boot_interface_window,
-        )
-        .await?;
-    }
-
-    db_expected_power_shelf::update(&mut txn, &power_shelf)
-        .await
-        .map_err(CarbideError::from)?;
+    let preallocation = update_power_shelf_in_transaction(
+        &mut txn,
+        &power_shelf,
+        api.runtime_config.retained_boot_interface_window,
+    )
+    .await?;
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
+    if let Some(outcome) = preallocation {
+        emit(StaticAddressPreallocationCompleted::from(outcome));
+    }
+
     Ok(Response::new(()))
 }
 
-pub async fn get_expected_power_shelf(
+pub(crate) async fn patch_expected_power_shelf(
+    api: &Api,
+    request: Request<rpc::PatchExpectedPowerShelfRequest>,
+) -> Result<Response<()>, Status> {
+    let request = request.into_inner();
+    let fields = UpdateMask::parse(
+        request.update_mask.map(|mask| mask.paths),
+        ExpectedComponent::PowerShelf,
+    )?;
+    let mut patch = request.expected_power_shelf.ok_or_else(|| {
+        CarbideError::InvalidArgument("expected_power_shelf is required".to_string())
+    })?;
+    let expected_power_shelf_id = required_id(
+        patch.expected_power_shelf_id.take(),
+        "expected_power_shelf_id",
+    )?;
+    fields.validate_bmc_credentials(&patch.bmc_username, &patch.bmc_password)?;
+    log_request_data_redacted(format!(
+        "expected_power_shelf_id: {expected_power_shelf_id}"
+    ));
+
+    let mut txn = api.txn_begin().await?;
+    let mut power_shelf =
+        db_expected_power_shelf::find_by_id_for_update(&mut txn, expected_power_shelf_id)
+            .await?
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "expected_power_shelf",
+                id: expected_power_shelf_id.to_string(),
+            })?;
+    validate_bmc_mac(&patch.bmc_mac_address, power_shelf.bmc_mac_address)?;
+    if fields.is_empty() {
+        txn.commit().await?;
+        return Ok(Response::new(()));
+    }
+    if fields.contains(UpdateField::BmcUsername) {
+        power_shelf.bmc_username = patch.bmc_username;
+    }
+    if fields.contains(UpdateField::BmcPassword) {
+        power_shelf.bmc_password = patch.bmc_password;
+    }
+    if fields.contains(UpdateField::ShelfSerialNumber) {
+        power_shelf.serial_number = patch.shelf_serial_number;
+    }
+    if fields.contains(UpdateField::BmcIpAddress) {
+        power_shelf.bmc_ip_address = parse_bmc_ip(&patch.bmc_ip_address)?;
+    }
+    if fields.contains(UpdateField::BmcRetainCredentials) {
+        power_shelf.bmc_retain_credentials = Some(required_value(
+            patch.bmc_retain_credentials,
+            "bmc_retain_credentials",
+        )?);
+    }
+    if fields.contains(UpdateField::RackId) {
+        power_shelf.rack_id = patch.rack_id;
+    }
+    fields.update_metadata(patch.metadata, &mut power_shelf.metadata)?;
+    let preallocation = update_power_shelf_in_transaction(
+        &mut txn,
+        &power_shelf,
+        api.runtime_config.retained_boot_interface_window,
+    )
+    .await?;
+    txn.commit().await?;
+    if let Some(preallocation) = preallocation {
+        emit(StaticAddressPreallocationCompleted::from(preallocation));
+    }
+    Ok(Response::new(()))
+}
+
+async fn update_power_shelf_in_transaction(
+    txn: &mut sqlx::PgConnection,
+    power_shelf: &ExpectedPowerShelf,
+    retained_window: Option<chrono::Duration>,
+) -> Result<Option<PreallocationSuccess>, CarbideError> {
+    // Lock the inventory before allocating addresses so PATCH and legacy
+    // updates cannot wait on each other's locks.
+    db_expected_power_shelf::update(txn, power_shelf).await?;
+
+    let preallocation = if let Some(bmc_ip) = power_shelf.bmc_ip_address {
+        Some(
+            update_preallocated_machine_interface(
+                &mut *txn,
+                power_shelf.bmc_mac_address,
+                bmc_ip,
+                retained_window,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    Ok(preallocation)
+}
+
+pub(crate) async fn get_expected_power_shelf(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelfRequest>,
 ) -> Result<Response<rpc::ExpectedPowerShelf>, Status> {
@@ -168,7 +267,7 @@ pub async fn get_expected_power_shelf(
     Ok(Response::new(response))
 }
 
-pub async fn get_all_expected_power_shelves(
+pub(crate) async fn get_all_expected_power_shelves(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedPowerShelfList>, Status> {
@@ -198,7 +297,7 @@ pub async fn get_all_expected_power_shelves(
     }))
 }
 
-pub async fn replace_all_expected_power_shelves(
+pub(crate) async fn replace_all_expected_power_shelves(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelfList>,
 ) -> Result<Response<()>, Status> {
@@ -239,7 +338,7 @@ pub async fn replace_all_expected_power_shelves(
     Ok(Response::new(()))
 }
 
-pub async fn delete_all_expected_power_shelves(
+pub(crate) async fn delete_all_expected_power_shelves(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<()>, Status> {
@@ -262,7 +361,7 @@ pub async fn delete_all_expected_power_shelves(
     Ok(Response::new(()))
 }
 
-pub async fn get_all_expected_power_shelves_linked(
+pub(crate) async fn get_all_expected_power_shelves_linked(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::LinkedExpectedPowerShelfList>, Status> {
@@ -295,7 +394,7 @@ pub async fn get_all_expected_power_shelves_linked(
 
 // Utility method called by `explore`. Not a grpc handler.
 // TODO(chet): Remove dead_code once the exploration is wired up.
-pub(crate) async fn query(
+pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<model::expected_power_shelf::ExpectedPowerShelf>, CarbideError> {

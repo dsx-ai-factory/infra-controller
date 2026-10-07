@@ -22,7 +22,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 use crate::vpc_peering::convert_vpc_peerings_to_table;
 
-pub async fn create(
+pub(super) async fn create(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

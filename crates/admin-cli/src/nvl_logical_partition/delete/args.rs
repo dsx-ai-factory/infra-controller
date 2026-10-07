@@ -29,9 +29,9 @@ Delete a logical partition by name:
     $ nico-admin-cli logical-partition delete --name my-partition
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'n', long, help = "name of the partition")]
-    pub name: String,
+    name: String,
 }
 
 impl TryFrom<Args> for forgerpc::NvLinkLogicalPartitionDeletionRequest {

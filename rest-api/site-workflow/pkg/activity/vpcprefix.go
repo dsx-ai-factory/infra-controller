@@ -8,10 +8,10 @@ import (
 	"errors"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -30,7 +30,7 @@ func NewManageVpcPrefix(coreGrpcAtomicClient *client.CoreGrpcAtomicClient) Manag
 }
 
 // Function to create VpcPrefix with NICo
-func (mvp *ManageVpcPrefix) CreateVpcPrefixOnSite(ctx context.Context, request *cwssaws.VpcPrefixCreationRequest) error {
+func (mvp *ManageVpcPrefix) CreateVpcPrefixOnSite(ctx context.Context, request *corev1.VpcPrefixCreationRequest) error {
 	logger := log.With().Str("Activity", "CreateVpcPrefixOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -57,19 +57,20 @@ func (mvp *ManageVpcPrefix) CreateVpcPrefixOnSite(ctx context.Context, request *
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.CreateVpcPrefix(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create VPC Prefix using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create VPC Prefix using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to update VpcPrefix with NICo
-func (mvp *ManageVpcPrefix) UpdateVpcPrefixOnSite(ctx context.Context, request *cwssaws.VpcPrefixUpdateRequest) error {
+func (mvp *ManageVpcPrefix) UpdateVpcPrefixOnSite(ctx context.Context, request *corev1.VpcPrefixUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateVpcPrefixOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -94,19 +95,20 @@ func (mvp *ManageVpcPrefix) UpdateVpcPrefixOnSite(ctx context.Context, request *
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateVpcPrefix(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update VPC Prefix using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update VPC Prefix using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to delete VpcPrefix on NICo
-func (mvp *ManageVpcPrefix) DeleteVpcPrefixOnSite(ctx context.Context, request *cwssaws.VpcPrefixDeletionRequest) error {
+func (mvp *ManageVpcPrefix) DeleteVpcPrefixOnSite(ctx context.Context, request *corev1.VpcPrefixDeletionRequest) error {
 	logger := log.With().Str("Activity", "DeleteVpcPrefixOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -131,13 +133,14 @@ func (mvp *ManageVpcPrefix) DeleteVpcPrefixOnSite(ctx context.Context, request *
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteVpcPrefix(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete VPC Prefix using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete VPC Prefix using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
@@ -159,7 +162,7 @@ func (mvpi *ManageVpcPrefixInventory) DiscoverVpcPrefixInventory(ctx context.Con
 	logger := log.With().Str("Activity", "DiscoverVpcPrefixInventory").Logger()
 	logger.Info().Msg("Starting activity")
 
-	inventoryImpl := manageInventoryImpl[*cwssaws.VpcPrefixId, *cwssaws.VpcPrefix, *cwssaws.VpcPrefixInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.VpcPrefixId, *corev1.VpcPrefix, *corev1.VpcPrefixInventory]{
 		itemType:               "VpcPrefix",
 		config:                 mvpi.config,
 		internalFindIDs:        vpcPrefixFindIDs,
@@ -170,10 +173,10 @@ func (mvpi *ManageVpcPrefixInventory) DiscoverVpcPrefixInventory(ctx context.Con
 	return inventoryImpl.CollectAndPublishInventory(ctx, &logger)
 }
 
-func vpcPrefixFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.VpcPrefixId, error) {
+func vpcPrefixFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.VpcPrefixId, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	idList, err := grpcServiceClient.SearchVpcPrefixes(ctx, &cwssaws.VpcPrefixSearchQuery{
-		Deleted: cwssaws.DeletedFilter_DELETED_FILTER_INCLUDE,
+	idList, err := grpcServiceClient.SearchVpcPrefixes(ctx, &corev1.VpcPrefixSearchQuery{
+		Deleted: corev1.DeletedFilter_DELETED_FILTER_INCLUDE,
 	})
 	if err != nil {
 		return nil, err
@@ -181,11 +184,11 @@ func vpcPrefixFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) (
 	return idList.VpcPrefixIds, nil
 }
 
-func vpcPrefixFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.VpcPrefixId) ([]*cwssaws.VpcPrefix, error) {
+func vpcPrefixFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.VpcPrefixId) ([]*corev1.VpcPrefix, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	list, err := grpcServiceClient.GetVpcPrefixes(ctx, &cwssaws.VpcPrefixGetRequest{
+	list, err := grpcServiceClient.GetVpcPrefixes(ctx, &corev1.VpcPrefixGetRequest{
 		VpcPrefixIds: ids,
-		Deleted:      cwssaws.DeletedFilter_DELETED_FILTER_INCLUDE,
+		Deleted:      corev1.DeletedFilter_DELETED_FILTER_INCLUDE,
 	})
 
 	if err != nil {
@@ -194,14 +197,14 @@ func vpcPrefixFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient,
 	return list.GetVpcPrefixes(), nil
 }
 
-func vpcPrefixPagedInventory(allItemIDs []*cwssaws.VpcPrefixId, pagedItems []*cwssaws.VpcPrefix, input *pagedInventoryInput) *cwssaws.VpcPrefixInventory {
+func vpcPrefixPagedInventory(allItemIDs []*corev1.VpcPrefixId, pagedItems []*corev1.VpcPrefix, input *pagedInventoryInput) *corev1.VpcPrefixInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of VpcPrefixs
-	inventory := &cwssaws.VpcPrefixInventory{
+	inventory := &corev1.VpcPrefixInventory{
 		VpcPrefixes: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),
@@ -216,17 +219,17 @@ func vpcPrefixPagedInventory(allItemIDs []*cwssaws.VpcPrefixId, pagedItems []*cw
 	return inventory
 }
 
-func vpcPrefixFindFallback(ctx context.Context, coreGrpcClient *cClient.CoreGrpcClient) ([]*cwssaws.VpcPrefixId, []*cwssaws.VpcPrefix, error) {
+func vpcPrefixFindFallback(ctx context.Context, coreGrpcClient *cClient.CoreGrpcClient) ([]*corev1.VpcPrefixId, []*corev1.VpcPrefix, error) {
 	grpcServiceClient := coreGrpcClient.GrpcServiceClient()
-	request := &cwssaws.VpcPrefixGetRequest{
-		Deleted: cwssaws.DeletedFilter_DELETED_FILTER_INCLUDE,
+	request := &corev1.VpcPrefixGetRequest{
+		Deleted: corev1.DeletedFilter_DELETED_FILTER_INCLUDE,
 	}
 	items, err := grpcServiceClient.GetVpcPrefixes(ctx, request)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var ids []*cwssaws.VpcPrefixId
+	var ids []*corev1.VpcPrefixId
 	for _, it := range items.GetVpcPrefixes() {
 		ids = append(ids, it.GetId())
 	}

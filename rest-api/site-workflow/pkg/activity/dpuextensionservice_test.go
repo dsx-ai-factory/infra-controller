@@ -7,9 +7,9 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -28,7 +28,7 @@ func TestManageDpuExtensionService_CreateDpuExtensionServiceOnSite(t *testing.T)
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.CreateDpuExtensionServiceRequest
+		request *corev1.CreateDpuExtensionServiceRequest
 	}
 
 	serviceID := "test-service-id"
@@ -48,7 +48,7 @@ func TestManageDpuExtensionService_CreateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateDpuExtensionServiceRequest{
+				request: &corev1.CreateDpuExtensionServiceRequest{
 					ServiceId:            &serviceID,
 					ServiceName:          serviceName,
 					TenantOrganizationId: tenantOrgID,
@@ -63,7 +63,7 @@ func TestManageDpuExtensionService_CreateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateDpuExtensionServiceRequest{
+				request: &corev1.CreateDpuExtensionServiceRequest{
 					ServiceId:            nil,
 					ServiceName:          serviceName,
 					TenantOrganizationId: tenantOrgID,
@@ -78,7 +78,7 @@ func TestManageDpuExtensionService_CreateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateDpuExtensionServiceRequest{
+				request: &corev1.CreateDpuExtensionServiceRequest{
 					ServiceId:            util.GetStrPtr(""),
 					ServiceName:          serviceName,
 					TenantOrganizationId: tenantOrgID,
@@ -93,7 +93,7 @@ func TestManageDpuExtensionService_CreateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateDpuExtensionServiceRequest{
+				request: &corev1.CreateDpuExtensionServiceRequest{
 					ServiceId:            &serviceID,
 					ServiceName:          "",
 					TenantOrganizationId: tenantOrgID,
@@ -108,7 +108,7 @@ func TestManageDpuExtensionService_CreateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.CreateDpuExtensionServiceRequest{
+				request: &corev1.CreateDpuExtensionServiceRequest{
 					ServiceId:            &serviceID,
 					ServiceName:          serviceName,
 					TenantOrganizationId: "",
@@ -160,7 +160,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServiceOnSite(t *testing.T)
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.UpdateDpuExtensionServiceRequest
+		request *corev1.UpdateDpuExtensionServiceRequest
 	}
 
 	serviceID := "test-service-id"
@@ -178,7 +178,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateDpuExtensionServiceRequest{
+				request: &corev1.UpdateDpuExtensionServiceRequest{
 					ServiceId:   serviceID,
 					ServiceName: util.GetStrPtr("test-service-name"),
 				},
@@ -192,7 +192,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.UpdateDpuExtensionServiceRequest{
+				request: &corev1.UpdateDpuExtensionServiceRequest{
 					ServiceId: "",
 				},
 			},
@@ -242,7 +242,7 @@ func TestManageDpuExtensionService_DeleteDpuExtensionServiceOnSite(t *testing.T)
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.DeleteDpuExtensionServiceRequest
+		request *corev1.DeleteDpuExtensionServiceRequest
 	}
 
 	serviceID := "test-service-id"
@@ -260,7 +260,7 @@ func TestManageDpuExtensionService_DeleteDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteDpuExtensionServiceRequest{
+				request: &corev1.DeleteDpuExtensionServiceRequest{
 					ServiceId: serviceID,
 				},
 			},
@@ -273,7 +273,7 @@ func TestManageDpuExtensionService_DeleteDpuExtensionServiceOnSite(t *testing.T)
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteDpuExtensionServiceRequest{
+				request: &corev1.DeleteDpuExtensionServiceRequest{
 					ServiceId: "",
 				},
 			},
@@ -316,7 +316,7 @@ func TestManageDpuExtensionService_GetDpuExtensionServiceVersionsInfoOnSite(t *t
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.GetDpuExtensionServiceVersionsInfoRequest
+		request *corev1.GetDpuExtensionServiceVersionsInfoRequest
 	}
 
 	serviceID := "test-service-id"
@@ -335,7 +335,7 @@ func TestManageDpuExtensionService_GetDpuExtensionServiceVersionsInfoOnSite(t *t
 			},
 			args: args{
 				ctx: context.WithValue(context.Background(), "wantCount", 20),
-				request: &cwssaws.GetDpuExtensionServiceVersionsInfoRequest{
+				request: &corev1.GetDpuExtensionServiceVersionsInfoRequest{
 					ServiceId: serviceID,
 				},
 			},
@@ -349,7 +349,7 @@ func TestManageDpuExtensionService_GetDpuExtensionServiceVersionsInfoOnSite(t *t
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.GetDpuExtensionServiceVersionsInfoRequest{
+				request: &corev1.GetDpuExtensionServiceVersionsInfoRequest{
 					ServiceId: "",
 				},
 			},
@@ -468,7 +468,7 @@ func TestManageDpuExtensionServiceInventory_DiscoverDpuExtensionServiceInventory
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.DpuExtensionServiceInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.DpuExtensionServiceInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -477,12 +477,12 @@ func TestManageDpuExtensionServiceInventory_DiscoverDpuExtensionServiceInventory
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.DpuExtensionServices))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

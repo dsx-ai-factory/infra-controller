@@ -44,6 +44,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Fetch version
@@ -71,12 +72,14 @@ jobs:
     needs:
       - fetch-new-version
     steps:
+      # persist-credentials is intentionally left enabled here: the "Push Git Tag"
+      # step below pushes back to the repo using the credential this checkout persists.
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Push Git Tag
-        uses: NVIDIA/dsx-github-actions/.github/actions/git-tag@95e609360851cfc141918c2c21e57762d77394ac
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/git-tag@95e609360851cfc141918c2c21e57762d77394ac
         with:
           tag: ${{ needs.fetch-new-version.outputs.version }}
       - name: Release

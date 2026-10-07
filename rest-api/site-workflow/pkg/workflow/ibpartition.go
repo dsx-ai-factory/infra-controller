@@ -6,11 +6,13 @@ package workflow
 import (
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 func DiscoverInfiniBandPartitionInventory(ctx workflow.Context) error {
@@ -52,21 +54,20 @@ func DiscoverInfiniBandPartitionInventory(ctx workflow.Context) error {
 // CreateInfiniBandPartitionV2 is a workflow to create new InfiniBand Partitions using the CreateInfiniBandPartitionOnSite activity
 // V1 (CreateInfiniBandPartition) is found in cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func CreateInfiniBandPartitionV2(ctx workflow.Context, request *cwssaws.IBPartitionCreationRequest) error {
+func CreateInfiniBandPartitionV2(ctx workflow.Context, request *corev1.IBPartitionCreationRequest) error {
 	logger := log.With().Str("Workflow", "InfiniBandPartition").Str("Action", "Create").Str("IB Partition ID", request.GetId().GetValue()).Str("Name", request.GetConfig().GetName()).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -87,19 +88,19 @@ func CreateInfiniBandPartitionV2(ctx workflow.Context, request *cwssaws.IBPartit
 }
 
 // UpdateInfiniBandPartition updates an InfiniBand Partition on site using the UpdateInfiniBandPartitionOnSite activity
-func UpdateInfiniBandPartition(ctx workflow.Context, request *cwssaws.IBPartitionUpdateRequest) error {
+func UpdateInfiniBandPartition(ctx workflow.Context, request *corev1.IBPartitionUpdateRequest) error {
 	logger := log.With().Str("Workflow", "InfiniBandPartition").Str("Action", "Update").Str("IB Partition ID", request.GetId().GetValue()).Logger()
 
 	logger.Info().Msg("starting workflow")
 
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 
@@ -121,21 +122,20 @@ func UpdateInfiniBandPartition(ctx workflow.Context, request *cwssaws.IBPartitio
 // DeleteInfiniBandPartitionV2 is a workflow to Delete InfiniBand Partitions using the DeleteInfiniBandPartitionOnSite activity
 // V1 (DeleteInfiniBandPartition) is found in cloud-workflow and uses a different activity that does not speak
 // to nico directly.
-func DeleteInfiniBandPartitionV2(ctx workflow.Context, request *cwssaws.IBPartitionDeletionRequest) error {
+func DeleteInfiniBandPartitionV2(ctx workflow.Context, request *corev1.IBPartitionDeletionRequest) error {
 	logger := log.With().Str("Workflow", "InfiniBandPartition").Str("Action", "Delete").Str("IB Partition ID", request.GetId().GetValue()).Logger()
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

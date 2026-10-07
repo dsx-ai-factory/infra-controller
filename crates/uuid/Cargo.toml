@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Common UUID types Forge components."
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 # TODO: rename to carbide_uuid in source
 [lib]

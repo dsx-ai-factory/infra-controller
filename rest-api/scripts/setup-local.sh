@@ -8,6 +8,7 @@ NAMESPACE="${NAMESPACE:-nico-rest}"
 API_URL="${API_URL:-http://localhost:8388}"
 KEYCLOAK_URL="${KEYCLOAK_URL:-http://localhost:8082}"
 ORG="${ORG:-test-org}"
+RESTART_API="${RESTART_API:-1}"
 
 usage() {
     echo "Usage: $0 <command>"
@@ -15,6 +16,7 @@ usage() {
     echo "Commands:"
     echo "  pki         Setup PKI secrets and CA"
     echo "  site-agent  Setup site-agent with a real site"
+    echo "  temporal-namespace <name>  Ensure a Temporal namespace exists"
     echo "  all         Run both pki and site-agent setup"
     echo "  verify      Verify local deployment health"
     exit 1
@@ -127,13 +129,16 @@ wait_for_services() {
         echo "Waiting for Keycloak... $i/240"
     done
 
-    # Once Keycloak is ready we need to restart the API server because if Keycloak wasn't ready
+    # Once Keycloak is ready we normally restart the API server because if Keycloak wasn't ready
     # when it started it would have failed to fetch the JWKS, and therefore it will automatically
-    # disable Keycloak support.
+    # disable Keycloak support. Integrated deployments can skip the restart when they guarantee
+    # that Keycloak was ready before the API started.
     echo "Waiting for API ..."
-    kubectl -n $NAMESPACE rollout restart deployment nico-rest-api
+    if [ "$RESTART_API" = "1" ]; then
+        kubectl -n $NAMESPACE rollout restart deployment nico-rest-api
+    fi
     if ! kubectl -n $NAMESPACE rollout status deployment nico-rest-api --timeout=240s; then
-        echo "ERROR: Failed to restart API"
+        echo "ERROR: API is not ready"
         exit 1
     fi
 
@@ -184,8 +189,8 @@ create_site() {
     EXISTING_SITE=$(echo "$EXISTING_RESP" | jq -r '.[] | select(.name == "local-dev-site") | .id' 2>/dev/null || echo "")
 
     if [ -n "$EXISTING_SITE" ] && [ "$EXISTING_SITE" != "null" ]; then
+        SITE_ID="$EXISTING_SITE"
         SITE_REG_TOKEN=$(echo "$EXISTING_RESP" | jq -r '.[] | select(.name == "local-dev-site") | .registrationToken // empty' 2>/dev/null)
-        echo "$EXISTING_SITE"
         return
     fi
 
@@ -205,7 +210,6 @@ create_site() {
         SITE_ID=$(echo "$SITE_RESP" | jq -r '.id // empty')
         if [ -n "$SITE_ID" ] && [ "$SITE_ID" != "null" ]; then
             SITE_REG_TOKEN=$(echo "$SITE_RESP" | jq -r '.registrationToken // empty')
-            echo "$SITE_ID"
             return
         fi
 
@@ -221,15 +225,60 @@ create_site() {
     exit 1
 }
 
-configure_site_agent() {
-    local site_id=$1
+ensure_temporal_namespace() {
+    local temporal_namespace=$1
+    local temporal_address="temporal-frontend.temporal.svc.cluster.local.:7233"
+    local describe_error=""
+    local create_error=""
 
-    kubectl -n temporal exec deploy/temporal-admintools -- temporal operator namespace create --namespace "$site_id" \
-        --address temporal-frontend.temporal:7233 \
+    local temporal_command=(
+        kubectl -n temporal exec deployment/temporal-admintools --
+        temporal operator namespace
+    )
+
+    echo "Registering Temporal namespace: $temporal_namespace"
+    for attempt in {1..30}; do
+        if describe_error=$("${temporal_command[@]}" describe --namespace "$temporal_namespace" \
+            --address "$temporal_address" \
+            --tls-cert-path /var/secrets/temporal/certs/server-interservice/tls.crt \
+            --tls-key-path /var/secrets/temporal/certs/server-interservice/tls.key \
+            --tls-ca-path /var/secrets/temporal/certs/server-interservice/ca.crt \
+            --tls-server-name interservice.server.temporal.local 2>&1); then
+            echo "Temporal namespace confirmed: $temporal_namespace"
+            return
+        fi
+
+        create_error=$("${temporal_command[@]}" create --namespace "$temporal_namespace" \
+            --address "$temporal_address" \
+            --tls-cert-path /var/secrets/temporal/certs/server-interservice/tls.crt \
+            --tls-key-path /var/secrets/temporal/certs/server-interservice/tls.key \
+            --tls-ca-path /var/secrets/temporal/certs/server-interservice/ca.crt \
+            --tls-server-name interservice.server.temporal.local 2>&1) || true
+        echo "Attempt $attempt: Temporal namespace not confirmed yet"
+        sleep 5
+    done
+
+    if describe_error=$("${temporal_command[@]}" describe --namespace "$temporal_namespace" \
+        --address "$temporal_address" \
         --tls-cert-path /var/secrets/temporal/certs/server-interservice/tls.crt \
         --tls-key-path /var/secrets/temporal/certs/server-interservice/tls.key \
         --tls-ca-path /var/secrets/temporal/certs/server-interservice/ca.crt \
-        --tls-server-name interservice.server.temporal.local || true
+        --tls-server-name interservice.server.temporal.local 2>&1); then
+        echo "Temporal namespace confirmed: $temporal_namespace"
+        return
+    fi
+
+    echo "ERROR: Temporal namespace $temporal_namespace was not created" >&2
+    echo "Last describe error: $describe_error" >&2
+    echo "Last create error: $create_error" >&2
+    return 1
+}
+
+configure_site_agent() {
+    local site_id=$1
+    local current_site_id=""
+
+    ensure_temporal_namespace "$site_id"
 
     kubectl -n $NAMESPACE get configmap nico-rest-site-agent-config -o yaml | \
         sed "s/CLUSTER_ID: .*/CLUSTER_ID: \"$site_id\"/" | \
@@ -237,22 +286,33 @@ configure_site_agent() {
         sed "s/TEMPORAL_SUBSCRIBE_QUEUE: .*/TEMPORAL_SUBSCRIBE_QUEUE: \"site\"/" | \
         kubectl apply -f -
 
-    local reg_token="${SITE_REG_TOKEN:-local-dev-otp}"
     local sm_cacert
     sm_cacert=$(kubectl -n $NAMESPACE get secret site-manager-tls -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
 
-    kubectl -n $NAMESPACE delete secret site-registration 2>/dev/null || true
-    kubectl -n $NAMESPACE create secret generic site-registration \
-        --from-literal=site-uuid="$site_id" \
-        --from-literal=otp="$reg_token" \
-        --from-literal=creds-url="https://nico-rest-site-manager:8100/v1/sitecreds" \
-        --from-literal=cacert="$sm_cacert"
+    if [ -n "${SITE_REG_TOKEN:-}" ] && [ "$SITE_REG_TOKEN" != "null" ]; then
+        kubectl -n $NAMESPACE create secret generic site-registration \
+            --from-literal=site-uuid="$site_id" \
+            --from-literal=otp="$SITE_REG_TOKEN" \
+            --from-literal=creds-url="https://nico-rest-site-manager:8100/v1/sitecreds" \
+            --from-literal=cacert="$sm_cacert" \
+            --dry-run=client -o yaml | kubectl apply -f -
+    else
+        current_site_id=$(kubectl -n $NAMESPACE get secret site-registration \
+            -o jsonpath='{.data.site-uuid}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+        if [ "$current_site_id" != "$site_id" ]; then
+            echo "ERROR: Registration token is unavailable and existing site credentials do not match $site_id" >&2
+            return 1
+        fi
+        echo "Registration token is no longer exposed; preserving the existing site credentials"
+    fi
 
     kubectl -n $NAMESPACE rollout restart sts/nico-rest-site-agent
     kubectl -n $NAMESPACE rollout status sts/nico-rest-site-agent --timeout=240s
 }
 
 setup_site_agent() {
+    local site_resp
+
     echo "Setting up site-agent..."
     wait_for_services
 
@@ -263,15 +323,19 @@ setup_site_agent() {
     TOKEN=$(get_token)
 
     echo "Creating site..."
-    SITE_ID=$(create_site "$TOKEN")
+    create_site "$TOKEN"
     echo "Site ID: $SITE_ID"
 
-    SITE_REG_TOKEN=$(curl -sf "$API_URL/v2/org/$ORG/nico/site/$SITE_ID?infrastructureProviderId=$(
-        curl -sf "$API_URL/v2/org/$ORG/nico/infrastructure-provider/current" \
-            -H "Authorization: Bearer $TOKEN" | jq -r '.id'
-    )" -H "Authorization: Bearer $TOKEN" | jq -r '.registrationToken // empty' 2>/dev/null)
+    if [ -z "${SITE_REG_TOKEN:-}" ] || [ "$SITE_REG_TOKEN" = "null" ]; then
+        if ! site_resp=$(curl -sf "$API_URL/v2/org/$ORG/nico/site/$SITE_ID?infrastructureProviderId=$PROVIDER_ID" \
+            -H "Authorization: Bearer $TOKEN"); then
+            echo "ERROR: Failed to fetch site registration token" >&2
+            return 1
+        fi
+        SITE_REG_TOKEN=$(echo "$site_resp" | jq -r '.registrationToken // empty')
+    fi
     if [ -z "$SITE_REG_TOKEN" ] || [ "$SITE_REG_TOKEN" = "null" ]; then
-        echo "WARNING: Could not retrieve registration token from API, using fallback"
+        echo "Registration token is no longer exposed by the API"
     else
         echo "Registration token acquired (${#SITE_REG_TOKEN} chars)"
     fi
@@ -325,6 +389,10 @@ case "${1:-}" in
         ;;
     site-agent)
         setup_site_agent
+        ;;
+    temporal-namespace)
+        [ "$#" -eq 2 ] || usage
+        ensure_temporal_namespace "$2"
         ;;
     all)
         setup_pki

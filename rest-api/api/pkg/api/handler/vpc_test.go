@@ -15,20 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -39,9 +25,25 @@ import (
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 func testVPCInitDB(t *testing.T) *cdb.Session {
@@ -53,7 +55,41 @@ func testVPCInitDB(t *testing.T) *cdb.Session {
 	return dbSession
 }
 
-// reset the tables needed for Allocation tests
+func TestPowerResourceGroupAPIError(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		fallback    string
+		wantCode    int
+		wantMessage string
+	}{
+		{
+			name:        "maps DPS name collision to conflict",
+			err:         fmt.Errorf("create replacement group: %w", dpsclient.ErrResourceGroupAlreadyExists),
+			fallback:    "Failed to change DPS resource group",
+			wantCode:    http.StatusConflict,
+			wantMessage: "Power resource group already exists",
+		},
+		{
+			name:        "preserves generic DPS failure mapping",
+			err:         errors.New("DPS unavailable"),
+			fallback:    "Failed to create DPS resource group",
+			wantCode:    http.StatusServiceUnavailable,
+			wantMessage: "Failed to create DPS resource group",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			apiErr := powerResourceGroupAPIError(test.err, test.fallback)
+			assert.Equal(t, test.wantCode, apiErr.Code)
+			assert.Equal(t, test.wantMessage, apiErr.Message)
+		})
+	}
+}
+
+// testVPCSetupSchema resets the tables required by VPC handler and
+// privilege-resolution tests.
 func testVPCSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create Infrastructure Provider table
 	err := dbSession.DB.ResetModel(context.Background(), (*cdbm.InfrastructureProvider)(nil))
@@ -66,6 +102,12 @@ func testVPCSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	assert.Nil(t, err)
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
+	assert.Nil(t, err)
+	// create Tenant Account table used for effective per-Site privilege resolution
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantAccount)(nil))
+	assert.Nil(t, err)
+	// create Tenant Site table used for per-Site privilege overrides
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)
 	// create Allocation table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Allocation)(nil))
@@ -96,7 +138,12 @@ func testVPCSetupSchema(t *testing.T, dbSession *cdb.Session) {
 func testVPCSiteBuildInfrastructureProvider(t *testing.T, dbSession *cdb.Session, name string, org string, user *cdbm.User) *cdbm.InfrastructureProvider {
 	ipDAO := cdbm.NewInfrastructureProviderDAO(dbSession)
 
-	ip, err := ipDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Infrastructure Provider"), org, nil, user)
+	ip, err := ipDAO.Create(context.Background(), nil, cdbm.InfrastructureProviderCreateInput{
+		Name:        name,
+		DisplayName: cutil.GetPtr("Test Infrastructure Provider"),
+		Org:         org,
+		CreatedBy:   user.ID,
+	})
 	assert.Nil(t, err)
 
 	return ip
@@ -287,14 +334,16 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		message string
 	}
 	type args struct {
-		reqData               *model.APIVpcCreateRequest
-		reqOrg                string
-		reqUser               *cdbm.User
-		respCode              int
-		respMessage           string
-		expectedStatus        string
-		expectedVni           *int
-		expectedStatusDetails []expectedStatusDetail
+		reqData                    *model.APIVpcCreateRequest
+		reqOrg                     string
+		reqUser                    *cdbm.User
+		respCode                   int
+		respMessage                string
+		expectedStatus             string
+		expectedVni                *int
+		expectedVirtualizationType string
+		expectedRoutingProfile     *string
+		expectedStatusDetails      []expectedStatusDetail
 	}
 
 	dbSession := testSiteInitDB(t)
@@ -313,14 +362,10 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 	tnu := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn := testVPCBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu)
-	tnDAO := cdbm.NewTenantDAO(dbSession)
-	tn, err := tnDAO.Update(context.Background(), nil, cdbm.TenantUpdateInput{
-		TenantID: tn.ID,
-		Config: &cdbm.TenantConfig{
-			TargetedInstanceCreation: true,
-		},
-	})
-	assert.NoError(t, err)
+	// Routing-profile write privilege is resolved site-scoped. TenantSite
+	// associations without an explicit override inherit this Ready TenantAccount
+	// default.
+	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu)
 
 	tnu2 := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg, tnOrgRoles)
 	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-2", tnOrg, tnu2)
@@ -331,12 +376,25 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 	st1 := testVPCBuildSite(t, dbSession, ip, "test-site-1", true, true, cdbm.SiteStatusRegistered, ipu)
 	assert.NotNil(t, st1)
+	st1, err := cdbm.NewSiteDAO(dbSession).Update(ctx, nil, cdbm.SiteUpdateInput{
+		SiteID: st1.ID,
+		Config: &cdbm.SiteConfigUpdateInput{VpcSlaac: cutil.GetPtr(true)},
+	})
+	require.NoError(t, err)
 
 	st2 := testVPCBuildSite(t, dbSession, ip, "test-site-2", true, false, cdbm.SiteStatusRegistered, ipu)
 	assert.NotNil(t, st2)
 
 	st3 := testVPCBuildSite(t, dbSession, ip, "test-site-3", false, false, cdbm.SiteStatusRegistered, ipu)
 	assert.NotNil(t, st3)
+
+	st4 := testVPCBuildSite(t, dbSession, ip, "test-site-4", true, false, cdbm.SiteStatusRegistered, ipu)
+	assert.NotNil(t, st4)
+
+	st5 := testVPCBuildSite(t, dbSession, ip, "test-site-5", true, false, cdbm.SiteStatusRegistered, ipu)
+	assert.NotNil(t, st5)
+	_, err = dbSession.DB.NewUpdate().Model(st5).Set("config = config - 'vpc_slaac'").WherePK().Exec(ctx)
+	require.NoError(t, err)
 
 	al := testVPCSiteBuildAllocation(t, dbSession, st1, tn, "test-allocation", ipu)
 	assert.NotNil(t, al)
@@ -347,11 +405,17 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	al3 := testVPCSiteBuildAllocation(t, dbSession, st1, tn3, "test-allocation-tenant-3", ipu)
 	assert.NotNil(t, al3)
 
-	// Associate tenant 1 with site 1
+	al4 := testVPCSiteBuildAllocation(t, dbSession, st4, tn, "test-allocation-4", ipu)
+	assert.NotNil(t, al4)
+
+	al5 := testVPCSiteBuildAllocation(t, dbSession, st5, tn, "test-allocation-5", ipu)
+	assert.NotNil(t, al5)
+
+	// Associate tenant 1 with site 1; the unset override inherits the account default.
 	ts1t1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st1.ID, tnu.ID)
 	assert.NotNil(t, ts1t1)
 
-	// Associate tenant 1 with site 2
+	// Associate tenant 1 with site 2; the unset override inherits the account default.
 	ts2t1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st2.ID, tnu.ID)
 	assert.NotNil(t, ts2t1)
 
@@ -366,6 +430,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	// Associate tenant 3 with site 1
 	ts1t3 := testBuildTenantSiteAssociation(t, dbSession, tnOrg3, tn3.ID, st1.ID, tnu3.ID)
 	assert.NotNil(t, ts1t3)
+
+	ts4t1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st4.ID, tnu.ID)
+	assert.NotNil(t, ts4t1)
+
+	ts5t1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st5.ID, tnu.ID)
+	assert.NotNil(t, ts5t1)
 
 	// NSG for tenant 1 on site 1
 	nsgTenant1Site1 := testBuildNetworkSecurityGroup(t, dbSession, "test-nsg-1", tn, st1, cdbm.NetworkSecurityGroupStatusReady)
@@ -405,6 +475,17 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	scp.IDClientMap[st3.ID.String()] = tst3
 
 	vpcWithAllocatedVniName := "Test VPC with allocated VNI"
+	vpcWithRoutingProfileName := "Test VPC routing profile"
+	vpcWithRoutingProfileOverridesName := "Test VPC routing profile overrides"
+	vpcWithResolvedRoutingProfileName := "Test VPC resolved routing profile"
+	vpcWithUnpersistedResolvedRoutingProfileName := "Test VPC unpersisted resolved routing profile"
+	vpcWithUnpersistedResolvedRoutingProfileID := uuid.New()
+	_, err = dbSession.DB.Exec(`
+		ALTER TABLE vpc
+		ADD CONSTRAINT vpc_test_reject_resolved_routing_profile_persistence
+		CHECK (name <> 'Test VPC unpersisted resolved routing profile' OR routing_profile IS NULL)
+	`)
+	require.NoError(t, err)
 	allocatedVni := uint32(7301)
 	expectedAllocatedVni := int(allocatedVni)
 
@@ -417,10 +498,36 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	wrunWithAllocatedVni := &tmocks.WorkflowRun{}
 	wrunWithAllocatedVni.On("GetID").Return(wid)
 	wrunWithAllocatedVni.Mock.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		controllerVpc, ok := args.Get(1).(*cwssaws.Vpc)
+		controllerVpc, ok := args.Get(1).(*corev1.Vpc)
 		if ok {
-			controllerVpc.Status = &cwssaws.VpcStatus{
+			controllerVpc.Status = &corev1.VpcStatus{
 				Vni: &allocatedVni,
+			}
+		}
+	}).Return(nil)
+
+	wrunWithEffectiveProfile := &tmocks.WorkflowRun{}
+	wrunWithEffectiveProfile.On("GetID").Return(wid)
+	wrunWithEffectiveProfile.Mock.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		controllerVpc, ok := args.Get(1).(*corev1.Vpc)
+		if ok {
+			controllerVpc.Status = &corev1.VpcStatus{
+				EffectiveRoutingProfile: &corev1.VpcEffectiveRoutingProfile{
+					LeakDefaultRouteFromUnderlay: true,
+					Internal:                     true,
+					AccessTier:                   6,
+				},
+			}
+		}
+	}).Return(nil)
+
+	wrunWithResolvedRoutingProfile := &tmocks.WorkflowRun{}
+	wrunWithResolvedRoutingProfile.On("GetID").Return(wid)
+	wrunWithResolvedRoutingProfile.Mock.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		controllerVpc, ok := args.Get(1).(*corev1.Vpc)
+		if ok {
+			controllerVpc.Config = &corev1.VpcConfig{
+				RoutingProfileType: cutil.GetPtr("EXTERNAL"),
 			}
 		}
 	}).Return(nil)
@@ -429,14 +536,37 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		mock.AnythingOfType("func(internal.Context, uuid.UUID, uuid.UUID) error"), mock.AnythingOfType("uuid.UUID"),
 		mock.AnythingOfType("uuid.UUID")).Return(wrun, nil)
 
+	unavailableVpcID := uuid.New()
+	unavailableVpcName := "Test VPC unavailable after dispatch"
+	unavailableErr := errors.New("Core unavailable after VPC create dispatch")
+	unavailableRun := &tmocks.WorkflowRun{}
+	unavailableRun.On("GetID").Return("test-vpc-unavailable-workflow-id")
+	unavailableRun.On("Get", mock.Anything, mock.Anything).Return(
+		tp.NewNonRetryableApplicationError(unavailableErr.Error(), swe.ErrTypeNICoUnavailable, unavailableErr),
+	)
 	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"CreateVPCV2", mock.MatchedBy(func(req *cwssaws.VpcCreationRequest) bool {
+		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+			return req != nil && req.Name == unavailableVpcName
+		})).Return(unavailableRun, nil)
+
+	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
 			return req != nil && req.Name == vpcWithAllocatedVniName
 		})).Return(wrunWithAllocatedVni, nil)
 
 	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"CreateVPCV2", mock.MatchedBy(func(req *cwssaws.VpcCreationRequest) bool {
-			return req == nil || req.Name != vpcWithAllocatedVniName
+		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+			return req != nil && (req.Name == vpcWithRoutingProfileName || req.Name == vpcWithRoutingProfileOverridesName)
+		})).Return(wrunWithEffectiveProfile, nil)
+
+	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+			return req != nil && (req.Name == vpcWithResolvedRoutingProfileName || req.Name == vpcWithUnpersistedResolvedRoutingProfileName)
+		})).Return(wrunWithResolvedRoutingProfile, nil)
+
+	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+			return req == nil || (req.Name != unavailableVpcName && req.Name != vpcWithAllocatedVniName && req.Name != vpcWithRoutingProfileName && req.Name != vpcWithRoutingProfileOverridesName && req.Name != vpcWithResolvedRoutingProfileName && req.Name != vpcWithUnpersistedResolvedRoutingProfileName)
 		})).Return(wrun, nil)
 
 	// Mock timeout error
@@ -451,7 +581,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+	routingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
+		RouteTargetImports:           &model.APIVpcRouteTargets{{ASN: 64512, VNI: 559}},
+		LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
+		AllowedAnycastPrefixes:       &[]string{"192.0.2.1/24"},
+	}
 
 	tests := []struct {
 		name               string
@@ -459,9 +594,34 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		args               args
 		wantErr            bool
 		verifyChildSpanner bool
+		expectNoMutation   bool
+		expectRolledBack   bool
+		omitRoutingProfile bool
 	}{
 		{
-			name: "test VPC create API endpoint success",
+			name: "test VPC create API endpoint rejects power resource group when DPS power management is disabled",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:               "Test VPC rejected power resource group",
+					SiteID:             st1.ID.String(),
+					PowerResourceGroup: cutil.GetPtr("resource-group"),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not have DPS power management enabled",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
+		// The create path must accept and retain the highest 24-bit requested VNI.
+		{
+			name: "test VPC create API endpoint accepts maximum explicit VNI",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -473,13 +633,235 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 					Description:               cutil.GetPtr("Test VPC Description"),
 					SiteID:                    st1.ID.String(),
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					SlaacEnabled:              cutil.GetPtr(true),
 					NetworkSecurityGroupID:    &nsgTenant1Site1.ID,
-					Vni:                       cutil.GetPtr(555),
+					Vni:                       cutil.GetPtr(16777215),
 					Labels: map[string]string{
 						"vpc-dpu-zone": "east1",
 						"vpc-gpu-zone": "west1",
 					},
 					NVLinkLogicalPartitionID: cutil.GetPtr(nvllp1.ID.String()),
+				},
+				reqOrg:         tnOrg,
+				reqUser:        tnu,
+				respCode:       http.StatusCreated,
+				expectedStatus: cdbm.VpcStatusProvisioning,
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC create API endpoint defaults SLAAC VPC to FNN on native networking site",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:         "Test SLAAC VPC default FNN",
+					SiteID:       st1.ID.String(),
+					SlaacEnabled: cutil.GetPtr(true),
+				},
+				reqOrg:                     tnOrg,
+				reqUser:                    tnu,
+				respCode:                   http.StatusCreated,
+				expectedStatus:             cdbm.VpcStatusProvisioning,
+				expectedVirtualizationType: cdbm.VpcFNN,
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC create API endpoint inherits Core-resolved routing profile when omitted",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      vpcWithResolvedRoutingProfileName,
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+				},
+				reqOrg:                 tnOrg,
+				reqUser:                tnu,
+				respCode:               http.StatusCreated,
+				expectedStatus:         cdbm.VpcStatusProvisioning,
+				expectedRoutingProfile: cutil.GetPtr(model.APIVpcRoutingProfileExternal),
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+			omitRoutingProfile: true,
+		},
+		{
+			name: "test VPC create API endpoint rolls back when Core-resolved routing profile cannot be persisted",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					ID:                        &vpcWithUnpersistedResolvedRoutingProfileID,
+					Name:                      vpcWithUnpersistedResolvedRoutingProfileName,
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					SlaacEnabled:              cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusInternalServerError,
+				respMessage: "Failed to persist Core-resolved VPC routing profile",
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+			expectRolledBack:   true,
+		},
+		{
+			name: "test VPC create API endpoint rejects SLAAC when Site config inventory stores false",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test SLAAC VPC unsupported by Site",
+					SiteID:                    st4.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					SlaacEnabled:              cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not advertise support for SLAAC-enabled VPCs",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
+		{
+			name: "test VPC create API endpoint rejects SLAAC when Site config inventory omits the capability",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test SLAAC VPC without cached Site capability",
+					SiteID:                    st5.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					SlaacEnabled:              cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not advertise support for SLAAC-enabled VPCs",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
+		{
+			name: "test VPC create API endpoint rolls back when Core is unavailable after dispatch",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					ID:                        &unavailableVpcID,
+					Name:                      unavailableVpcName,
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					SlaacEnabled:              cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusServiceUnavailable,
+				respMessage: unavailableErr.Error(),
+			},
+			wantErr:          false,
+			expectRolledBack: true,
+		},
+		{
+			name: "test VPC create API endpoint rejects SLAAC for explicit ethernet virtualization",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test SLAAC VPC explicit ethernet",
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcEthernetVirtualizer),
+					SlaacEnabled:              cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "`slaacEnabled` is only supported when network virtualization type is `FNN`",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
+		{
+			name: "test VPC create API endpoint rejects SLAAC when virtualization defaults to ethernet",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:         "Test SLAAC VPC default ethernet",
+					SiteID:       st3.ID.String(),
+					SlaacEnabled: cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "`slaacEnabled` is only supported when network virtualization type is `FNN`",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
+		// Override-only writes use the same site-scoped privilege as named profiles.
+		{
+			name: "test VPC create API endpoint with routing profile overrides success",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      vpcWithRoutingProfileOverridesName,
+					Description:               cutil.GetPtr("Test VPC Description"),
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					RoutingProfileOverrides:   routingProfileOverrides,
 				},
 				reqOrg:         tnOrg,
 				reqUser:        tnu,
@@ -534,6 +916,30 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			wantErr:            false,
 			verifyChildSpanner: true,
 		},
+		// Override-only writes must not bypass the named-profile privilege gate.
+		{
+			name: "test VPC create API endpoint rejects routing profile overrides without targeted instance creation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test VPC restricted routing profile overrides",
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					RoutingProfileOverrides:   routingProfileOverrides,
+				},
+				reqOrg:      tnOrg3,
+				reqUser:     tnu3,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have sufficient privileges to set `routingProfileOverrides`",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
+		// A privileged FNN create forwards and persists every supplied override.
 		{
 			name: "test VPC create API endpoint with routing profile success",
 			fields: fields{
@@ -543,13 +949,14 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIVpcCreateRequest{
-					Name:                      "Test VPC routing profile",
+					Name:                      vpcWithRoutingProfileName,
 					Description:               cutil.GetPtr("Test VPC Description"),
 					SiteID:                    st1.ID.String(),
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 					NetworkSecurityGroupID:    &nsgTenant1Site1.ID,
 					Vni:                       cutil.GetPtr(559),
 					RoutingProfile:            cutil.GetPtr(model.APIVpcRoutingProfileInternal),
+					RoutingProfileOverrides:   routingProfileOverrides,
 					Labels: map[string]string{
 						"vpc-dpu-zone": "east1",
 						"vpc-gpu-zone": "west1",
@@ -571,7 +978,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "test VPC create API endpoint rejects unsupported routing profile",
+			name: "test VPC create API endpoint rejects empty routing profile before dispatch",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -579,16 +986,43 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIVpcCreateRequest{
-					Name:                      "Test VPC unsupported routing profile",
+					Name:                      "Test VPC empty routing profile",
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					RoutingProfile:            cutil.GetPtr(""),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "`routingProfile` must not be empty",
+			},
+			expectNoMutation: true,
+		},
+		{
+			name: "test VPC create API endpoint accepts site-configured routing profile",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test VPC site-configured routing profile",
 					Description:               cutil.GetPtr("Test VPC Description"),
 					SiteID:                    st1.ID.String(),
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 					RoutingProfile:            cutil.GetPtr("tenant-edge"),
 				},
-				reqOrg:      tnOrg,
-				reqUser:     tnu,
-				respCode:    http.StatusBadRequest,
-				respMessage: "`routingProfile` must be one of privileged-internal, internal, or external",
+				reqOrg:         tnOrg,
+				reqUser:        tnu,
+				respCode:       http.StatusCreated,
+				expectedStatus: cdbm.VpcStatusProvisioning,
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
@@ -653,6 +1087,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 					Description:               cutil.GetPtr("Flat VPC for zero-DPU instances"),
 					SiteID:                    st1.ID.String(),
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFlat),
+					SlaacEnabled:              cutil.GetPtr(false),
 				},
 				reqOrg:         tnOrg,
 				reqUser:        tnu,
@@ -742,6 +1177,28 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		// Handler-side defaulting reports the resolved unsupported type.
+		{
+			name: "test VPC create API endpoint rejects routing profile overrides when type defaults to ethernet",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                    "Test VPC default ethernet routing profile overrides",
+					SiteID:                  st3.ID.String(),
+					RoutingProfileOverrides: routingProfileOverrides,
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "Routing profile overrides are not supported for network virtualization type: ETHERNET_VIRTUALIZER",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
 		},
 		{
 			name: "test VPC create API endpoint with explicit VPC ID success",
@@ -1048,7 +1505,16 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				cfg:       tt.fields.cfg,
 			}
 
-			jsonData, _ := json.Marshal(tt.args.reqData)
+			jsonData, err := json.Marshal(tt.args.reqData)
+			require.NoError(t, err)
+			if tt.omitRoutingProfile {
+				var requestBody map[string]json.RawMessage
+				err = json.Unmarshal(jsonData, &requestBody)
+				require.NoError(t, err)
+				delete(requestBody, "routingProfile")
+				jsonData, err = json.Marshal(requestBody)
+				require.NoError(t, err)
+			}
 
 			// Setup echo server/context
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
@@ -1060,7 +1526,6 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -1075,6 +1540,38 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			if tt.args.respMessage != "" {
 				assert.Contains(t, rec.Body.String(), tt.args.respMessage)
 			}
+
+			tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "InvokeCoreGRPC", mock.Anything)
+			tst3.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "InvokeCoreGRPC", mock.Anything)
+			if tt.expectNoMutation {
+				// Authorization and compatibility failures must precede persistence and workflow dispatch.
+				persistedVpcs, total, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetAll(ctx, nil, cdbm.VpcFilterInput{Name: &tt.args.reqData.Name}, paginator.PageInput{}, nil)
+				require.NoError(t, gerr)
+				assert.Zero(t, total)
+				assert.Empty(t, persistedVpcs)
+				requestMatcher := mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+					return req != nil && req.Name == tt.args.reqData.Name
+				})
+				tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", requestMatcher)
+				tst3.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", requestMatcher)
+			}
+			if tt.expectRolledBack {
+				persistedVpcs, total, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetAll(ctx, nil, cdbm.VpcFilterInput{Name: &tt.args.reqData.Name}, paginator.PageInput{}, nil)
+				require.NoError(t, gerr)
+				assert.Zero(t, total)
+				assert.Empty(t, persistedVpcs)
+
+				require.NotNil(t, tt.args.reqData.ID)
+				statusDetails, total, gerr := cdbm.NewStatusDetailDAO(tt.fields.dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{tt.args.reqData.ID.String()}}, paginator.PageInput{})
+				require.NoError(t, gerr)
+				assert.Zero(t, total)
+				assert.Empty(t, statusDetails)
+
+				forwardedRequestMatcher := mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+					return req != nil && req.Name == tt.args.reqData.Name && req.SlaacEnabled != nil && *req.SlaacEnabled
+				})
+				tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", forwardedRequestMatcher)
+			}
 			if tt.args.respCode != http.StatusCreated {
 				return
 			}
@@ -1082,9 +1579,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			rst := &model.APIVpc{}
 
 			serr := json.Unmarshal(rec.Body.Bytes(), rst)
-			if serr != nil {
-				t.Fatal(serr)
-			}
+			require.NoError(t, serr)
+			responseFields := struct {
+				SlaacEnabled *bool `json:"slaacEnabled"`
+			}{}
+			serr = json.Unmarshal(rec.Body.Bytes(), &responseFields)
+			require.NoError(t, serr)
 
 			assert.Equal(t, rst.Name, tt.args.reqData.Name)
 			assert.True(t, tt.args.reqData.ID == nil || rst.ID == tt.args.reqData.ID.String(), "%+v != %+v", rst.ID, tt.args.reqData.ID)
@@ -1098,12 +1598,25 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			} else {
 				assert.Nil(t, rst.Description)
 			}
-			assert.Equal(t, tt.args.reqData.RoutingProfile, rst.RoutingProfile)
-			if tt.args.reqData.NetworkVirtualizationType != nil {
-				assert.Equal(t, rst.NetworkVirtualizationType, tt.args.reqData.NetworkVirtualizationType)
-			} else {
-				assert.Equal(t, *rst.NetworkVirtualizationType, cdbm.VpcEthernetVirtualizer)
+			expectedRoutingProfile := tt.args.reqData.RoutingProfile
+			if tt.args.expectedRoutingProfile != nil {
+				expectedRoutingProfile = tt.args.expectedRoutingProfile
 			}
+			assert.Equal(t, expectedRoutingProfile, rst.RoutingProfile)
+			assert.Equal(t, tt.args.reqData.RoutingProfileOverrides, rst.RoutingProfileOverrides)
+			expectedSlaacEnabled := tt.args.reqData.SlaacEnabled != nil && *tt.args.reqData.SlaacEnabled
+			assert.Equal(t, expectedSlaacEnabled, rst.SlaacEnabled)
+			require.NotNil(t, responseFields.SlaacEnabled)
+			assert.Equal(t, expectedSlaacEnabled, *responseFields.SlaacEnabled)
+			expectedVirtualizationType := cdbm.VpcEthernetVirtualizer
+			if tt.args.reqData.NetworkVirtualizationType != nil {
+				expectedVirtualizationType = *tt.args.reqData.NetworkVirtualizationType
+			}
+			if tt.args.expectedVirtualizationType != "" {
+				expectedVirtualizationType = tt.args.expectedVirtualizationType
+			}
+			require.NotNil(t, rst.NetworkVirtualizationType)
+			assert.Equal(t, expectedVirtualizationType, *rst.NetworkVirtualizationType)
 			assert.Equal(t, tt.args.expectedStatus, rst.Status)
 			require.Len(t, rst.StatusHistory, len(tt.args.expectedStatusDetails))
 			for i, expectedStatusDetail := range tt.args.expectedStatusDetails {
@@ -1128,8 +1641,65 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				assert.Equal(t, len(rst.Labels), len(tt.args.reqData.Labels))
 			}
 
-			assert.True(t, tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", mock.MatchedBy(func(req *cwssaws.VpcCreationRequest) bool {
+			// Read the row independently so the create response cannot hide a persistence defect.
+			persistedVpc, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(rst.ID), nil)
+			require.NoError(t, gerr)
+			assert.Equal(t, expectedSlaacEnabled, persistedVpc.SlaacEnabled)
+			if tt.args.reqData.Vni != nil {
+				require.NotNil(t, persistedVpc.Vni)
+				assert.Equal(t, *tt.args.reqData.Vni, *persistedVpc.Vni)
+			} else {
+				assert.Nil(t, persistedVpc.Vni)
+			}
+			require.NotNil(t, persistedVpc.NetworkVirtualizationType)
+			assert.Equal(t, expectedVirtualizationType, *persistedVpc.NetworkVirtualizationType)
+			if expectedRoutingProfile != nil {
+				require.NotNil(t, persistedVpc.RoutingProfile)
+				assert.Equal(t, model.NormalizeAPIVpcRoutingProfileForSite(*expectedRoutingProfile), *persistedVpc.RoutingProfile)
+			} else {
+				assert.Nil(t, persistedVpc.RoutingProfile)
+			}
+			assert.Equal(t, tt.args.reqData.RoutingProfileOverrides.ToDB(), persistedVpc.RoutingProfileOverrides)
+			if tt.args.reqData.RoutingProfileOverrides != nil {
+				// Effective state returned without a VNI is cached and exposed to this privileged tenant.
+				require.NotNil(t, rst.EffectiveRoutingProfile)
+				assert.Equal(t, uint32(6), rst.EffectiveRoutingProfile.AccessTier)
+				require.NotNil(t, persistedVpc.EffectiveRoutingProfile)
+				assert.Equal(t, uint32(6), persistedVpc.EffectiveRoutingProfile.AccessTier)
+			}
+
+			assert.True(t, tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
 				if req == nil {
+					return false
+				}
+				if tt.args.reqData.Vni != nil {
+					if req.Vni == nil || *req.Vni != uint32(*tt.args.reqData.Vni) {
+						return false
+					}
+				} else if req.Vni != nil {
+					return false
+				}
+				if !proto.Equal(req.RoutingProfileOverrides, tt.args.reqData.RoutingProfileOverrides.ToDB().ToProto()) {
+					return false
+				}
+				if tt.args.reqData.SlaacEnabled == nil {
+					if req.SlaacEnabled != nil {
+						return false
+					}
+				} else if req.SlaacEnabled == nil || *req.SlaacEnabled != *tt.args.reqData.SlaacEnabled {
+					return false
+				}
+				if req.NetworkVirtualizationType == nil {
+					return false
+				}
+				expectedProtoVirtualizationType := corev1.VpcVirtualizationType_ETHERNET_VIRTUALIZER
+				switch expectedVirtualizationType {
+				case cdbm.VpcFNN:
+					expectedProtoVirtualizationType = corev1.VpcVirtualizationType_FNN
+				case cdbm.VpcFlat:
+					expectedProtoVirtualizationType = corev1.VpcVirtualizationType_FLAT
+				}
+				if *req.NetworkVirtualizationType != expectedProtoVirtualizationType {
 					return false
 				}
 				if tt.args.reqData.RoutingProfile == nil {
@@ -1182,9 +1752,14 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 	tnu := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn := testVPCBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu)
+	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu)
 
 	tnu2 := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg, tnOrgRoles)
 	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-2", tnOrg, tnu2)
+
+	tnOrg3 := "test-tenant-org-3"
+	tnu3 := testVPCBuildUser(t, dbSession, "test-starfleet-id-4", tnOrg3, tnOrgRoles)
+	tn3 := testVPCBuildTenant(t, dbSession, "test-tenant-3", tnOrg3, tnu3)
 
 	st := testVPCBuildSite(t, dbSession, ip, "test-site-1", false, true, cdbm.SiteStatusRegistered, ipu)
 	assert.NotNil(t, st)
@@ -1215,6 +1790,12 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 	vpc2 := testVPCBuildVPC(t, dbSession, "test-vpc-2", ip, tn, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "wes2"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpc2)
+	vpcFNN := testVPCBuildVPC(t, dbSession, "test-vpc-fnn", ip, tn, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu)
+	assert.NotNil(t, vpcFNN)
+	vpcFNN.EffectiveRoutingProfile = &cdbm.VpcEffectiveRoutingProfile{Internal: true, AccessTier: 2}
+	testUpdateVPC(t, dbSession, vpcFNN)
+	vpcFNNUnprivileged := testVPCBuildVPC(t, dbSession, "test-vpc-fnn-unprivileged", ip, tn3, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu3)
+	assert.NotNil(t, vpcFNNUnprivileged)
 
 	vpc3 := testVPCBuildVPC(t, dbSession, "test-vpc-3", ip, tn, st2, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west3"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpc2)
@@ -1234,6 +1815,10 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 	ts1t2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn2.ID, st.ID, tnu2.ID)
 	assert.NotNil(t, ts1t2)
 
+	// Associate the unprivileged tenant with Site 1 without granting targeted instance creation.
+	ts1t3 := testBuildTenantSiteAssociation(t, dbSession, tnOrg3, tn3.ID, st.ID, tnu3.ID)
+	assert.NotNil(t, ts1t3)
+
 	// Associate tenant 2 with site 2
 	ts2t2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn2.ID, st2.ID, tnu2.ID)
 	assert.NotNil(t, ts2t2)
@@ -1250,12 +1835,25 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 	nsgTenant2Site1 := testBuildNetworkSecurityGroup(t, dbSession, "test-nsg-3", tn2, st, cdbm.NetworkSecurityGroupStatusReady)
 	assert.NotNil(t, nsgTenant2Site1)
 
+	vpcWithNSG := testVPCBuildVPC(t, dbSession, "test-vpc-with-nsg", ip, tn, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west7"}, cdbm.VpcStatusReady, tnu)
+	assert.NotNil(t, vpcWithNSG)
+	vpcWithNSG.NetworkSecurityGroupID = cutil.GetPtr(nsgTenant1Site1.ID)
+	testUpdateVPC(t, dbSession, vpcWithNSG)
+
+	vpcForNSGSet := testVPCBuildVPC(t, dbSession, "test-vpc-set-nsg", ip, tn, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west8"}, cdbm.VpcStatusReady, tnu)
+	assert.NotNil(t, vpcForNSGSet)
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+	updateRoutingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
+		RouteTargetsOnExports:         &model.APIVpcRouteTargets{{ASN: 64513, VNI: 61}},
+		TenantLeakCommunitiesAccepted: cutil.GetPtr(true),
+		AcceptedLeaksFromUnderlay:     &[]string{},
+	}
 
 	// Mock per-Site client for st3
 	tsc := &tmocks.Client{}
@@ -1293,13 +1891,98 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 	tst.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	tests := []struct {
-		name                         string
-		fields                       fields
-		args                         args
-		wantErr                      bool
-		verifyChildSpanner           bool
-		expectedNVLinkPartitionValue *string
+		name                              string
+		fields                            fields
+		args                              args
+		wantErr                           bool
+		verifyChildSpanner                bool
+		expectedNVLinkPartitionValue      *string
+		expectNVLinkPartitionNil          bool
+		expectedNetworkSecurityGroupValue *string
+		expectNetworkSecurityGroupNil     bool
+		expectedRoutingProfileOverrides   *model.APIVpcRoutingProfileOverrides
+		expectNoRoutingProfileMutation    bool
 	}{
+		{
+			name: "test VPC update rejects power resource group when DPS power management is disabled",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					PowerResourceGroup: cutil.GetPtr("resource-group"),
+				},
+				reqVPCID:    vpc.ID.String(),
+				reqVPC:      vpc,
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not have DPS power management enabled",
+			},
+		},
+		// A present object replaces the FNN VPC's full inline definition.
+		{
+			name: "test VPC update replaces routing profile overrides",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					RoutingProfileOverrides: updateRoutingProfileOverrides,
+				},
+				reqVPCID: vpcFNN.ID.String(),
+				reqVPC:   vpcFNN,
+				reqOrg:   tnOrg,
+				reqUser:  tnu,
+				respCode: http.StatusOK,
+			},
+			expectedRoutingProfileOverrides: updateRoutingProfileOverrides,
+		},
+		// Tenants without targeted instance creation cannot replace inline definitions.
+		{
+			name: "test VPC update rejects routing profile overrides without targeted instance creation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					RoutingProfileOverrides: updateRoutingProfileOverrides,
+				},
+				reqVPCID:    vpcFNNUnprivileged.ID.String(),
+				reqVPC:      vpcFNNUnprivileged,
+				reqOrg:      tnOrg3,
+				reqUser:     tnu3,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have sufficient privileges to set `routingProfileOverrides`",
+			},
+			expectNoRoutingProfileMutation: true,
+		},
+		// Inline definitions are rejected when the persisted VPC is not FNN.
+		{
+			name: "test VPC update rejects routing profile overrides for ethernet virtualization",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					RoutingProfileOverrides: updateRoutingProfileOverrides,
+				},
+				reqVPCID:    vpc2.ID.String(),
+				reqVPC:      vpc2,
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "Routing profile overrides are not supported for network virtualization type: ETHERNET_VIRTUALIZER",
+			},
+		},
 		{
 			name: "test VPC update success",
 			fields: fields{
@@ -1324,6 +2007,27 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC update to set NSG - success",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					NetworkSecurityGroupID: &nsgTenant1Site1.ID,
+				},
+				reqVPCID: vpcForNSGSet.ID.String(),
+				reqVPC:   vpcForNSGSet,
+				reqOrg:   tnOrg,
+				reqUser:  tnu,
+				respCode: http.StatusOK,
+			},
+			wantErr:                           false,
+			verifyChildSpanner:                true,
+			expectedNetworkSecurityGroupValue: &nsgTenant1Site1.ID,
 		},
 		{
 			name: "test VPC update NSG with bad tenant - fail",
@@ -1409,21 +2113,17 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIVpcUpdateRequest{
-					Name:                   cutil.GetPtr(uuid.NewString()),
-					Description:            cutil.GetPtr("Test VPC Description"),
 					NetworkSecurityGroupID: cutil.GetPtr(""),
-					Labels: map[string]string{
-						"zone": "westnew",
-					},
 				},
-				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
+				reqVPCID: vpcWithNSG.ID.String(),
+				reqVPC:   vpcWithNSG,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
 			},
-			wantErr:            false,
-			verifyChildSpanner: true,
+			wantErr:                       false,
+			verifyChildSpanner:            true,
+			expectNetworkSecurityGroupNil: true,
 		},
 
 		{
@@ -1596,8 +2296,8 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				reqUser:  tnu,
 				respCode: http.StatusOK,
 			},
-			wantErr:                      false,
-			expectedNVLinkPartitionValue: cutil.GetPtr(""),
+			wantErr:                  false,
+			expectNVLinkPartitionNil: true,
 		},
 		{
 			name: "test VPC update to set NVLink Logical Partition ID after clearing - success",
@@ -1644,7 +2344,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -1660,6 +2359,17 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.args.respCode, rec.Code)
+			if tt.expectNoRoutingProfileMutation {
+				// Rejected writes must preserve storage and avoid dispatching the update workflow.
+				persistedVpc, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPCID), nil)
+				require.NoError(t, gerr)
+				assert.Nil(t, persistedVpc.RoutingProfileOverrides)
+				workflowOptionsMatcher := mock.MatchedBy(func(options temporalClient.StartWorkflowOptions) bool {
+					return options.ID == "vpc-update-"+tt.args.reqVPCID
+				})
+				tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, workflowOptionsMatcher, "UpdateVPC", mock.Anything)
+				tst.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, workflowOptionsMatcher, "UpdateVPC", mock.Anything)
+			}
 			if tt.args.respCode != http.StatusOK {
 				return
 			}
@@ -1671,8 +2381,13 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				t.Fatal(serr)
 			}
 
-			assert.Equal(t, rst.Name, *tt.args.reqData.Name)
-			assert.Equal(t, *rst.Description, *tt.args.reqData.Description)
+			if tt.args.reqData.Name != nil {
+				assert.Equal(t, *tt.args.reqData.Name, rst.Name)
+			}
+			if tt.args.reqData.Description != nil {
+				require.NotNil(t, rst.Description)
+				assert.Equal(t, *tt.args.reqData.Description, *rst.Description)
+			}
 			assert.NotEqual(t, rst.Updated.String(), tt.args.reqVPC.Updated.String())
 
 			if tt.args.reqData.NVLinkLogicalPartitionID != nil {
@@ -1687,20 +2402,57 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				assert.Equal(t, len(rst.Labels), len(tt.args.reqData.Labels))
 			}
 
-			if tt.expectedNVLinkPartitionValue != nil {
-				var lastUpdateVPCReq *cwssaws.VpcUpdateRequest
+			if tt.expectedRoutingProfileOverrides != nil {
+				// Verify the response and a fresh DB lookup both hold the replacement object.
+				assert.Equal(t, tt.expectedRoutingProfileOverrides, rst.RoutingProfileOverrides)
+				persistedVpc, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPCID), nil)
+				require.NoError(t, gerr)
+				assert.Equal(t, tt.expectedRoutingProfileOverrides.ToDB(), persistedVpc.RoutingProfileOverrides)
+				assert.Nil(t, persistedVpc.EffectiveRoutingProfile)
+			}
+
+			if tt.args.reqData.NetworkSecurityGroupID != nil {
+				persistedVpc, err := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPCID), nil)
+				require.NoError(t, err)
+				if *tt.args.reqData.NetworkSecurityGroupID == "" {
+					assert.Nil(t, rst.NetworkSecurityGroupID, "Failed to clear VPC NSG ID in response")
+					assert.Nil(t, persistedVpc.NetworkSecurityGroupID, "Failed to clear persisted VPC NSG ID")
+				} else {
+					require.NotNil(t, rst.NetworkSecurityGroupID)
+					require.NotNil(t, persistedVpc.NetworkSecurityGroupID)
+					assert.Equal(t, *tt.args.reqData.NetworkSecurityGroupID, *rst.NetworkSecurityGroupID)
+					assert.Equal(t, *tt.args.reqData.NetworkSecurityGroupID, *persistedVpc.NetworkSecurityGroupID)
+				}
+			}
+
+			var lastUpdateVPCReq *corev1.VpcUpdateRequest
+			if tt.expectedNVLinkPartitionValue != nil || tt.expectNVLinkPartitionNil || tt.expectedNetworkSecurityGroupValue != nil || tt.expectNetworkSecurityGroupNil || tt.expectedRoutingProfileOverrides != nil {
 				for i := len(tsc.Mock.Calls) - 1; i >= 0; i-- {
 					call := tsc.Mock.Calls[i]
 					if call.Method == "ExecuteWorkflow" && len(call.Arguments) >= 4 {
 						if wfName, ok := call.Arguments[2].(string); ok && wfName == "UpdateVPC" {
-							lastUpdateVPCReq, _ = call.Arguments[3].(*cwssaws.VpcUpdateRequest)
+							lastUpdateVPCReq, _ = call.Arguments[3].(*corev1.VpcUpdateRequest)
 							break
 						}
 					}
 				}
 				require.NotNil(t, lastUpdateVPCReq, "UpdateVPC workflow should have been called")
+			}
+
+			if tt.expectNVLinkPartitionNil {
+				assert.Nil(t, lastUpdateVPCReq.DefaultNvlinkLogicalPartitionId, "DefaultNvlinkLogicalPartitionId should be nil in workflow request")
+			} else if tt.expectedNVLinkPartitionValue != nil {
 				require.NotNil(t, lastUpdateVPCReq.DefaultNvlinkLogicalPartitionId, "DefaultNvlinkLogicalPartitionId should be set in workflow request")
 				assert.Equal(t, *tt.expectedNVLinkPartitionValue, lastUpdateVPCReq.DefaultNvlinkLogicalPartitionId.Value)
+			}
+			if tt.expectNetworkSecurityGroupNil {
+				assert.Nil(t, lastUpdateVPCReq.NetworkSecurityGroupId, "NetworkSecurityGroupId should be nil in workflow request")
+			} else if tt.expectedNetworkSecurityGroupValue != nil {
+				require.NotNil(t, lastUpdateVPCReq.NetworkSecurityGroupId, "NetworkSecurityGroupId should be set in workflow request")
+				assert.Equal(t, *tt.expectedNetworkSecurityGroupValue, *lastUpdateVPCReq.NetworkSecurityGroupId)
+			}
+			if tt.expectedRoutingProfileOverrides != nil {
+				assert.True(t, proto.Equal(tt.expectedRoutingProfileOverrides.ToDB().ToProto(), lastUpdateVPCReq.RoutingProfileOverrides))
 			}
 
 			if tt.verifyChildSpanner {
@@ -1817,7 +2569,7 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st3
 	tsc := &tmocks.Client{}
@@ -2068,7 +2820,6 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := uvvh.Handle(ec); (err != nil) != tt.wantErr {
@@ -2138,9 +2889,10 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 	tnu1 := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg1, tnOrgRoles)
 	tn1 := testVPCBuildTenant(t, dbSession, "test-tenant", tnOrg1, tnu1)
 
-	tnu2 := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg1, tnOrgRoles)
-	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-1", tnOrg1, tnu2)
+	tnu2 := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles)
+	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-1", tnOrg2, tnu2)
 	assert.NotNil(t, tn2)
+	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg1, cdbm.TenantAccountStatusReady, tnu1)
 
 	st := testVPCBuildSite(t, dbSession, ip, "test-site-1", false, true, cdbm.SiteStatusRegistered, ipu)
 	assert.NotNil(t, st)
@@ -2148,8 +2900,16 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 	al := testVPCSiteBuildAllocation(t, dbSession, st, tn1, "test-allocation", ipu)
 	assert.NotNil(t, al)
 
-	vpc := testVPCBuildVPC(t, dbSession, "test-vpc", ip, tn1, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west1"}, cdbm.VpcStatusReady, tnu1)
+	vpc := testVPCBuildVPC(t, dbSession, "test-vpc", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, map[string]string{"zone": "west1"}, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc)
+	vpc.RoutingProfileOverrides = &cdbm.VpcRoutingProfileOverrides{LeakDefaultRouteFromUnderlay: cutil.GetPtr(false)}
+	vpc.EffectiveRoutingProfile = &cdbm.VpcEffectiveRoutingProfile{LeakDefaultRouteFromUnderlay: true, Internal: true, AccessTier: 5}
+	testUpdateVPC(t, dbSession, vpc)
+
+	// The second tenant has no targeted-instance-creation account and must not see effective state.
+	unprivilegedVpc := testVPCBuildVPC(t, dbSession, "test-vpc-unprivileged", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+	unprivilegedVpc.EffectiveRoutingProfile = &cdbm.VpcEffectiveRoutingProfile{Internal: true, AccessTier: 5}
+	testUpdateVPC(t, dbSession, unprivilegedVpc)
 
 	// Attach an NSG to this instance
 	nsg1 := testBuildNetworkSecurityGroup(t, dbSession, "network-security-group-1-for-the-win", tn1, st, cdbm.NetworkSecurityGroupStatusReady)
@@ -2163,7 +2923,7 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                             string
@@ -2175,6 +2935,7 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 		expectedTenantOrg                *string
 		expectedSiteName                 *string
 		expectedNetworkSecurityGroupName *string
+		expectEffectiveRoutingProfile    bool
 		verifyChildSpanner               bool
 	}{
 		{
@@ -2189,6 +2950,24 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 				reqVPCID: vpc.ID.String(),
 				reqOrg:   tnOrg1,
 				reqUser:  tnu1,
+				respCode: http.StatusOK,
+			},
+			wantErr:                       false,
+			expectEffectiveRoutingProfile: true,
+		},
+		// A tenant without effective site privilege receives no resolved profile field.
+		{
+			name: "test VPC get omits effective routing profile for unprivileged tenant",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   unprivilegedVpc,
+				reqVPCID: unprivilegedVpc.ID.String(),
+				reqOrg:   tnOrg2,
+				reqUser:  tnu2,
 				respCode: http.StatusOK,
 			},
 			wantErr: false,
@@ -2271,10 +3050,11 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusOK,
 			},
-			queryIncludeRelations1: cutil.GetPtr(cdbm.TenantRelationName),
-			expectedTenantOrg:      &tn1.Org,
-			wantErr:                false,
-			verifyChildSpanner:     true,
+			queryIncludeRelations1:        cutil.GetPtr(cdbm.TenantRelationName),
+			expectedTenantOrg:             &tn1.Org,
+			wantErr:                       false,
+			expectEffectiveRoutingProfile: true,
+			verifyChildSpanner:            true,
 		},
 		{
 			name: "test VPC get API endpoint success include NSG relation",
@@ -2293,6 +3073,7 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 			queryIncludeRelations1:           cutil.GetPtr(cdbm.NetworkSecurityGroupRelationName),
 			expectedNetworkSecurityGroupName: &nsg1.Name,
 			wantErr:                          false,
+			expectEffectiveRoutingProfile:    true,
 			verifyChildSpanner:               true,
 		},
 		{
@@ -2309,11 +3090,12 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusOK,
 			},
-			queryIncludeRelations1: cutil.GetPtr(cdbm.TenantRelationName),
-			queryIncludeRelations2: cutil.GetPtr(cdbm.SiteRelationName),
-			expectedTenantOrg:      &tn1.Org,
-			expectedSiteName:       &st.Name,
-			wantErr:                false,
+			queryIncludeRelations1:        cutil.GetPtr(cdbm.TenantRelationName),
+			queryIncludeRelations2:        cutil.GetPtr(cdbm.SiteRelationName),
+			expectedTenantOrg:             &tn1.Org,
+			expectedSiteName:              &st.Name,
+			wantErr:                       false,
+			expectEffectiveRoutingProfile: true,
 		},
 	}
 	for _, tt := range tests {
@@ -2345,7 +3127,6 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -2370,6 +3151,11 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 
 			assert.Equal(t, rst.Name, tt.args.reqVPC.Name)
 			assert.Equal(t, rst.Description, tt.args.reqVPC.Description)
+			assert.Equal(t, tt.expectEffectiveRoutingProfile, rst.EffectiveRoutingProfile != nil)
+			assert.Equal(t, tt.expectEffectiveRoutingProfile, strings.Contains(rec.Body.String(), "effectiveRoutingProfile"))
+			if tt.args.reqVPC.RoutingProfileOverrides != nil {
+				assert.NotNil(t, rst.RoutingProfileOverrides)
+			}
 
 			if tt.expectedTenantOrg != nil {
 				assert.Equal(t, rst.Tenant.Org, *tt.expectedTenantOrg)
@@ -2422,6 +3208,7 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 
 	tnu := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn := testVPCBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu)
+	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu)
 	tnu2 := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tn2Org, tnOrgRoles)
 	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-2", tn2Org, tnu2)
 
@@ -2436,6 +3223,14 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 
 	al2 := testVPCSiteBuildAllocation(t, dbSession, st2, tn, "test-allocation-2", ipu)
 	assert.NotNil(t, al2)
+
+	// A per-Site false override removes only Site 2 from the account-level privilege.
+	tenantSite2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st2.ID, tnu.ID)
+	_, err := cdbm.NewTenantSiteDAO(dbSession).Update(ctx, nil, cdbm.TenantSiteUpdateInput{
+		TenantSiteID: tenantSite2.ID,
+		Config:       &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)},
+	})
+	require.NoError(t, err)
 
 	// Site with no allocations for first tenant
 	// We'll add VPCs to simulate a site where tenant had allocations
@@ -2497,6 +3292,7 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 
 		// Add the NSG of the site to the VPC
 		vpc.NetworkSecurityGroupID = cutil.GetPtr(curNsg.ID)
+		vpc.EffectiveRoutingProfile = &cdbm.VpcEffectiveRoutingProfile{Internal: true, AccessTier: uint32(i + 1)}
 		testUpdateVPC(t, dbSession, vpc)
 
 		vpcs = append(vpcs, *vpc)
@@ -2507,7 +3303,7 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                             string
@@ -2700,26 +3496,6 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 			wantRespCode:                     http.StatusOK,
 			expectedSiteName:                 &st.Name,
 			expectedNetworkSecurityGroupName: &nsg1.Name,
-		},
-		{
-			name: "get all VPCs with infrastructure provider success",
-			fields: fields{
-				dbSession: dbSession,
-				tc:        tc,
-				cfg:       cfg,
-			},
-			args: args{
-				org: tnOrg,
-				query: url.Values{
-					"includeRelation":          []string{cdbm.InfrastructureProviderRelationName},
-					"infrastructureProviderId": []string{ip.ID.String()},
-					"pageSize":                 []string{"30"},
-				},
-				user: tnu,
-			},
-			wantCount:      30,
-			wantTotalCount: totalCount,
-			wantRespCode:   http.StatusOK,
 		},
 		{
 			name: "get all VPCs by name as query full text search success",
@@ -3048,7 +3824,6 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -3065,6 +3840,16 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantCount, len(resp))
+
+			// Bulk responses apply effective privilege independently for each VPC Site.
+			for _, responseVpc := range resp {
+				require.NotNil(t, responseVpc.SiteID)
+				if *responseVpc.SiteID == st2.ID.String() {
+					assert.Nil(t, responseVpc.EffectiveRoutingProfile)
+				} else {
+					assert.NotNil(t, responseVpc.EffectiveRoutingProfile)
+				}
+			}
 
 			ph := rec.Header().Get(pagination.ResponseHeaderName)
 			require.NotEmpty(t, ph)
@@ -3127,7 +3912,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
-	testVPCSetupSchema(t, dbSession)
+	common.TestSetupSchema(t, dbSession)
 
 	ipOrg := "test-provider-org"
 	ipOrgRoles := []string{authz.ProviderAdminRole}
@@ -3167,6 +3952,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	vpc3 := testVPCBuildVPC(t, dbSession, "test-vpc-3", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, map[string]string{"zone": "east1"}, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc3)
+	vpcWithPeering := testVPCBuildVPC(t, dbSession, "test-vpc-with-peering", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
 
 	os := common.TestBuildOperatingSystem(t, dbSession, "test-os", tn1, cdbm.OperatingSystemStatusReady, tnu1)
 	assert.NotNil(t, os)
@@ -3236,6 +4022,15 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	tscWithNICoNotFound.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	peeringPrecondition := fmt.Sprintf("VPC `%s` still has peerings; delete its peerings and wait for them to disappear before deleting the VPC", vpcWithPeering.ID)
+	peeringWorkflowRun := &tmocks.WorkflowRun{}
+	peeringWorkflowRun.On("GetID").Return("workflow-with-peering-precondition")
+	peeringWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError(peeringPrecondition, swe.ErrTypeNICoFailedPrecondition, errors.New(peeringPrecondition))).Once()
+	peeringSiteClient := &tmocks.Client{}
+	peeringSiteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteVPCV2", mock.Anything).Return(peeringWorkflowRun, nil).Once()
+	scpWithPeering := sc.NewClientPool(tcfg)
+	scpWithPeering.IDClientMap[st.ID.String()] = peeringSiteClient
+
 	// Prepare client pool for sync calls
 	// to site(s).
 
@@ -3258,7 +4053,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 		"DeleteVPCV2", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configurations
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -3266,7 +4061,26 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 		args               args
 		wantErr            bool
 		verifyChildSpanner bool
+		responseContains   string
+		expectedVpcStatus  string
 	}{
+		{
+			name: "VPC peering precondition reaches the caller without marking the VPC Deleting",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scpWithPeering,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   vpcWithPeering.ID.String(),
+				reqOrg:   tnOrg1,
+				reqUser:  tnu1,
+				respCode: http.StatusPreconditionFailed,
+			},
+			responseContains:  peeringPrecondition,
+			expectedVpcStatus: cdbm.VpcStatusReady,
+		},
 		{
 			name: "test VPC delete API endpoint success",
 			fields: fields{
@@ -3450,7 +4264,6 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPC)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -3462,10 +4275,18 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.args.respCode, rec.Code)
+			if tt.responseContains != "" {
+				assert.Contains(t, rec.Body.String(), tt.responseContains)
+			}
+			if tt.expectedVpcStatus != "" {
+				vpc, err := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPC), nil)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedVpcStatus, vpc.Status)
+			}
 			if tt.args.respCode != http.StatusAccepted {
 				return
 			}
-			assert.Contains(t, rec.Body.String(), "Deletion request was accepted")
+			assertDeletionAcceptedResponse(t, rec.Body.Bytes())
 
 			// Verify VPC in deleting state
 			vpcDAO := cdbm.NewVpcDAO(dbSession)
@@ -3480,6 +4301,8 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+	peeringSiteClient.AssertExpectations(t)
+	peeringWorkflowRun.AssertExpectations(t)
 }
 
 func TestNewCreateVPCHandler(t *testing.T) {
@@ -3512,19 +4335,17 @@ func TestNewCreateVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewCreateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewCreateVPCHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewCreateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -3559,19 +4380,17 @@ func TestNewUpdateVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewUpdateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewUpdateVPCHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewUpdateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -3601,10 +4420,9 @@ func TestNewGetVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -3642,10 +4460,9 @@ func TestNewGetAllVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -3688,19 +4505,17 @@ func TestNewDeleteVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				scp:        scp,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+				scp:       scp,
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewDeleteVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewDeleteVPCHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewDeleteVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

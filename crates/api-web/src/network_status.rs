@@ -62,7 +62,7 @@ struct NetworkStatusDisplay {
     is_agent_updated: bool,
 }
 
-pub async fn show_html(
+pub(super) async fn show_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -81,7 +81,7 @@ pub async fn show_html(
     let (pages, all_status) = match fetch_network_status(state, current_page, limit).await {
         Ok(all) => all,
         Err(err) => {
-            tracing::error!(%err, "fetch_network_status");
+            tracing::error!(error = %err, "fetch_network_status");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading network status",
@@ -143,7 +143,7 @@ pub async fn show_html(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_all_json(
+pub(super) async fn show_all_json(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -160,7 +160,7 @@ pub async fn show_all_json(
     let (_, all_status) = match fetch_network_status(state, current_page, limit).await {
         Ok(all) => all,
         Err(err) => {
-            tracing::error!(%err, "fetch_network_status");
+            tracing::error!(error = %err, "fetch_network_status");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading network status",
@@ -189,10 +189,10 @@ async fn fetch_network_status(
         .map(|response| response.into_inner())?
         .all;
 
-    let all_ids: Vec<MachineId> = all_status
+    let all_ids = all_status
         .iter()
         .filter_map(|status| status.dpu_machine_id)
-        .collect();
+        .collect::<Vec<_>>();
 
     // Handling the case of getting a nonsensical limit.
     let limit = if limit == 0 {
@@ -212,10 +212,11 @@ async fn fetch_network_status(
         return Ok((pages, vec![]));
     }
 
-    let ids_for_page: Vec<MachineId> = all_ids
+    let ids_for_page = all_ids
         .into_iter()
         .skip(current_record_cnt_seen)
         .take(limit)
+        .map(Into::into)
         .collect();
 
     let all_dpus = api
@@ -239,7 +240,7 @@ async fn fetch_network_status(
         let Some(dpu_id) = status.dpu_machine_id else {
             continue;
         };
-        let Some(dpu) = dpus_by_id.get(&dpu_id) else {
+        let Some(dpu) = dpus_by_id.get(&MachineId::from(dpu_id)) else {
             continue;
         };
 
@@ -250,13 +251,14 @@ async fn fetch_network_status(
                 inventory
                     .components
                     .iter()
-                    .find(|c| c.name == "forge-dpu-agent")
+                    .find(|c| c.name == "carbide-dpu-agent" || c.name == "forge-dpu-agent")
                     .map(|c| c.version.clone())
             })
             .unwrap_or_default();
         let health = dpu
-            .health
+            .status
             .as_ref()
+            .and_then(|status| status.health.as_ref())
             .map(|h| {
                 health_report::HealthReport::try_from(h.clone())
                     .unwrap_or_else(health_report::HealthReport::malformed_report)

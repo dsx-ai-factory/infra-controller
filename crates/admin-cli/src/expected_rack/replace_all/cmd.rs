@@ -34,7 +34,7 @@ struct ExpectedRackList {
 }
 
 /// replace_all clears all expected racks and replaces them with the contents of a JSON file.
-pub async fn replace_all(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn replace_all(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let json_file_path = Path::new(&args.filename);
     let reader = BufReader::new(File::open(json_file_path)?);
 
@@ -56,8 +56,9 @@ pub async fn replace_all(args: Args, api_client: &ApiClient) -> CarbideCliResult
             .expected_racks
             .into_iter()
             .map(|rack| rpc_forge::ExpectedRack {
+                rack_group_id: None,
                 rack_id: Some(rack.rack_id),
-                rack_profile_id: Some(rack.rack_profile_id),
+                rack_profile_id: None,
                 metadata: rack.metadata,
             })
             .collect(),

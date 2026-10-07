@@ -1,0 +1,163 @@
+# toml-language-server: $schema=https://raw.githubusercontent.com/rvben/rumdl/main/rumdl.schema.json
+
+# rumdl configuration file
+#
+# Configuration reference: https://rumdl.dev/global-settings/
+# Rules reference: https://rumdl.dev/rules/
+
+# Inherit settings from another config file (relative to this file's directory)
+# extends = "../base.rumdl.toml"
+
+# Global configuration options
+
+[global]
+# List of rules to disable
+# disable = ["MD014", "MD033", "MD036"]
+disable = [
+  "commands-show-output",
+  "no-inline-html",
+  "no-emphasis-as-heading",
+]
+
+# List of rules to enable exclusively (replaces defaults; only these rules will run)
+# enable = ["MD001", "MD003", "MD004"]
+
+# Additional rules to enable on top of defaults (additive, does not replace)
+# Use this to activate opt-in rules like MD060, MD063, MD072, MD073, MD074
+# extend-enable = ["MD060", "MD063"]
+
+# Additional rules to disable on top of the disable list (additive)
+# extend-disable = ["MD041"]
+
+# List of file/directory patterns to include for linting (if provided, only these will be linted)
+# include = [
+#    "docs/*.md",
+#    "src/**/*.md",
+#    "README.md"
+# ]
+
+# List of file/directory patterns to exclude from linting
+exclude = [
+    # Common directories to exclude
+    ".git",
+    ".github",
+    ".gitlab",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+
+    # Specific files or patterns
+    "CHANGELOG.md",
+    "LICENSE.md",
+]
+
+# Respect .gitignore files when scanning directories (default: true)
+respect-gitignore = true
+
+# Markdown flavor/dialect (uncomment to enable)
+# Options: standard (default), gfm, commonmark, mkdocs, mdx, quarto
+flavor = "mdx"
+
+[per-file-flavor]
+# Fern treats all files as MDX, so best to lint accordingly
+# "**/*.md" = "standard"
+
+# Disable specific rules for specific files
+[per-file-ignores]
+"**/snippets/**/*.mdx" = ["MD041"]  # Snippets don't need to start with an H1
+"fern/changelog/*.mdx" = ["MD041"]  # Changelog entries don't need to start with an H1
+
+# Rule-specific configurations
+
+[MD004]
+# Unordered list style (asterisk, plus, dash, consistent)
+# after-marker default is 1 space after the marker
+style = "consistent"
+# after-marker = 1
+
+[MD007]
+# ul-indent
+# indent = 4
+style = "text-aligned"
+
+[MD009]
+# no-trailing-spaces
+list_item_empty_lines = false
+strict = false
+
+[MD010]
+# no-hard-tabs
+spaces-per-tab = 4  # Number of spaces to replace each tab with (default: 4)
+
+[MD013]
+# line-length
+line-length = 100000      # make sure paragraph-length lines are allowed
+# line-length = 100
+# reflow = true
+# reflow-mode = "normalize"
+
+[MD024]
+# no-duplicate-heading
+siblings_only = true
+
+[MD025]
+level = 1                        # The heading level that should be unique (default: 1)
+front-matter-title = "title"     # Regex pattern to match title in YAML front matter (default: "title")
+allow-document-sections = true  # Allow multiple H1s separated by --- thematic breaks (default: false)
+allow-with-separators = true    # Allow multiple H1s as document section titles (default: false)
+
+[MD029]
+# ol-prefix
+# Style options:
+# - "one" or "one-one": All items numbered "1." (easiest maintenance)
+# - "ordered": Sequential numbering (1, 2, 3...)
+# - "ordered0": Zero-based sequential (0, 1, 2...)
+# - "one-or-ordered": Auto-detect per list (either all-ones OR sequential)
+# - "consistent": Document-wide consistency - uses most common style across all lists
+# TODO: move to "one-one" style when we can (except for files that are
+# going to be viewed in GitHub a lot)
+style = "consistent"
+
+[MD041]
+# first-line-heading
+level = 1
+
+[MD044]
+# names = ["NVIDIA Infra Controller", "NVIDIA"]
+# code-blocks = false
+
+[MD046]
+# code-block-style
+style = "fenced"
+
+[MD048]
+# code-fence-style
+style = "backtick"
+
+[MD054]
+# link-image-style
+# default is all true
+autolink = false    # Allow <https://example.com>
+# inline = true       # Allow [text](url) and ![alt](url)
+# full = true         # Allow [text][ref] with separate [ref]: url definition
+# collapsed = true    # Allow [text][] with separate [text]: url definition
+# shortcut = true     # Allow [text] with separate [text]: url definition
+# url-inline = true   # Allow [https://example.com](https://example.com)
+
+[MD055]
+# table-pipe-style
+style = "leading_and_trailing"
+
+[MD060]
+# table-column-style
+style = "compact"
+
+[MD076]
+# list-item-spacing
+style = "consistent"              # "consistent" (default), "loose", or "tight"
+allow-loose-continuation = true  # allow blank lines around continuation paragraphs
+
+[MD077]
+# list-continuation-indent
+# severity = "info"

@@ -23,13 +23,13 @@ use thiserror::Error;
 // encompassing source resolution, flashing, verification, and reset.
 #[derive(Debug, Error)]
 pub enum FirmwareError {
-    #[error("Command execution failed: {0}")]
+    #[error("command execution failed: {0}")]
     CommandFailed(String),
 
-    #[error("Failed to resolve firmware from '{description}': {reason}")]
+    #[error("failed to resolve firmware from '{description}': {reason}")]
     SourceResolution { description: String, reason: String },
 
-    #[error("File not found: {0}")]
+    #[error("file not found: {0}")]
     FileNotFound(PathBuf),
 
     #[error("HTTP download failed: {0}")]
@@ -38,31 +38,31 @@ pub enum FirmwareError {
     #[error("SSH transfer failed: {0}")]
     SshError(#[from] forge_ssh::SshError),
 
-    #[error("Flint error: {0}")]
+    #[error("flint error: {0}")]
     FlintError(#[from] crate::lockdown::error::MlxError),
 
     #[error("mlxconfig error: {0}")]
     MlxConfigError(#[from] crate::runner::error::MlxRunnerError),
 
-    #[error("Firmware reset failed: {0}")]
+    #[error("firmware reset failed: {0}")]
     ResetFailed(String),
 
-    #[error("Firmware verification failed: {0}")]
+    #[error("firmware verification failed: {0}")]
     VerificationFailed(String),
 
     #[error("mlxfwreset tool not found or not executable")]
     MlxFwResetNotFound,
 
-    #[error("Permission denied - requires root privileges")]
+    #[error("permission denied - requires root privileges")]
     PermissionDenied,
 
-    #[error("Device not found: {0}")]
+    #[error("device not found: {0}")]
     DeviceNotFound(String),
 
-    #[error("Dry run - would have executed: {0}")]
+    #[error("dry run - would have executed: {0}")]
     DryRun(String),
 
-    #[error("Configuration error: {0}")]
+    #[error("configuration error: {0}")]
     ConfigError(String),
 
     #[error("I/O error: {0}")]

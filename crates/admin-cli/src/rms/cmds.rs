@@ -22,13 +22,13 @@ use librms::RmsApi;
 use crate::rms::args::{FirmwareInventory, PowerOnSequence, PowerState};
 
 /// Print the RMS node inventory as JSON.
-pub async fn list_node_inventory(rms_client: &Arc<dyn RmsApi>) -> eyre::Result<()> {
+pub(super) async fn list_node_inventory(rms_client: &Arc<dyn RmsApi>) -> eyre::Result<()> {
     let response = rms_client.list_node_inventory().await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
-pub async fn power_on_sequence(
+pub(super) async fn power_on_sequence(
     args: PowerOnSequence,
     rms_client: &Arc<dyn RmsApi>,
 ) -> eyre::Result<()> {
@@ -37,13 +37,16 @@ pub async fn power_on_sequence(
     Ok(())
 }
 
-pub async fn power_state(args: PowerState, rms_client: &Arc<dyn RmsApi>) -> eyre::Result<()> {
+pub(super) async fn power_state(
+    args: PowerState,
+    rms_client: &Arc<dyn RmsApi>,
+) -> eyre::Result<()> {
     let response = rms_client.get_power_state(args.into()).await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
-pub async fn get_firmware_inventory(
+pub(super) async fn get_firmware_inventory(
     args: FirmwareInventory,
     rms_client: &Arc<dyn RmsApi>,
 ) -> eyre::Result<()> {

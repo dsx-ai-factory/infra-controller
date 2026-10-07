@@ -94,7 +94,7 @@ shard = 0
 shards_count = 1
 cache_size = 100
 
-[endpoint_sources.carbide_api]
+[endpoint_sources.nico_api]
 enabled = false
 
 [sinks.tracing]

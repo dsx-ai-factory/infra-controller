@@ -20,12 +20,14 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "carbide-dsx-exchange-consumer"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 async-trait = { workspace = true }
 chrono = { features = ["serde"], workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
@@ -57,6 +59,11 @@ mqttea = { path = "../mqttea" }
 
 [build-dependencies]
 carbide-version = { path = "../version" }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

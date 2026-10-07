@@ -20,7 +20,7 @@ use ::rpc::forge::ConfigSetting;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn tracing_enabled(value: bool, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn tracing_enabled(value: bool, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client
         .set_dynamic_config(ConfigSetting::TracingEnabled, value.to_string(), None)
         .await

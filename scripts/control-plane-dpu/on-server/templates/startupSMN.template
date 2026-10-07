@@ -1,0 +1,261 @@
+- header:
+    model: bluefield
+    nvue-api-version: nvue_v1
+    rev-id: 1.0
+    version: HBN 2.4.3
+- set:
+    evpn:
+      enable: on
+    interface:
+      lo:
+        ip:
+          address:
+            # This will be pulled from the same subnet as `lo-ip` (for managed host DPU loopbacks in Nico; see helm-prereqs/values/nico-core.yaml), but they MUST NOT overlap.
+            # We should exclude a chunk from the range in Nico and use those here.  E.g., if the prefix is {{.LoopbackIP}}/28, the range in
+            # Nico should be 10.217.5.21/32 - 10.217.5.30/32 to allow up to 5 site-controllers, and site-controllers should only be assigned
+            # loopbacks from {{.LoopbackIP}}/32 - 10.217.5.20/32.
+            {{.LoopbackIP}}/32: {}
+        type: loopback
+      p0_if:
+        type: swp
+      p1_if:
+        type: swp
+      pf0hpf_if:
+        ip:
+          address:
+            # This is for peering between the host and the DPU.
+            {{.Hostnet}}: {}
+          vrf: vpc_{{.ControlPlaneVNI}}
+        type: swp
+      pf1hpf_if:
+        type: swp
+    nve:
+      vxlan:
+        arp-nd-suppress: on
+        enable: on
+        source:
+          address: {{.LoopbackIP}}
+    router:
+      bgp:
+        autonomous-system: {{.ASN}}
+        enable: on
+        router-id: {{.LoopbackIP}}
+      policy:
+        prefix-list:
+          ADVERTISE:
+            rule:
+              '10':
+                action: permit
+                match:
+                  {{.Loopback}}: {}
+              '20':
+                action: permit
+                match:
+                  {{.Hostnet}}: {}
+              '30':
+                action: permit
+                match:
+                  {{.Rule30}}:  # Service IPs. MetalLB will announce these to the DPU.
+                    min-prefix-len: 32
+              '40':
+                action: permit
+                match:
+                  {{.Rule40}}: # Additional service IPs?
+                    min-prefix-len: 32
+          EVPN_ADVERTISE:
+            rule:
+              '20':
+                action: permit
+                match:
+                  {{.Hostnet}}: {} # Send the type 5 route for the site-controller out to the TOR.
+              '30':
+                action: permit
+                match:
+                  {{.Rule30}}:  # Do the same for the service IPs because managed hosts will need to hit service IPs through the overlay.
+                    min-prefix-len: 32
+              '40':
+                action: permit
+                match:
+                  {{.Rule40}}: # Do the same for these additional service IPs.
+                    min-prefix-len: 32
+          FROM_HOST_VRF:
+            rule:
+              '10':
+                action: permit
+                match:
+                  0.0.0.0/0: {}
+          FROM_DEFAULT_VRF:
+            rule:
+              '10':
+                action: permit
+                match:
+                  0.0.0.0/0: {}
+        route-map:
+          ADVERTISEMAP:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  ip-prefix-list: ADVERTISE
+                  type: ipv4
+          EVPN_ADVERTISEMAP:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  ip-prefix-list: EVPN_ADVERTISE
+                  type: ipv4
+          FROM_HOST_VRF_MAP:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  ip-prefix-list: FROM_HOST_VRF
+                  type: ipv4
+          FROM_DEFAULT_VRF_MAP:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  ip-prefix-list: FROM_DEFAULT_VRF
+                  type: ipv4
+      vrr:
+        enable: on
+
+    vrf:
+      default:
+        router:
+          bgp:
+            address-family:
+              ipv4-unicast:
+                enable: on
+                multipaths:
+                  ebgp: 128
+                redistribute:
+                  connected:
+                    enable: on
+                route-import:
+                  from-vrf:
+                    #route-map: FROM_HOST_VRF_MAP
+                    enable: on
+                    list:
+                      vpc_{{.ControlPlaneVNI}}: {}
+              l2vpn-evpn:
+                enable: on
+            enable: on
+            neighbor:
+              p0_if:
+                remote-as: external
+{{- if and (has . "BgpLeafSessionPassword") .BgpLeafSessionPassword }}
+                password: {{ .BgpLeafSessionPassword | quote }} # BGP TCP MD5 toward the leaf (installWithLeafPassword; rendered at build time into the encrypted artifacts)
+{{- end }}
+                type: unnumbered
+                address-family:
+                  l2vpn-evpn:
+                    enable: on # Turn on for TOR peerings because we are going to learn some important type 5 routes.
+                    policy:
+                      outbound:
+                        route-map: EVPN_ADVERTISEMAP
+                  ipv4-unicast:
+                    policy:
+                      outbound:
+                        route-map: ADVERTISEMAP
+              p1_if:
+                remote-as: external
+{{- if and (has . "BgpLeafSessionPassword") .BgpLeafSessionPassword }}
+                password: {{ .BgpLeafSessionPassword | quote }} # BGP TCP MD5 toward the leaf (installWithLeafPassword; rendered at build time into the encrypted artifacts)
+{{- end }}
+                type: unnumbered
+                address-family:
+                  l2vpn-evpn:
+                    enable: on # Turn on for TOR peerings because we are going to learn some important type 5 routes.
+                    policy:
+                      outbound:
+                        route-map: EVPN_ADVERTISEMAP
+                  ipv4-unicast:
+                    policy:
+                      outbound:
+                        route-map: ADVERTISEMAP
+            path-selection:
+              multipath:
+                aspath-ignore: on
+          nexthop-tracking:
+            ipv4:
+              resolved-via-default: on
+
+
+      # This should come from your networking team. They should have allocated a range of VNIs to be used for Nico.
+      # The pool pools.vpc-vni, fnn.admin_vpc.vpc_vni (both are defined in helm-prereqs/values/nico-core.yaml) and
+      # ControlPlaneVNI in this file should come from that range without any overlap.
+      # Assume that your Nico site has been allocated VNIs 60000 - 65000 by your networking team.
+      # Then a sample allocation might look like these:
+      #   ControlPlaneVNI => 60000
+      #   fnn.admin_vpc.vpc_vni => 60100
+      #   pool pools.vpc-vni => [start = 60101 end = 60500]
+      #
+      # Note that range 60001-60099 has been reserved for other Nico sites in the Datacenter
+      #
+      vpc_{{.ControlPlaneVNI}}:
+        evpn:
+          enable: on
+          vni:
+            '{{.ControlPlaneVNI}}': {}
+{{- if .VpcVrfLoopback}}
+        loopback:
+          ip:
+            address:
+            # Optional to allow testing of the overlay from directly in the HBN container 
+            # without having to be in a tenant os
+              {{.VpcVrfLoopback}}: {}
+{{- end}}
+        router:
+          bgp:
+            path-selection:
+              multipath:
+                aspath-ignore: on
+            address-family:
+              ipv4-unicast:
+                enable: on
+                redistribute:
+                  connected:
+                    enable: on
+                route-export:
+                  to-evpn:
+                    enable: on
+                route-import:
+                  from-vrf:
+                    enable: on
+                    list:
+                      default: {}
+              ipv6-unicast:
+                enable: on
+            enable: on
+            neighbor:
+              # The host side of the DPU:Host peering.
+              {{.BGPNeighbor}}:
+                address-family:
+                  ipv6-unicast:
+                    enable: on
+                remote-as: {{.RemoteAS}}
+                type: numbered
+            route-export:
+              to-evpn:
+                route-target:
+                  {{.SiteControllerRoutesASN}}:{{.FnnCommonSiteControllerRouteTarget}}: {} # Route-target to tag FSC routes to EVPN for SMN return traffic.  Default to {{.DatacenterASN}}
+            route-import:
+              from-evpn:
+                route-target:
+                  {{.DatacenterASN}}:{{.FnnCommonManagedNodeBmcRouteTarget}}: {}      # BMCs for Nico managed nodes
+                  {{.DatacenterASN}}:{{.FnnCommonAdminNetworkTarget}}: {}             # Admin network routes
+                  {{.DatacenterASN}}:{{.FnnCommonSiteControllerRouteTarget}}: {}      # Site-controllers
+{{- $site := ds "site"}}
+{{- if and (coll.Has $site "fnn") (coll.Has $site.fnn "routeTargetsToImport")}}
+{{- range $k, $v := $site.fnn.routeTargetsToImport}}
+                  {{$k}}: {}
+{{- end}}
+{{- end}}
+                  auto: {}

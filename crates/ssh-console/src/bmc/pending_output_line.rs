@@ -17,14 +17,14 @@
 
 /// A pending output line is data we received from a BMC after the last newline character, and is
 /// useful to relay to the user after they've connected so they can see what the latest output was.
-pub struct PendingOutputLine(Vec<u8>);
+pub(super) struct PendingOutputLine(Vec<u8>);
 
 impl PendingOutputLine {
-    pub fn with_max_size(max_size: usize) -> Self {
+    pub(super) fn with_max_size(max_size: usize) -> Self {
         Self(Vec::with_capacity(max_size))
     }
 
-    pub fn extend(&mut self, data: &[u8]) {
+    pub(super) fn extend(&mut self, data: &[u8]) {
         // If there's a newline in the data, start from there
         let newline_index = if let Some(newline_index) = data.iter().position(|b| *b == b'\n') {
             self.0.clear();
@@ -48,7 +48,7 @@ impl PendingOutputLine {
         self.0.extend(slice);
     }
 
-    pub fn get(&self) -> &[u8] {
+    pub(super) fn get(&self) -> &[u8] {
         &self.0
     }
 }

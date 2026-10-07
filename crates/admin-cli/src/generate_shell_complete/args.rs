@@ -35,14 +35,14 @@ Write fish completions to the fish completions directory:
     $ nico-admin-cli generate-shell-complete fish > ~/.config/fish/completions/nico-admin-cli.fish
 
 ")]
-pub struct Cmd {
+pub(crate) struct Cmd {
     #[clap(subcommand)]
-    pub shell: Shell,
+    pub(super) shell: Shell,
 }
 
 #[derive(Parser, Debug, Clone)]
 #[clap(rename_all = "kebab_case")]
-pub enum Shell {
+pub(super) enum Shell {
     Bash,
     Fish,
     Zsh,

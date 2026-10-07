@@ -1,0 +1,43 @@
+# =============================================================================
+# operators/values/argo-cd.yaml — Argo CD static values
+#
+# DPF prerequisite (installed by default; skip with --skip-dpf).
+# Copied from NVIDIA/doca-platform deploy/helmfiles/values at tag v26.4.0 —
+# keep in sync with the helm-prereqs/doca-platform submodule pin when bumping DPF.
+#
+# Chart: argo/argo-cd 9.4.1
+# =============================================================================
+
+## Disable the ApplicationSet controller.
+applicationSet:
+  replicas: 0
+dex:
+  enabled: false
+notifications:
+  enabled: false
+global:
+  podLabels:
+    ovn.dpu.nvidia.com/skip-injection: ""
+  affinity:
+    nodeAffinity:
+      # -- Default node affinity rules. Either: `none`, `soft` or `hard`
+      type: hard
+      # -- Default match expressions for node affinity
+      matchExpressions:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: Exists
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+redis:
+  image:
+    repository: mirror.gcr.io/redis
+configs:
+  params:
+    # Argo CD can be deployed to a different namespace.
+    # Setting namespaces to dpf-operator-system ensures Argo CD reconciles applications in that namespace.
+    application.namespaces: dpf-operator-system

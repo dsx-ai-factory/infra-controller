@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.25.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
 
 # Docker automatically provides these args during multi-platform builds
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG VERSION=dev
 
 # Set environment variables for cross-compilation
 ENV CGO_ENABLED=0
@@ -21,8 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# Copy go module files and VERSION first for better caching
-COPY go.mod go.sum VERSION ./
+# Copy go module files first for better caching
+COPY go.mod go.sum ./
 # Copy SDK go module files, required for maintaining separate go.mod for SDK
 COPY sdk/standard/go.mod ./sdk/standard/
 # Download dependencies
@@ -33,7 +34,7 @@ COPY api/ ./api/
 COPY common/ ./common/
 COPY auth/ ./auth/
 COPY db/ ./db/
-COPY workflow-schema/ ./workflow-schema/
+COPY proto/ ./proto/
 COPY workflow/ ./workflow/
 COPY site-workflow/ ./site-workflow/
 COPY ipam/ ./ipam/
@@ -47,7 +48,7 @@ RUN mkdir -p /var/secrets/temporal/certs
 
 # Build the application
 WORKDIR /workspace/api
-RUN VERSION=$(grep -v '^#' /workspace/VERSION | tr -d '[:space:]' 2>/dev/null || echo "dev") && \
+RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
         -ldflags "-extldflags '-static' -w -s \
@@ -64,7 +65,7 @@ RUN go build \
         ./cmd/cli
 
 # Final stage
-FROM nvcr.io/nvidia/distroless/go:v3.2.1 AS final
+FROM nvcr.io/nvidia/distroless/go:v4.0.8 AS final
 
 WORKDIR /app
 

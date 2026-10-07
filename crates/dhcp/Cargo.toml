@@ -4,6 +4,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "dhcp"
@@ -12,10 +13,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 chrono = { workspace = true }
 derive_builder = { workspace = true }
+dhcproto = { workspace = true }
 eyre = { workspace = true }
-hyper = { workspace = true, features = ["http2"] }
-hyper-util = { workspace = true, features = ["tokio"] }
-http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2"], optional = true }
+hyper-util = { workspace = true, features = ["tokio"], optional = true }
+http-body-util = { workspace = true, optional = true }
 ipnetwork = { workspace = true }
 lazy_static = { workspace = true }
 libc = { workspace = true }
@@ -24,23 +26,37 @@ lru = { workspace = true }
 mac_address = { workspace = true }
 once_cell = { workspace = true }
 opentelemetry = { workspace = true }
-prost = { workspace = true }
+prost = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 
 # [local-dependencies]
+carbide-dhcp-common = { path = "../dhcp-common" }
+carbide-instrument = { path = "../instrument" }
 carbide-rpc = { path = "../rpc" }
 carbide-tls = { path = "../tls" }
+carbide-dhcpv6 = { path = "../dhcpv6" }
 metrics-endpoint = { path = "../metrics-endpoint" }
+
+[features]
+default = []
+test-support = [
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:prost",
+]
 
 [dev-dependencies]
 eyre = { workspace = true }
-dhcproto = { workspace = true }
 serde_json = { workspace = true }
-test-cdylib = { workspace = true }
 tempfile = { workspace = true }
+# Self-dependency so the crate's own integration tests see the `test-support` helpers.
+carbide-dhcp = { path = ".", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-rpc = { path = "../rpc" }
+carbide-test-support = { path = "../test-support" }
 prometheus = { workspace = true }
 
 [build-dependencies]

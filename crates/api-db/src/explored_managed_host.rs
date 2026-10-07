@@ -24,6 +24,9 @@ use sqlx::{FromRow, PgConnection, Row};
 use crate::DatabaseError;
 use crate::db_read::DbReader;
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 #[derive(Debug, Clone)]
 struct DbExploredManagedHost {
     /// The IP address of the node we explored
@@ -57,7 +60,7 @@ pub async fn find_ips(
     _filter: model::site_explorer::ExploredManagedHostSearchFilter,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
     #[derive(Debug, Clone, Copy, FromRow)]
-    pub struct ExploredManagedHostIp(IpAddr);
+    struct ExploredManagedHostIp(IpAddr);
     // grab list of IPs
     let mut builder = sqlx::QueryBuilder::new("SELECT host_bmc_ip FROM explored_managed_hosts");
     let query = builder.build_query_as();
@@ -73,7 +76,8 @@ pub async fn find_by_ips(
     txn: impl DbReader<'_>,
     ips: Vec<IpAddr>,
 ) -> Result<Vec<ExploredManagedHost>, DatabaseError> {
-    let query = "SELECT * FROM explored_managed_hosts WHERE host_bmc_ip=ANY($1)";
+    let query =
+        "SELECT host_bmc_ip, explored_dpus FROM explored_managed_hosts WHERE host_bmc_ip=ANY($1)";
 
     sqlx::query_as::<_, DbExploredManagedHost>(query)
         .bind(ips)
@@ -84,7 +88,8 @@ pub async fn find_by_ips(
 }
 
 pub async fn find_all(txn: impl DbReader<'_>) -> Result<Vec<ExploredManagedHost>, DatabaseError> {
-    let query = "SELECT * FROM explored_managed_hosts ORDER by host_bmc_ip ASC";
+    let query =
+        "SELECT host_bmc_ip, explored_dpus FROM explored_managed_hosts ORDER by host_bmc_ip ASC";
 
     sqlx::query_as::<_, DbExploredManagedHost>(query)
         .fetch_all(txn)
@@ -117,6 +122,23 @@ pub async fn update(
     }
 
     Ok(())
+}
+
+/// `lock_by_host_bmc_addr` locks every existing row for this address until
+/// the caller's transaction completes. The connection must be in a transaction.
+/// It returns whether any rows were locked; `false` does not prevent a later
+/// insert. Query failures propagate to the caller.
+pub async fn lock_by_host_bmc_addr(
+    txn: &mut PgConnection,
+    addr: IpAddr,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT host_bmc_ip FROM explored_managed_hosts WHERE host_bmc_ip = $1 FOR UPDATE";
+    let addresses: Vec<IpAddr> = sqlx::query_scalar(query)
+        .bind(addr)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(!addresses.is_empty())
 }
 
 pub async fn delete_by_host_bmc_addr(

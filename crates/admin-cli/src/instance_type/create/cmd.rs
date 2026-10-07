@@ -25,7 +25,7 @@ use crate::rpc::ApiClient;
 /// Create an instance type.
 /// On successful creation, the details of the
 /// new type will be displayed.
-pub async fn create(
+pub(super) async fn create(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

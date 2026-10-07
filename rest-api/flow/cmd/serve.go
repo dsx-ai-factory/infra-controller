@@ -17,9 +17,13 @@ import (
 	"github.com/spf13/cobra"
 	"go.temporal.io/sdk/worker"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/config"
+	flowmetrics "github.com/NVIDIA/infra-controller/rest-api/flow/internal/metrics"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	svc "github.com/NVIDIA/infra-controller/rest-api/flow/internal/service"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	cmbuiltin "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/builtin"
@@ -31,8 +35,11 @@ import (
 )
 
 const (
-	defaultServicePort    = 50051
-	componentMgrCfgEnvVar = "COMPONENT_MANAGER_CONFIG"
+	defaultServicePort                 = 50051
+	defaultMetricsPort                 = 9360
+	componentMgrCfgEnvVar              = "COMPONENT_MANAGER_CONFIG"
+	allowedServiceIdentitiesFileEnvVar = "FLOW_AUTHORIZATION_ALLOWED_SERVICE_IDENTITIES_FILE"
+	authorizationModeEnvVar            = "FLOW_AUTHORIZATION_MODE"
 
 	// computeImplEnvVar selects the compute component manager
 	// implementation at deploy time. This override exists for the
@@ -52,9 +59,11 @@ const (
 )
 
 var (
-	port               int
-	componentMgrConfig string
-	devMode            bool
+	port                     int
+	metricsPort              int
+	componentMgrConfig       string
+	devMode                  bool
+	allowedServiceIdentities []string
 
 	// clientOnlyFlags are the global persistent flags that apply only to
 	// client commands. They are hidden from serve's help and rejected if set.
@@ -87,10 +96,17 @@ func init() {
 		_ = serveCmd.InheritedFlags().MarkHidden(name)
 	}
 
-	serveCmd.Flags().IntVarP(&port, "listen-port", "p", defaultServicePort, "Port for the gRPC server") //nolint:lll
+	serveCmd.Flags().IntVarP(&port, "listen-port", "p", defaultServicePort, "Port for the gRPC server")                 //nolint:lll
+	serveCmd.Flags().IntVar(&metricsPort, "metrics-port", defaultMetricsPort, "Port for the Prometheus metrics server") //nolint:lll
 	// Component manager config: priority is CLI flag > env var > service default config.
 	serveCmd.Flags().StringVarP(&componentMgrConfig, "component-config", "c", "", "Path to component manager config file (YAML)")               //nolint:lll
 	serveCmd.Flags().BoolVar(&devMode, "dev-mode", false, "Enable developer options (gRPC reflection, debug logging). Not for production use.") //nolint:lll
+	serveCmd.Flags().StringSliceVar(
+		&allowedServiceIdentities,
+		"allowed-service-identity",
+		nil,
+		"SPIFFE URI allowed to call Flow; may be specified multiple times",
+	)
 }
 
 // loadComponentManagerConfig loads the component manager configuration with the following priority:
@@ -178,6 +194,19 @@ func doServe() {
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
 
+	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-flow")
+	if otelErr != nil {
+		log.Error().Err(otelErr).Msg("failed to initialize tracing")
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				log.Error().Err(err).Msg("failed to shut down tracing")
+			}
+		}()
+	}
+
 	if os.Getenv(svc.EnvVarName) == "" {
 		log.Warn().Msgf("%s not set, defaulting to %q for local development", svc.EnvVarName, "development")
 		os.Setenv(svc.EnvVarName, "development") //nolint:errcheck
@@ -192,6 +221,11 @@ func doServe() {
 
 	flowConfig := config.ReadConfig()
 
+	authorization, err := loadAuthorizationConfig()
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to load gRPC service authorization config")
+	}
+
 	dbConf, err := cdb.ConfigFromEnv()
 	if err != nil {
 		log.Fatal().Msgf("failed to retrieve DB conn information: %v", err)
@@ -200,6 +234,19 @@ func doServe() {
 	temporalConf, err := svc.BuildTemporalConfigFromEnv()
 	if err != nil {
 		log.Fatal().Msgf("failed to retrieve Temporal conn information: %v", err)
+	}
+
+	dataCipher, err := loadDataCipherFromEnv()
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to load Flow data encryption key")
+	}
+	if dataCipher == nil {
+		log.Warn().
+			Str("env_var", secret.EncryptionKeyPathEnvVar).
+			Msg(
+				"Flow data encryption key is not configured; requests with firmware " +
+					"authentication data and existing encrypted operations will fail",
+			)
 	}
 
 	ctx := context.Background()
@@ -215,6 +262,12 @@ func doServe() {
 	if err != nil {
 		log.Fatal().Msgf("failed to initialize provider registry: %v", err)
 	}
+	defer func() {
+		closeErr := providerRegistry.Close()
+		if closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close providers")
+		}
+	}()
 
 	// Open a DB session for the readiness gate. The gate consults the
 	// persisted ComponentOperationStatus inventorysync writes to the component
@@ -255,6 +308,7 @@ func doServe() {
 			temporalmanager.WorkflowQueue: {},
 		},
 		ComponentManagerRegistry: cmRegistry,
+		DataCipher:               dataCipher,
 	}
 
 	if os.Getenv("REPORT_NICO_API_VERSION") != "" {
@@ -264,6 +318,12 @@ func doServe() {
 			if err != nil {
 				log.Fatal().Msgf("Unable to create GRPC client: %v", err)
 			}
+			defer func() {
+				closeErr := client.Close()
+				if closeErr != nil {
+					log.Error().Err(closeErr).Msg("Failed to close version probe client")
+				}
+			}()
 			for {
 				time.Sleep(time.Second * 10)
 				if version, err := client.Version(ctx); err != nil {
@@ -287,6 +347,7 @@ func doServe() {
 		}()
 	}
 
+	metricsRegistry, rpcMetrics := flowmetrics.NewRegistry()
 	service, err := svc.New(
 		ctx,
 		svc.Config{
@@ -296,7 +357,10 @@ func doServe() {
 			FlowConfig:       flowConfig,
 			CMConfig:         cmConfig,
 			ProviderRegistry: providerRegistry,
+			Metrics:          rpcMetrics,
+			DataCipher:       dataCipher,
 			DevMode:          devMode,
+			Authorization:    authorization,
 			CertConfig: pkgcerts.Config{
 				CACert:  globalCACert,
 				TLSCert: globalTLSCert,
@@ -309,20 +373,103 @@ func doServe() {
 		log.Fatal().Msgf("failed to create the new gRPC server: %v", err)
 	}
 
+	metricsServer, err := flowmetrics.NewServer(fmt.Sprintf(":%d", metricsPort), metricsRegistry)
+	if err != nil {
+		log.Fatal().Err(err).Int("port", metricsPort).Msg("failed to bind the metrics server")
+	}
+	metricsDone := make(chan struct{})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("failed to shut down the metrics server")
+		}
+		<-metricsDone
+	}()
+	go func() {
+		defer close(metricsDone)
+		log.Info().Int("port", metricsPort).Msg("Flow metrics server is running")
+		if err := metricsServer.Serve(); err != nil {
+			log.Error().Err(err).Msg("Flow metrics server stopped unexpectedly")
+		}
+	}()
+
 	log.Info().Msg("New Flow service is created\n")
 	log.Info().Msgf("DB config: %+v", dbConf)
-	log.Info().Msgf("Temporal config: %+v", temporalManagerConf)
+	log.Info().Msgf("Temporal config: %+v", temporalManagerConf.ClientConf)
 
 	sigs := make(chan os.Signal, 1)
+	stopped := make(chan struct{})
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	go func() {
 		<-sigs // Block execution until signal from terminal gets triggered here.
 		service.Stop(ctx)
+		close(stopped)
 	}()
 
 	if err := service.Start(ctx); err != nil {
 		log.Fatal().Msgf("failed to start the service: %v\n", err)
 	}
+	// Serve can return before Stop finishes draining the component managers.
+	// Keep their Core clients alive until that shutdown has completed.
+	<-stopped
+}
+
+func loadDataCipherFromEnv() (*secret.Cipher, error) {
+	path, configured := os.LookupEnv(secret.EncryptionKeyPathEnvVar)
+	if !configured {
+		return nil, nil
+	}
+
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("%s is set but empty", secret.EncryptionKeyPathEnvVar)
+	}
+
+	return secret.NewCipherFromFile(path)
+}
+
+func loadAuthorizationConfig() (authz.Config, error) {
+	mode, err := authz.NewMode(os.Getenv(authorizationModeEnvVar))
+	if err != nil {
+		return authz.Config{}, fmt.Errorf("%s: %w", authorizationModeEnvVar, err)
+	}
+
+	rawPath, isSet := os.LookupEnv(allowedServiceIdentitiesFileEnvVar)
+	if !isSet {
+		// Without an allowlist file, use identities passed through the
+		// --allowed-service-identity command-line option.
+		return authz.Config{
+			AllowedServiceIdentities: allowedServiceIdentities,
+			Mode:                     mode,
+		}, nil
+	}
+
+	if len(allowedServiceIdentities) > 0 {
+		return authz.Config{}, fmt.Errorf(
+			"allowed service identities cannot be configured by both file and command-line options",
+		)
+	}
+
+	path := strings.TrimSpace(rawPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return authz.Config{}, fmt.Errorf("read allowed service identities file %q: %w", path, err)
+	}
+
+	var identities []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		identity := strings.TrimSpace(line)
+		if identity != "" {
+			identities = append(identities, identity)
+		}
+	}
+
+	return authz.Config{
+		AllowedServiceIdentities: identities,
+		Mode:                     mode,
+	}, nil
 }
 
 func logComponentManagerRegistry(registry *componentmanager.Registry) {

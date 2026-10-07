@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -23,6 +24,53 @@ func TestNewRack(t *testing.T) {
 	rack := New(info, loc)
 	assert.Equal(t, rack.Info, info)
 	assert.Equal(t, rack.Loc, loc)
+}
+
+func TestRack_ValidateComponentIDs(t *testing.T) {
+	firstID := uuid.New()
+	tests := []struct {
+		name       string
+		rack       *Rack
+		components []component.Component
+		wantErr    string
+	}{
+		{name: "nil rack", wantErr: "rack is nil"},
+		{name: "empty components", rack: &Rack{}},
+		{
+			name:       "unique component ids",
+			rack:       &Rack{},
+			components: []component.Component{{Info: deviceinfo.DeviceInfo{ID: firstID}}},
+		},
+		{
+			name:       "missing component id",
+			rack:       &Rack{},
+			components: []component.Component{{}},
+			wantErr:    "component 0 id is required",
+		},
+		{
+			name: "duplicate component id",
+			rack: &Rack{},
+			components: []component.Component{
+				{Info: deviceinfo.DeviceInfo{ID: firstID}},
+				{Info: deviceinfo.DeviceInfo{ID: firstID}},
+			},
+			wantErr: "component 1 duplicates id",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.rack != nil {
+				test.rack.Components = test.components
+			}
+			err := test.rack.ValidateComponentIDs()
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestAddComponent(t *testing.T) {

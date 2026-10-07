@@ -9,7 +9,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 )
@@ -64,9 +64,9 @@ func (ibpcr *APIInfiniBandPartitionCreateRequest) Validate() error {
 // that the handler has performed any cross-context checks Validate
 // cannot see (org/tenant association, Site readiness, name
 // uniqueness). It returns no error.
-func (ibpcr *APIInfiniBandPartitionCreateRequest) ToProto(ibp *cdbm.InfiniBandPartition) *cwssaws.IBPartitionCreationRequest {
+func (ibpcr *APIInfiniBandPartitionCreateRequest) ToProto(ibp *cdbm.InfiniBandPartition) *corev1.IBPartitionCreationRequest {
 	ibpProto := ibp.ToProto()
-	return &cwssaws.IBPartitionCreationRequest{
+	return &corev1.IBPartitionCreationRequest{
 		Id:       ibpProto.Id,
 		Config:   ibpProto.Config,
 		Metadata: ibpProto.Metadata,
@@ -111,9 +111,9 @@ func (ibpur *APIInfiniBandPartitionUpdateRequest) Validate() error {
 //
 // The method trusts that the request has already been Validated. It
 // returns no error.
-func (ibpur *APIInfiniBandPartitionUpdateRequest) ToProto(ibp *cdbm.InfiniBandPartition) *cwssaws.IBPartitionUpdateRequest {
+func (ibpur *APIInfiniBandPartitionUpdateRequest) ToProto(ibp *cdbm.InfiniBandPartition) *corev1.IBPartitionUpdateRequest {
 	ibpProto := ibp.ToProto()
-	return &cwssaws.IBPartitionUpdateRequest{
+	return &corev1.IBPartitionUpdateRequest{
 		Id:       ibpProto.Id,
 		Config:   ibpProto.Config,
 		Metadata: ibpProto.Metadata,
@@ -151,7 +151,7 @@ type APIInfiniBandPartition struct {
 	// EnableSharp indicates if sharp enable on the IB partition or not
 	EnableSharp *bool `json:"enableSharp"`
 	// Labels is the labels of the InfiniBand Partition
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Status is the status o the InfiniBand Partition
 	Status cdbm.InfiniBandPartitionStatus `json:"status"`
 	// StatusHistory is the status detail records for the InfiniBand Partition over time
@@ -175,7 +175,7 @@ func NewAPIInfiniBandPartition(dibp *cdbm.InfiniBandPartition, dbsds []cdbm.Stat
 		ServiceLevel:  dibp.ServiceLevel,
 		RateLimit:     dibp.RateLimit,
 		Mtu:           dibp.Mtu,
-		Labels:        dibp.Labels,
+		Labels:        APILabels(dibp.Labels),
 		EnableSharp:   dibp.EnableSharp,
 		Status:        dibp.Status,
 		Created:       dibp.Created,

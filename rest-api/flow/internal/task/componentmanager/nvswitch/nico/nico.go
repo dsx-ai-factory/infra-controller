@@ -12,7 +12,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
 	cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
@@ -24,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/firmwarecomponents"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -79,6 +79,8 @@ func Descriptor() cmcatalog.Descriptor {
 		},
 		RequiredProviders: []string{nicoprovider.ProviderName},
 		Capabilities: capability.CapabilitySet{
+			capability.CapabilityDecommissionControl,
+			capability.CapabilityDecommissionStatus,
 			capability.CapabilityFirmwareConsistencyCheck,
 			capability.CapabilityFirmwareControl,
 			capability.CapabilityFirmwareStatus,
@@ -130,12 +132,12 @@ func (m *Manager) InjectExpectation(
 	return nil
 }
 
-func switchIDsProto(ids []string) *pb.SwitchIdList {
-	pbIDs := make([]*pb.SwitchId, len(ids))
+func switchIDsProto(ids []string) *corev1.SwitchIdList {
+	pbIDs := make([]*corev1.SwitchId, len(ids))
 	for i, id := range ids {
-		pbIDs[i] = &pb.SwitchId{Id: id}
+		pbIDs[i] = &corev1.SwitchId{Id: id}
 	}
-	return &pb.SwitchIdList{Ids: pbIDs}
+	return &corev1.SwitchIdList{Ids: pbIDs}
 }
 
 // ensureRackOperable is the per-Manager policy gate for disruptive
@@ -153,6 +155,21 @@ func switchIDsProto(ids []string) *pb.SwitchIdList {
 // A switch that Core does not associate with a rack is logged and
 // skipped: failing closed would block bring-up flows for switches that
 // have not yet been ingested into the rack topology.
+// ensureTargetOperable keeps readiness resolution separate from API targeting.
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
+	if !target.UsesMACAddresses() {
+		return m.ensureRackOperable(ctx, target.Identifiers, op, override)
+	}
+	if m.readiness == nil {
+		return nil
+	}
+	if override {
+		log.Warn().Strs("management_macs", target.Identifiers).Str("operation", string(op)).Msg("Readiness check bypassed by override_readiness_check")
+		return nil
+	}
+	return m.readiness.WaitForManagementMACsReady(ctx, target.Type, target.Identifiers, op)
+}
+
 func (m *Manager) ensureRackOperable(
 	ctx context.Context,
 	switchIDs []string,
@@ -219,32 +236,38 @@ func (m *Manager) PowerControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureRackOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
-	var action pb.SystemPowerControl
+	var action corev1.SystemPowerControl
 	switch info.Operation {
 	case operations.PowerOperationPowerOn, operations.PowerOperationForcePowerOn:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_ON
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_ON
 	case operations.PowerOperationPowerOff:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_SHUTDOWN
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_SHUTDOWN
 	case operations.PowerOperationForcePowerOff:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF
 	case operations.PowerOperationRestart, operations.PowerOperationWarmReset:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART
 	case operations.PowerOperationForceRestart:
-		action = pb.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART
+		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART
 	default:
 		return fmt.Errorf("unsupported power operation for NVSwitch: %v", info.Operation)
 	}
 
-	req := &pb.ComponentPowerControlRequest{
-		Target: &pb.ComponentPowerControlRequest_SwitchIds{
-			SwitchIds: switchIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.ComponentPowerControlRequest{
 		Action:                action,
 		BypassStateController: info.OverrideReadinessCheck,
+	}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.ComponentPowerControlRequest_SwitchBmcMacs{
+			SwitchBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.ComponentPowerControlRequest_SwitchIds{
+			SwitchIds: switchIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
@@ -253,8 +276,8 @@ func (m *Manager) PowerControl(
 	}
 
 	for _, r := range resp.GetResults() {
-		if r.GetStatus() != pb.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("power control failed for %s: %s", r.GetComponentId(), r.GetError())
+		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			return fmt.Errorf("power control failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -271,10 +294,15 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &pb.GetComponentInventoryRequest{
-		Target: &pb.GetComponentInventoryRequest_SwitchIds{
-			SwitchIds: switchIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentInventoryRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentInventoryRequest_SwitchBmcMacs{
+			SwitchBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentInventoryRequest_SwitchIds{
+			SwitchIds: switchIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentInventory(ctx, req)
@@ -282,31 +310,16 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("GetComponentInventory failed: %w", err)
 	}
 
-	result := make(map[string]operations.PowerStatus, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
-		result[id] = operations.PowerStatusUnknown
-	}
-
+	result := make(map[string]operations.PowerStatus, target.Len())
 	for _, entry := range resp.GetEntries() {
-		compID := entry.GetResult().GetComponentId()
-		if ps := nicoprovider.ExtractPowerState(entry.GetReport()); ps != operations.PowerStatusUnknown {
-			result[compID] = ps
+		if entry.GetResult() == nil || entry.GetResult().GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			continue
 		}
+		compID := nicoprovider.ResultIdentifier(entry.GetResult(), target.UsesMACAddresses())
+		result[compID] = nicoprovider.ExtractPowerState(entry.GetReport())
 	}
 
 	return result, nil
-}
-
-// nicoPowerStateToOperationsPowerStatus converts nico PowerState to operations PowerStatus.
-func nicoPowerStateToOperationsPowerStatus(state nicoapi.PowerState) operations.PowerStatus {
-	switch state {
-	case nicoapi.PowerStateOn:
-		return operations.PowerStatusOn
-	case nicoapi.PowerStateOff, nicoapi.PowerStateDisabled:
-		return operations.PowerStatusOff
-	default:
-		return operations.PowerStatusUnknown
-	}
 }
 
 // FirmwareControl schedules a firmware update via NICo's UpdateComponentFirmware API.
@@ -331,7 +344,7 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureRackOperable(ctx, target.ComponentIDs, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -352,15 +365,20 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		}
 	}
 
-	req := &pb.UpdateComponentFirmwareRequest{
-		Target: &pb.UpdateComponentFirmwareRequest_Switches{
-			Switches: &pb.UpdateSwitchFirmwareTarget{
-				SwitchIds:  switchIDsProto(target.ComponentIDs),
-				Components: subComponents,
-			},
-		},
+	switchTarget := &corev1.UpdateSwitchFirmwareTarget{Components: subComponents}
+	if target.UsesMACAddresses() {
+		switchTarget.BmcMacs = &corev1.MacAddressList{MacAddresses: target.Identifiers}
+	} else {
+		switchTarget.SwitchIds = switchIDsProto(target.Identifiers)
+	}
+	req := &corev1.UpdateComponentFirmwareRequest{
+		Target:                &corev1.UpdateComponentFirmwareRequest_Switches{Switches: switchTarget},
 		TargetVersion:         info.TargetVersion,
+		ForceUpdate:           info.OverrideVersionCheck,
 		BypassStateController: info.OverrideReadinessCheck,
+	}
+	if info.AccessToken != "" {
+		req.AccessToken = &info.AccessToken
 	}
 
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
@@ -369,8 +387,8 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 	}
 
 	for _, r := range resp.GetResults() {
-		if r.GetStatus() != pb.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("firmware update failed for %s: %s", r.GetComponentId(), r.GetError())
+		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -399,7 +417,7 @@ func (m *Manager) checkFirmwareUpToDate(ctx context.Context, target common.Targe
 		return false, nil
 	}
 
-	for _, id := range target.ComponentIDs {
+	for _, id := range target.Identifiers {
 		actual, ok := actualFirmware[id]
 		if !ok || len(actual) == 0 {
 			return false, nil
@@ -417,10 +435,15 @@ func (m *Manager) checkFirmwareUpToDate(ctx context.Context, target common.Targe
 // only covers host/DPU), so fall back to the raw Redfish FirmwareInventory
 // entries in report.Service[].Inventories[], keyed by Inventory.Id.
 func (m *Manager) getActualFirmwareVersions(ctx context.Context, target common.Target) (map[string]map[string]string, error) {
-	req := &pb.GetComponentInventoryRequest{
-		Target: &pb.GetComponentInventoryRequest_SwitchIds{
-			SwitchIds: switchIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentInventoryRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentInventoryRequest_SwitchBmcMacs{
+			SwitchBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentInventoryRequest_SwitchIds{
+			SwitchIds: switchIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentInventory(ctx, req)
@@ -428,9 +451,9 @@ func (m *Manager) getActualFirmwareVersions(ctx context.Context, target common.T
 		return nil, fmt.Errorf("GetComponentInventory failed: %w", err)
 	}
 
-	result := make(map[string]map[string]string, len(target.ComponentIDs))
+	result := make(map[string]map[string]string, target.Len())
 	for _, entry := range resp.GetEntries() {
-		compID := entry.GetResult().GetComponentId()
+		compID := nicoprovider.ResultIdentifier(entry.GetResult(), target.UsesMACAddresses())
 		report := entry.GetReport()
 		fwVersions := report.GetFirmwareVersions()
 		if len(fwVersions) == 0 {
@@ -446,7 +469,7 @@ func (m *Manager) getActualFirmwareVersions(ctx context.Context, target common.T
 // extractInventoryVersions builds a firmware version map from the raw Redfish
 // FirmwareInventory entries in the exploration report, keyed by Inventory.Id.
 // Entries without a version are skipped.
-func extractInventoryVersions(report *pb.EndpointExplorationReport) map[string]string {
+func extractInventoryVersions(report *corev1.EndpointExplorationReport) map[string]string {
 	out := make(map[string]string)
 	for _, svc := range report.GetService() {
 		for _, inv := range svc.GetInventories() {
@@ -467,7 +490,7 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 	}
 
 	var referenceJSON string
-	for _, id := range target.ComponentIDs {
+	for _, id := range target.Identifiers {
 		actual, ok := actualFirmware[id]
 		if !ok {
 			return fmt.Errorf("switch %s has no firmware version data", id)
@@ -485,13 +508,13 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 	}
 
 	log.Info().
-		Int("switch_count", len(target.ComponentIDs)).
+		Int("switch_count", target.Len()).
 		Str("firmware_versions", referenceJSON).
 		Msg("All NVSwitch firmware versions are consistent")
 	return nil
 }
 
-func matchesAnyDesired(actual map[string]string, entries []*pb.DesiredFirmwareVersionEntry) bool {
+func matchesAnyDesired(actual map[string]string, entries []*corev1.DesiredFirmwareVersionEntry) bool {
 	for _, entry := range entries {
 		if firmwareVersionsMatch(entry.GetComponentVersions(), actual) {
 			return true
@@ -521,10 +544,15 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &pb.GetComponentFirmwareStatusRequest{
-		Target: &pb.GetComponentFirmwareStatusRequest_SwitchIds{
-			SwitchIds: switchIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentFirmwareStatusRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_SwitchBmcMacs{
+			SwitchBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_SwitchIds{
+			SwitchIds: switchIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
@@ -534,16 +562,16 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 
 	// Group statuses by component ID since Core may return multiple
 	// sub-component updates (BMC, CPLD, BIOS, NVOS) for the same switch.
-	grouped := make(map[string][]*pb.FirmwareUpdateStatus)
+	grouped := make(map[string][]*corev1.FirmwareUpdateStatus)
 	for _, s := range resp.GetStatuses() {
-		compID := s.GetResult().GetComponentId()
+		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		grouped[compID] = append(grouped[compID], s)
 	}
 
 	// Ensure every requested component ID is present in the result,
 	// even if Core returned no statuses for it.
-	result := make(map[string]operations.FirmwareUpdateStatus, len(target.ComponentIDs))
-	for _, compID := range target.ComponentIDs {
+	result := make(map[string]operations.FirmwareUpdateStatus, target.Len())
+	for _, compID := range target.Identifiers {
 		result[compID] = aggregateNICoStatuses(compID, grouped[compID])
 	}
 
@@ -559,7 +587,76 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 // FirmwareUpdateStatus message does not carry a sub-component type field. Once Core
 // exposes that information, we should check that all 4 sub-components are present and
 // treat a missing sub-component as incomplete (not Completed).
-func aggregateNICoStatuses(compID string, statuses []*pb.FirmwareUpdateStatus) operations.FirmwareUpdateStatus {
+// Decommission initiates decommissioning of the target switches via NICo.
+func (m *Manager) Decommission(
+	ctx context.Context,
+	target common.Target,
+	_ operations.DecommissionTaskInfo,
+) error {
+	if err := target.Validate(); err != nil {
+		return fmt.Errorf("target is invalid: %w", err)
+	}
+
+	for _, switchID := range target.Identifiers {
+		if err := m.nicoClient.DecommissionSwitch(ctx, switchID); err != nil {
+			return fmt.Errorf("DecommissionSwitch failed for %s: %w", switchID, err)
+		}
+	}
+
+	log.Info().
+		Strs("switch_ids", target.Identifiers).
+		Msg("Decommission initiated for NVSwitch components")
+	return nil
+}
+
+// GetDecommissionStatus returns the current decommission state for each
+// target switch, keyed by switch ID.
+func (m *Manager) GetDecommissionStatus(
+	ctx context.Context,
+	target common.Target,
+) (map[string]string, error) {
+	if err := target.Validate(); err != nil {
+		return nil, fmt.Errorf("target is invalid: %w", err)
+	}
+
+	states, err := m.nicoClient.FindSwitchControllerStates(ctx, target.Identifiers)
+	if err != nil {
+		return nil, fmt.Errorf("FindSwitchControllerStates: %w", err)
+	}
+
+	// Ensure every requested component is present in the result.
+	result := make(map[string]string, len(target.Identifiers))
+	for _, id := range target.Identifiers {
+		if s, ok := states[id]; ok {
+			result[id] = normalizeDecommissionState(s)
+		} else {
+			result[id] = ""
+		}
+	}
+	return result, nil
+}
+
+// normalizeDecommissionState converts Core's persisted switch-controller JSON
+// into the status vocabulary used by the Flow decommission waiter.
+func normalizeDecommissionState(raw string) string {
+	var state struct {
+		State                string `json:"state"`
+		DecommissioningState struct {
+			State string `json:"state"`
+		} `json:"decommissioning_state"`
+	}
+	if err := json.Unmarshal([]byte(raw), &state); err != nil ||
+		state.State != "decommissioning" ||
+		state.DecommissioningState.State == "" {
+		return raw
+	}
+	if state.DecommissioningState.State == "decommissioned" {
+		return "Decommissioned"
+	}
+	return "Decommissioning/" + state.DecommissioningState.State
+}
+
+func aggregateNICoStatuses(compID string, statuses []*corev1.FirmwareUpdateStatus) operations.FirmwareUpdateStatus {
 	if len(statuses) == 0 {
 		return operations.FirmwareUpdateStatus{
 			ComponentID: compID,

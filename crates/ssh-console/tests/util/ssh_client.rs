@@ -36,15 +36,15 @@ static PROMPT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 static BMC_BACKDOOR_SEQUENCE: &[u8] = b"backdoor_escape_console\n";
 
 #[derive(Copy, Clone)]
-pub struct ConnectionConfig<'a> {
-    pub connection_name: &'a str,
-    pub user: &'a str,
-    pub private_key_path: &'a Path,
-    pub addr: SocketAddr,
-    pub expected_prompt: &'a [u8],
+pub(crate) struct ConnectionConfig<'a> {
+    pub(crate) connection_name: &'a str,
+    pub(crate) user: &'a str,
+    pub(crate) private_key_path: &'a Path,
+    pub(crate) addr: SocketAddr,
+    pub(crate) expected_prompt: &'a [u8],
 }
 
-pub async fn assert_connection_works_with_retries_and_timeout(
+pub(crate) async fn assert_connection_works_with_retries_and_timeout(
     connection_config: &ConnectionConfig<'_>,
     retry_count: u8,
     per_try_timeout: Duration,
@@ -68,7 +68,7 @@ pub async fn assert_connection_works_with_retries_and_timeout(
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 } else {
                     return Err(error).context(format!(
-                        "Could not connect to {} after {} retries",
+                        "could not connect to {} after {} retries",
                         connection_config.connection_name, retry_count,
                     ));
                 }
@@ -76,7 +76,7 @@ pub async fn assert_connection_works_with_retries_and_timeout(
             // Timed out
             Err(elapsed) => {
                 return Err(elapsed).context(format!(
-                    "Timed out asserting working connection to {}",
+                    "timed out asserting working connection to {}",
                     connection_config.connection_name
                 ));
             }
@@ -84,7 +84,7 @@ pub async fn assert_connection_works_with_retries_and_timeout(
     }
 }
 
-pub async fn assert_connection_works(
+pub(crate) async fn assert_connection_works(
     ConnectionConfig {
         connection_name,
         user,
@@ -116,7 +116,7 @@ pub async fn assert_connection_works(
                 ),
             )
             .await
-            .context("Error authenticating with public key")?;
+            .context("error authenticating with public key")?;
 
         Ok::<_, eyre::Error>(session)
     }?;
@@ -125,13 +125,13 @@ pub async fn assert_connection_works(
     let mut channel = session
         .channel_open_session()
         .await
-        .context("Error opening session")?;
+        .context("error opening session")?;
 
     // Request PTY
     channel
         .request_pty(false, "xterm", 80, 24, 0, 0, &[])
         .await
-        .context("Error requesting PTY")?;
+        .context("error requesting PTY")?;
 
     // Request Shell
     channel.request_shell(false).await?;
@@ -159,7 +159,7 @@ pub async fn assert_connection_works(
             _ = tokio::time::sleep_until(assertion_timeout.into()) => {
                 match test_state {
                     ConnectionTestState::TryingCtrlBackslash => {
-                        tracing::info!("Succesfully prevented ctrl+\\ from triggering escape, now simulating dropping to BMC prompt from other means");
+                        tracing::info!("Successfully prevented ctrl+\\ from triggering escape, now simulating dropping to BMC prompt from other means");
                         test_state = ConnectionTestState::TryingBackdoorEscape;
                         assertion_timeout = Instant::now().add(Duration::from_secs(3));
                     }
@@ -235,14 +235,14 @@ pub async fn assert_connection_works(
 
     if result.is_ok() && matches!(test_state, ConnectionTestState::WaitingForPrompt) {
         return Err(eyre::format_err!(format!(
-            "Did not detect a prompt after connecting to {connection_name}"
+            "did not detect a prompt after connecting to {connection_name}"
         )));
     }
 
     result
 }
 
-pub async fn fill_logs(
+pub(crate) async fn fill_logs(
     ConnectionConfig {
         connection_name: _,
         user,
@@ -275,7 +275,7 @@ pub async fn fill_logs(
                 ),
             )
             .await
-            .context("Error authenticating with public key")?;
+            .context("error authenticating with public key")?;
 
         Ok::<_, eyre::Error>(session)
     }?;
@@ -284,13 +284,13 @@ pub async fn fill_logs(
     let channel = session
         .channel_open_session()
         .await
-        .context("Error opening session")?;
+        .context("error opening session")?;
 
     // Request PTY
     channel
         .request_pty(false, "xterm", 80, 24, 0, 0, &[])
         .await
-        .context("Error requesting PTY")?;
+        .context("error requesting PTY")?;
 
     // Request Shell
     channel.request_shell(false).await?;
@@ -332,7 +332,7 @@ pub async fn fill_logs(
     Ok(())
 }
 
-pub async fn assert_reboot_behavior(
+pub(crate) async fn assert_reboot_behavior(
     ConnectionConfig {
         connection_name: _,
         user,
@@ -365,7 +365,7 @@ pub async fn assert_reboot_behavior(
                 ),
             )
             .await
-            .context("Error authenticating with public key")?;
+            .context("error authenticating with public key")?;
 
         Ok::<_, eyre::Error>(session)
     }?;
@@ -374,7 +374,7 @@ pub async fn assert_reboot_behavior(
     let mut channel = session
         .channel_open_session()
         .await
-        .context("Error opening session")?;
+        .context("error opening session")?;
 
     // Issue reboot command
     channel.exec(true, POWER_RESET_COMMAND).await?;
@@ -394,7 +394,7 @@ pub async fn assert_reboot_behavior(
 
     let Some(exit_status) = exit_status else {
         return Err(eyre::format_err!(
-            "Sending reboot command did not return an exit status"
+            "sending reboot command did not return an exit status"
         ));
     };
 
@@ -404,23 +404,23 @@ pub async fn assert_reboot_behavior(
     if supported {
         if !has_successful_response {
             return Err(eyre::format_err!(
-                "Sending reboot command did not return expected output. output={output}, exit_status={exit_status}"
+                "sending reboot command did not return expected output. output={output}, exit_status={exit_status}"
             ));
         }
         if exit_status != 0 {
             return Err(eyre::format_err!(
-                "Sending reboot command returned a nonzero exit status. output={output}, exit_status={exit_status}"
+                "sending reboot command returned a nonzero exit status. output={output}, exit_status={exit_status}"
             ));
         }
     } else {
         if has_successful_response {
             return Err(eyre::format_err!(
-                "Sending reboot command returned successful output, but was not supposed to. output={output}, exit_status={exit_status}"
+                "sending reboot command returned successful output, but was not supposed to. output={output}, exit_status={exit_status}"
             ));
         }
         if exit_status == 0 {
             return Err(eyre::format_err!(
-                "Sending reboot command returned successful exit status, but was not supposed to. output={output}, exit_status={exit_status}"
+                "sending reboot command returned successful exit status, but was not supposed to. output={output}, exit_status={exit_status}"
             ));
         }
     }
@@ -437,7 +437,7 @@ enum ConnectionTestState {
     TryingBackdoorEscape,
 }
 
-pub struct PermissiveSshClient;
+pub(crate) struct PermissiveSshClient;
 
 impl russh::client::Handler for PermissiveSshClient {
     type Error = eyre::Error;

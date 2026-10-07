@@ -15,11 +15,15 @@
  * limitations under the License.
  */
 
+use config_version::ConfigVersion;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionServiceObservability, ExtensionServiceObservabilityConfig,
-    ExtensionServiceObservabilityConfigType, ExtensionServiceObservabilityConfigTypeLogging,
+    ExtensionServiceLifecycleState, ExtensionServiceObservability,
+    ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
+    ExtensionServiceObservabilityConfigTypeLogging,
     ExtensionServiceObservabilityConfigTypePrometheus, ExtensionServiceSnapshot,
-    ExtensionServiceType, ExtensionServiceVersionInfo,
+    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcAddressFamily,
+    ServiceVpcInterfaceRequirement,
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -30,13 +34,17 @@ use crate::forge as rpc;
 const MAX_OBSERVABILITY_CONFIG_NAME: usize = 64;
 const MAX_OBSERVABILITY_PROPERTY_LEN: usize = 128;
 
-static PROM_ENDPOINT_BAD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-zA-Z0-9:\-]+").unwrap());
+// Allow bracketed IPv6 and dotted hosts; exclude quotes and whitespace from single-quoted YAML targets.
+// Keep in sync with rest-api/api/pkg/api/model/dpuextensionservice.go.
+static PROM_ENDPOINT_BAD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[^a-zA-Z0-9:\-.\[\]]+").unwrap());
 static LOG_PATH_BAD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-zA-Z0-9\-\_\/\.\@]+").unwrap());
 
 impl From<ExtensionServiceType> for rpc::DpuExtensionServiceType {
     fn from(service_type: ExtensionServiceType) -> Self {
         match service_type {
             ExtensionServiceType::KubernetesPod => rpc::DpuExtensionServiceType::KubernetesPod,
+            ExtensionServiceType::DpfHelmChart => rpc::DpuExtensionServiceType::DpfHelmChart,
         }
     }
 }
@@ -45,7 +53,114 @@ impl From<rpc::DpuExtensionServiceType> for ExtensionServiceType {
     fn from(service_type: rpc::DpuExtensionServiceType) -> Self {
         match service_type {
             rpc::DpuExtensionServiceType::KubernetesPod => ExtensionServiceType::KubernetesPod,
+            rpc::DpuExtensionServiceType::DpfHelmChart => ExtensionServiceType::DpfHelmChart,
         }
+    }
+}
+
+impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTarget {
+    fn from(target: model::extension_service::DpuTarget) -> Self {
+        match target {
+            model::extension_service::DpuTarget::Primary => Self::Primary,
+            model::extension_service::DpuTarget::AllActive => Self::AllActive,
+            model::extension_service::DpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl From<ServiceVpcAddressFamily> for rpc::ServiceVpcAddressFamily {
+    fn from(address_family: ServiceVpcAddressFamily) -> Self {
+        match address_family {
+            ServiceVpcAddressFamily::Ipv4 => Self::Ipv4,
+            ServiceVpcAddressFamily::Ipv6 => Self::Ipv6,
+        }
+    }
+}
+
+impl From<rpc::DpuExtensionServiceDpuTarget> for model::extension_service::DpuTarget {
+    fn from(target: rpc::DpuExtensionServiceDpuTarget) -> Self {
+        match target {
+            rpc::DpuExtensionServiceDpuTarget::Primary => Self::Primary,
+            rpc::DpuExtensionServiceDpuTarget::AllActive => Self::AllActive,
+            rpc::DpuExtensionServiceDpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl TryFrom<rpc::ServiceVpcInterfaceRequirement> for ServiceVpcInterfaceRequirement {
+    type Error = RpcDataConversionError;
+
+    fn try_from(requirement: rpc::ServiceVpcInterfaceRequirement) -> Result<Self, Self::Error> {
+        let address_family = rpc::ServiceVpcAddressFamily::try_from(requirement.address_family)
+            .map_err(|_| {
+                RpcDataConversionError::InvalidValue(
+                    "service_vpc_interfaces.address_family".to_string(),
+                    requirement.address_family.to_string(),
+                )
+            })?;
+        Ok(Self {
+            // The Rust type has no unspecified variant because every declared
+            // service interface must choose one supported family.
+            address_family: match address_family {
+                rpc::ServiceVpcAddressFamily::Ipv4 => ServiceVpcAddressFamily::Ipv4,
+                rpc::ServiceVpcAddressFamily::Ipv6 => ServiceVpcAddressFamily::Ipv6,
+                rpc::ServiceVpcAddressFamily::Unspecified => {
+                    return Err(RpcDataConversionError::InvalidValue(
+                        "service_vpc_interfaces.address_family".to_string(),
+                        "unspecified".to_string(),
+                    ));
+                }
+            },
+        })
+    }
+}
+
+impl From<ServiceVpcInterfaceRequirement> for rpc::ServiceVpcInterfaceRequirement {
+    fn from(requirement: ServiceVpcInterfaceRequirement) -> Self {
+        Self {
+            address_family: rpc::ServiceVpcAddressFamily::from(requirement.address_family) as i32,
+        }
+    }
+}
+
+impl From<ExtensionServiceLifecycleState> for rpc::DpuExtensionServiceLifecycleState {
+    fn from(state: ExtensionServiceLifecycleState) -> Self {
+        match state {
+            ExtensionServiceLifecycleState::Creating => Self::Creating,
+            ExtensionServiceLifecycleState::Ready => Self::Ready,
+            ExtensionServiceLifecycleState::Updating => Self::Updating,
+            ExtensionServiceLifecycleState::Deleting => Self::Deleting,
+            ExtensionServiceLifecycleState::Deleted => Self::Deleted,
+            ExtensionServiceLifecycleState::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Converts the durable registration lifecycle into the generic lifecycle
+/// payload used by the public API. The dedicated protobuf enum is the source
+/// of truth for the state names placed in the JSON `state` field.
+pub fn lifecycle_status(
+    state: ExtensionServiceLifecycleState,
+    version: ConfigVersion,
+    outcome: Option<PersistentStateHandlerOutcome>,
+) -> rpc::LifecycleStatus {
+    let state = match rpc::DpuExtensionServiceLifecycleState::from(state) {
+        rpc::DpuExtensionServiceLifecycleState::Creating => "creating",
+        rpc::DpuExtensionServiceLifecycleState::Ready => "ready",
+        rpc::DpuExtensionServiceLifecycleState::Updating => "updating",
+        rpc::DpuExtensionServiceLifecycleState::Deleting => "deleting",
+        rpc::DpuExtensionServiceLifecycleState::Deleted => "deleted",
+        rpc::DpuExtensionServiceLifecycleState::Failed => "failed",
+    };
+
+    rpc::LifecycleStatus {
+        state: serde_json::json!({ "state": state }).to_string(),
+        version: version.version_string(),
+        state_reason: outcome.map(Into::into),
+        sla: Some(rpc::StateSla {
+            sla: None,
+            time_in_state_above_sla: false,
+        }),
     }
 }
 
@@ -65,6 +180,9 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
     fn from(snapshot: ExtensionServiceSnapshot) -> Self {
         Self {
             service_id: snapshot.service_id.into(),
+            dpu_target: snapshot
+                .dpu_target
+                .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
             service_type: snapshot.service_type as i32,
             service_name: snapshot.service_name,
             tenant_organization_id: snapshot.tenant_organization_id.to_string(),
@@ -78,6 +196,16 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
             description: snapshot.description,
             created: snapshot.created.to_string(),
             updated: snapshot.updated.to_string(),
+            lifecycle_status: Some(lifecycle_status(
+                snapshot.lifecycle_state,
+                snapshot.lifecycle_state_version,
+                snapshot.lifecycle_state_outcome,
+            )),
+            service_vpc_interfaces: snapshot
+                .service_vpc_interfaces
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -203,134 +331,233 @@ impl TryFrom<rpc::DpuExtensionServiceObservabilityConfig> for ExtensionServiceOb
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{Case, check_cases, scenarios};
+
     use super::*;
     use crate::forge::dpu_extension_service_observability_config::Config;
     use crate::forge::{self as rpc};
 
+    /// Verifies the public wire accepts IPv4 and IPv6 while rejecting missing or
+    /// newer unknown family values instead of choosing a default.
     #[test]
-    fn test_observability_config_from_rpc() {
-        // Try a bad name
-        ExtensionServiceObservabilityConfig::try_from(
-            rpc::DpuExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(1024)),
-                config: Some(Config::Logging(
-                    rpc::DpuExtensionServiceObservabilityConfigLogging {
-                        path: "/dev/null".to_string(),
-                    },
-                )),
-            },
-        )
-        .unwrap_err();
-
-        // Try a missing config
-        ExtensionServiceObservabilityConfig::try_from(
-            rpc::DpuExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: None,
-            },
-        )
-        .unwrap_err();
-
-        // Try a bad log path size
-        ExtensionServiceObservabilityConfig::try_from(
-            rpc::DpuExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: Some(Config::Logging(
-                    rpc::DpuExtensionServiceObservabilityConfigLogging {
-                        path: "/dev/null".repeat(1024),
-                    },
-                )),
-            },
-        )
-        .unwrap_err();
-
-        // Try a bad log path
-        ExtensionServiceObservabilityConfig::try_from(
-            rpc::DpuExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: Some(Config::Logging(
-                    rpc::DpuExtensionServiceObservabilityConfigLogging {
-                        path: "/dev/null$$$$$$".repeat(1024),
-                    },
-                )),
-            },
-        )
-        .unwrap_err();
-
-        // Try a bad endpoint
-        ExtensionServiceObservabilityConfig::try_from(
-            rpc::DpuExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: Some(Config::Prometheus(
-                    rpc::DpuExtensionServiceObservabilityConfigPrometheus {
-                        endpoint: "localhost".repeat(1024),
-                        scrape_interval_seconds: 30,
-                    },
-                )),
-            },
-        )
-        .unwrap_err();
-
-        // Try another bad endpoint using bad characters
-        ExtensionServiceObservabilityConfig::try_from(
-            rpc::DpuExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: Some(Config::Prometheus(
-                    rpc::DpuExtensionServiceObservabilityConfigPrometheus {
-                        endpoint: "/this/is/not/valid".repeat(1024),
-                        scrape_interval_seconds: 30,
-                    },
-                )),
-            },
-        )
-        .unwrap_err();
-
-        // Try a good prom config
+    fn service_vpc_requirement_family_conversion_is_strict() {
+        // Both explicit families remain representable even when activation is unavailable.
         assert_eq!(
-            ExtensionServiceObservabilityConfig::try_from(
-                rpc::DpuExtensionServiceObservabilityConfig {
-                    name: Some("a".repeat(10)),
-                    config: Some(Config::Prometheus(
-                        rpc::DpuExtensionServiceObservabilityConfigPrometheus {
-                            endpoint: "localhost:8080".to_string(),
-                            scrape_interval_seconds: 30,
-                        },
-                    )),
-                }
-            )
-            .unwrap(),
-            ExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: ExtensionServiceObservabilityConfigType::Prometheus(
-                    ExtensionServiceObservabilityConfigTypePrometheus {
-                        endpoint: "localhost:8080".to_string(),
-                        scrape_interval_seconds: 30
-                    }
-                )
-            }
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+            })
+            .unwrap()
+            .address_family,
+            ServiceVpcAddressFamily::Ipv4
+        );
+        assert_eq!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv6 as i32,
+            })
+            .unwrap()
+            .address_family,
+            ServiceVpcAddressFamily::Ipv6
         );
 
-        // Try a good logging config
-        assert_eq!(
-            ExtensionServiceObservabilityConfig::try_from(
-                rpc::DpuExtensionServiceObservabilityConfig {
-                    name: Some("a".repeat(10)),
-                    config: Some(Config::Logging(
-                        rpc::DpuExtensionServiceObservabilityConfigLogging {
-                            path: "/dev/null@home".to_string(),
+        // Unspecified and unknown values cannot silently choose a deployment family.
+        assert!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Unspecified as i32,
+            })
+            .is_err()
+        );
+        assert!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: i32::MAX,
+            })
+            .is_err()
+        );
+    }
+    fn observability_config(
+        name: Option<String>,
+        config: Option<Config>,
+    ) -> rpc::DpuExtensionServiceObservabilityConfig {
+        rpc::DpuExtensionServiceObservabilityConfig { name, config }
+    }
+
+    fn logging(path: impl Into<String>) -> Config {
+        Config::Logging(rpc::DpuExtensionServiceObservabilityConfigLogging { path: path.into() })
+    }
+
+    fn prometheus(endpoint: impl Into<String>) -> Config {
+        Config::Prometheus(rpc::DpuExtensionServiceObservabilityConfigPrometheus {
+            endpoint: endpoint.into(),
+            scrape_interval_seconds: 30,
+        })
+    }
+
+    #[test]
+    fn extension_service_type_conversions() {
+        let cases = [
+            (
+                ExtensionServiceType::KubernetesPod,
+                rpc::DpuExtensionServiceType::KubernetesPod,
+            ),
+            (
+                ExtensionServiceType::DpfHelmChart,
+                rpc::DpuExtensionServiceType::DpfHelmChart,
+            ),
+        ];
+
+        for (service_type, rpc_type) in cases {
+            assert_eq!(
+                rpc::DpuExtensionServiceType::from(service_type.clone()),
+                rpc_type
+            );
+            assert_eq!(ExtensionServiceType::from(rpc_type), service_type);
+        }
+    }
+
+    #[test]
+    fn extension_service_lifecycle_states_use_the_proto_defined_names() {
+        let cases = [
+            (ExtensionServiceLifecycleState::Creating, "creating"),
+            (ExtensionServiceLifecycleState::Ready, "ready"),
+            (ExtensionServiceLifecycleState::Updating, "updating"),
+            (ExtensionServiceLifecycleState::Deleting, "deleting"),
+            (ExtensionServiceLifecycleState::Deleted, "deleted"),
+            (ExtensionServiceLifecycleState::Failed, "failed"),
+        ];
+
+        for (state, expected) in cases {
+            let lifecycle = lifecycle_status(state, ConfigVersion::initial(), None);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&lifecycle.state).unwrap()["state"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn observability_config_from_rpc() {
+        // Preserve target text, including IPv6 brackets, through RPC conversion.
+        check_cases(
+            ["[::1]:9090", "192.0.2.10:9090", "metrics.example.com:9090"].map(|endpoint| Case {
+                scenario: endpoint,
+                input: observability_config(None, Some(prometheus(endpoint))),
+                expect: Yields(ExtensionServiceObservabilityConfig {
+                    name: None,
+                    config: ExtensionServiceObservabilityConfigType::Prometheus(
+                        ExtensionServiceObservabilityConfigTypePrometheus {
+                            endpoint: endpoint.to_string(),
+                            scrape_interval_seconds: 30,
                         },
-                    )),
-                }
-            )
-            .unwrap(),
-            ExtensionServiceObservabilityConfig {
-                name: Some("a".repeat(10)),
-                config: ExtensionServiceObservabilityConfigType::Logging(
-                    ExtensionServiceObservabilityConfigTypeLogging {
-                        path: "/dev/null@home".to_string(),
-                    }
-                )
+                    ),
+                }),
+            }),
+            |config| {
+                ExtensionServiceObservabilityConfig::try_from(config)
+                    .map_err(|error| error.to_string())
+            },
+        );
+
+        let max_name = Some("a".repeat(MAX_OBSERVABILITY_CONFIG_NAME));
+        let max_endpoint = format!(
+            "localhost:8080{}",
+            "a".repeat(MAX_OBSERVABILITY_PROPERTY_LEN - "localhost:8080".len()),
+        );
+        let max_path = format!(
+            "/dev/null@home{}",
+            "/".repeat(MAX_OBSERVABILITY_PROPERTY_LEN - "/dev/null@home".len()),
+        );
+        scenarios!(run = |input| {
+            ExtensionServiceObservabilityConfig::try_from(input).map_err(|error| error.to_string())
+        };
+            "invalid config" {
+                observability_config(None, None) => FailsWith(
+                    "argument DpuExtensionServiceObservability.config is missing".to_string(),
+                ),
             }
+
+            "invalid name" {
+                observability_config(
+                    Some("a".repeat(MAX_OBSERVABILITY_CONFIG_NAME + 1)),
+                    Some(logging("/dev/null")),
+                ) => FailsWith(
+                    "invalid value length exceeds 64 for DpuExtensionServiceObservability.name"
+                        .to_string(),
+                ),
+            }
+
+            "invalid logging path" {
+                observability_config(
+                    max_name.clone(),
+                    Some(logging("a".repeat(MAX_OBSERVABILITY_PROPERTY_LEN + 1))),
+                ) => FailsWith(
+                    "invalid value length exceeds 128 for DpuExtensionServiceObservability.config.path"
+                        .to_string(),
+                ),
+                observability_config(
+                    max_name.clone(),
+                    Some(logging("/dev/null$")),
+                ) => FailsWith(
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9\-\_\/\.\@]+` are invalid for DpuExtensionServiceObservability.config.path"
+                        .to_string(),
+                ),
+            }
+
+            "invalid Prometheus endpoint" {
+                observability_config(
+                    max_name.clone(),
+                    Some(prometheus("a".repeat(MAX_OBSERVABILITY_PROPERTY_LEN + 1))),
+                ) => FailsWith(
+                    "invalid value length exceeds 128 for DpuExtensionServiceObservability.config.endpoint"
+                        .to_string(),
+                ),
+                observability_config(
+                    max_name.clone(),
+                    Some(prometheus("localhost/metrics")),
+                ) => FailsWith(
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-.\[\]]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
+                        .to_string(),
+                ),
+                observability_config(
+                    None,
+                    Some(prometheus("[::1]:9090'")),
+                ) => FailsWith(
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-.\[\]]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
+                        .to_string(),
+                ),
+                observability_config(
+                    None,
+                    Some(prometheus("[::1]:9090\n")),
+                ) => FailsWith(
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-.\[\]]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
+                        .to_string(),
+                ),
+            }
+
+            "valid config" {
+                observability_config(
+                    max_name.clone(),
+                    Some(prometheus(max_endpoint.clone())),
+                ) => Yields(ExtensionServiceObservabilityConfig {
+                    name: max_name,
+                    config: ExtensionServiceObservabilityConfigType::Prometheus(
+                        ExtensionServiceObservabilityConfigTypePrometheus {
+                            endpoint: max_endpoint,
+                            scrape_interval_seconds: 30,
+                        },
+                    ),
+                }),
+                observability_config(
+                    None,
+                    Some(logging(max_path.clone())),
+                ) => Yields(ExtensionServiceObservabilityConfig {
+                    name: None,
+                    config: ExtensionServiceObservabilityConfigType::Logging(
+                        ExtensionServiceObservabilityConfigTypeLogging {
+                            path: max_path,
+                        },
+                    ),
+                }),
+            },
         );
     }
 }

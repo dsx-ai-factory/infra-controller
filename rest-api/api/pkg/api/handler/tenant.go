@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
 	temporalClient "go.temporal.io/sdk/client"
 
 	"github.com/rs/zerolog"
@@ -21,27 +22,27 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateTenantHandler is the API Handler for creating new Tenant
 type CreateTenantHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateTenantHandler initializes and returns a new handler for creating Tenant
 func NewCreateTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateTenantHandler {
 	return CreateTenantHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -57,7 +58,7 @@ func NewCreateTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 201 {object} model.APITenant
 // @Router /v2/org/{org}/nico/tenant [post]
 func (cth CreateTenantHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "Create", c, cth.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -90,19 +91,17 @@ func (cth CreateTenantHandler) Handle(c echo.Context) error {
 
 // GetCurrentTenantHandler is the API Handler for retrieving Tenant associated with the org
 type GetCurrentTenantHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetCurrentTenantHandler initializes and returns a new handler to retrieve Tenant associate with the org
 func NewGetCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentTenantHandler {
 	return GetCurrentTenantHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -117,7 +116,7 @@ func NewGetCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 200 {object} model.APITenant
 // @Router /v2/org/{org}/nico/tenant/current [get]
 func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrent", c, gcth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -158,7 +157,7 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 
 		// Re-read inside the tx so the existence check and any create/update
 		// happen against the same locked snapshot.
-		tns, derr := tnDAO.GetAllByOrg(ctx, tx, org, nil)
+		tns, _, derr := tnDAO.GetAll(ctx, tx, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Tenant for this org")
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current Tenant", nil)
@@ -206,31 +205,151 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 		return common.HandleTxError(c, logger, err, "Failed to retrieve current Tenant, DB transaction error")
 	}
 
-	// Create response
-	apiInstance := model.NewAPITenant(tn)
+	targetedInstanceCreation, err := common.TenantHasLegacyTargetedInstanceCreation(ctx, nil, gcth.dbSession, tn)
+	if err != nil {
+		logger.Error().Err(err).Msg("error resolving deprecated TargetedInstanceCreation Tenant capability")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability due to DB error", nil)
+	}
+
+	apiInstance := model.NewAPITenant(tn, targetedInstanceCreation)
 
 	logger.Info().Msg("finishing API handler")
 
 	return c.JSON(http.StatusOK, apiInstance)
 }
 
+// ~~~~~ Get Current Routing Profile Handler ~~~~~ //
+
+// GetCurrentTenantRoutingProfileHandler retrieves the routing profiles the
+// current Tenant may use at one Site.
+type GetCurrentTenantRoutingProfileHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+}
+
+// NewGetCurrentTenantRoutingProfileHandler initializes the routing-profile handler.
+func NewGetCurrentTenantRoutingProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetCurrentTenantRoutingProfileHandler {
+	return GetCurrentTenantRoutingProfileHandler{
+		dbSession: dbSession,
+		scp:       scp,
+	}
+}
+
+// Handle godoc
+// @Summary Retrieve current Tenant routing profiles for a Site
+// @Description Retrieve the Tenant's default VPC routing profile and the profiles it may select at one Site.
+// @Tags tenant
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site"
+// @Success 200 {object} model.APITenantRoutingProfile
+// @Router /v2/org/{org}/nico/tenant/current/routing-profile [get]
+func (gctrph GetCurrentTenantRoutingProfileHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantRoutingProfile", "GetCurrent", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	ok, err := auth.ValidateOrgMembership(dbUser, org)
+	if !ok {
+		if err != nil {
+			logger.Error().Err(err).Msg("error validating org membership for User in request")
+		} else {
+			logger.Warn().Msg("could not validate org membership for user, access denied")
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	}
+
+	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole)
+	if !ok {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
+	}
+
+	siteID := c.QueryParam("siteId")
+	site, err := common.GetSiteFromIDString(ctx, nil, siteID, gctrph.dbSession)
+	if err != nil {
+		if err == cdb.ErrDoesNotExist {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Site with ID specified in query", nil)
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Site ID in query", nil)
+	}
+	if site.Status != cdbm.SiteStatusRegistered {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in query must be in Registered state", nil)
+	}
+	if site.Config == nil || !site.Config.NativeNetworking {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in query must have native networking enabled", nil)
+	}
+
+	tenant, err := common.GetTenantForOrg(ctx, nil, gctrph.dbSession, org)
+	if err != nil {
+		if err == common.ErrOrgTenantNotFound {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Org does not have a Tenant associated", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
+	}
+
+	allocationDAO := cdbm.NewAllocationDAO(gctrph.dbSession)
+	allocationCount, err := allocationDAO.GetCount(ctx, nil, cdbm.AllocationFilterInput{
+		TenantIDs: []uuid.UUID{tenant.ID},
+		SiteIDs:   []uuid.UUID{site.ID},
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+	}
+	if allocationCount == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have any Allocations with Site specified in query", nil)
+	}
+
+	stc, err := gctrph.scp.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+
+	coreResponse := &corev1.FindTenantResponse{}
+	apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindTenant_FullMethodName, &corev1.FindTenantRequest{
+		TenantOrganizationId: org,
+	}, coreResponse, site.ID.String())
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "failed to retrieve Tenant routing profiles")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+	if coreResponse.GetTenant() == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Tenant was not found on Site", nil)
+	}
+
+	allowAlternatives, err := common.TenantHasTargetedInstanceCreation(ctx, nil, gctrph.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if err != nil {
+		logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to verify privileges for Site", nil)
+	}
+
+	response := &model.APITenantRoutingProfile{}
+	response.FromProto(coreResponse, allowAlternatives)
+	return c.JSON(http.StatusOK, response)
+}
+
 // ~~~~~ Get Current Stats Handler ~~~~~ //
 
 // GetCurrentTenantStatsHandler is the API Handler for retrieving Tenant stats associated with the org
 type GetCurrentTenantStatsHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetCurrentTenantStatsHandler initializes and returns a new handler to retrieve Tenant stats associate with the org
 func NewGetCurrentTenantStatsHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentTenantStatsHandler {
 	return GetCurrentTenantStatsHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -245,7 +364,7 @@ func NewGetCurrentTenantStatsHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 200 {object} model.APITenantStats
 // @Router /v2/org/{org}/nico/tenant/current/stats [get]
 func (gcth GetCurrentTenantStatsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrentStats", c, gcth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrentStats", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -274,7 +393,7 @@ func (gcth GetCurrentTenantStatsHandler) Handle(c echo.Context) error {
 	// Get Tenant for this org
 	tnDAO := cdbm.NewTenantDAO(gcth.dbSession)
 
-	tns, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tns, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
@@ -327,19 +446,17 @@ func (gcth GetCurrentTenantStatsHandler) Handle(c echo.Context) error {
 
 // UpdateCurrentTenantHandler is the API Handler for updating the current Tenant
 type UpdateCurrentTenantHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateCurrentTenantHandler initializes and returns a new handler for updating the current Tenant
 func NewUpdateCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateCurrentTenantHandler {
 	return UpdateCurrentTenantHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -355,7 +472,7 @@ func NewUpdateCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 200 {object} model.APITenant
 // @Router /v2/org/{org}/nico/tenant/current [patch]
 func (ucth UpdateCurrentTenantHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "UpdateCurrent", c, ucth.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "UpdateCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -29,9 +29,9 @@ Add capacity to resource pools from a TOML file:
     $ nico-admin-cli resource-pool grow --filename ./grow-pools.toml
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long)]
-    pub filename: String,
+    filename: String,
 }
 
 impl TryFrom<Args> for ::rpc::forge::GrowResourcePoolRequest {

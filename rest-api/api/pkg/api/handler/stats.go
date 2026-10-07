@@ -25,17 +25,15 @@ import (
 
 // GetMachineGPUStatsHandler is the API Handler for retrieving GPU stats for machines at a site
 type GetMachineGPUStatsHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetMachineGPUStatsHandler initializes and returns a new handler for machine GPU stats
 func NewGetMachineGPUStatsHandler(dbSession *cdb.Session, cfg *config.Config) GetMachineGPUStatsHandler {
 	return GetMachineGPUStatsHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -51,7 +49,7 @@ func NewGetMachineGPUStatsHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Success 200 {array} model.APIMachineGPUStats
 // @Router /v2/org/{orgName}/nico/machine/gpu/stats [get]
 func (gmgsh GetMachineGPUStatsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetGPUStats", c, gmgsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetGPUStats", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -75,33 +73,17 @@ func (gmgsh GetMachineGPUStatsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have access to the specified site", nil)
 	}
 
-	// Fetch all machines for the site (exclude metadata for performance)
-	machineDAO := cdbm.NewMachineDAO(gmgsh.dbSession)
-	machines, _, err := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{
-		SiteIDs:         []uuid.UUID{site.ID},
-		ExcludeMetadata: true,
-	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	// Aggregate GPU stats for the site in the database.
+	gpuStats, err := common.GetSiteGPUStats(ctx, nil, gmgsh.dbSession, logger, &infrastructureProvider.ID, &site.ID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving machines for site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve machines", nil)
+		logger.Error().Err(err).Msg("error retrieving GPU stats for site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve GPU stats", nil)
 	}
 
-	if len(machines) == 0 {
-		return c.JSON(http.StatusOK, []model.APIMachineGPUStats{})
+	result := gpuStats[site.ID]
+	if result == nil {
+		result = []model.APIMachineGPUStats{}
 	}
-
-	machineIDs := lo.Map(machines, func(m cdbm.Machine, _ int) string { return m.ID })
-
-	// Fetch GPU capabilities for all machines
-	mcDAO := cdbm.NewMachineCapabilityDAO(gmgsh.dbSession)
-	capabilities, _, err := mcDAO.GetAll(ctx, nil, machineIDs, nil, cdb.GetTypedStrPtr(cdbm.MachineCapabilityTypeGPU),
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving GPU capabilities")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve GPU capabilities", nil)
-	}
-
-	result := model.NewAPIMachineGPUStatsList(capabilities)
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, result)
@@ -111,17 +93,15 @@ func (gmgsh GetMachineGPUStatsHandler) Handle(c echo.Context) error {
 
 // GetTenantInstanceTypeStatsHandler is the API Handler for retrieving per-tenant instance type allocation stats
 type GetTenantInstanceTypeStatsHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetTenantInstanceTypeStatsHandler initializes and returns a new handler for tenant instance type stats
 func NewGetTenantInstanceTypeStatsHandler(dbSession *cdb.Session, cfg *config.Config) GetTenantInstanceTypeStatsHandler {
 	return GetTenantInstanceTypeStatsHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -137,7 +117,7 @@ func NewGetTenantInstanceTypeStatsHandler(dbSession *cdb.Session, cfg *config.Co
 // @Success 200 {array} model.APITenantInstanceTypeStats
 // @Router /v2/org/{orgName}/nico/tenant/instance-type/stats [get]
 func (gtitsh GetTenantInstanceTypeStatsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetInstanceTypeStats", c, gtitsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetInstanceTypeStats", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -346,17 +326,15 @@ func (gtitsh GetTenantInstanceTypeStatsHandler) Handle(c echo.Context) error {
 
 // GetMachineInstanceTypeSummaryHandler is the API Handler for retrieving assigned vs unassigned machine summary
 type GetMachineInstanceTypeSummaryHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetMachineInstanceTypeSummaryHandler initializes and returns a new handler for machine instance type summary
 func NewGetMachineInstanceTypeSummaryHandler(dbSession *cdb.Session, cfg *config.Config) GetMachineInstanceTypeSummaryHandler {
 	return GetMachineInstanceTypeSummaryHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -372,7 +350,7 @@ func NewGetMachineInstanceTypeSummaryHandler(dbSession *cdb.Session, cfg *config
 // @Success 200 {object} model.APIMachineInstanceTypeSummary
 // @Router /v2/org/{orgName}/nico/machine/instance-type/stats/summary [get]
 func (gmitsh GetMachineInstanceTypeSummaryHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetInstanceTypeSummary", c, gmitsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetInstanceTypeSummary", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -430,17 +408,15 @@ func (gmitsh GetMachineInstanceTypeSummaryHandler) Handle(c echo.Context) error 
 
 // GetMachineInstanceTypeStatsHandler is the API Handler for retrieving detailed per-instance-type machine stats
 type GetMachineInstanceTypeStatsHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetMachineInstanceTypeStatsHandler initializes and returns a new handler for machine instance type stats
 func NewGetMachineInstanceTypeStatsHandler(dbSession *cdb.Session, cfg *config.Config) GetMachineInstanceTypeStatsHandler {
 	return GetMachineInstanceTypeStatsHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -456,7 +432,7 @@ func NewGetMachineInstanceTypeStatsHandler(dbSession *cdb.Session, cfg *config.C
 // @Success 200 {array} model.APIMachineInstanceTypeStats
 // @Router /v2/org/{orgName}/nico/machine/instance-type/stats [get]
 func (gmitsh GetMachineInstanceTypeStatsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetInstanceTypeStats", c, gmitsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetInstanceTypeStats", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

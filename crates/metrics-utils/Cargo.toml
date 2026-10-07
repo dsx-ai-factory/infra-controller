@@ -4,6 +4,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 opentelemetry_sdk = { workspace = true, features = [

@@ -22,12 +22,12 @@ use crate::errors::CarbideCliResult;
 use crate::health_utils;
 use crate::rpc::ApiClient;
 
-pub async fn add(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
+pub(super) async fn add(api_client: &ApiClient, args: Args) -> CarbideCliResult<()> {
     let report =
         health_utils::resolve_health_report(args.template, args.health_report, args.message)?;
 
     if args.print_only {
-        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
 

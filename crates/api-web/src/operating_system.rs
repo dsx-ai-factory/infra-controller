@@ -63,7 +63,7 @@ impl From<&forgerpc::OperatingSystem> for OsRowDisplay {
             name: os.name.clone(),
             os_type,
             status,
-            tenant_organization_id: os.tenant_organization_id.clone(),
+            tenant_organization_id: os.tenant_organization_id.clone().unwrap_or_default(),
             template_id: os
                 .ipxe_template_id
                 .map(|id| id.to_string())
@@ -73,11 +73,11 @@ impl From<&forgerpc::OperatingSystem> for OsRowDisplay {
     }
 }
 
-pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let oss = match fetch_operating_systems(state).await {
         Ok(v) => v,
         Err(err) => {
-            tracing::error!(%err, "fetch_operating_systems");
+            tracing::error!(error = %err, "fetch_operating_systems");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading operating systems",
@@ -92,11 +92,11 @@ pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
     let mut oss = match fetch_operating_systems(state).await {
         Ok(v) => v,
         Err(err) => {
-            tracing::error!(%err, "fetch_operating_systems");
+            tracing::error!(error = %err, "fetch_operating_systems");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading operating systems",
@@ -211,7 +211,7 @@ impl From<forgerpc::OperatingSystem> for OsDetail {
             description: os.description.unwrap_or_default(),
             os_type,
             status,
-            tenant_organization_id: os.tenant_organization_id,
+            tenant_organization_id: os.tenant_organization_id.unwrap_or_default(),
             is_active: os.is_active,
             allow_override: os.allow_override,
             phone_home_enabled: os.phone_home_enabled,
@@ -229,7 +229,7 @@ impl From<forgerpc::OperatingSystem> for OsDetail {
     }
 }
 
-pub async fn detail(
+pub(super) async fn detail(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(os_id): AxumPath<String>,
 ) -> Response {
@@ -250,7 +250,7 @@ pub async fn detail(
             return super::not_found_response(os_id);
         }
         Err(err) => {
-            tracing::error!(%err, "get_operating_system");
+            tracing::error!(error = %err, "get_operating_system");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error loading operating system",

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use carbide_secrets::credentials::CredentialKey;
@@ -23,14 +23,14 @@ use carbide_uuid::machine::MachineId;
 
 use crate::IPMITool;
 
-pub struct IPMIToolTestImpl {}
+pub(super) struct IPMIToolTestImpl {}
 
 #[async_trait]
 impl IPMITool for IPMIToolTestImpl {
     async fn restart(
         &self,
         _machine_id: &MachineId,
-        _bmc_ip: IpAddr,
+        _bmc_address: SocketAddr,
         _legacy_boot: bool,
         _credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report> {
@@ -39,7 +39,7 @@ impl IPMITool for IPMIToolTestImpl {
 
     async fn bmc_cold_reset(
         &self,
-        _bmc_ip: IpAddr,
+        _bmc_address: SocketAddr,
         _credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report> {
         Ok(())

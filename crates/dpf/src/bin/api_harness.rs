@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 //! DPF API harness.
 //!
@@ -27,9 +28,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use carbide_dpf::repository::{DpuRepository, K8sConfigRepository};
 use carbide_dpf::{
-    DpfError, DpfSdk, DpfSdkBuilder, DpuDeviceInfo, DpuNodeInfo, InitDpfResourcesConfig,
-    KubeRepository, NAMESPACE, ServiceDefinition, dpu_node_cr_name,
+    DpfError, DpfSdk, DpfSdkBuilder, DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo,
+    InitDpfResourcesConfigBuilder, KubeRepository, NAMESPACE, ServiceDefinition, dpu_node_cr_name,
 };
+use carbide_utils::redfish::parse_uri_host_ip;
 use clap::{Parser, Subcommand};
 use libredfish::model::BootProgressTypes;
 use libredfish::{Redfish, SystemPowerControl};
@@ -69,7 +71,8 @@ enum Commands {
         #[arg(long)]
         node_id: String,
 
-        /// Comma-separated list of DPU configurations: device_name:dpu_bmc_ip:serial
+        /// Comma-separated list of DPU configurations: device_name:dpu_bmc_ip:serial.
+        /// IPv6 BMC addresses may be bare or enclosed in brackets
         #[arg(long)]
         dpus: String,
 
@@ -245,19 +248,20 @@ fn load_services_from_file(path: &std::path::Path) -> Result<Vec<ServiceDefiniti
 fn parse_dpus(dpus: &str) -> Result<Vec<DpuConfig>, String> {
     dpus.split(',')
         .map(|s| {
-            let parts: Vec<&str> = s.trim().split(':').collect();
-            if parts.len() != 3 {
-                return Err(format!(
-                    "Invalid DPU config '{}', expected device_name:dpu_bmc_ip:serial",
-                    s
-                ));
-            }
+            let (device_name, dpu_bmc_ip, serial_number) = s
+                .trim()
+                .split_once(':')
+                .and_then(|(name, rest)| {
+                    rest.rsplit_once(':').map(|(ip, serial)| (name, ip, serial))
+                })
+                .ok_or_else(|| {
+                    format!("invalid DPU config '{s}', expected device_name:dpu_bmc_ip:serial")
+                })?;
             Ok(DpuConfig {
-                device_name: parts[0].to_string(),
-                dpu_bmc_ip: parts[1]
-                    .parse()
-                    .map_err(|_| format!("Invalid DPU BMC IP '{}'", parts[1]))?,
-                serial_number: parts[2].to_string(),
+                device_name: device_name.to_string(),
+                dpu_bmc_ip: parse_uri_host_ip(dpu_bmc_ip)
+                    .ok_or_else(|| format!("invalid DPU BMC IP '{dpu_bmc_ip}'"))?,
+                serial_number: serial_number.to_string(),
             })
         })
         .collect()
@@ -314,7 +318,7 @@ async fn redfish_reboot_host(
         .and_then(|sys| sys.boot_progress)
         .and_then(|bp| bp.last_state_time);
     tracing::info!(
-        host = %host_bmc_ip,
+        host_bmc_ip_address = %host_bmc_ip,
         pre_reboot_time = ?pre_reboot_time,
         "Sending ForceRestart via Redfish"
     );
@@ -349,7 +353,7 @@ async fn redfish_reboot_host(
 
                 if timestamp_changed && os_running {
                     tracing::info!(
-                        host = %host_bmc_ip,
+                        host_bmc_ip_address = %host_bmc_ip,
                         last_state_time = ?current_time,
                         "Host rebooted and OS is running"
                     );
@@ -357,9 +361,9 @@ async fn redfish_reboot_host(
                 }
 
                 tracing::debug!(
-                    host = %host_bmc_ip,
+                    host_bmc_ip_address = %host_bmc_ip,
                     last_state_time = ?current_time,
-                    last_state = ?current_state,
+                    host_state = ?current_state,
                     timestamp_changed,
                     os_running,
                     "Waiting for host reboot to complete"
@@ -367,7 +371,7 @@ async fn redfish_reboot_host(
             }
             Err(e) => {
                 tracing::debug!(
-                    host = %host_bmc_ip,
+                    host_bmc_ip_address = %host_bmc_ip,
                     error = %e,
                     "Redfish unreachable during reboot, retrying"
                 );
@@ -521,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let password =
                 resolve_bmc_password(&repo, &cli.namespace, bmc_password.as_deref()).await?;
             redfish_reboot_host(&host_bmc_ip, &bmc_username, &password).await?;
-            tracing::info!(host = %host_bmc_ip, "Host reboot initiated via Redfish");
+            tracing::info!(host_bmc_ip_address = %host_bmc_ip, "Host reboot initiated via Redfish");
         }
     }
 
@@ -577,7 +581,7 @@ async fn monitor_until_ready(
     let _watcher = sdk
         .watcher()
         .on_dpu_event(|event| async move {
-            tracing::info!(dpu = %event.dpu_name, phase = ?event.phase, "DPU event");
+            tracing::info!(dpu_name = %event.dpu_name, phase = ?event.phase, "DPU event");
             Ok(())
         })
         .on_reboot_required({
@@ -672,7 +676,7 @@ async fn monitor_until_ready(
             }
         }
     };
-    tracing::info!(node = %node_name, host = %host_bmc_ip, "Reboot required, rebooting host via Redfish");
+    tracing::info!(node = %node_name, host_bmc_ip_address = %host_bmc_ip, "Reboot required, rebooting host via Redfish");
     redfish_reboot_host(host_bmc_ip, DEFAULT_BMC_USERNAME, bmc_password)
         .await
         .map_err(|e| format!("Redfish reboot failed: {e}"))?;
@@ -709,14 +713,13 @@ async fn run_provisioning_flow(
     let timeout = Duration::from_secs(timeout_secs);
 
     tracing::info!("=== DPF Provisioning Flow ===");
-    tracing::info!(host = %host_bmc_ip, dpu_count = dpus.len(), timeout_secs, "Starting provisioning");
+    tracing::info!(host_bmc_ip_address = %host_bmc_ip, dpu_count = dpus.len(), timeout_seconds = timeout_secs, "Starting provisioning");
 
     tracing::info!("[1/4] Initializing DPF resources...");
-    let init_config = InitDpfResourcesConfig {
-        bfb_url: bfb_url.to_string(),
-        services: services.to_vec(),
-        ..Default::default()
-    };
+    let init_config = InitDpfResourcesConfigBuilder::default()
+        .bfb_url(bfb_url)
+        .services(services.to_vec())
+        .build()?;
     sdk.create_initialization_objects(&init_config).await?;
     tracing::info!("BFB, DPUFlavor, and DPUDeployment created");
 
@@ -730,7 +733,7 @@ async fn run_provisioning_flow(
             dpu_machine_id: String::new(),
             is_primary: true,
         };
-        sdk.register_dpu_device(info).await?;
+        sdk.register_dpu_device(info, None).await?;
         tracing::info!(device_name = %dpu.device_name, serial = %dpu.serial_number, "Registered device");
     }
 
@@ -739,6 +742,7 @@ async fn run_provisioning_flow(
         node_id: node_id.to_string(),
         host_bmc_ip: host_bmc_ip_addr,
         device_ids: dpus.iter().map(|d| d.device_name.clone()).collect(),
+        deployment_type: DpuDeploymentType::Bf3,
     };
     sdk.register_dpu_node(node_info).await?;
     tracing::info!(dpu_count = dpus.len(), "Node registered");
@@ -757,7 +761,7 @@ async fn run_provisioning_flow(
 
     tracing::info!(
         dpu_count = dpus.len(),
-        elapsed_secs = elapsed.as_secs(),
+        elapsed_seconds = elapsed.as_secs(),
         "=== Provisioning Complete ==="
     );
     Ok(())
@@ -799,7 +803,7 @@ async fn wait_for_dpu_created_after(
                 let name = dpu.metadata.name.as_deref().unwrap_or_default();
                 if dpu.spec.dpu_device_name != device_name {
                     tracing::debug!(
-                        dpu = %name,
+                        dpu_name = %name,
                         spec_device = %dpu.spec.dpu_device_name,
                         want_device = %device_name,
                         "DPU skip (device name mismatch)"
@@ -813,7 +817,7 @@ async fn wait_for_dpu_created_after(
                     .and_then(k8s_time_to_system_time)
                 else {
                     tracing::info!(
-                        dpu = %name,
+                        dpu_name = %name,
                         "DPU skip (no creation_timestamp or conversion failed)"
                     );
                     return std::future::ready(Ok::<(), DpfError>(()));
@@ -830,9 +834,9 @@ async fn wait_for_dpu_created_after(
                     .unwrap_or(0);
                 let passes = ct > cutoff;
                 tracing::info!(
-                    dpu = %name,
-                    creation_ms = ct_ms,
-                    cutoff_ms = cutoff_ms,
+                    dpu_name = %name,
+                    creation_time_milliseconds = ct_ms,
+                    cutoff_time_milliseconds = cutoff_ms,
                     passes = passes,
                     "DPU created_after check"
                 );
@@ -886,7 +890,7 @@ async fn run_reprovisioning_flow(
 
     tracing::info!(
         device_name = %device_name,
-        elapsed_secs = elapsed.as_secs(),
+        elapsed_seconds = elapsed.as_secs(),
         "=== Reprovisioning Complete ==="
     );
     Ok(())
@@ -964,7 +968,7 @@ async fn show_status(
         tracing::info!(name = %name, dpu_count, "DPU Node");
         if let Some(dpus) = &node.spec.dpus {
             for dpu in dpus {
-                tracing::info!(dpu = %dpu.name, "  DPU");
+                tracing::info!(dpu_name = %dpu.name, "  DPU");
             }
         }
     }
@@ -1004,7 +1008,7 @@ async fn show_status(
             .first()
             .map(|c| c.type_.clone())
             .unwrap_or_else(|| "Unknown".to_string());
-        tracing::info!(name = %name, serial = %serial, status = %status_str, "DPU Device");
+        tracing::info!(name = %name, serial = %serial, dpu_device_status = %status_str, "DPU Device");
     }
 
     // List DPUDeployments
@@ -1015,7 +1019,7 @@ async fn show_status(
     }
     for dep in &deployments {
         let name = dep.metadata.name.clone().unwrap_or_default();
-        let bfb = dep.spec.dpus.bfb.clone();
+        let bfb = dep.spec.dpus.bfb.clone().unwrap_or_default();
         tracing::info!(name = %name, bfb = %bfb, "DPUDeployment");
     }
 
@@ -1052,19 +1056,19 @@ async fn run_watcher(sdk: Arc<DpfSdk<KubeRepository>>) -> Result<(), Box<dyn std
     let watcher = sdk
         .watcher()
         .on_dpu_event(|event| async move {
-            tracing::info!(dpu = %event.dpu_name, phase = ?event.phase, "PHASE");
+            tracing::info!(dpu_name = %event.dpu_name, phase = ?event.phase, "PHASE");
             Ok(())
         })
         .on_reboot_required(|event| async move {
-            tracing::warn!(node = %event.node_name, host = %event.host_bmc_ip, "REBOOT REQUIRED");
+            tracing::warn!(node = %event.node_name, host_bmc_ip_address = %event.host_bmc_ip, "REBOOT REQUIRED");
             Ok(())
         })
         .on_dpu_ready(|event| async move {
-            tracing::info!(dpu = %event.dpu_name, device_name = %event.device_name, "READY");
+            tracing::info!(dpu_name = %event.dpu_name, device_name = %event.device_name, "READY");
             Ok(())
         })
         .on_error(|event| async move {
-            tracing::error!(dpu = %event.dpu_name, device_name = %event.device_name, node = %event.node_name, "ERROR");
+            tracing::error!(dpu_name = %event.dpu_name, device_name = %event.device_name, node = %event.node_name, "ERROR");
             Ok(())
         })
         .start()?;
@@ -1074,4 +1078,44 @@ async fn run_watcher(sdk: Arc<DpfSdk<KubeRepository>>) -> Result<(), Box<dyn std
     drop(watcher);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{Fails, FailsWith};
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    #[test]
+    fn parse_dpus_accepts_bare_and_bracketed_ipv6() {
+        let configs =
+            parse_dpus(" bf3-a:192.0.2.10:MT123, bf3-b:2001:db8::10:MT456, bf3-c:[::1]:MT789 ")
+                .unwrap();
+        let expected = [
+            ("bf3-a", "192.0.2.10", "MT123"),
+            ("bf3-b", "2001:db8::10", "MT456"),
+            ("bf3-c", "::1", "MT789"),
+        ];
+        assert_eq!(configs.len(), expected.len());
+        for (config, (name, ip, serial)) in configs.iter().zip(expected) {
+            assert_eq!(config.device_name, name);
+            assert_eq!(config.dpu_bmc_ip, ip.parse::<IpAddr>().unwrap());
+            assert_eq!(config.serial_number, serial);
+        }
+
+        scenarios!(run = |input| parse_dpus(input).map(|_| ());
+            "missing delimiters" {
+                "bf3-a" => Fails,
+                "bf3-a:192.0.2.10" => Fails,
+            }
+            "invalid BMC address" {
+                "bf3-a:[not-an-ip]:MT123" => FailsWith(
+                    "invalid DPU BMC IP '[not-an-ip]'".to_string(),
+                ),
+                "bf3-a:[2001:db8::10:MT123" => Fails,
+                "bf3-a:2001:db8::10]:MT123" => Fails,
+            }
+        );
+    }
 }

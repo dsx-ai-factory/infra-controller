@@ -19,13 +19,13 @@ use db::DatabaseError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum PreingestionManagerError {
-    #[error("Database error: {0}")]
+    #[error("database error: {0}")]
     DatabaseError(#[from] DatabaseError),
-    #[error("Error in libredfish: {0}")]
+    #[error("error in libredfish: {0}")]
     RedfishError(#[from] libredfish::RedfishError),
-    #[error("Argument is invalid: {0}")]
+    #[error("argument is invalid: {0}")]
     InvalidArgument(String),
-    #[error("Internal error: {message}")]
+    #[error("internal error: {message}")]
     Internal { message: String },
 }
 
@@ -36,4 +36,4 @@ impl PreingestionManagerError {
     }
 }
 
-pub type PreingestionManagerResult<T> = Result<T, PreingestionManagerError>;
+pub(super) type PreingestionManagerResult<T> = Result<T, PreingestionManagerError>;

@@ -16,7 +16,7 @@
  */
 
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -40,15 +40,15 @@ Show full details for one remediation on one machine:
     --machine-id abcdef01-2345-6789-abcd-ef0123456789
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         help = "The remediation id to query, in case the user wants to see which machines have a specific remediation applied.  Provide both arguments to see all the details for a specific remediation and machine.",
         long
     )]
-    pub remediation_id: Option<RemediationId>,
+    pub(super) remediation_id: Option<RemediationId>,
     #[clap(
         help = "The machine id to query, in case the user wants to see which remediations have been applied to a specific box.  Provide both arguments to see all the details for a specific remediation and machine.",
         long
     )]
-    pub machine_id: Option<MachineId>,
+    pub(super) machine_id: Option<DpuMachineId>,
 }

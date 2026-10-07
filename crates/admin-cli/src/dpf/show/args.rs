@@ -33,7 +33,7 @@ Show DPF status for one host machine:
     $ nico-admin-cli dpf show 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: DpfQuery,
+    pub(super) inner: DpfQuery,
 }

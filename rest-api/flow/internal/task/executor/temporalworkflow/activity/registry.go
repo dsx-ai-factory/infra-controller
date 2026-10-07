@@ -4,6 +4,7 @@
 package activity
 
 import (
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 )
@@ -17,6 +18,7 @@ type Activities struct {
 	updater       task.TaskStatusUpdater
 	reportUpdater task.TaskReportUpdater
 	registry      *componentmanager.Registry
+	dataCipher    *secret.Cipher
 }
 
 // New creates an Activities instance. Any argument may be nil; activity
@@ -25,11 +27,13 @@ func New(
 	updater task.TaskStatusUpdater,
 	reportUpdater task.TaskReportUpdater,
 	registry *componentmanager.Registry,
+	dataCipher *secret.Cipher,
 ) *Activities {
 	return &Activities{
 		updater:       updater,
 		reportUpdater: reportUpdater,
 		registry:      registry,
+		dataCipher:    dataCipher,
 	}
 }
 
@@ -49,5 +53,7 @@ func (a *Activities) All() map[string]any {
 		NameBringUpControl:            a.BringUpControl,
 		NameGetBringUpStatus:          a.GetBringUpStatus,
 		NameVerifyFirmwareConsistency: a.VerifyFirmwareConsistency,
+		NameDecommissionControl:       a.DecommissionControl,
+		NameGetDecommissionStatus:     a.GetDecommissionStatus,
 	}
 }

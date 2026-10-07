@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmd;
+mod args;
+mod cmd;
 
-pub use args::Args;
+pub(super) use args::Args;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -33,6 +33,7 @@ impl Run for Args {
                     options,
                     ctx.config.format,
                     ctx.config.extended,
+                    &mut ctx.output_file,
                 )
                 .await
             }

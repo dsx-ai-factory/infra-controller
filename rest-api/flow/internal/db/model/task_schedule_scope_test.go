@@ -322,25 +322,3 @@ func TestNilComponentFilterIsNULL(t *testing.T) {
 
 	assert.Nil(t, raw, "component_filter should be SQL NULL, not the JSON null literal")
 }
-
-// ── sliceSetEqual ─────────────────────────────────────────────────────────────
-
-func TestSliceSetEqual(t *testing.T) {
-	cases := map[string]struct {
-		a, b []string
-		want bool
-	}{
-		"both empty":          {a: nil, b: nil, want: true},
-		"same order":          {a: []string{"x", "y"}, b: []string{"x", "y"}, want: true},
-		"different order":     {a: []string{"x", "y"}, b: []string{"y", "x"}, want: true},
-		"different lengths":   {a: []string{"x", "y"}, b: []string{"x"}, want: false},
-		"disjoint":            {a: []string{"x"}, b: []string{"y"}, want: false},
-		"duplicate in a vs b": {a: []string{"x", "x"}, b: []string{"x", "y"}, want: false},
-	}
-
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, sliceSetEqual(tc.a, tc.b))
-		})
-	}
-}

@@ -16,57 +16,140 @@
  */
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
 
-/// One row from kea's memfile CSV (kea-leases4.csv). Only the fields the
-/// lease4 hook tests care about are exposed.
-//
-// dead_code is allowed because not every test binary that includes `common`
-// inspects the lease file -- the existing booturl/multithreaded tests only
-// look at packets.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct LeaseEntry {
-    pub address: Ipv4Addr,
-    pub hwaddr: String,
-    /// 0 = default (active). Other states (declined, expired-reclaimed)
-    /// shouldn't appear in our tests but are exposed for completeness.
-    pub state: u32,
+use super::dhcp_factory::RELAY_IP;
+
+const KEA_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const KEA_START_ATTEMPTS: usize = 5;
+const KEA_EXIT_SETTLE: Duration = Duration::from_millis(100);
+
+// Kea binds loopback DHCP ports and loads the same hook library in each test.
+// Within one test process, keep one Kea child alive at a time to avoid
+// CI-only loopback/startup flakes. Separate test binaries can still run Kea
+// concurrently; dynamic ports and startup retries handle that case. The condvar
+// keeps waiters asleep without holding the mutex for a full test.
+static KEA_RUN_GATE: OnceLock<KeaRunGate> = OnceLock::new();
+
+struct KeaRunGate {
+    state: Mutex<KeaRunState>,
+    available: Condvar,
 }
 
-pub struct Kea {
+#[derive(Default)]
+struct KeaRunState {
+    running: bool,
+}
+
+struct KeaRunPermit {
+    gate: &'static KeaRunGate,
+}
+
+impl KeaRunGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(KeaRunState::default()),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&'static self) -> KeaRunPermit {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.running {
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        state.running = true;
+
+        KeaRunPermit { gate: self }
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.running = false;
+        self.available.notify_one();
+    }
+}
+
+impl Drop for KeaRunPermit {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
+
+pub(crate) struct Kea {
     temp_conf_file: PathBuf,
-    #[allow(dead_code)] // only read by tests that inspect the memfile
-    lease_file: PathBuf,
 
     dhcp_in_port: u16,
     dhcp_out_port: u16,
+    dhcp_in_port_reservation: Option<UdpSocket>,
 
     // Hold this around so that when Kea is dropped, TempDir is dropped and cleaned up
     temp_base_directory: TempDir,
 
     process: Option<Child>,
+    logs: Arc<Mutex<Vec<String>>>,
+    log_readers: Vec<thread::JoinHandle<()>>,
+    _run_permit: Option<KeaRunPermit>,
 }
 
 impl Kea {
-    // Start the Kea DHCP server as a sub-process and return a handle to it
-    // Stops when the returned object is dropped.
-    pub fn new(
+    /// Reserve dynamic DHCP ports, start Kea, and return it with a connected
+    /// relay socket. The Kea process is stopped when the harness drops. Tests
+    /// that inspect Kea's memfile can pass an externally-owned lease path.
+    pub(crate) fn start(
+        api_server_url: &str,
+        lease_file: Option<&Path>,
+    ) -> Result<(Kea, UdpSocket), eyre::Report> {
+        // Acquire before reserving ports so waiters do not hold loopback port
+        // reservations while another Kea test is running in this process.
+        let run_permit = KEA_RUN_GATE.get_or_init(KeaRunGate::new).acquire();
+        let relay_socket = UdpSocket::bind(format!("{RELAY_IP}:0"))?;
+        let dhcp_out_port = relay_socket.local_addr()?.port();
+        let (dhcp_in_port, dhcp_in_port_reservation) = Self::reserve_dhcp_in_port()?;
+
+        let mut kea = Kea::new_inner(
+            api_server_url,
+            dhcp_in_port,
+            dhcp_out_port,
+            Some(dhcp_in_port_reservation),
+            lease_file,
+        )?;
+        kea.run(run_permit)?;
+        relay_socket.connect(format!("127.0.0.1:{}", kea.dhcp_in_port))?;
+
+        Ok((kea, relay_socket))
+    }
+
+    fn new_inner(
         api_server_url: &str,
         dhcp_in_port: u16,
         dhcp_out_port: u16,
+        dhcp_in_port_reservation: Option<UdpSocket>,
+        lease_file: Option<&Path>,
     ) -> Result<Kea, eyre::Report> {
         let temp_base_directory = tempfile::tempdir()?;
 
         let temp_conf_file = temp_base_directory.path().join("kea-dhcp4.conf");
-        let lease_file = temp_base_directory.path().join("kea-leases4.csv");
+        let lease_file = lease_file
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| temp_base_directory.path().join("kea-leases4.csv"));
 
         let mut temp_conf_fd = File::create(&temp_conf_file)?;
         temp_conf_fd.write_all(Kea::config(api_server_url, &lease_file).as_bytes())?;
@@ -76,85 +159,68 @@ impl Kea {
 
         Ok(Kea {
             temp_conf_file,
-            lease_file,
             temp_base_directory,
             dhcp_in_port,
             dhcp_out_port,
+            dhcp_in_port_reservation,
             process: None,
+            logs: Arc::new(Mutex::new(Vec::new())),
+            log_readers: Vec::new(),
+            _run_permit: None,
         })
     }
 
-    /// Path to the persistent lease file Kea writes (memfile backend with persist=true).
-    /// Used by tests to assert on what got persisted.
-    #[allow(dead_code)]
-    pub fn lease_file_path(&self) -> &Path {
-        &self.lease_file
+    fn reserve_dhcp_in_port() -> Result<(u16, UdpSocket), eyre::Report> {
+        let dhcp_in_port_reservation = UdpSocket::bind("0.0.0.0:0")?;
+        let dhcp_in_port = dhcp_in_port_reservation.local_addr()?.port();
+
+        Ok((dhcp_in_port, dhcp_in_port_reservation))
     }
 
-    /// Read kea-leases4.csv and return all entries. Skips the header row.
-    /// Returns an empty Vec if the file doesn't exist yet (Kea writes it
-    /// lazily on first lease event).
-    #[allow(dead_code)]
-    pub fn read_leases(&self) -> Vec<LeaseEntry> {
-        let Ok(file) = File::open(&self.lease_file) else {
-            return Vec::new();
-        };
-        let mut entries = Vec::new();
-        for (i, line) in BufReader::new(file).lines().enumerate() {
-            let Ok(line) = line else { continue };
-            // Header is "address,hwaddr,client_id,...,state,user_context,pool_id"
-            if i == 0 || line.is_empty() {
-                continue;
+    fn refresh_dhcp_in_port(&mut self) -> Result<(), eyre::Report> {
+        // The relay/output port stays fixed because `start` keeps its
+        // socket bound; only Kea's receive port needs a fresh try.
+        let (dhcp_in_port, dhcp_in_port_reservation) = Self::reserve_dhcp_in_port()?;
+
+        self.dhcp_in_port = dhcp_in_port;
+        self.dhcp_in_port_reservation = Some(dhcp_in_port_reservation);
+
+        Ok(())
+    }
+
+    fn run(&mut self, run_permit: KeaRunPermit) -> Result<(), eyre::Report> {
+        let mut run_permit = Some(run_permit);
+        let mut last_exit = None;
+        for attempt in 1..=KEA_START_ATTEMPTS {
+            match self.run_once()? {
+                Some(status) => {
+                    last_exit = Some((self.dhcp_in_port, status));
+                    if attempt == KEA_START_ATTEMPTS {
+                        break;
+                    }
+
+                    println!(
+                        "KEA exited before binding DHCP port {} on attempt {attempt}/{KEA_START_ATTEMPTS}: {status}; retrying with a fresh DHCP receive port",
+                        self.dhcp_in_port
+                    );
+                    self.refresh_dhcp_in_port()?;
+                }
+                None => {
+                    self._run_permit = run_permit.take();
+                    return Ok(());
+                }
             }
-            let cols: Vec<&str> = line.split(',').collect();
-            if cols.len() < 10 {
-                continue;
-            }
-            let Ok(address) = cols[0].parse::<Ipv4Addr>() else {
-                continue;
-            };
-            let Ok(state) = cols[9].parse::<u32>() else {
-                continue;
-            };
-            entries.push(LeaseEntry {
-                address,
-                hwaddr: cols[1].to_string(),
-                state,
-            });
         }
-        entries
+
+        let (port, status) = last_exit.expect("at least one Kea start attempt should have run");
+        Err(eyre::eyre!(
+            "kea exited before binding DHCP port {port} after {KEA_START_ATTEMPTS} attempts: {status}"
+        ))
     }
 
-    /// Convenience: find the active lease entry for a given MAC string
-    /// (kea writes MAC as colon-separated lowercase hex, e.g. "02:00:00:00:00:01").
-    #[allow(dead_code)]
-    pub fn find_lease(&self, hwaddr: &str) -> Option<LeaseEntry> {
-        self.read_leases()
-            .into_iter()
-            .find(|l| l.hwaddr == hwaddr && l.state == 0)
-    }
+    fn run_once(&mut self) -> Result<Option<ExitStatus>, eyre::Report> {
+        drop(self.dhcp_in_port_reservation.take());
 
-    /// Poll the lease file for an entry matching `hwaddr` whose address is
-    /// `expected`, up to `timeout`. Returns true if found, false if the
-    /// deadline passes. Useful because Kea's persist-to-disk can lag the
-    /// gRPC ACK by a few ms.
-    #[allow(dead_code)]
-    pub fn wait_for_lease(&self, hwaddr: &str, expected: Ipv4Addr, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(lease) = self.find_lease(hwaddr)
-                && lease.address == expected
-            {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    pub fn run(&mut self) -> Result<(), eyre::Report> {
         let mut process = Command::new("/usr/sbin/kea-dhcp4")
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
@@ -170,83 +236,108 @@ impl Kea {
 
         let stdout = BufReader::new(process.stdout.take().unwrap());
         let stderr = BufReader::new(process.stderr.take().unwrap());
-        thread::spawn(move || {
+        let stdout_logs = self.logs.clone();
+        self.log_readers.push(thread::spawn(move || {
             for line in stdout.lines() {
-                println!("KEA STDOUT: {}", line.unwrap());
+                match line {
+                    Ok(line) => {
+                        println!("KEA STDOUT: {line}");
+                        stdout_logs.lock().unwrap().push(line);
+                    }
+                    Err(error) => {
+                        eprintln!("failed to read Kea stdout: {error}");
+                        break;
+                    }
+                }
             }
-        });
-        thread::spawn(move || {
+        }));
+        let stderr_logs = self.logs.clone();
+        self.log_readers.push(thread::spawn(move || {
             for line in stderr.lines() {
-                println!("KEA STDOUT: {}", line.unwrap());
+                match line {
+                    Ok(line) => {
+                        println!("KEA STDERR: {line}");
+                        stderr_logs.lock().unwrap().push(line);
+                    }
+                    Err(error) => {
+                        eprintln!("failed to read Kea stderr: {error}");
+                        break;
+                    }
+                }
             }
-        });
+        }));
+
+        self.process = Some(process);
 
         // Poll until Kea binds its DHCP receive port, so the test doesn't race.
         // Trying to bind the same port ourselves: success means Kea hasn't taken it yet;
         // AddrInUse means Kea is listening and we're ready to proceed.
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + KEA_READY_TIMEOUT;
         loop {
             thread::sleep(Duration::from_millis(100));
+            if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
+                self.process = None;
+                return Ok(Some(status));
+            }
             match UdpSocket::bind(format!("0.0.0.0:{}", self.dhcp_in_port)) {
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    thread::sleep(KEA_EXIT_SETTLE);
+                    if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
+                        self.process = None;
+                        return Ok(Some(status));
+                    }
+                    break;
+                }
                 Ok(_) => {}
-                Err(e) => return Err(eyre::eyre!("Unexpected error probing Kea readiness: {e}")),
+                Err(e) => return Err(eyre::eyre!("unexpected error probing kea readiness: {e}")),
             }
             if Instant::now() >= deadline {
+                self.stop_process();
                 return Err(eyre::eyre!(
-                    "Kea did not bind DHCP port {} within 15 seconds",
+                    "kea did not bind DHCP port {} within {KEA_READY_TIMEOUT:?}",
                     self.dhcp_in_port
                 ));
             }
         }
 
-        self.process = Some(process);
+        Ok(None)
+    }
 
-        Ok(())
+    /// Return whether the captured stdout or stderr contains `needle`.
+    pub(crate) fn has_log(&self, needle: &str) -> bool {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    /// Stop Kea and wait until its captured stdout and stderr have been drained.
+    pub(crate) fn stop_process(&mut self) {
+        if let Some(process) = &mut self.process {
+            // Rust stdlib can only send a KILL (9) to sub-process. Thankfully dhcp already depends on
+            // libc so we can use that.
+            // SAFETY: The unreaped Child retains its valid, unreused PID and
+            // SIGTERM is a valid signal; no borrowed memory crosses the syscall.
+            unsafe {
+                libc::kill(process.id() as i32, libc::SIGTERM);
+            }
+            thread::sleep(Duration::from_millis(100));
+            if let Ok(None) = process.try_wait() {
+                process.kill().unwrap(); // -9
+                process.wait().unwrap();
+            }
+        }
+        self.process = None;
+        for reader in self.log_readers.drain(..) {
+            if reader.join().is_err() {
+                eprintln!("Kea log-reader thread panicked");
+            }
+        }
     }
 
     fn config(api_server_url: &str, lease_file: &Path) -> String {
-        // Locate libdhcp.so. Cargo may put it under either `target/debug/`
-        // (default) or `target/...something.../debug/` (when CARGO_BUILD_TARGET
-        // is set in the env). Check release before debug so a `--release`
-        // test build wins.
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let candidates: Vec<String> = {
-            let target_triple = std::env::var("CARGO_BUILD_TARGET").ok();
-            let triple_subdir = target_triple
-                .as_deref()
-                .map(|t| format!("{t}/"))
-                .unwrap_or_default();
-            // NOTE: cargo only updates the non-deps `libdhcp.so` on the first
-            // build after a clean; subsequent rebuilds touch `deps/libdhcp.so`
-            // only. Prefer the deps copy so we always pick up fresh rebuilds.
-            vec![
-                format!("{manifest_dir}/../../target/{triple_subdir}release/deps/libdhcp.so"),
-                format!("{manifest_dir}/../../target/release/deps/libdhcp.so"),
-                format!("{manifest_dir}/../../target/{triple_subdir}debug/deps/libdhcp.so"),
-                format!("{manifest_dir}/../../target/debug/deps/libdhcp.so"),
-                format!("{manifest_dir}/../../target/{triple_subdir}release/libdhcp.so"),
-                format!("{manifest_dir}/../../target/release/libdhcp.so"),
-                format!("{manifest_dir}/../../target/{triple_subdir}debug/libdhcp.so"),
-                format!("{manifest_dir}/../../target/debug/libdhcp.so"),
-            ]
-        };
-        let hook_lib = match candidates.iter().find(|p| Path::new(p).exists()) {
-            Some(p) => p.clone(),
-            None => {
-                // If `cargo build` has not been run yet (after a `cargo clean`),
-                // the `build.rs` script won't have generated libdhcp.so, so lets
-                // do it ourselves.
-                println!(
-                    "Could not find Kea hooks dynamic library in any of {candidates:?}. Building."
-                );
-                test_cdylib::build_current_project();
-                candidates
-                    .into_iter()
-                    .find(|p| Path::new(p).exists())
-                    .expect("test_cdylib build did not produce libdhcp.so at any expected path")
-            }
-        };
+        let hook_lib = super::hook_library_path();
 
         let conf = json!({
         "Dhcp4": {
@@ -272,6 +363,7 @@ impl Kea {
             "renew-timer": 900,
             "rebind-timer": 1800,
             "valid-lifetime": 3600,
+            "decline-probation-period": 900,
             "hooks-libraries": [
                 {
                         "library": hook_lib,
@@ -310,7 +402,7 @@ impl Kea {
                 {
                     "name": "kea-dhcp4.carbide-callouts",
                     "output_options": [{"output": "stdout"}],
-                    "severity": "FATAL",
+                    "severity": "ERROR",
                     "debuglevel": 10
                 }
             ]
@@ -322,16 +414,6 @@ impl Kea {
 
 impl Drop for Kea {
     fn drop(&mut self) {
-        if let Some(process) = &mut self.process {
-            // Rust stdlib can only send a KILL (9) to sub-process. Thankfully dhcp already depends on
-            // libc so we can use that.
-            unsafe {
-                libc::kill(process.id() as i32, libc::SIGTERM);
-            }
-            thread::sleep(Duration::from_millis(100));
-            if let Ok(None) = process.try_wait() {
-                process.kill().unwrap(); // -9
-            }
-        }
+        self.stop_process();
     }
 }

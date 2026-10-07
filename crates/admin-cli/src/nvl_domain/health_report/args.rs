@@ -33,7 +33,7 @@ Print an empty health report template:
     $ nico-admin-cli nvl-domain health-report print-empty-template
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "List health report sources for an NVLink domain")]
     Show { domain_id: NvLinkDomainId },
     #[clap(about = "Print an empty health report template")]

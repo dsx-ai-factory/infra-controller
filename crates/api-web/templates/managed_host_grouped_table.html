@@ -12,7 +12,7 @@
 		{% for group in grouped_hosts.as_ref().unwrap().groups %}
 		<tr>
 			<td>
-				<a style="display: block" href="/admin/managed-host?{{ group.filter }}"> + </a>
+				<a style="display: block" href="/admin/managed-host?{{ group.query }}"> + </a>
 			</td>
 			{% for value in group.group_fields %}
 				<td>{{ value }}</td>

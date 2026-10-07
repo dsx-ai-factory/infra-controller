@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -28,6 +29,8 @@ const (
 	NameBringUpControl            = "BringUpControl"
 	NameGetBringUpStatus          = "GetBringUpStatus"
 	NameVerifyFirmwareConsistency = "VerifyFirmwareConsistency"
+	NameDecommissionControl       = "DecommissionControl"
+	NameGetDecommissionStatus     = "GetDecommissionStatus"
 )
 
 // InjectExpectation is a Temporal activity that registers expected component
@@ -119,6 +122,15 @@ func (a *Activities) FirmwareControl(
 		return err
 	}
 
+	info.AccessToken, err = firmwareauth.DecryptFor(
+		a.dataCipher,
+		info.AuthenticationData,
+		target.Type,
+	)
+	if err != nil {
+		return err
+	}
+
 	return controller.FirmwareControl(ctx, target, info)
 }
 
@@ -185,6 +197,66 @@ func (a *Activities) GetBringUpStatus(
 	}
 
 	return &GetBringUpStatusResult{States: states}, nil
+}
+
+// DecommissionControl initiates decommission of the target components via
+// the appropriate component manager. Returns immediately after the request
+// is accepted; callers should poll GetDecommissionStatus for completion.
+func (a *Activities) DecommissionControl(
+	ctx context.Context,
+	target common.Target,
+	info operations.DecommissionTaskInfo,
+) error {
+	decommissioner, err := requireDecommissioner(a.registry, target)
+	if err != nil {
+		return err
+	}
+
+	return decommissioner.Decommission(ctx, target, info)
+}
+
+// GetDecommissionStatusResult is the result of the GetDecommissionStatus activity.
+type GetDecommissionStatusResult struct {
+	// States maps each found component ID to its current raw decommission state
+	// string as returned by the component manager (e.g. "Decommissioning/...",
+	// "Decommissioned", "Failed/..."). Only IDs that Core returned a record for
+	// are present here.
+	States map[string]string
+	// NotFound holds component IDs for which the reader could not return a
+	// usable state. This can mean the record is absent or that its state was
+	// omitted; it is not a terminal-success signal.
+	NotFound []string
+}
+
+// GetDecommissionStatus returns the decommission state for target components.
+// This activity is designed to be called repeatedly in a polling loop.
+// Component IDs with an empty state are returned in NotFound rather than as
+// empty strings in States, so the caller can reject the ambiguous result.
+func (a *Activities) GetDecommissionStatus(
+	ctx context.Context,
+	target common.Target,
+) (*GetDecommissionStatusResult, error) {
+	reader, err := requireDecommissionStatusReader(a.registry, target)
+	if err != nil {
+		return nil, err
+	}
+
+	rawStates, err := reader.GetDecommissionStatus(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &GetDecommissionStatusResult{
+		States: make(map[string]string, len(rawStates)),
+	}
+	for id, state := range rawStates {
+		if state == "" {
+			result.NotFound = append(result.NotFound, id)
+		} else {
+			result.States[id] = state
+		}
+	}
+	return result, nil
 }
 
 // VerifyFirmwareConsistency checks that all target components report the

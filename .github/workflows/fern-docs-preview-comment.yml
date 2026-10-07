@@ -37,7 +37,7 @@ permissions:
 jobs:
   # Build workflow can "succeed" with collect skipped (fork PR); then no artifact.
   artifact-present:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: github.event.workflow_run.conclusion == 'success'
     outputs:
       exists: ${{ steps.check.outputs.exists }}
@@ -58,7 +58,7 @@ jobs:
 
   preview:
     needs: artifact-present
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: needs.artifact-present.outputs.exists == 'true'
     steps:
       - name: Download fern sources and metadata

@@ -17,7 +17,7 @@
 
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
-pub fn str_to_rpc_uuid(id: &str) -> CarbideCliResult<::rpc::common::Uuid> {
+pub(super) fn str_to_rpc_uuid(id: &str) -> CarbideCliResult<::rpc::common::Uuid> {
     let id: ::rpc::common::Uuid = uuid::Uuid::parse_str(id)
         .map_err(|e| CarbideCliError::GenericError(e.to_string()))?
         .into();

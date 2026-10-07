@@ -35,6 +35,12 @@ repositories:
     url: https://opensource.zalando.com/postgres-operator/charts/postgres-operator
   - name: metallb
     url: https://metallb.github.io/metallb
+  - name: argo
+    url: https://argoproj.github.io/argo-helm
+  - name: nfd
+    url: https://kubernetes-sigs.github.io/node-feature-discovery/charts
+  - name: contour
+    url: https://projectcontour.github.io/helm-charts/
 
 releases:
   # ---------------------------------------------------------------------------
@@ -56,6 +62,25 @@ releases:
       - operators/values/metallb.yaml
 
   # ---------------------------------------------------------------------------
+  # Contour — optional Ingress controller for clusters that do not already
+  # provide one. setup.sh installs it only when requested; Envoy's Service uses
+  # type LoadBalancer and receives an address from MetalLB.
+  #
+  # Deliberately declares no `needs` on metallb. setup.sh phase 1c wraps the
+  # metallb sync in a CRD apply/re-apply, and `needs` plus --include-needs would
+  # re-run that release without those guards. Phase 1c always precedes 1d.
+  # ---------------------------------------------------------------------------
+  - name: contour
+    namespace: projectcontour
+    createNamespace: true
+    chart: contour/contour
+    version: "0.8.0"
+    wait: true
+    timeout: 600
+    values:
+      - operators/values/contour.yaml
+
+  # ---------------------------------------------------------------------------
   # Zalando postgres-operator — manages nico-pg-cluster HA Patroni cluster.
   # Installed before cert-manager (no TLS dependency). Must be up before
   # nico-prereqs so the postgresql.acid.zalan.do CRD exists when the chart
@@ -65,7 +90,10 @@ releases:
     namespace: postgres
     createNamespace: true
     chart: postgres-operator/postgres-operator
-    version: "1.10.1"
+    # NOTE: chart versions below 1.11.0 are no longer published in Zalando's chart
+    # repository. The CRD API (acid.zalan.do/v1) is unchanged across this bump, and
+    # nico-pg-cluster pins postgresql.version explicitly, so the database is unaffected.
+    version: "1.11.0"
     wait: true
     timeout: 600
     values:
@@ -115,6 +143,84 @@ releases:
     timeout: 600
     values:
       - operators/values/external-secrets.yaml
+
+  # ---------------------------------------------------------------------------
+  # DPF prerequisites — Argo CD, Kamaji, maintenance-operator, NFD.
+  # Installed by setup.sh phase 5b unless --skip-dpf (per-release
+  # sync; nothing here installs on a normal run). Versions and values are
+  # pinned from NVIDIA/doca-platform deploy/helmfiles/prereqs.yaml at the tag
+  # the helm-prereqs/doca-platform submodule is pinned to (v26.4.0) - bump together.
+  # All four install into dpf-operator-system, same as upstream.
+  # NOTE: upstream pins cert-manager v1.19.3; we reuse our v1.17.1 release
+  # above (compatible with DPF's Issuer/Certificate v1 usage — known skew).
+  # ---------------------------------------------------------------------------
+  - name: argo-cd
+    namespace: dpf-operator-system
+    createNamespace: true
+    chart: argo/argo-cd
+    version: "9.4.1"
+    labels:
+      group: dpf-prereqs
+    wait: true
+    timeout: 600
+    values:
+      - operators/values/argo-cd.yaml
+
+  - name: kamaji
+    namespace: dpf-operator-system
+    createNamespace: true
+    chart: oci://ghcr.io/nvidia/charts/kamaji
+    version: "1.2.0"
+    labels:
+      group: dpf-prereqs
+    wait: true
+    timeout: 600
+    values:
+      - operators/values/kamaji.yaml
+    hooks:
+      # Upstream applies chart CRDs before sync (deploy/helmfiles/apply-crds.sh)
+      # because helm only installs crds/ on first install, never on upgrade.
+      - events: ["preSync"]
+        command: "bash"
+        args:
+          - -c
+          - |
+            helm show crds oci://ghcr.io/nvidia/charts/kamaji --version 1.2.0 \
+              | kubectl apply --server-side --field-manager=helmfile --force-conflicts -f - \
+              || echo "WARNING: CRD apply for kamaji failed; continuing" >&2
+
+  - name: maintenance-operator
+    namespace: dpf-operator-system
+    createNamespace: true
+    chart: oci://ghcr.io/mellanox/maintenance-operator-chart
+    version: "0.3.0"
+    labels:
+      group: dpf-prereqs
+    wait: true
+    timeout: 600
+    values:
+      - operators/values/maintenance-operator.yaml
+    hooks:
+      - events: ["preSync"]
+        command: "bash"
+        args:
+          - -c
+          - |
+            helm show crds oci://ghcr.io/mellanox/maintenance-operator-chart --version 0.3.0 \
+              | kubectl apply --server-side --field-manager=helmfile --force-conflicts -f - \
+              || echo "WARNING: CRD apply for maintenance-operator failed; continuing" >&2
+
+  - name: node-feature-discovery
+    namespace: dpf-operator-system
+    createNamespace: true
+    chart: nfd/node-feature-discovery
+    version: "0.18.3"
+    labels:
+      group: dpf-prereqs
+    wait: true
+    timeout: 600
+    values:
+      - operators/values/node-feature-discovery.yaml
 
   # ---------------------------------------------------------------------------
   # nico-prereqs — local Helm chart (this directory)

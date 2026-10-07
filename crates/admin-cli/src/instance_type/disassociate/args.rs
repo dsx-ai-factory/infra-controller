@@ -24,12 +24,12 @@ use rpc::forge::RemoveMachineInstanceTypeAssociationRequest;
 EXAMPLES:
 
 Remove a machine's instance-type association:
-    $ nico-admin-cli instance-type disassociate 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli instance-type disassociate fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Machine Id")]
-    pub machine_id: MachineId,
+    pub(super) machine_id: MachineId,
 }
 
 impl From<&Args> for RemoveMachineInstanceTypeAssociationRequest {

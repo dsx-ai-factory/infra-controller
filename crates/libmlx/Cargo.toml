@@ -20,6 +20,7 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 description = "Consolidated Mellanox NIC configuration, firmware, and device management library."
 
 [lib]
@@ -49,6 +50,8 @@ prettytable-rs = { workspace = true }
 # Async / networking
 tokio = { features = ["full"], workspace = true }
 reqwest = { features = ["rustls"], workspace = true }
+reqwest-middleware = { workspace = true }
+reqwest-tracing = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
@@ -94,3 +97,6 @@ russh = { workspace = true }
 #default = ["mockdpa"]
 default = []
 mockdpa = []
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

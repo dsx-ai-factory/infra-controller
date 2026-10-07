@@ -10,18 +10,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestExpectedRackDetailFromPb(t *testing.T) {
 	t.Run("full metadata + rack ids", func(t *testing.T) {
-		er := &pb.ExpectedRack{
-			RackId:        &pb.RackId{Id: "a12"},
-			RackProfileId: &pb.RackProfileId{Id: "gb200-nvl72"},
-			Metadata: &pb.Metadata{
+		er := &corev1.ExpectedRack{
+			RackId:        &corev1.RackId{Id: "a12"},
+			RackProfileId: &corev1.RackProfileId{Id: "gb200-nvl72"},
+			Metadata: &corev1.Metadata{
 				Name:        "Rack A12",
 				Description: "Building 1, Row 3",
-				Labels: []*pb.Label{
+				Labels: []*corev1.Label{
 					labelKV("chassis.manufacturer", "Foxconn"),
 					labelKV("chassis.serial-number", "SN12345"),
 					labelKV("location.datacenter", "DC-East"),
@@ -43,8 +43,8 @@ func TestExpectedRackDetailFromPb(t *testing.T) {
 	})
 
 	t.Run("missing optional rack_id stays empty", func(t *testing.T) {
-		er := &pb.ExpectedRack{
-			RackProfileId: &pb.RackProfileId{Id: "gb200-nvl72"},
+		er := &corev1.ExpectedRack{
+			RackProfileId: &corev1.RackProfileId{Id: "gb200-nvl72"},
 		}
 		got := expectedRackDetailFromPb(er)
 		assert.Empty(t, got.RackID)
@@ -55,16 +55,16 @@ func TestExpectedRackDetailFromPb(t *testing.T) {
 
 func TestExpectedMachineDetailFromPb(t *testing.T) {
 	t.Run("full proto", func(t *testing.T) {
-		em := &pb.ExpectedMachine{
-			Id:                  &pb.UUID{Value: "11111111-1111-1111-1111-111111111111"},
+		em := &corev1.ExpectedMachine{
+			Id:                  &corev1.UUID{Value: "11111111-1111-1111-1111-111111111111"},
 			BmcMacAddress:       "aa:bb:cc:dd:ee:01",
 			BmcIpAddress:        strPtr("10.0.0.1"),
 			ChassisSerialNumber: "CSN-001",
-			RackId:              &pb.RackId{Id: "a12"},
-			Metadata: &pb.Metadata{
+			RackId:              &corev1.RackId{Id: "a12"},
+			Metadata: &corev1.Metadata{
 				Name:        "host-001",
 				Description: "compute node",
-				Labels: []*pb.Label{
+				Labels: []*corev1.Label{
 					labelKV("manufacturer", "Supermicro"),
 					labelKV("model", "ARS-211GL-NHR"),
 					labelKV("firmware_version", "1.2.3"),
@@ -91,7 +91,7 @@ func TestExpectedMachineDetailFromPb(t *testing.T) {
 	})
 
 	t.Run("missing optional fields stay empty", func(t *testing.T) {
-		em := &pb.ExpectedMachine{
+		em := &corev1.ExpectedMachine{
 			BmcMacAddress:       "aa:bb:cc:dd:ee:02",
 			ChassisSerialNumber: "CSN-002",
 		}
@@ -104,15 +104,15 @@ func TestExpectedMachineDetailFromPb(t *testing.T) {
 }
 
 func TestExpectedSwitchDetailFromPb(t *testing.T) {
-	es := &pb.ExpectedSwitch{
-		ExpectedSwitchId:   &pb.UUID{Value: "22222222-2222-2222-2222-222222222222"},
+	es := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: "22222222-2222-2222-2222-222222222222"},
 		BmcMacAddress:      "aa:bb:cc:dd:ee:11",
 		BmcIpAddress:       "10.0.0.11",
 		SwitchSerialNumber: "SSN-001",
-		RackId:             &pb.RackId{Id: "a12"},
-		Metadata: &pb.Metadata{
+		RackId:             &corev1.RackId{Id: "a12"},
+		Metadata: &corev1.Metadata{
 			Name: "switch-001",
-			Labels: []*pb.Label{
+			Labels: []*corev1.Label{
 				labelKV("manufacturer", "NVIDIA"),
 				labelKV("model", "Q3450-LD"),
 			},
@@ -131,15 +131,15 @@ func TestExpectedSwitchDetailFromPb(t *testing.T) {
 }
 
 func TestExpectedPowerShelfDetailFromPb(t *testing.T) {
-	eps := &pb.ExpectedPowerShelf{
-		ExpectedPowerShelfId: &pb.UUID{Value: "33333333-3333-3333-3333-333333333333"},
+	eps := &corev1.ExpectedPowerShelf{
+		ExpectedPowerShelfId: &corev1.UUID{Value: "33333333-3333-3333-3333-333333333333"},
 		BmcMacAddress:        "aa:bb:cc:dd:ee:21",
 		BmcIpAddress:         "10.0.0.21",
 		ShelfSerialNumber:    "PSN-001",
-		RackId:               &pb.RackId{Id: "a12"},
-		Metadata: &pb.Metadata{
+		RackId:               &corev1.RackId{Id: "a12"},
+		Metadata: &corev1.Metadata{
 			Name: "shelf-001",
-			Labels: []*pb.Label{
+			Labels: []*corev1.Label{
 				labelKV("manufacturer", "Lite-On"),
 			},
 		},
@@ -164,8 +164,8 @@ func TestMetadataToGoNilSafe(t *testing.T) {
 }
 
 func TestMetadataToGoSkipsValueNilLabels(t *testing.T) {
-	md := &pb.Metadata{
-		Labels: []*pb.Label{
+	md := &corev1.Metadata{
+		Labels: []*corev1.Label{
 			{Key: "with-value", Value: strPtr("v")},
 			{Key: "no-value"},
 			nil,
@@ -237,9 +237,9 @@ func TestMockGetAllExpectedDetailsEmptyReturnsNil(t *testing.T) {
 	}
 }
 
-func labelKV(k, v string) *pb.Label {
+func labelKV(k, v string) *corev1.Label {
 	val := v
-	return &pb.Label{Key: k, Value: &val}
+	return &corev1.Label{Key: k, Value: &val}
 }
 
 func strPtr(s string) *string { return &s }

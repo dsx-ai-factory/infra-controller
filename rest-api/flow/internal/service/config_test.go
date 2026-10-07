@@ -11,8 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
 	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
 )
+
+const allowedServiceIdentity = "spiffe://example.test/ns/site/sa/site-workflow"
 
 // tlsConfig creates stub certificate files in t.TempDir() and returns a
 // CertConfig with their paths. Using real files ensures the tests remain valid
@@ -218,7 +221,15 @@ func TestConfigValidate(t *testing.T) {
 			t.Setenv("CERTDIR", t.TempDir())
 			t.Setenv(EnvVarName, tt.flowEnv)
 
-			c := Config{DevMode: tt.devMode, CertConfig: tt.certConf}
+			authorization := authz.Config{Mode: authz.DefaultMode}
+			if tt.certConf.IsSet() {
+				authorization.AllowedServiceIdentities = []string{allowedServiceIdentity}
+			}
+			c := Config{
+				DevMode:       tt.devMode,
+				CertConfig:    tt.certConf,
+				Authorization: authorization,
+			}
 			err := c.Validate()
 
 			if tt.wantErr {
@@ -227,6 +238,79 @@ func TestConfigValidate(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestConfigValidateAuthorization(t *testing.T) {
+	tests := map[string]struct {
+		certConfig    pkgcerts.Config
+		authorization authz.Config
+		wantErr       string
+	}{
+		"secure with allowed identity": {
+			certConfig: tlsConfig(t),
+			authorization: authz.Config{
+				AllowedServiceIdentities: []string{allowedServiceIdentity},
+				Mode:                     authz.DefaultMode,
+			},
+		},
+		"secure without allowed identity defaults to audit": {
+			certConfig: tlsConfig(t),
+			authorization: authz.Config{
+				Mode: authz.DefaultMode,
+			},
+		},
+		"secure with invalid identity": {
+			certConfig: tlsConfig(t),
+			authorization: authz.Config{
+				AllowedServiceIdentities: []string{"not-a-spiffe-id"},
+				Mode:                     authz.DefaultMode,
+			},
+			wantErr: "not a valid SPIFFE ID",
+		},
+		"insecure with configured identity": {
+			certConfig: noTLSConfig(),
+			authorization: authz.Config{
+				AllowedServiceIdentities: []string{allowedServiceIdentity},
+				Mode:                     authz.ModeAudit,
+			},
+			wantErr: "service authorization requires TLS",
+		},
+		"insecure with audit mode": {
+			certConfig: noTLSConfig(),
+			authorization: authz.Config{
+				Mode: authz.ModeAudit,
+			},
+		},
+		"insecure with enforce mode": {
+			certConfig: noTLSConfig(),
+			authorization: authz.Config{
+				Mode: authz.ModeEnforce,
+			},
+			wantErr: "service authorization requires TLS",
+		},
+		"insecure with undefined mode": {
+			certConfig: noTLSConfig(),
+			wantErr:    "authorization mode",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CERTDIR", t.TempDir())
+			t.Setenv(EnvVarName, string(envDevelopment))
+
+			config := Config{
+				CertConfig:    test.certConfig,
+				Authorization: test.authorization,
+			}
+			err := config.Validate()
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

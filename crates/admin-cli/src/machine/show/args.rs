@@ -33,10 +33,19 @@ Show only DPUs (or only hosts):
     $ nico-admin-cli machine show --dpus
     $ nico-admin-cli machine show --hosts
 
+Limit every column to 20 characters so long values don't wrap the table:
+    $ nico-admin-cli machine show --max-width 20
+
+Limit a column whose header contains spaces (quote the value):
+    $ nico-admin-cli machine show --max-width \"State Version=20\"
+
+Show only some columns, in the order given:
+    $ nico-admin-cli machine show --columns state,id,\"attached dpus\"
+
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, action = clap::ArgAction::HelpLong)]
-    pub help: Option<bool>,
+    pub(crate) help: Option<bool>,
 
     #[clap(
         short,
@@ -45,7 +54,7 @@ pub struct Args {
         conflicts_with = "machine",
         help = "Show all machines (DEPRECATED)"
     )]
-    pub all: bool,
+    pub(crate) all: bool,
 
     #[clap(
         short,
@@ -54,7 +63,7 @@ pub struct Args {
         conflicts_with = "machine",
         help = "Show only DPUs"
     )]
-    pub dpus: bool,
+    pub(crate) dpus: bool,
 
     #[clap(
         short,
@@ -63,7 +72,7 @@ pub struct Args {
         conflicts_with = "machine",
         help = "Show only hosts"
     )]
-    pub hosts: bool,
+    pub(crate) hosts: bool,
 
     #[clap(
         short = 't',
@@ -75,13 +84,16 @@ pub struct Args {
         conflicts_with = "dpus",
         help = "Show only machines for this instance type"
     )]
-    pub instance_type_id: Option<String>,
+    pub(crate) instance_type_id: Option<String>,
 
     #[clap(
         default_value(None),
-        help = "The machine ID to query. Omit to show all machines."
+        conflicts_with = "max_width",
+        conflicts_with = "columns",
+        help = "The machine ID to query. Omit to show all machines. Cannot be combined with \
+                --max-width or --columns."
     )]
-    pub machine: Option<MachineId>,
+    pub(crate) machine: Option<MachineId>,
 
     #[clap(
         short = 'c',
@@ -89,5 +101,11 @@ pub struct Args {
         default_value("5"),
         help = "History count. Valid if `machine` argument is passed."
     )]
-    pub history_count: u32,
+    pub(crate) history_count: u32,
+
+    #[clap(flatten)]
+    pub(crate) width: crate::table_utils::MaxWidthArgs,
+
+    #[clap(flatten)]
+    pub(crate) columns: crate::table_utils::ColumnsArgs,
 }

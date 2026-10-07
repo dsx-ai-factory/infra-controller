@@ -18,7 +18,9 @@ use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
 use carbide_uuid::machine::MachineId;
-use carbide_uuid::machine_validation::MachineValidationId;
+use carbide_uuid::machine_validation::{
+    MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
+};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use serde::{Deserialize, Serialize};
@@ -47,6 +49,8 @@ pub struct MachineValidationTestAddRequest {
     pub custom_tags: Vec<String>,
     pub components: Vec<String>,
     pub is_enabled: Option<bool>,
+    /// Optional OCI plugin configuration; absent retains legacy test execution.
+    pub plugin: Option<MachineValidationPlugin>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -69,6 +73,39 @@ pub struct MachineValidationTestUpdatePayload {
     pub custom_tags: Vec<String>,
     pub components: Vec<String>,
     pub is_enabled: Option<bool>,
+    /// Must be unset. Plugin revisions are immutable and cannot be updated.
+    pub plugin: Option<MachineValidationPlugin>,
+}
+
+/// Immutable executable settings for a Machine Validation plugin.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MachineValidationPlugin {
+    /// Execution type. `container` is the only currently supported value.
+    #[serde(
+        rename = "type",
+        alias = "plugin_type",
+        default = "MachineValidationPlugin::default_type"
+    )]
+    pub plugin_type: String,
+    /// OCI image reference pinned to a digest.
+    pub image: String,
+    /// Executable and arguments invoked without a shell.
+    pub entrypoint: Vec<String>,
+    /// Non-secret JSON object copied to the plugin input contract.
+    pub parameters_json: String,
+    /// Requests a privileged container; it is allowed only when site policy permits it.
+    pub privileged: bool,
+    /// Requests a writable host-root mount; it additionally needs separate approval
+    /// for this verified plugin revision before it can be enabled.
+    pub host_access_full: bool,
+}
+
+impl MachineValidationPlugin {
+    pub const CONTAINER_TYPE: &'static str = "container";
+
+    fn default_type() -> String {
+        Self::CONTAINER_TYPE.to_string()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +151,69 @@ pub struct MachineValidationStatus {
     pub completed: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, strum_macros::EnumString)]
+pub enum MachineValidationRunItemState {
+    #[default]
+    Pending,
+    Running,
+    Success,
+    Skipped,
+    Failed,
+}
+
+impl Display for MachineValidationRunItemState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, strum_macros::EnumString)]
+pub enum MachineValidationAttemptState {
+    #[default]
+    Pending,
+    Running,
+    Success,
+    Skipped,
+    Failed,
+}
+
+impl Display for MachineValidationAttemptState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+/// The source stream for a persisted Machine Validation attempt log chunk.
+#[derive(Debug, Clone, PartialEq, Eq, strum_macros::EnumString)]
+pub enum MachineValidationAttemptLogStream {
+    #[strum(serialize = "stdout")]
+    Stdout,
+    #[strum(serialize = "stderr")]
+    Stderr,
+}
+
+impl Display for MachineValidationAttemptLogStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdout => f.write_str("stdout"),
+            Self::Stderr => f.write_str("stderr"),
+        }
+    }
+}
+
+fn decode_state<T>(raw: String, column: &'static str) -> Result<T, sqlx::Error>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    T::from_str(&raw).map_err(|err| {
+        sqlx::Error::Decode(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid {column}: {raw} ({err})"),
+        )))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct MachineValidation {
     pub id: MachineValidationId,
@@ -125,6 +225,7 @@ pub struct MachineValidation {
     pub context: Option<String>,
     pub status: Option<MachineValidationStatus>,
     pub duration_to_complete: i64,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
     // Columns for these exist, but are unused in rust code
     // pub description: Option<String>,
 }
@@ -151,7 +252,138 @@ impl<'r> FromRow<'r, PgRow> for MachineValidation {
             filter: filter.map(|x| x.0),
             status: Some(status),
             duration_to_complete: row.try_get("duration_to_complete")?,
+            last_heartbeat_at: row.try_get("last_heartbeat_at")?,
             // description: row.try_get("description")?, // unused
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MachineValidationRunItem {
+    pub id: MachineValidationRunItemId,
+    pub run_id: MachineValidationId,
+    pub current_attempt_id: Option<MachineValidationAttemptId>,
+    pub test_id: String,
+    pub test_version: Option<String>,
+    pub display_name: String,
+    pub context: String,
+    pub component: Option<String>,
+    pub state: MachineValidationRunItemState,
+    pub order_index: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub timeout_seconds: i64,
+    /// The selected plugin configuration, frozen when the run plan is created.
+    pub plugin: Option<MachineValidationPlugin>,
+    /// Full-host approval as it existed when this run plan was created.
+    pub plugin_full_host_approved: bool,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub skip_reason: Option<String>,
+    pub failure_reason: Option<String>,
+}
+
+impl<'r> FromRow<'r, PgRow> for MachineValidationRunItem {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        let state_raw: String = row.try_get("state")?;
+
+        Ok(MachineValidationRunItem {
+            id: row.try_get("id")?,
+            run_id: row.try_get("run_id")?,
+            current_attempt_id: match row
+                .try_get::<Option<MachineValidationAttemptId>, _>("current_attempt_id")
+            {
+                Ok(value) => value,
+                Err(sqlx::Error::ColumnNotFound(_)) => None,
+                Err(err) => return Err(err),
+            },
+            test_id: row.try_get("test_id")?,
+            test_version: row.try_get("test_version")?,
+            display_name: row.try_get("display_name")?,
+            context: row.try_get("context")?,
+            component: row.try_get("component")?,
+            state: decode_state(state_raw, "machine_validation_run_items.state")?,
+            order_index: row.try_get("order_index")?,
+            attempt: row.try_get("attempt")?,
+            max_attempts: row.try_get("max_attempts")?,
+            timeout_seconds: row.try_get("timeout_seconds")?,
+            plugin: row
+                .try_get::<Option<sqlx::types::Json<MachineValidationPlugin>>, _>("plugin")?
+                .map(|plugin| plugin.0),
+            plugin_full_host_approved: row.try_get("plugin_full_host_approved")?,
+            started_at: row.try_get("started_at")?,
+            ended_at: row.try_get("ended_at")?,
+            last_heartbeat_at: row.try_get("last_heartbeat_at")?,
+            skip_reason: row.try_get("skip_reason")?,
+            failure_reason: row.try_get("failure_reason")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MachineValidationAttempt {
+    pub id: MachineValidationAttemptId,
+    pub run_item_id: MachineValidationRunItemId,
+    pub attempt_number: i32,
+    pub state: MachineValidationAttemptState,
+    pub command: Option<String>,
+    pub args: Option<String>,
+    pub container_image: Option<String>,
+    pub execute_in_host: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub failure_classification: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub stdout_summary: Option<String>,
+    pub stderr_summary: Option<String>,
+}
+
+impl<'r> FromRow<'r, PgRow> for MachineValidationAttempt {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        let state_raw: String = row.try_get("state")?;
+
+        Ok(MachineValidationAttempt {
+            id: row.try_get("id")?,
+            run_item_id: row.try_get("run_item_id")?,
+            attempt_number: row.try_get("attempt_number")?,
+            state: decode_state(state_raw, "machine_validation_attempts.state")?,
+            command: row.try_get("command")?,
+            args: row.try_get("args")?,
+            container_image: row.try_get("container_image")?,
+            execute_in_host: row.try_get("execute_in_host")?,
+            exit_code: row.try_get("exit_code")?,
+            failure_classification: row.try_get("failure_classification")?,
+            started_at: row.try_get("started_at")?,
+            ended_at: row.try_get("ended_at")?,
+            last_heartbeat_at: row.try_get("last_heartbeat_at")?,
+            stdout_summary: row.try_get("stdout_summary")?,
+            stderr_summary: row.try_get("stderr_summary")?,
+        })
+    }
+}
+
+/// A bounded, append-only stdout or stderr fragment from a validation attempt.
+#[derive(Debug, Clone)]
+pub struct MachineValidationAttemptLogChunk {
+    pub attempt_id: MachineValidationAttemptId,
+    pub sequence: i32,
+    pub stream: MachineValidationAttemptLogStream,
+    pub created_at: DateTime<Utc>,
+    pub content: String,
+}
+
+impl<'r> FromRow<'r, PgRow> for MachineValidationAttemptLogChunk {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        let stream_raw: String = row.try_get("stream")?;
+
+        Ok(MachineValidationAttemptLogChunk {
+            attempt_id: row.try_get("attempt_id")?,
+            sequence: row.try_get("sequence")?,
+            stream: decode_state(stream_raw, "machine_validation_attempt_logs.stream")?,
+            created_at: row.try_get("created_at")?,
+            content: row.try_get("content")?,
         })
     }
 }
@@ -200,6 +432,10 @@ pub struct MachineValidationTest {
     pub components: Vec<String>,
     pub last_modified_at: DateTime<Utc>,
     pub is_enabled: bool,
+    /// Plugin configuration for this revision, if it is plugin-backed.
+    pub plugin: Option<MachineValidationPlugin>,
+    /// Revision-scoped approval for a plugin's writable host-root mount.
+    pub full_host_approved: bool,
 }
 
 impl<'r> FromRow<'r, PgRow> for MachineValidationTest {
@@ -228,6 +464,10 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationTest {
             components: row.try_get("components")?,
             last_modified_at: row.try_get("last_modified_at")?,
             is_enabled: row.try_get("is_enabled")?,
+            plugin: row
+                .try_get::<Option<sqlx::types::Json<MachineValidationPlugin>>, _>("plugin")?
+                .map(|plugin| plugin.0),
+            full_host_approved: row.try_get("full_host_approved")?,
         })
     }
 }
@@ -366,27 +606,129 @@ mod tests {
     }
 
     #[test]
-    fn state_display_round_trips_through_from_str() {
+    fn run_item_state_from_str_parses_every_variant_and_rejects_the_rest() {
         scenarios!(
-            run = |state| MachineValidationState::from_str(&state.to_string()).map_err(drop);
-            "Started" {
-                MachineValidationState::Started => Yields(MachineValidationState::Started),
+            run = |s| MachineValidationRunItemState::from_str(s).map_err(drop);
+            "Pending" {
+                "Pending" => Yields(MachineValidationRunItemState::Pending),
             }
 
-            "InProgress" {
-                MachineValidationState::InProgress => Yields(MachineValidationState::InProgress),
+            "Running" {
+                "Running" => Yields(MachineValidationRunItemState::Running),
             }
 
             "Success" {
-                MachineValidationState::Success => Yields(MachineValidationState::Success),
+                "Success" => Yields(MachineValidationRunItemState::Success),
             }
 
             "Skipped" {
-                MachineValidationState::Skipped => Yields(MachineValidationState::Skipped),
+                "Skipped" => Yields(MachineValidationRunItemState::Skipped),
             }
 
             "Failed" {
-                MachineValidationState::Failed => Yields(MachineValidationState::Failed),
+                "Failed" => Yields(MachineValidationRunItemState::Failed),
+            }
+
+            "empty string" {
+                "" => Fails,
+            }
+
+            "unknown variant" {
+                "Started" => Fails,
+            }
+
+            "lowercase is not accepted" {
+                "pending" => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn run_item_state_display_renders_the_variant_name() {
+        value_scenarios!(
+            run = |state| state.to_string();
+            "Pending" {
+                MachineValidationRunItemState::Pending => "Pending".to_string(),
+            }
+
+            "Running" {
+                MachineValidationRunItemState::Running => "Running".to_string(),
+            }
+
+            "Success" {
+                MachineValidationRunItemState::Success => "Success".to_string(),
+            }
+
+            "Skipped" {
+                MachineValidationRunItemState::Skipped => "Skipped".to_string(),
+            }
+
+            "Failed" {
+                MachineValidationRunItemState::Failed => "Failed".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn attempt_state_from_str_parses_every_variant_and_rejects_the_rest() {
+        scenarios!(
+            run = |s| MachineValidationAttemptState::from_str(s).map_err(drop);
+            "Pending" {
+                "Pending" => Yields(MachineValidationAttemptState::Pending),
+            }
+
+            "Running" {
+                "Running" => Yields(MachineValidationAttemptState::Running),
+            }
+
+            "Success" {
+                "Success" => Yields(MachineValidationAttemptState::Success),
+            }
+
+            "Skipped" {
+                "Skipped" => Yields(MachineValidationAttemptState::Skipped),
+            }
+
+            "Failed" {
+                "Failed" => Yields(MachineValidationAttemptState::Failed),
+            }
+
+            "empty string" {
+                "" => Fails,
+            }
+
+            "unknown variant" {
+                "Started" => Fails,
+            }
+
+            "lowercase is not accepted" {
+                "pending" => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn attempt_state_display_renders_the_variant_name() {
+        value_scenarios!(
+            run = |state| state.to_string();
+            "Pending" {
+                MachineValidationAttemptState::Pending => "Pending".to_string(),
+            }
+
+            "Running" {
+                MachineValidationAttemptState::Running => "Running".to_string(),
+            }
+
+            "Success" {
+                MachineValidationAttemptState::Success => "Success".to_string(),
+            }
+
+            "Skipped" {
+                MachineValidationAttemptState::Skipped => "Skipped".to_string(),
+            }
+
+            "Failed" {
+                MachineValidationAttemptState::Failed => "Failed".to_string(),
             }
         );
     }
@@ -424,45 +766,20 @@ mod tests {
     }
 
     #[test]
-    fn status_equality_distinguishes_each_field() {
-        let base = MachineValidationStatus {
-            state: MachineValidationState::InProgress,
-            total: 10,
-            completed: 4,
-        };
-        value_scenarios!(
-            run = |status| status == base;
-            "identical is equal" {
-                MachineValidationStatus {
-                    state: MachineValidationState::InProgress,
-                    total: 10,
-                    completed: 4,
-                } => true,
-            }
+    fn plugin_type_defaults_for_older_catalog_revisions() {
+        let plugin: MachineValidationPlugin = serde_json::from_str(
+            r#"{
+                "image":"registry.example.com/plugin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "entrypoint":["/plugin/entrypoint"],
+                "parameters_json":"{}",
+                "privileged":false,
+                "host_access_full":false
+            }"#,
+        )
+        .expect("older plugin revision deserializes");
 
-            "differing state is unequal" {
-                MachineValidationStatus {
-                    state: MachineValidationState::Success,
-                    total: 10,
-                    completed: 4,
-                } => false,
-            }
-
-            "differing total is unequal" {
-                MachineValidationStatus {
-                    state: MachineValidationState::InProgress,
-                    total: 11,
-                    completed: 4,
-                } => false,
-            }
-
-            "differing completed is unequal" {
-                MachineValidationStatus {
-                    state: MachineValidationState::InProgress,
-                    total: 10,
-                    completed: 5,
-                } => false,
-            }
-        );
+        assert_eq!(plugin.plugin_type, MachineValidationPlugin::CONTAINER_TYPE);
+        let serialized = serde_json::to_value(plugin).expect("plugin serializes");
+        assert_eq!(serialized["type"], MachineValidationPlugin::CONTAINER_TYPE);
     }
 }

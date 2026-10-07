@@ -3,7 +3,7 @@
   "title": "DPUService Helm Chart Values",
   "description": "Schema for validating values.yaml for DPUService Helm charts. Note: All Kubernetes resources must include {{ .Release.Name }} in their metadata.name to enable deployment of multiple instances of the service.",
   "type": "object",
-  "required": ["serviceDaemonSet"],
+  "required": ["serviceDaemonSet", "lldpSidecar"],
   "properties": {
     "serviceDaemonSet": {
       "type": "object",
@@ -138,6 +138,36 @@
         }
       }
     },
+    "lldpSidecar": {
+      "type": "object",
+      "description": "Configuration for the LLDP snapshot sidecar",
+      "required": ["resources"],
+      "properties": {
+        "resources": {
+          "type": "object",
+          "description": "CPU and memory requests and limits for the LLDP snapshot sidecar",
+          "required": ["requests", "limits"],
+          "properties": {
+            "requests": {
+              "type": "object",
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": { "type": "string", "minLength": 1 },
+                "memory": { "type": "string", "minLength": 1 }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": { "type": "string", "minLength": 1 },
+                "memory": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
     "exposedPorts": {
       "type": "object",
       "description": "Configuration for exposing ports (optional). If provided, both 'ports' and 'labels' must be specified.",
@@ -158,6 +188,26 @@
           }
         }
       }
+    },
+    "supplementalNetworkConfig": {
+      "type": "object",
+      "description": "Reference to an externally managed ConfigMap (not part of this chart) holding an RFC 7386 JSON Merge Patch that the dpu-agent merges into the `set` section of its generated NVUE config before every apply. Applies uniformly to every DPU in this release's DaemonSet. An empty or omitted name disables the mount and the merge.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the externally managed ConfigMap in the release namespace (RFC 1123 DNS subdomain). Empty disables the feature.",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+        },
+        "key": {
+          "type": "string",
+          "description": "Key within that ConfigMap holding the merge-patch document (default: supplemental.json)",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[-._a-zA-Z0-9]+$"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true

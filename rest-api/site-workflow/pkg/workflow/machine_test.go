@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	mActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
@@ -38,9 +38,9 @@ func (s *MachineWorkflowTestSuite) AfterTest(suiteName, testName string) {
 func (s *MachineWorkflowTestSuite) Test_UpdateMachineInventory_Success() {
 	var machineManager mActivity.ManageMachine
 
-	request := &cwssaws.MaintenanceRequest{
-		Operation: cwssaws.MaintenanceOperation_Enable,
-		HostId:    &cwssaws.MachineId{Id: uuid.New().String()},
+	request := &corev1.MaintenanceRequest{
+		Operation: corev1.MaintenanceOperation_Enable,
+		HostId:    &corev1.MachineId{Id: uuid.New().String()},
 		Reference: util.GetStrPtr("Machine needs to taken offline to re-cable the network"),
 	}
 
@@ -57,9 +57,9 @@ func (s *MachineWorkflowTestSuite) Test_UpdateMachineInventory_Success() {
 func (s *MachineWorkflowTestSuite) Test_UpdateMachineInventory_ActivityFails() {
 	var machineManager mActivity.ManageMachine
 
-	request := &cwssaws.MaintenanceRequest{
-		Operation: cwssaws.MaintenanceOperation_Enable,
-		HostId:    &cwssaws.MachineId{Id: uuid.New().String()},
+	request := &corev1.MaintenanceRequest{
+		Operation: corev1.MaintenanceOperation_Enable,
+		HostId:    &corev1.MachineId{Id: uuid.New().String()},
 		Reference: util.GetStrPtr("Machine needs to taken offline to re-cable the network"),
 	}
 
@@ -116,10 +116,10 @@ func (s *MachineWorkflowTestSuite) Test_CollectAndPublishMachineInventory_Activi
 func (s *MachineWorkflowTestSuite) Test_UpdateMachineMetadata_Success() {
 	var machineManager mActivity.ManageMachine
 
-	request := &cwssaws.MachineMetadataUpdateRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.New().String()},
-		Metadata: &cwssaws.Metadata{
-			Labels: []*cwssaws.Label{
+	request := &corev1.MachineMetadataUpdateRequest{
+		MachineId: &corev1.MachineId{Id: uuid.New().String()},
+		Metadata: &corev1.Metadata{
+			Labels: []*corev1.Label{
 				{
 					Key:   "test-key",
 					Value: util.GetStrPtr("test-value"),
@@ -143,10 +143,10 @@ func (s *MachineWorkflowTestSuite) Test_UpdateMachineMetadata_ActivityFails() {
 
 	errMsg := "Site Controller communication error"
 
-	request := &cwssaws.MachineMetadataUpdateRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.New().String()},
-		Metadata: &cwssaws.Metadata{
-			Labels: []*cwssaws.Label{
+	request := &corev1.MachineMetadataUpdateRequest{
+		MachineId: &corev1.MachineId{Id: uuid.New().String()},
+		Metadata: &corev1.Metadata{
+			Labels: []*corev1.Label{
 				{
 					Key:   "test-key",
 					Value: util.GetStrPtr("test-value"),
@@ -172,16 +172,16 @@ func (s *MachineWorkflowTestSuite) Test_UpdateMachineMetadata_ActivityFails() {
 
 func (s *MachineWorkflowTestSuite) Test_CreateMachineHealthReport_Success() {
 	var machineManager mActivity.ManageMachine
-	req := &cwssaws.InsertMachineHealthReportRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.New().String()},
-		HealthReportEntry: &cwssaws.HealthReportEntry{
-			Report: &cwssaws.HealthReport{
+	req := &corev1.InsertMachineHealthReportRequest{
+		MachineId: &corev1.MachineId{Id: uuid.New().String()},
+		HealthReportEntry: &corev1.HealthReportEntry{
+			Report: &corev1.HealthReport{
 				Source: "request-online-repair",
-				Alerts: []*cwssaws.HealthProbeAlert{
+				Alerts: []*corev1.HealthProbeAlert{
 					{Id: "OnLineRepair", Message: `{"details":"d","issue_category":"OTHER","summary":"s"}`},
 				},
 			},
-			Mode: cwssaws.HealthReportApplyMode_Merge,
+			Mode: corev1.HealthReportApplyMode_Merge,
 		},
 	}
 	s.env.RegisterActivity(machineManager.CreateMachineHealthReportOnSite)
@@ -193,8 +193,8 @@ func (s *MachineWorkflowTestSuite) Test_CreateMachineHealthReport_Success() {
 
 func (s *MachineWorkflowTestSuite) Test_DeleteMachineHealthReport_Success() {
 	var machineManager mActivity.ManageMachine
-	req := &cwssaws.RemoveMachineHealthReportRequest{
-		MachineId: &cwssaws.MachineId{Id: uuid.New().String()},
+	req := &corev1.RemoveMachineHealthReportRequest{
+		MachineId: &corev1.MachineId{Id: uuid.New().String()},
 		Source:    "request-online-repair",
 	}
 	s.env.RegisterActivity(machineManager.DeleteMachineHealthReportOnSite)
@@ -229,35 +229,43 @@ func (s *GetDpuMachinesTestSuite) Test_GetDpuMachines_Success() {
 
 	dpuMachineIDs := []string{"dpu-machine-1", "dpu-machine-2", "dpu-machine-3"}
 
-	expectedResult := []*cwssaws.DpuMachine{
+	expectedResult := &corev1.DpuMachineList{Machines: []*corev1.DpuMachine{
 		{
-			Machine: &cwssaws.Machine{
-				Id: &cwssaws.MachineId{Id: "dpu-machine-1"},
+			Machine: &corev1.Machine{
+				Id: &corev1.MachineId{Id: "dpu-machine-1"},
 			},
-			DpuNetworkConfig: &cwssaws.ManagedHostNetworkConfigResponse{
+			DpuNetworkConfig: &corev1.ManagedHostNetworkConfigResponse{
 				VniDevice:    "vxlan48",
 				IsPrimaryDpu: true,
+				NetworkSecurityPolicyOverrides: []*corev1.ResolvedNetworkSecurityGroupRule{
+					{
+						Rule: &corev1.NetworkSecurityGroupRuleAttributes{
+							SourceNet:      &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: "10.0.0.0/24"},
+							DestinationNet: &corev1.NetworkSecurityGroupRuleAttributes_DstPrefix{DstPrefix: "10.1.0.0/24"},
+						},
+					},
+				},
 			},
 		},
 		{
-			Machine: &cwssaws.Machine{
-				Id: &cwssaws.MachineId{Id: "dpu-machine-2"},
+			Machine: &corev1.Machine{
+				Id: &corev1.MachineId{Id: "dpu-machine-2"},
 			},
-			DpuNetworkConfig: &cwssaws.ManagedHostNetworkConfigResponse{
+			DpuNetworkConfig: &corev1.ManagedHostNetworkConfigResponse{
 				VniDevice:    "vxlan48",
 				IsPrimaryDpu: false,
 			},
 		},
 		{
-			Machine: &cwssaws.Machine{
-				Id: &cwssaws.MachineId{Id: "dpu-machine-3"},
+			Machine: &corev1.Machine{
+				Id: &corev1.MachineId{Id: "dpu-machine-3"},
 			},
-			DpuNetworkConfig: &cwssaws.ManagedHostNetworkConfigResponse{
+			DpuNetworkConfig: &corev1.ManagedHostNetworkConfigResponse{
 				VniDevice:    "vxlan48",
 				IsPrimaryDpu: false,
 			},
 		},
-	}
+	}}
 
 	// Mock GetDpuMachinesByIDs activity success
 	s.env.RegisterActivity(machineManager.GetDpuMachinesByIDs)
@@ -268,15 +276,17 @@ func (s *GetDpuMachinesTestSuite) Test_GetDpuMachines_Success() {
 	s.True(s.env.IsWorkflowCompleted())
 	s.NoError(s.env.GetWorkflowError())
 
-	var result []*cwssaws.DpuMachine
+	var result corev1.DpuMachineList
 	s.env.GetWorkflowResult(&result)
 
-	s.Equal(len(expectedResult), len(result))
-	for i, dpuMachine := range result {
-		s.Equal(expectedResult[i].Machine.Id.Id, dpuMachine.Machine.Id.Id)
-		s.Equal(expectedResult[i].DpuNetworkConfig.VniDevice, dpuMachine.DpuNetworkConfig.VniDevice)
-		s.Equal(expectedResult[i].DpuNetworkConfig.IsPrimaryDpu, dpuMachine.DpuNetworkConfig.IsPrimaryDpu)
+	s.Equal(len(expectedResult.Machines), len(result.Machines))
+	for i, dpuMachine := range result.Machines {
+		s.Equal(expectedResult.Machines[i].Machine.Id.Id, dpuMachine.Machine.Id.Id)
+		s.Equal(expectedResult.Machines[i].DpuNetworkConfig.VniDevice, dpuMachine.DpuNetworkConfig.VniDevice)
+		s.Equal(expectedResult.Machines[i].DpuNetworkConfig.IsPrimaryDpu, dpuMachine.DpuNetworkConfig.IsPrimaryDpu)
 	}
+	s.Equal("10.0.0.0/24", result.Machines[0].DpuNetworkConfig.NetworkSecurityPolicyOverrides[0].Rule.GetSrcPrefix())
+	s.Equal("10.1.0.0/24", result.Machines[0].DpuNetworkConfig.NetworkSecurityPolicyOverrides[0].Rule.GetDstPrefix())
 }
 
 func (s *GetDpuMachinesTestSuite) Test_GetDpuMachines_ActivityFails() {

@@ -17,16 +17,16 @@
 
 use model::site_explorer::{Inventory as ModelInventory, Service as ModelService};
 use nv_redfish::update_service::SoftwareInventory;
-use nv_redfish::{Bmc, Resource, ServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::{Error, hw};
 
-pub struct ExploredInventories<B: Bmc> {
+pub(crate) struct ExploredInventories<B: Bmc> {
     members: Vec<SoftwareInventory<B>>,
 }
 
 impl<B: Bmc> ExploredInventories<B> {
-    pub async fn explore(root: &ServiceRoot<B>) -> Result<Self, Error<B>> {
+    pub(crate) async fn explore(root: &ServiceRoot<B>) -> Result<Self, Error<B>> {
         Ok(Self {
             members: root
                 .update_service()
@@ -40,15 +40,15 @@ impl<B: Bmc> ExploredInventories<B> {
         })
     }
 
-    pub fn to_model(&self, hw_type: Option<hw::HwType>) -> Vec<ModelService> {
+    pub(crate) fn to_model(&self, hw_type: Option<hw::HwType>) -> Vec<ModelService> {
         let fw_inventories = ModelService {
             id: "FirmwareInventory".to_string(),
             inventories: self
                 .members
                 .iter()
                 .map(|inventory| ModelInventory {
-                    id: inventory.id().to_string(),
-                    description: inventory.description().map(|v| v.to_string()),
+                    id: inventory.raw().id.clone(),
+                    description: inventory.raw().description.clone().flatten(),
                     version: match hw_type {
                         Some(hw::HwType::Lenovo) => {
                             inventory.version().map(|v| {

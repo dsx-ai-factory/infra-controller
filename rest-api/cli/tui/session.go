@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -84,6 +85,13 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("instance", s.fetchInstances)
 	s.Resolver.RegisterFetcher("operating-system", s.fetchOperatingSystems)
 	s.Resolver.RegisterFetcher("machine", s.fetchMachines)
+	s.Resolver.RegisterFetcher("dpu-machine", s.fetchDPUMachines)
+	s.Resolver.RegisterFetcher("machine-label-key", func(context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys("machine")
+	})
+	s.Resolver.RegisterFetcher("expected-machine-label-key", func(context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys("expected-machine")
+	})
 	s.Resolver.RegisterFetcher("ip-block", s.fetchIPBlocks)
 	s.Resolver.RegisterFetcher("network-security-group", s.fetchNSGs)
 	s.Resolver.RegisterFetcher("audit", s.fetchAudits)
@@ -100,9 +108,16 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("expected-power-shelf", s.fetchExpectedPowerShelves)
 	s.Resolver.RegisterFetcher("infiniband-partition", s.fetchInfiniBandPartitions)
 	s.Resolver.RegisterFetcher("nvlink-logical-partition", s.fetchNVLinkLogicalPartitions)
+	s.Resolver.RegisterFetcher("spectrumx-partition", s.fetchSpectrumXPartitions)
 	s.Resolver.RegisterFetcher("instance-type", s.fetchInstanceTypes)
 	s.Resolver.RegisterFetcher("dpu-extension-service", s.fetchDPUExtensionServices)
 	s.Resolver.RegisterFetcher("tray", s.fetchTrays)
+	s.Resolver.RegisterFetcher("ipxe-template", s.fetchIPXETemplates)
+	s.Resolver.RegisterFetcher("rule", s.fetchRules)
+	s.Resolver.RegisterFetcher("task-run", s.fetchRuns)
+	s.Resolver.RegisterFetcher("vpc-peering", s.fetchVPCPeerings)
+	s.Resolver.RegisterFetcher("tenant", s.fetchTenants)
+	s.Resolver.RegisterFetcher("tray-component", s.fetchTrayComponents)
 }
 
 // fetchAll fetches all pages from a list endpoint and returns raw JSON objects.
@@ -119,8 +134,9 @@ func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[str
 			return nil, err
 		}
 		var items []map[string]interface{}
-		if err := json.Unmarshal(body, &items); err != nil {
-			return all, nil
+		err = json.Unmarshal(body, &items)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s page %d: %w", path, page, err)
 		}
 		all = append(all, items...)
 		if pag := hdrs.Get("X-Pagination"); pag != "" {
@@ -226,6 +242,109 @@ func (s *Session) getTenantID(_ context.Context) (string, error) {
 	return id, nil
 }
 
+// tenantHasTargetedInstanceCreationAtSite resolves the current Tenant's
+// effective targeted-instance-creation capability for one Site. The API
+// enforces this capability using a Ready Tenant Account for the Site's
+// Infrastructure Provider plus any site-specific override, so the TUI mirrors
+// that resolution before offering specific Machines.
+func (s *Session) tenantHasTargetedInstanceCreationAtSite(ctx context.Context, siteID string) (bool, error) {
+	isSiteContext := s.Scope.VpcID != ""
+	if siteID == "" {
+		message := "site ID is missing"
+		if isSiteContext {
+			message = "selected VPC has no site ID"
+		}
+		return false, errors.New(message)
+	}
+
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	body, _, err := s.Client.Do(
+		"GET",
+		apiPath(s, "site/{id}"),
+		map[string]string{
+			"id": siteID,
+		},
+		nil,
+		nil,
+	)
+	var siteString string
+	if isSiteContext {
+		siteString = "selected VPC site"
+	} else {
+		siteString = "site"
+	}
+	if err != nil {
+		return false, fmt.Errorf("fetching %s: %w", siteString, err)
+	}
+	var site map[string]interface{}
+	err = json.Unmarshal(body, &site)
+	if err != nil {
+		return false, fmt.Errorf("parsing %s: %w", siteString, err)
+	}
+	providerID := str(site, "infrastructureProviderId")
+	if providerID == "" {
+		return false, fmt.Errorf("%s has no infrastructure provider ID", siteString)
+	}
+
+	accounts, err := s.fetchAll(
+		apiPath(s, "tenant/account"),
+		map[string]string{
+			"infrastructureProviderId": providerID,
+			"tenantId":                 tenantID,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("fetching tenant accounts for %s: %w", siteString, err)
+	}
+	for _, account := range accounts {
+		status := str(account, "status")
+		if !strings.EqualFold(status, "Ready") {
+			continue
+		}
+		accountProviderID := str(account, "infrastructureProviderId")
+		if accountProviderID != providerID {
+			continue
+		}
+		accountTenantID := str(account, "tenantId")
+		if accountTenantID != tenantID {
+			continue
+		}
+
+		rawCapabilities, ok := account["siteCapabilities"].([]interface{})
+		if !ok {
+			return false, nil
+		}
+
+		defaultEnabled := false
+		for _, rawCapability := range rawCapabilities {
+			capability, ok := rawCapability.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			enabled, ok := capability["targetedInstanceCreation"].(bool)
+			if !ok {
+				continue
+			}
+			siteIDs := stringSlice(capability["siteIds"])
+			if len(siteIDs) == 0 {
+				defaultEnabled = enabled
+				continue
+			}
+			for _, capabilitySiteID := range siteIDs {
+				if capabilitySiteID == siteID {
+					return enabled, nil
+				}
+			}
+		}
+		return defaultEnabled, nil
+	}
+	return false, nil
+}
+
 // getInfrastructureProviderID returns the current infrastructure provider ID, caching it for the session.
 func (s *Session) getInfrastructureProviderID(_ context.Context) (string, error) {
 	if cached := s.Cache.LookupByName("_infra_provider", s.Org); cached != nil {
@@ -302,9 +421,15 @@ func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
 		result[i] = NamedItem{
-			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
+			Name:   str(m, "name"),
+			ID:     str(m, "id"),
+			Status: str(m, "status"),
 			Labels: extractLabels(m),
-			Extra:  map[string]string{"siteId": str(m, "siteId")}, Raw: m,
+			Extra: map[string]string{
+				"networkVirtualizationType": str(m, "networkVirtualizationType"),
+				"siteId":                    str(m, "siteId"),
+			},
+			Raw: m,
 		}
 	}
 	return result, nil
@@ -427,7 +552,12 @@ func (s *Session) fetchOperatingSystems(_ context.Context) ([]NamedItem, error) 
 	}
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
-		result[i] = NamedItem{Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"), Raw: m}
+		result[i] = NamedItem{
+			Name:   str(m, "name"),
+			ID:     str(m, "id"),
+			Status: str(m, "status"),
+			Extra:  map[string]string{"type": str(m, "type")}, Raw: m,
+		}
 	}
 	return result, nil
 }
@@ -482,10 +612,38 @@ func (s *Session) fetchIPBlocks(ctx context.Context) ([]NamedItem, error) {
 	for i, m := range items {
 		result[i] = NamedItem{
 			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
-			Extra: map[string]string{"siteId": str(m, "siteId")}, Raw: m,
+			Extra: map[string]string{"siteId": str(m, "siteId"), "tenantId": str(m, "tenantId")}, Raw: m,
 		}
 	}
 	return result, nil
+}
+
+func (s *Session) fetchTenantIPBlocks(ctx context.Context) ([]NamedItem, string, error) {
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	q := map[string]string{"tenantId": tenantID}
+	if s.Scope.SiteID != "" {
+		q["siteId"] = s.Scope.SiteID
+	}
+	items, err := s.fetchAll(apiPath(s, "ipblock"), q)
+	if err != nil {
+		return nil, "", err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		result[i] = NamedItem{
+			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
+			Extra: map[string]string{
+				"siteId":          str(m, "siteId"),
+				"tenantId":        str(m, "tenantId"),
+				"protocolVersion": str(m, "protocolVersion"),
+			},
+			Raw: m,
+		}
+	}
+	return result, tenantID, nil
 }
 
 func (s *Session) fetchNSGs(_ context.Context) ([]NamedItem, error) {
@@ -907,6 +1065,225 @@ func (s *Session) fetchDPUExtensionServices(_ context.Context) ([]NamedItem, err
 			Extra: map[string]string{"siteId": str(m, "siteId"), "serviceType": str(m, "serviceType")},
 			Raw:   m,
 		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchIPXETemplates(_ context.Context) ([]NamedItem, error) {
+	return s.fetchIPXETemplatesForSite(s.Scope.SiteID)
+}
+
+func (s *Session) fetchIPXETemplatesForSite(siteID string) ([]NamedItem, error) {
+	q := map[string]string{}
+	if siteID != "" {
+		q["siteId"] = siteID
+	}
+	items, err := s.fetchAll(apiPath(s, "ipxe-template"), q)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		name := strings.TrimSpace(str(m, "name"))
+		if name == "" {
+			name = str(m, "id")
+		}
+		result[i] = NamedItem{
+			Name: name, ID: str(m, "id"), Status: str(m, "visibility"),
+			Extra: map[string]string{"visibility": str(m, "visibility")},
+			Raw:   m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchRules(ctx context.Context) ([]NamedItem, error) {
+	siteID := strings.TrimSpace(s.Scope.SiteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("select a site before resolving an operation rule")
+	}
+	return s.fetchRulesForSite(ctx, siteID)
+}
+
+func (s *Session) fetchRulesForSite(_ context.Context, siteID string) ([]NamedItem, error) {
+	items, err := s.fetchAll(apiPath(s, "task/rule"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		name := strings.TrimSpace(str(m, "name"))
+		if name == "" {
+			name = strings.Trim(strings.Join([]string{str(m, "operationType"), str(m, "operationCode")}, " / "), " /")
+		}
+		if name == "" {
+			name = str(m, "id")
+		}
+		result[i] = NamedItem{
+			Name: name, ID: str(m, "id"),
+			Extra: map[string]string{
+				"siteId":        siteID,
+				"operationType": str(m, "operationType"),
+				"operationCode": str(m, "operationCode"),
+			},
+			Raw: m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchRuns(ctx context.Context) ([]NamedItem, error) {
+	siteID := strings.TrimSpace(s.Scope.SiteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("select a site before resolving a run")
+	}
+	return s.fetchRunsForSite(ctx, siteID)
+}
+
+func (s *Session) fetchRunsForSite(_ context.Context, siteID string) ([]NamedItem, error) {
+	items, err := s.fetchAll(apiPath(s, "task/run"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		name := strings.TrimSpace(str(m, "name"))
+		if name == "" {
+			name = strings.Trim(strings.Join([]string{str(m, "operationType"), str(m, "operationCode")}, " / "), " /")
+		}
+		if name == "" {
+			name = str(m, "id")
+		}
+		result[i] = NamedItem{
+			Name: name, ID: str(m, "id"), Status: str(m, "status"),
+			Extra: map[string]string{
+				"siteId":        siteID,
+				"operationType": str(m, "operationType"),
+				"operationCode": str(m, "operationCode"),
+			},
+			Raw: m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchVPCPeerings(ctx context.Context) ([]NamedItem, error) {
+	q := map[string]string{}
+	if s.Scope.SiteID != "" {
+		q["siteId"] = s.Scope.SiteID
+	}
+	if s.Scope.VpcID != "" {
+		q["vpcId"] = s.Scope.VpcID
+	}
+	items, err := s.fetchAll(apiPath(s, "vpc-peering"), q)
+	if err != nil {
+		return nil, err
+	}
+
+	vpcNames := map[string]string{}
+	if vpcs, fetchErr := s.Resolver.Fetch(ctx, "vpc"); fetchErr == nil {
+		for _, vpc := range vpcs {
+			vpcNames[vpc.ID] = vpc.Name
+		}
+	}
+
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		vpc1ID := str(m, "vpc1Id")
+		vpc2ID := str(m, "vpc2Id")
+		vpc1Name := nestedString(m, "vpc1", "name")
+		if vpc1Name == "" {
+			vpc1Name = strings.TrimSpace(vpcNames[vpc1ID])
+		}
+		if vpc1Name == "" {
+			vpc1Name = vpc1ID
+		}
+		vpc2Name := nestedString(m, "vpc2", "name")
+		if vpc2Name == "" {
+			vpc2Name = strings.TrimSpace(vpcNames[vpc2ID])
+		}
+		if vpc2Name == "" {
+			vpc2Name = vpc2ID
+		}
+		name := strings.Trim(strings.Join([]string{vpc1Name, vpc2Name}, " <-> "), " <>-")
+		if name == "" {
+			name = str(m, "id")
+		}
+		result[i] = NamedItem{
+			Name: name, ID: str(m, "id"), Status: str(m, "status"),
+			Extra: map[string]string{
+				"siteId": str(m, "siteId"),
+				"vpc1Id": vpc1ID,
+				"vpc2Id": vpc2ID,
+			},
+			Raw: m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchTenants(ctx context.Context) ([]NamedItem, error) {
+	result := []NamedItem{}
+	seen := map[string]struct{}{}
+	add := func(name, id, status string, raw interface{}) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			name = id
+		}
+		seen[id] = struct{}{}
+		result = append(result, NamedItem{Name: name, ID: id, Status: status, Raw: raw})
+	}
+
+	accounts, accountsErr := s.fetchTenantAccounts(ctx)
+	if accountsErr == nil {
+		for _, account := range accounts {
+			add(account.Extra["tenantOrg"], account.Extra["tenantId"], account.Status, account.Raw)
+		}
+	}
+
+	currentTenantID, currentErr := s.getTenantID(ctx)
+	if currentErr == nil {
+		add(s.Org, currentTenantID, "", nil)
+	}
+	if len(result) == 0 && accountsErr != nil && currentErr != nil {
+		return nil, fmt.Errorf("fetching tenants: tenant accounts: %v; current tenant: %w", accountsErr, currentErr)
+	}
+	return result, nil
+}
+
+func (s *Session) fetchTrayComponents(ctx context.Context) ([]NamedItem, error) {
+	trays, err := s.Resolver.Fetch(ctx, "tray")
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, 0, len(trays))
+	for _, tray := range trays {
+		componentID := strings.TrimSpace(tray.Extra["componentId"])
+		if componentID == "" {
+			continue
+		}
+		name := strings.TrimSpace(tray.Name)
+		if name == "" {
+			name = componentID
+		}
+		result = append(result, NamedItem{
+			Name:   name,
+			ID:     componentID,
+			Status: tray.Extra["type"],
+			Extra: map[string]string{
+				"trayId": tray.ID,
+				"rackId": tray.Extra["rackId"],
+				"type":   tray.Extra["type"],
+			},
+			Raw: tray.Raw,
+		})
 	}
 	return result, nil
 }

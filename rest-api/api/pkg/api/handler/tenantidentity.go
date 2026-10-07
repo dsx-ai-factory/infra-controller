@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	temporalEnums "go.temporal.io/api/enums/v1"
@@ -26,7 +27,8 @@ import (
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
@@ -45,17 +47,15 @@ func payloadHash(m proto.Message) (string, error) {
 
 // CreateOrUpdateTenantIdentityConfigHandler handles PUT /tenant-identity/config.
 type CreateOrUpdateTenantIdentityConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateOrUpdateTenantIdentityConfigHandler returns a new CreateOrUpdateTenantIdentityConfigHandler.
 func NewCreateOrUpdateTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateOrUpdateTenantIdentityConfigHandler {
 	return CreateOrUpdateTenantIdentityConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -74,7 +74,7 @@ func NewCreateOrUpdateTenantIdentityConfigHandler(dbSession *cdb.Session, scp *s
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [put]
 func (umich CreateOrUpdateTenantIdentityConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "CreateOrUpdate", c, umich.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "CreateOrUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -160,7 +160,7 @@ func (umich CreateOrUpdateTenantIdentityConfigHandler) Handle(c echo.Context) er
 	wid := we.GetID()
 	logger.Info().Str("Workflow ID", wid).Msg("executed synchronous create or update Tenant Identity Config workflow")
 
-	var protoResponse cwssaws.TenantIdentityConfigResponse
+	var protoResponse corev1.TenantIdentityConfigResponse
 	err = we.Get(ctx, &protoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -186,17 +186,15 @@ func (umich CreateOrUpdateTenantIdentityConfigHandler) Handle(c echo.Context) er
 
 // GetTenantIdentityConfigHandler handles GET /tenant-identity/config.
 type GetTenantIdentityConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetTenantIdentityConfigHandler returns a new GetTenantIdentityConfigHandler.
 func NewGetTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetTenantIdentityConfigHandler {
 	return GetTenantIdentityConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -211,7 +209,7 @@ func NewGetTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPoo
 // @Success 200 {object} model.APITenantIdentityConfig
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [get]
 func (gmich GetTenantIdentityConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Get", c, gmich.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -261,7 +259,7 @@ func (gmich GetTenantIdentityConfigHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	protoRequest := &cwssaws.GetTenantIdentityConfigRequest{OrganizationId: org}
+	protoRequest := &corev1.GetTenantIdentityConfigRequest{OrganizationId: org}
 
 	workflowOptions := tclient.StartWorkflowOptions{
 		ID:                       "tenant-identity-config-get-" + org + "-" + site.ID.String(),
@@ -282,7 +280,7 @@ func (gmich GetTenantIdentityConfigHandler) Handle(c echo.Context) error {
 	wid := we.GetID()
 	logger.Info().Str("Workflow ID", wid).Msg("executed synchronous get Tenant Identity Config workflow")
 
-	var protoResponse cwssaws.TenantIdentityConfigResponse
+	var protoResponse corev1.TenantIdentityConfigResponse
 	err = we.Get(ctx, &protoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -304,17 +302,15 @@ func (gmich GetTenantIdentityConfigHandler) Handle(c echo.Context) error {
 
 // DeleteTenantIdentityConfigHandler handles DELETE /tenant-identity/config.
 type DeleteTenantIdentityConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteTenantIdentityConfigHandler returns a new DeleteTenantIdentityConfigHandler.
 func NewDeleteTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteTenantIdentityConfigHandler {
 	return DeleteTenantIdentityConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -328,7 +324,7 @@ func NewDeleteTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.Client
 // @Success 204
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [delete]
 func (dmich DeleteTenantIdentityConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Delete", c, dmich.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -378,7 +374,7 @@ func (dmich DeleteTenantIdentityConfigHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	protoRequest := &cwssaws.GetTenantIdentityConfigRequest{OrganizationId: org}
+	protoRequest := &corev1.GetTenantIdentityConfigRequest{OrganizationId: org}
 
 	workflowOptions := tclient.StartWorkflowOptions{
 		ID:                       "tenant-identity-config-delete-" + org + "-" + site.ID.String(),
@@ -418,17 +414,15 @@ func (dmich DeleteTenantIdentityConfigHandler) Handle(c echo.Context) error {
 
 // CreateOrUpdateTenantIdentityTokenDelegationHandler handles PUT /tenant-identity/token-delegation.
 type CreateOrUpdateTenantIdentityTokenDelegationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateOrUpdateTenantIdentityTokenDelegationHandler returns a new CreateOrUpdateTenantIdentityTokenDelegationHandler.
 func NewCreateOrUpdateTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateOrUpdateTenantIdentityTokenDelegationHandler {
 	return CreateOrUpdateTenantIdentityTokenDelegationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -447,7 +441,7 @@ func NewCreateOrUpdateTenantIdentityTokenDelegationHandler(dbSession *cdb.Sessio
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation [put]
 func (utdh CreateOrUpdateTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "CreateOrUpdate", c, utdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "CreateOrUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -533,7 +527,7 @@ func (utdh CreateOrUpdateTenantIdentityTokenDelegationHandler) Handle(c echo.Con
 	wid := we.GetID()
 	logger.Info().Str("Workflow ID", wid).Msg("executed synchronous create or update Token Delegation workflow")
 
-	var protoResponse cwssaws.TokenDelegationResponse
+	var protoResponse corev1.TokenDelegationResponse
 	err = we.Get(ctx, &protoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -559,17 +553,15 @@ func (utdh CreateOrUpdateTenantIdentityTokenDelegationHandler) Handle(c echo.Con
 
 // GetTenantIdentityTokenDelegationHandler handles GET /tenant-identity/token-delegation.
 type GetTenantIdentityTokenDelegationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetTenantIdentityTokenDelegationHandler returns a new GetTenantIdentityTokenDelegationHandler.
 func NewGetTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetTenantIdentityTokenDelegationHandler {
 	return GetTenantIdentityTokenDelegationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -584,7 +576,7 @@ func NewGetTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.
 // @Success 200 {object} model.APITenantIdentityTokenDelegation
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation [get]
 func (gtdh GetTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Get", c, gtdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -634,7 +626,7 @@ func (gtdh GetTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	protoRequest := &cwssaws.GetTokenDelegationRequest{OrganizationId: org}
+	protoRequest := &corev1.GetTokenDelegationRequest{OrganizationId: org}
 
 	workflowOptions := tclient.StartWorkflowOptions{
 		ID:                       "tenant-identity-token-delegation-get-" + org + "-" + site.ID.String(),
@@ -655,7 +647,7 @@ func (gtdh GetTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error
 	wid := we.GetID()
 	logger.Info().Str("Workflow ID", wid).Msg("executed synchronous get Token Delegation workflow")
 
-	var protoResponse cwssaws.TokenDelegationResponse
+	var protoResponse corev1.TokenDelegationResponse
 	err = we.Get(ctx, &protoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -677,17 +669,15 @@ func (gtdh GetTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error
 
 // DeleteTenantIdentityTokenDelegationHandler handles DELETE /tenant-identity/token-delegation.
 type DeleteTenantIdentityTokenDelegationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteTenantIdentityTokenDelegationHandler returns a new DeleteTenantIdentityTokenDelegationHandler.
 func NewDeleteTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteTenantIdentityTokenDelegationHandler {
 	return DeleteTenantIdentityTokenDelegationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -701,7 +691,7 @@ func NewDeleteTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *
 // @Success 204
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation [delete]
 func (dtdh DeleteTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Delete", c, dtdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -751,7 +741,7 @@ func (dtdh DeleteTenantIdentityTokenDelegationHandler) Handle(c echo.Context) er
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	protoRequest := &cwssaws.GetTokenDelegationRequest{OrganizationId: org}
+	protoRequest := &corev1.GetTokenDelegationRequest{OrganizationId: org}
 
 	workflowOptions := tclient.StartWorkflowOptions{
 		ID:                       "tenant-identity-token-delegation-delete-" + org + "-" + site.ID.String(),
@@ -791,19 +781,17 @@ func (dtdh DeleteTenantIdentityTokenDelegationHandler) Handle(c echo.Context) er
 
 // GetJWKSHandler handles GET /.well-known/jwks.json and the SPIFFE variant.
 type GetJWKSHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
-	kind       cwssaws.JwksKind
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	kind      corev1.JwksKind
 }
 
 // NewGetJWKSHandler returns a new GetJWKSHandler.
-func NewGetJWKSHandler(dbSession *cdb.Session, scp *sc.ClientPool, kind cwssaws.JwksKind) GetJWKSHandler {
+func NewGetJWKSHandler(dbSession *cdb.Session, scp *sc.ClientPool, kind corev1.JwksKind) GetJWKSHandler {
 	return GetJWKSHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
-		kind:       kind,
+		dbSession: dbSession,
+		scp:       scp,
+		kind:      kind,
 	}
 }
 
@@ -858,7 +846,7 @@ func (gjwksh GetJWKSHandler) Handle(c echo.Context) error {
 	}
 
 	kind := gjwksh.kind
-	protoRequest := &cwssaws.JwksRequest{OrganizationId: org, Kind: &kind}
+	protoRequest := &corev1.JwksRequest{OrganizationId: org, Kind: &kind}
 
 	workflowOptions := tclient.StartWorkflowOptions{
 		ID:                       "tenant-identity-jwks-get-" + org + "-" + site.ID.String() + "-" + kind.String(),
@@ -879,7 +867,7 @@ func (gjwksh GetJWKSHandler) Handle(c echo.Context) error {
 	wid := we.GetID()
 	logger.Info().Str("Workflow ID", wid).Msg("executed synchronous get JWKS workflow")
 
-	var protoResponse cwssaws.Jwks
+	var protoResponse corev1.Jwks
 	err = we.Get(ctx, &protoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -917,17 +905,15 @@ func (gjwksh GetJWKSHandler) Handle(c echo.Context) error {
 
 // GetOpenIDConfigurationHandler handles GET /.well-known/openid-configuration.
 type GetOpenIDConfigurationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetOpenIDConfigurationHandler returns a new GetOpenIDConfigurationHandler.
 func NewGetOpenIDConfigurationHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetOpenIDConfigurationHandler {
 	return GetOpenIDConfigurationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -981,7 +967,7 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	protoRequest := &cwssaws.OpenIdConfigRequest{OrganizationId: org}
+	protoRequest := &corev1.OpenIdConfigRequest{OrganizationId: org}
 
 	workflowOptions := tclient.StartWorkflowOptions{
 		ID:                       "tenant-identity-openid-configuration-get-" + org + "-" + site.ID.String(),
@@ -1002,7 +988,7 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 	wid := we.GetID()
 	logger.Info().Str("Workflow ID", wid).Msg("executed synchronous get OpenID Configuration workflow")
 
-	var protoResponse cwssaws.OpenIdConfiguration
+	var protoResponse corev1.OpenIdConfiguration
 	err = we.Get(ctx, &protoResponse)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -1018,4 +1004,118 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 	apiOpenIDConf := &model.APIOpenIDConfiguration{}
 	apiOpenIDConf.FromResponseProto(&protoResponse)
 	return c.JSON(http.StatusOK, apiOpenIDConf)
+}
+
+// ~~~~~ Reencrypt Secrets Handler ~~~~~ //
+
+// ReencryptTenantIdentitySecretsHandler handles POST /tenant-identity/re-encrypt.
+type ReencryptTenantIdentitySecretsHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+}
+
+// NewReencryptTenantIdentitySecretsHandler returns a new ReencryptTenantIdentitySecretsHandler.
+func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.ClientPool) ReencryptTenantIdentitySecretsHandler {
+	return ReencryptTenantIdentitySecretsHandler{
+		dbSession: dbSession,
+		scp:       scp,
+	}
+}
+
+// Handle godoc
+// @Summary Reencrypt Tenant Identity Secrets
+// @Description Re-wrap tenant_identity_config ciphertext with the site's current master encryption key (KEK rotation). Provider-admin scoped; the URL org identifies the provider. Omit organizationId to target all orgs, or set it to a tenant org that has an allocation and tenant identity configuration on the Site.
+// @Tags TenantIdentity
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of provider organization"
+// @Param siteID path string true "ID of target Site"
+// @Param message body model.APITenantIdentityReencryptSecretsRequest true "Reencrypt Tenant Identity Secrets request"
+// @Success 200 {object} model.APITenantIdentityReencryptSecretsResponse
+// @Failure 503 {object} util.APIError
+// @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt [post]
+func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "ReencryptSecrets", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+
+	siteID := c.Param("siteID")
+	if siteID == "" {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Missing siteID path parameter", nil)
+	}
+
+	temporalClient, resolvedSiteID, apiErr := common.AuthorizeProviderSiteForCore(common.AuthorizeProviderSiteForCoreInput{
+		Ctx:       ctx,
+		Logger:    logger,
+		DBSession: rtish.dbSession,
+		SCP:       rtish.scp,
+		Org:       org,
+		User:      dbUser,
+		SiteID:    siteID,
+	})
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+
+	apiRequest := model.APITenantIdentityReencryptSecretsRequest{}
+	if c.Request().ContentLength == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Request body is required", nil)
+	}
+	err := c.Bind(&apiRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	validationErr := apiRequest.Validate()
+	if validationErr != nil {
+		logger.Warn().Err(validationErr).Msg("error validating Reencrypt Tenant Identity Secrets request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Reencrypt Tenant Identity Secrets request data", validationErr)
+	}
+	apiRequest.NormalizeOrganizationID()
+
+	if apiRequest.OrganizationID != nil {
+		tenant, err := common.GetTenantForOrg(ctx, nil, rtish.dbSession, *apiRequest.OrganizationID)
+		if err != nil {
+			if errors.Is(err, common.ErrOrgTenantNotFound) {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Tenant for organizationId specified in request data", nil)
+			}
+			logger.Error().Err(err).Str("Tenant Org", *apiRequest.OrganizationID).Msg("error retrieving Tenant for re-encryption scope")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
+		}
+
+		resolvedSiteUUID, err := uuid.Parse(resolvedSiteID)
+		if err != nil {
+			logger.Error().Err(err).Str("Site ID", resolvedSiteID).Msg("resolved Site has an invalid ID")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Tenant access to Site", nil)
+		}
+
+		_, err = cdbm.NewTenantSiteDAO(rtish.dbSession).GetByTenantIDAndSiteID(ctx, nil, tenant.ID, resolvedSiteUUID, nil)
+		if err != nil {
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant organization does not have an allocation on the Site", nil)
+			}
+			logger.Error().Err(err).Str("Tenant Org", tenant.Org).Str("Site ID", resolvedSiteID).Msg("error retrieving Tenant Site association")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Tenant access to Site", nil)
+		}
+	}
+
+	var protoResponse corev1.ReencryptTenantIdentitySecretsResponse
+	apiErr = common.ExecuteCoreGRPC(
+		ctx,
+		temporalClient,
+		corev1.Forge_ReencryptTenantIdentitySecrets_FullMethodName,
+		apiRequest.ToProto(),
+		&protoResponse,
+		resolvedSiteID,
+	)
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "failed to reencrypt Tenant Identity secrets via Core proxy")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	apiResponse := &model.APITenantIdentityReencryptSecretsResponse{}
+	apiResponse.FromProto(&protoResponse)
+	return c.JSON(http.StatusOK, apiResponse)
 }

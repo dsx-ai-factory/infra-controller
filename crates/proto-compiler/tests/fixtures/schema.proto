@@ -1,0 +1,34 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture;
+
+import "google/protobuf/descriptor.proto";
+
+message MethodAnnotation {
+  bool enabled = 1;
+  uint32 limit = 2;
+  string label = 3;
+}
+
+extend google.protobuf.MethodOptions {
+  MethodAnnotation method_annotation = 51000;
+}
+
+message Request {
+  optional string query = 1;
+}
+
+message Response {}
+
+service FixtureService {
+  rpc Annotated(Request) returns (Response) {
+    option (method_annotation) = {
+      enabled: true
+      limit: 73
+      label: "raw-option-sentinel"
+    };
+  }
+}

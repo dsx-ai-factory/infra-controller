@@ -4,12 +4,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	components "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/rs/zerolog/log"
@@ -42,6 +45,19 @@ func InitElektra() {
 }
 
 func main() {
+	otelShutdown, err := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-rest-site-agent")
+	if err != nil {
+		log.Error().Err(err).Msg("Elektra: failed to initialize tracing")
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				log.Error().Err(err).Msg("Elektra: failed to shut down tracing")
+			}
+		}()
+	}
+
 	InitElektra()
 	// sleep
 	// Wait forever

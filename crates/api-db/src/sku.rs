@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
 use futures_util::stream::StreamExt;
 use itertools::Itertools;
@@ -26,18 +26,22 @@ use model::machine::Machine;
 use model::machine::capabilities::{MachineCapabilitiesSet, MachineCapabilityInfiniband};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::sku::{
-    Sku, SkuComponentChassis, SkuComponentCpu, SkuComponentGpu, SkuComponentInfinibandDevices,
-    SkuComponentMemory, SkuComponentStorage, SkuComponentTpm, SkuComponents, diff_skus,
+    SKU_VERSION_WITH_DRIVE_LOCATION, Sku, SkuComponentChassis, SkuComponentCpu, SkuComponentGpu,
+    SkuComponentInfinibandDevices, SkuComponentMemory, SkuComponentStorage, SkuComponentTpm,
+    SkuComponents, diff_skus,
 };
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
 /// SKUs can maintain backward compatibility
-pub const CURRENT_SKU_VERSION: u32 = 4;
+pub const CURRENT_SKU_VERSION: u32 = 5;
 
 /// Find a SKU that matches the specified SKU using the same comparison that
 /// the SKU validation code uses. (i.e. the description, id and others are not compared)
@@ -55,7 +59,9 @@ pub async fn find_matching_with_exclusion(
     sku: &Sku,
     excluded_sku_id: Option<&String>,
 ) -> Result<Option<Sku>, DatabaseError> {
-    let mut builder = sqlx::QueryBuilder::new("SELECT * FROM machine_skus");
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id, description, created, components, schema_version, device_type FROM machine_skus",
+    );
     if let Some(excluded_sku_id) = excluded_sku_id {
         builder.push(" WHERE id != ");
         builder.push_bind(excluded_sku_id);
@@ -80,7 +86,47 @@ pub async fn find_matching_with_exclusion(
     Ok(None)
 }
 
-#[allow(txn_held_across_await)]
+/// Validate storage components of an expected SKU being persisted.
+///
+/// Rejects uncompilable PCI patterns (caught at authoring time rather than at
+/// validation time), and rejects v5 storage entries that carry no constraints
+/// at all (no size bounds, no PCI patterns). Such entries would silently accept
+/// any drive at any location, providing weaker guarantees than v4 model
+/// matching. This most commonly occurs when a v5 SKU is auto-generated from
+/// hardware_info that predates the size_mb/pci_path fields; those SKUs should
+/// not be persisted until the hardware has been re-enumerated.
+fn validate_storage_for_create(sku: &Sku) -> Result<(), DatabaseError> {
+    for storage in &sku.components.storage {
+        for pattern in &storage.pci_patterns {
+            regex::Regex::new(pattern).map_err(|err| {
+                DatabaseError::InvalidArgument(format!(
+                    "invalid storage PCI pattern \"{pattern}\": {err}"
+                ))
+            })?;
+        }
+        if let (Some(min), Some(max)) = (storage.min_size_mb, storage.max_size_mb)
+            && min > max
+        {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "storage entry (model {:?}) has min_size_mb ({min}) greater than max_size_mb ({max})",
+                storage.model
+            )));
+        }
+        if sku.schema_version >= SKU_VERSION_WITH_DRIVE_LOCATION
+            && storage.pci_patterns.is_empty()
+            && storage.min_size_mb.is_none()
+            && storage.max_size_mb.is_none()
+        {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "v5 storage entry (model {:?}) has no size bounds or PCI patterns; \
+                 re-enumerate the machine's hardware before creating this SKU",
+                storage.model
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
     if sku.schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
@@ -93,6 +139,8 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
             "SKU ID must not be empty".to_string(),
         ));
     }
+
+    validate_storage_for_create(sku)?;
 
     let mut inner_txn = Transaction::begin_inner(txn).await?;
 
@@ -120,7 +168,18 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
         .bind(&sku.device_type)
         .fetch_one(inner_txn.as_pgconn())
         .await
-        .map_err(|e| DatabaseError::new("create sku", e))?;
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|e| e.is_unique_violation())
+            {
+                DatabaseError::AlreadyFoundError {
+                    kind: "SKU",
+                    id: sku.id.clone(),
+                }
+            } else {
+                DatabaseError::new("create sku", e)
+            }
+        })?;
 
     inner_txn.commit().await?;
 
@@ -159,7 +218,7 @@ pub async fn find(
         return Ok(Vec::new());
     }
 
-    let query = "SELECT * FROM machine_skus WHERE id=ANY($1)";
+    let query = "SELECT id, description, created, components, schema_version, device_type FROM machine_skus WHERE id=ANY($1)";
 
     let skus: Vec<Sku> = sqlx::query_as(query)
         .bind(sku_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
@@ -210,7 +269,6 @@ pub async fn update_metadata(
     Ok(())
 }
 
-#[allow(txn_held_across_await)]
 pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseError> {
     if sku.schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
@@ -223,6 +281,8 @@ pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseE
             "SKU ID must not be empty".to_string(),
         ));
     }
+
+    validate_storage_for_create(sku)?;
 
     let mut inner_txn = Transaction::begin_inner(txn).await?;
 
@@ -283,11 +343,34 @@ pub async fn generate_sku_from_machine_at_version(
         2 => generate_sku_from_machine_at_version_2(txn, machine_id).await,
         3 => generate_sku_from_machine_at_version_3(txn, machine_id).await,
         4 => generate_sku_from_machine_at_version_4(txn, machine_id).await,
+        5 => generate_sku_from_machine_at_version_5(txn, machine_id).await,
         _ => Err(DatabaseError::new(
             "generate_sku_from_machine_at_version",
             sqlx::Error::RowNotFound,
         )),
     }
+}
+
+fn memory_components_from_hardware_info(
+    hardware_info: &HardwareInfo,
+) -> (BTreeMap<(String, u32), SkuComponentMemory>, u64) {
+    let mut mem_components: BTreeMap<(String, u32), SkuComponentMemory> = BTreeMap::default();
+    let mut total_mem = 0u64;
+    for mem in &hardware_info.memory_devices {
+        if let Some(cap) = mem.size_mb {
+            total_mem = total_mem.saturating_add((cap as u64).saturating_mul(mem.count as u64));
+            let key = (mem.mem_type.clone().unwrap_or_default(), cap);
+            mem_components
+                .entry(key.clone())
+                .and_modify(|entry| entry.count = entry.count.saturating_add(mem.count))
+                .or_insert(SkuComponentMemory {
+                    capacity_mb: key.1,
+                    memory_type: key.0,
+                    count: mem.count,
+                });
+        }
+    }
+    (mem_components, total_mem)
 }
 
 pub async fn generate_sku_from_machine_at_version_0_or_1(
@@ -314,7 +397,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
         ));
     };
 
-    let Some(hardware_info) = machine.hardware_info.as_ref() else {
+    let Some(hardware_info) = machine.status.hardware_info.as_ref() else {
         return Err(DatabaseError::new(
             "generate sku: load hardware info",
             sqlx::Error::RowNotFound,
@@ -341,7 +424,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
         let key = (gpu.name.clone(), gpu.total_memory.clone());
         gpu_components
             .entry(key)
-            .and_modify(|entry| entry.count += 1)
+            .and_modify(|entry| entry.count = entry.count.saturating_add(1))
             .or_insert(SkuComponentGpu {
                 vendor,
                 model: gpu.name.clone(),
@@ -350,26 +433,11 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
             });
     }
 
-    let mut mem_components: BTreeMap<(String, u32), SkuComponentMemory> = BTreeMap::default();
-    let mut total_mem = 0u64;
-    for mem in &hardware_info.memory_devices {
-        if let Some(cap) = mem.size_mb {
-            total_mem += cap as u64;
-            let key = (mem.mem_type.clone().unwrap_or_default(), cap);
-            mem_components
-                .entry(key.clone())
-                .and_modify(|entry| entry.count += 1)
-                .or_insert(SkuComponentMemory {
-                    capacity_mb: key.1,
-                    memory_type: key.0,
-                    count: 1,
-                });
-        }
-    }
+    let (mem_components, total_mem) = memory_components_from_hardware_info(hardware_info);
 
     let ib_capabilities = MachineCapabilityInfiniband::from_ib_interfaces_and_status(
         &hardware_info.infiniband_interfaces,
-        machine.infiniband_status_observation.as_ref(),
+        machine.status.infiniband_status_observation.as_ref(),
     );
     let ib_components: Vec<SkuComponentInfinibandDevices> = ib_capabilities
         .into_iter()
@@ -406,6 +474,9 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
                 .or_insert(SkuComponentStorage {
                     model: block_device.model.clone(),
                     count: 1,
+                    min_size_mb: None,
+                    max_size_mb: None,
+                    pci_patterns: Vec::new(),
                 });
         }
         storage
@@ -436,17 +507,17 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
 }
 
 pub fn generate_base_sku_from_hardware(
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     schema_version: u32,
     hardware_info: &HardwareInfo,
 ) -> Sku {
     let created = Utc::now();
 
     let capabilities = MachineCapabilitiesSet::from_hardware_info(
-        hardware_info.clone(),
-        machine.infiniband_status_observation.as_ref(),
+        hardware_info,
+        machine.status.infiniband_status_observation.as_ref(),
         machine.associated_dpu_machine_ids(),
-        machine.interfaces.clone(),
+        &machine.status.interfaces,
     );
 
     let chassis = SkuComponentChassis {
@@ -487,22 +558,7 @@ pub fn generate_base_sku_from_hardware(
         .sorted()
         .collect();
 
-    let mut mem_components: BTreeMap<(String, u32), SkuComponentMemory> = BTreeMap::default();
-    let mut total_mem = 0u64;
-    for mem in &hardware_info.memory_devices {
-        if let Some(cap) = mem.size_mb {
-            total_mem += cap as u64;
-            let key = (mem.mem_type.clone().unwrap_or_default(), cap);
-            mem_components
-                .entry(key.clone())
-                .and_modify(|entry| entry.count += 1)
-                .or_insert(SkuComponentMemory {
-                    capacity_mb: key.1,
-                    memory_type: key.0,
-                    count: 1,
-                });
-        }
-    }
+    let (mem_components, total_mem) = memory_components_from_hardware_info(hardware_info);
 
     let infiniband_devices: Vec<SkuComponentInfinibandDevices> = capabilities
         .infiniband
@@ -567,7 +623,7 @@ pub async fn generate_sku_from_machine_at_version_2(
         ));
     };
 
-    let Some(hardware_info) = machine.hardware_info.as_ref() else {
+    let Some(hardware_info) = machine.status.hardware_info.as_ref() else {
         return Err(DatabaseError::new(
             "generate sku: load hardware info (v2)",
             sqlx::Error::RowNotFound,
@@ -591,6 +647,9 @@ pub async fn generate_sku_from_machine_at_version_2(
             .or_insert(SkuComponentStorage {
                 model: s.model.clone(),
                 count: 1,
+                min_size_mb: None,
+                max_size_mb: None,
+                pci_patterns: Vec::new(),
             });
     }
 
@@ -620,7 +679,7 @@ pub async fn generate_sku_from_machine_at_version_3(
         ));
     };
 
-    let Some(hardware_info) = machine.hardware_info.as_ref() else {
+    let Some(hardware_info) = machine.status.hardware_info.as_ref() else {
         return Err(DatabaseError::new(
             "generate sku: load hardware info (v3)",
             sqlx::Error::RowNotFound,
@@ -641,6 +700,9 @@ pub async fn generate_sku_from_machine_at_version_3(
             .or_insert(SkuComponentStorage {
                 model: nvme.model.clone(),
                 count: 1,
+                min_size_mb: None,
+                max_size_mb: None,
+                pci_patterns: Vec::new(),
             });
     });
     sku.components.storage = storage.into_values().collect();
@@ -669,7 +731,7 @@ pub async fn generate_sku_from_machine_at_version_4(
         ));
     };
 
-    let Some(hardware_info) = machine.hardware_info.as_ref() else {
+    let Some(hardware_info) = machine.status.hardware_info.as_ref() else {
         return Err(DatabaseError::new(
             "generate sku: load hardware info (v4)",
             sqlx::Error::RowNotFound,
@@ -690,6 +752,9 @@ pub async fn generate_sku_from_machine_at_version_4(
             .or_insert(SkuComponentStorage {
                 model: nvme.model.clone(),
                 count: 1,
+                min_size_mb: None,
+                max_size_mb: None,
+                pci_patterns: Vec::new(),
             });
     });
     sku.components.storage = storage.into_values().collect();
@@ -705,4 +770,221 @@ pub async fn generate_sku_from_machine_at_version_4(
         });
 
     Ok(sku)
+}
+
+pub async fn generate_sku_from_machine_at_version_5(
+    txn: impl DbReader<'_>,
+    machine_id: &MachineId,
+) -> Result<Sku, DatabaseError> {
+    let Some(machine) = machine::find(
+        txn,
+        ObjectFilter::One(*machine_id),
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .into_iter()
+    .next() else {
+        return Err(DatabaseError::new(
+            "generate sku: find machine (v5)",
+            sqlx::Error::RowNotFound,
+        ));
+    };
+
+    let Some(hardware_info) = machine.status.hardware_info.as_ref() else {
+        return Err(DatabaseError::new(
+            "generate sku: load hardware info (v5)",
+            sqlx::Error::RowNotFound,
+        ));
+    };
+
+    let mut sku = generate_base_sku_from_hardware(&machine, 5, hardware_info);
+
+    // Unlike earlier versions, v5 records one storage entry per NVMe drive so
+    // each drive's size and PCI location can be validated individually. The
+    // discovered size is stored as an exact point (min == max) and the drive's
+    // sysfs/PCI location (see `drive_location`) is stored as its single
+    // "pattern". An expected SKU authored from this can then widen the size
+    // range or replace the literal path with a regex. Drives are ordered by
+    // path for deterministic output.
+    //
+    // size_mb and pci_path may be absent on hardware_info records that predate
+    // the v5 fields (discovered before PR #3717). Rather than failing generation
+    // and wedging the machine, we include the drive with whatever fields are
+    // present. A drive without a path will not match any location-constrained
+    // expected group (which is correct — the mismatch is reported as a diff),
+    // and a drive without a size satisfies only unconstrained size ranges. The
+    // machine self-heals once hardware re-enumeration populates the new fields.
+    let mut storage: Vec<SkuComponentStorage> = hardware_info
+        .nvme_devices
+        .iter()
+        .map(|nvme| SkuComponentStorage {
+            model: nvme.model.clone(),
+            count: 1,
+            min_size_mb: nvme.size_mb,
+            max_size_mb: nvme.size_mb,
+            pci_patterns: nvme
+                .pci_path
+                .as_deref()
+                .map(|path| vec![drive_location(path)])
+                .unwrap_or_default(),
+        })
+        .collect();
+    storage.sort();
+    sku.components.storage = storage;
+
+    // Vendor and Model fields do not contain useful information.  They seem limited and encoded somehow.
+    // We really only care about the spec version supported and that a TPM exists.
+    sku.components.tpm = hardware_info
+        .tpm_description
+        .as_ref()
+        .map(|tpm| SkuComponentTpm {
+            vendor: tpm.vendor.clone(),
+            version: tpm.tpm_spec.clone(),
+        });
+
+    Ok(sku)
+}
+
+/// The location recorded for a drive whose sysfs `DEVPATH` is `pci_path`.
+///
+/// Host enumeration reports each NVMe controller's full `DEVPATH`, which ends
+/// in the kernel-assigned instance node, e.g.
+/// `/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3`. That node is
+/// numbered in probe order, so it changes across reboots and differs between
+/// identical machines. Drop it and record its parent, which is fixed by the PCI
+/// slot. A path with nothing above the final node is kept as is.
+///
+/// SKUs generated before this rule recorded the full path; their patterns must
+/// be shortened the same way to keep matching.
+fn drive_location(pci_path: &str) -> String {
+    match pci_path.rsplit_once('/') {
+        Some((parent, _node)) if !parent.is_empty() => parent.to_string(),
+        _ => pci_path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values, value_scenarios};
+    use model::hardware_info::MemoryDeviceGroup;
+    use model::test_support::machine_snapshot::host_machine;
+
+    use super::*;
+
+    fn group(mem_type: Option<&str>, size_mb: Option<u32>, count: u32) -> MemoryDeviceGroup {
+        MemoryDeviceGroup {
+            size_mb,
+            mem_type: mem_type.map(str::to_owned),
+            count,
+        }
+    }
+
+    fn mem(memory_type: &str, capacity_mb: u32, count: u32) -> SkuComponentMemory {
+        SkuComponentMemory {
+            memory_type: memory_type.to_owned(),
+            capacity_mb,
+            count,
+        }
+    }
+
+    /// Runs `generate_base_sku_from_hardware` over `devices` and returns the resulting
+    /// memory components, sorted for order-independent comparison.
+    fn generated_memory(devices: Vec<MemoryDeviceGroup>) -> Vec<SkuComponentMemory> {
+        let machine = host_machine();
+        let hardware_info = HardwareInfo {
+            memory_devices: devices,
+            ..Default::default()
+        };
+        let sku = generate_base_sku_from_hardware(&machine, CURRENT_SKU_VERSION, &hardware_info);
+        let mut memory = sku.components.memory;
+        memory.sort();
+        memory
+    }
+
+    #[test]
+    fn generate_base_sku_from_hardware_groups_memory_devices() {
+        check_values(
+            [
+                Check {
+                    scenario: "no memory devices produce no memory components",
+                    input: vec![],
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "a single group becomes a single component",
+                    input: vec![group(Some("DDR5"), Some(65536), 8)],
+                    expect: vec![mem("DDR5", 65536, 8)],
+                },
+                Check {
+                    scenario: "groups with distinct type or size stay separate",
+                    input: vec![
+                        group(Some("DDR5"), Some(65536), 8),
+                        group(Some("DDR5"), Some(32768), 4),
+                        group(Some("DDR4"), Some(65536), 2),
+                    ],
+                    expect: {
+                        let mut expect = vec![
+                            mem("DDR5", 65536, 8),
+                            mem("DDR5", 32768, 4),
+                            mem("DDR4", 65536, 2),
+                        ];
+                        expect.sort();
+                        expect
+                    },
+                },
+                Check {
+                    scenario: "non-consecutive groups with the same type and size merge",
+                    input: vec![
+                        group(Some("DDR5"), Some(65536), 4),
+                        group(Some("DDR4"), Some(32768), 1),
+                        group(Some("DDR5"), Some(65536), 4),
+                    ],
+                    expect: {
+                        let mut expect = vec![mem("DDR5", 65536, 8), mem("DDR4", 32768, 1)];
+                        expect.sort();
+                        expect
+                    },
+                },
+                Check {
+                    scenario: "groups without a size are dropped from the SKU",
+                    input: vec![
+                        group(Some("DDR5"), None, 4),
+                        group(Some("DDR5"), Some(65536), 1),
+                    ],
+                    expect: vec![mem("DDR5", 65536, 1)],
+                },
+                Check {
+                    scenario: "a missing memory type defaults to an empty string",
+                    input: vec![group(None, Some(65536), 2)],
+                    expect: vec![mem("", 65536, 2)],
+                },
+                Check {
+                    scenario: "merged counts saturate instead of overflowing",
+                    input: vec![
+                        group(Some("DDR5"), Some(u32::MAX), u32::MAX),
+                        group(Some("DDR5"), Some(u32::MAX), u32::MAX),
+                    ],
+                    expect: vec![mem("DDR5", u32::MAX, u32::MAX)],
+                },
+            ],
+            generated_memory,
+        );
+    }
+
+    #[test]
+    fn drive_location_drops_the_controller_node() {
+        value_scenarios!(drive_location:
+            "the kernel-assigned controller node is dropped" {
+                "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3"
+                    => "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme".to_string(),
+            }
+            "a path with nothing above the final node is kept" {
+                "nvme3" => "nvme3".to_string(),
+                "/nvme3" => "/nvme3".to_string(),
+            }
+        );
+    }
 }

@@ -8,7 +8,7 @@ If online repair cannot fix the issue, clear online repair first and then releas
 
 This page is intended for tenant admins and platform operators writing tenant-facing runbooks.
 
-The caller must have access to the Infra Controller REST API through an API profile such as `nico-stg`. The online repair operation is allowed for provider admins and privileged tenant admins. In tenant workflows, this means the tenant must have the required privileged capability for repair operations, such as targeted instance creation access.
+The caller must have access to the Infra Controller REST API through an API profile such as `nico-stg`. The online repair operation is allowed for provider admins and privileged tenant admins. In tenant workflows, the privileged capability is targeted instance creation, and it must be effective at the site being repaired. It is the only tenant capability NICo defines, so no other grant substitutes for it. See [Granting Targeted Instance Creation](../../configuration/tenant_management.md#granting-targeted-instance-creation) for what makes it effective.
 
 ## What Online Repair Does
 
@@ -169,7 +169,7 @@ The OpenAPI operation ID is `update-instance`. Restish command shape:
 restish <api-profile> update-instance <tenant-org-id> <instance-id> < <request-body-json>
 ```
 
-First inspect the instance and preserve any existing labels. Instance label updates replace the full label map; labels not included in the update request are removed. Labels are limited to 10 key/value pairs, so use the minimum failure labels if the instance is already near that limit.
+First inspect the instance and preserve any existing labels. Instance label updates replace the full label map; labels not included in the update request are removed. Labels are limited to 16 key/value pairs, so use the minimum failure labels if the instance is already near that limit.
 
 ```bash
 restish nico-stg get-instance <tenant-org-id> <instance-id>

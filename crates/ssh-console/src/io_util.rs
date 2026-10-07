@@ -26,7 +26,7 @@ use tokio::io::unix::AsyncFd;
 
 /// Allocate a pty with `nix::pty::openpty`, ensuring its file descriptors are set with O_NONBLOCK,
 /// and return it.
-pub fn alloc_pty(cols: u16, rows: u16) -> Result<OpenptyResult, PtyAllocError> {
+pub(crate) fn alloc_pty(cols: u16, rows: u16) -> Result<OpenptyResult, PtyAllocError> {
     // set up raw mode so the child sees a “dumb” terminal
     let libc_termios = libc::termios {
         c_iflag: 0,
@@ -67,7 +67,7 @@ pub fn alloc_pty(cols: u16, rows: u16) -> Result<OpenptyResult, PtyAllocError> {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum PtyAllocError {
+pub(crate) enum PtyAllocError {
     #[error("error {what}: {error}")]
     Io {
         error: std::io::Error,
@@ -76,9 +76,13 @@ pub enum PtyAllocError {
 }
 
 /// Make `pty_slave` the controlling terminal for the given command when it is executed.
-pub fn set_controlling_terminal_on_exec(command: &mut tokio::process::Command, pty_slave: RawFd) {
-    // SAFETY: the pre_exec closure runs in the forked process before exec, where setsid() and
-    // setting TIOCSCTTY are commonly allowed things.
+pub(crate) fn set_controlling_terminal_on_exec(
+    command: &mut tokio::process::Command,
+    pty_slave: RawFd,
+) {
+    // SAFETY: the closure captures only a copied descriptor that remains owned through `spawn`
+    // and makes direct `setsid` and `TIOCSCTTY` syscalls without allocating, locking, or accessing
+    // shared Rust state between `fork` and `exec`.
     unsafe {
         command.pre_exec(move || {
             unistd::setsid()?;
@@ -104,7 +108,10 @@ fn set_nonblocking<F: AsFd>(fd: &F) -> nix::Result<()> {
 
 /// Waits for the fd to be ready for writing, and writes the data to it, looping repeatedly until
 /// all data is written.
-pub async fn write_data_to_async_fd(data: &[u8], fd: &AsyncFd<OwnedFd>) -> std::io::Result<usize> {
+pub(crate) async fn write_data_to_async_fd(
+    data: &[u8],
+    fd: &AsyncFd<OwnedFd>,
+) -> std::io::Result<usize> {
     let mut written = 0;
     loop {
         let mut guard = fd.writable().await?;

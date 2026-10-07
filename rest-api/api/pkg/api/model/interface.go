@@ -16,12 +16,26 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
+// IPFamily identifies an address family for a VPC-selected Interface.
+type IPFamily string
+
+const (
+	// IPFamilyIPv4 identifies IPv4 addressing.
+	IPFamilyIPv4 IPFamily = cdbm.IPBlockProtocolVersionV4
+	// IPFamilyIPv6 identifies IPv6 addressing.
+	IPFamilyIPv6 IPFamily = cdbm.IPBlockProtocolVersionV6
+)
+
 // APIInterfaceCreateRequest is the data structure to capture user request to create a new Interface
 type APIInterfaceCreateOrUpdateRequest struct {
 	// SubnetID is the ID of the Subnet
 	SubnetID *string `json:"subnetId"`
 	// VpcPrefixID is the ID of the VpcPrefix
 	VpcPrefixID *string `json:"vpcPrefixId"`
+	// VpcID is the ID of the VPC from which the Controller selects a prefix
+	VpcID *string `json:"vpcId"`
+	// IPFamilies lists the address families requested for a VPC-selected Interface
+	IPFamilies []IPFamily `json:"ipFamilies"`
 	// IPAddress is the explicitly requested IP address for the Interface
 	IPAddress *string `json:"ipAddress"`
 	// InlineRoutingProfile narrows VPC routing-profile options for this Interface.
@@ -32,7 +46,7 @@ type APIInterfaceCreateOrUpdateRequest struct {
 	DeviceInstance *int `json:"deviceInstance"`
 	// VirtualFunctionID is the ID of the Virtual Function
 	VirtualFunctionID *int `json:"virtualFunctionId"`
-	// IsPhysical indicates whether the Subnet is bound on a physical Interface
+	// IsPhysical indicates whether the network is bound on a physical Interface
 	IsPhysical bool `json:"isPhysical"`
 }
 
@@ -120,11 +134,13 @@ func validateInterfaceRequestedIpAddressHostBit(value any) error {
 }
 
 // Validate ensure the values passed in request are acceptable
-func (ifcr APIInterfaceCreateOrUpdateRequest) Validate() error {
-	err := validation.ValidateStruct(&ifcr,
+func (ifcr *APIInterfaceCreateOrUpdateRequest) Validate() error {
+	err := validation.ValidateStruct(ifcr,
 		validation.Field(&ifcr.SubnetID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&ifcr.VpcPrefixID,
+			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&ifcr.VpcID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&ifcr.IPAddress,
 			validation.When(ifcr.IPAddress != nil, validation.By(validateInterfaceRequestedIpAddressHostBit)),
@@ -133,17 +149,73 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) Validate() error {
 		validation.Field(&ifcr.DeviceInstance,
 			validation.Min(0).Error("deviceInstance must be equal or greater than 0")),
 		validation.Field(&ifcr.VirtualFunctionID,
-			validation.Min(1).Error("virtualFunctionId must be between 1 and 16"),
-			validation.Max(16).Error("virtualFunctionId must be between 1 and 16")),
+			validation.Min(0).Error("virtualFunctionId must be between 0 and 15"),
+			validation.Max(15).Error("virtualFunctionId must be between 0 and 15")),
 	)
+	if err != nil {
+		return err
+	}
 
-	if ifcr.SubnetID != nil && ifcr.VpcPrefixID != nil {
+	selectorCount := 0
+	for _, specified := range []bool{ifcr.SubnetID != nil, ifcr.VpcPrefixID != nil, ifcr.VpcID != nil} {
+		if specified {
+			selectorCount++
+		}
+	}
+	if selectorCount != 1 {
 		return validation.Errors{
-			"subnetId": errors.New("`subnetId` and `vpcPrefixId` cannot be specified together"),
+			validationCommonErrorField: errors.New("exactly one of `subnetId`, `vpcPrefixId`, or `vpcId` must be specified"),
 		}
 	}
 
-	if ifcr.IPAddress != nil && ifcr.SubnetID != nil {
+	// Validate and normalize the requested address families.
+	if ifcr.VpcID != nil {
+		if ifcr.IPFamilies == nil {
+			return validation.Errors{
+				"ipFamilies": errors.New("must be specified when `vpcId` is specified"),
+			}
+		}
+		if len(ifcr.IPFamilies) == 0 {
+			return validation.Errors{
+				"ipFamilies": errors.New("must contain at least one value when `vpcId` is specified"),
+			}
+		}
+
+		seenIPv4 := false
+		seenIPv6 := false
+		for _, family := range ifcr.IPFamilies {
+			switch family {
+			case IPFamilyIPv4:
+				seenIPv4 = true
+			case IPFamilyIPv6:
+				seenIPv6 = true
+			default:
+				return validation.Errors{
+					"ipFamilies": fmt.Errorf("invalid IP family `%s`", family),
+				}
+			}
+		}
+
+		normalizedFamilies := make([]IPFamily, 0, 2)
+		if seenIPv4 {
+			normalizedFamilies = append(normalizedFamilies, IPFamilyIPv4)
+		}
+		if seenIPv6 {
+			normalizedFamilies = append(normalizedFamilies, IPFamilyIPv6)
+		}
+		ifcr.IPFamilies = normalizedFamilies
+	} else if ifcr.IPFamilies != nil {
+		return validation.Errors{
+			"ipFamilies": errors.New("cannot be specified without `vpcId`"),
+		}
+	}
+
+	if ifcr.IPAddress != nil && (ifcr.SubnetID != nil || ifcr.VpcID != nil) {
+		if ifcr.VpcID != nil {
+			return validation.Errors{
+				"ipAddress": errors.New("cannot be specified when `vpcId` is specified"),
+			}
+		}
 		return validation.Errors{
 			"ipAddress": errors.New("cannot be specified for Subnet based Interfaces"),
 		}
@@ -155,12 +227,6 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) Validate() error {
 		}
 	}
 
-	if ifcr.SubnetID == nil && ifcr.VpcPrefixID == nil {
-		return validation.Errors{
-			validationCommonErrorField: errors.New("either `subnetId` or `vpcPrefixId` must be specified"),
-		}
-	}
-
 	if ifcr.Device != nil {
 		if ifcr.DeviceInstance == nil {
 			return validation.Errors{
@@ -168,9 +234,9 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) Validate() error {
 			}
 		}
 
-		if ifcr.VpcPrefixID == nil {
+		if ifcr.VpcPrefixID == nil && ifcr.VpcID == nil {
 			return validation.Errors{
-				"vpcPrefixId": errors.New("must be specified when `device` and `deviceInstance` are specified"),
+				validationCommonErrorField: errors.New("either `vpcPrefixId` or `vpcId` must be specified when `device` and `deviceInstance` are specified"),
 			}
 		}
 
@@ -186,7 +252,18 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) Validate() error {
 		}
 	}
 
-	return err
+	return nil
+}
+
+// VpcIPFamilyMode converts validated VPC-selection families to the DB model.
+func (ifcr APIInterfaceCreateOrUpdateRequest) VpcIPFamilyMode() cdbm.InterfaceVpcIPFamilyMode {
+	if len(ifcr.IPFamilies) == 2 {
+		return cdbm.InterfaceVpcIPFamilyModeDualStack
+	}
+	if len(ifcr.IPFamilies) == 1 && ifcr.IPFamilies[0] == IPFamilyIPv6 {
+		return cdbm.InterfaceVpcIPFamilyModeIPv6Only
+	}
+	return cdbm.InterfaceVpcIPFamilyModeIPv4Only
 }
 
 // APIInterface is the data structure to capture Interface
@@ -201,22 +278,28 @@ type APIInterface struct {
 	SubnetID *string `json:"subnetId"`
 	// Subnet is the summary of the Subnet
 	Subnet *APISubnetSummary `json:"subnet,omitempty"`
-	// VpcPrefixID is the ID of the associated VpcPrefix
+	// VpcPrefixID is the ID of the explicitly selected VpcPrefix
 	VpcPrefixID *string `json:"vpcPrefixId"`
 	// VpcPrefix is the summary of the VpcPrefix
 	VpcPrefix *APIVpcPrefixSummary `json:"vpcprefix,omitempty"`
+	// VpcID is the VPC selected for automatic prefix allocation
+	VpcID *string `json:"vpcId,omitempty"`
+	// IPFamilies lists the address families requested for automatic prefix allocation
+	IPFamilies []IPFamily `json:"ipFamilies,omitempty"`
 	// Device is the device name of the Interface
 	Device *string `json:"device"`
 	// DeviceInstance is the ID of the DeviceInstance
 	DeviceInstance *int `json:"deviceInstance"`
 	// VirtualFunctionID is the ID of the Virtual Function
 	VirtualFunctionID *int `json:"virtualFunctionId"`
-	// IsPhysical indicates whether the Subnet is bound on a physical Interface
+	// IsPhysical indicates whether the network is bound on a physical Interface
 	IsPhysical bool `json:"isPhysical"`
 	// MacAddress is the MAC address of the Interface
 	MacAddress *string `json:"macAddress"`
 	// IPAddresses is the list of IP addresses assigned to the Interface
 	IPAddresses []string `json:"ipAddresses"`
+	// IPPrefixes lists reported IPv4 or IPv6 CIDRs, independently of IPAddresses.
+	IPPrefixes []string `json:"ipPrefixes"`
 	// RequestedIpAddress is the explicitly requested IP address for the Interface
 	RequestedIpAddress *string `json:"requestedIpAddress"`
 	// InlineRoutingProfile contains interface-local routing profile options.
@@ -231,12 +314,14 @@ type APIInterface struct {
 
 // NewAPIInterface creates a new APIInterface
 func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
+	// Unknown prefixes still serialize as an empty JSON array, not null.
 	apiInterface := &APIInterface{
 		ID:                 dbis.ID.String(),
 		InstanceID:         dbis.InstanceID.String(),
 		IsPhysical:         dbis.IsPhysical,
 		MacAddress:         dbis.MacAddress,
 		IPAddresses:        dbis.IPAddresses,
+		IPPrefixes:         append([]string{}, dbis.IPPrefixes...),
 		RequestedIpAddress: dbis.RequestedIpAddress,
 		Status:             dbis.Status,
 		Created:            dbis.Created,
@@ -260,12 +345,27 @@ func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
 		apiInterface.Subnet = NewAPISubnetSummary(dbis.Subnet)
 	}
 
-	if dbis.VpcPrefixID != nil {
+	if dbis.VpcPrefixID != nil && dbis.VpcID == nil {
 		apiInterface.VpcPrefixID = cutil.GetPtr(dbis.VpcPrefixID.String())
 	}
 
-	if dbis.VpcPrefix != nil {
+	if dbis.VpcPrefix != nil && dbis.VpcID == nil {
 		apiInterface.VpcPrefix = NewAPIVpcPrefixSummary(dbis.VpcPrefix)
+	}
+
+	if dbis.VpcID != nil {
+		apiInterface.VpcID = cutil.GetPtr(dbis.VpcID.String())
+	}
+
+	if dbis.VpcIPFamilyMode != nil {
+		switch *dbis.VpcIPFamilyMode {
+		case cdbm.InterfaceVpcIPFamilyModeIPv4Only:
+			apiInterface.IPFamilies = []IPFamily{IPFamilyIPv4}
+		case cdbm.InterfaceVpcIPFamilyModeIPv6Only:
+			apiInterface.IPFamilies = []IPFamily{IPFamilyIPv6}
+		case cdbm.InterfaceVpcIPFamilyModeDualStack:
+			apiInterface.IPFamilies = []IPFamily{IPFamilyIPv4, IPFamilyIPv6}
+		}
 	}
 
 	if dbis.Device != nil {

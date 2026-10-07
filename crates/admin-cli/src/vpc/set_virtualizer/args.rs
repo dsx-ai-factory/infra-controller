@@ -18,7 +18,7 @@ use carbide_uuid::vpc::VpcId;
 use clap::{Parser, ValueEnum};
 #[derive(ValueEnum, Debug, Clone)]
 #[clap(rename_all = "kebab-case")]
-pub enum VpcVirtualizationTypeArg {
+pub(super) enum VpcVirtualizationTypeArg {
     #[clap(alias = "etv")]
     EthernetVirtualizer,
     #[clap(hide = true, alias = "etv_nvue")]
@@ -55,9 +55,9 @@ Set virtualizer to FNN on VPC:
     $ nico-admin-cli vpc set-virtualizer 12345678-1234-5678-90ab-cdef01234567 fnn
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "The VPC ID for the VPC to update")]
-    pub id: VpcId,
+    pub(super) id: VpcId,
     #[clap(value_enum, help = "The virtualizer to use for this VPC")]
-    pub virtualizer: VpcVirtualizationTypeArg,
+    pub(super) virtualizer: VpcVirtualizationTypeArg,
 }

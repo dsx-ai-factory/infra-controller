@@ -1,0 +1,29 @@
+{{- $supplementalCmName := default "" (get (default (dict) .Values.supplementalNetworkConfig) "name") -}}
+{{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
+{{- if or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-dpu-agent.fullname" . }}-config
+  labels:
+    {{- include "nico-dpu-agent.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    {{- with .Values.fmds.sign_proxy_url }}
+    [machine-identity]
+    sign-proxy-url = {{ . | quote }}
+    {{- end }}
+    {{- if $supplementalCmName }}
+    [network]
+    supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"
+    {{- end }}
+    {{- if or .Values.metricsPort $prometheusDisabled }}
+    [telemetry]
+    {{- with .Values.metricsPort }}
+    metrics-address = "0.0.0.0:{{ . }}"
+    {{- end }}
+    {{- if $prometheusDisabled }}
+    prometheus-enabled = false
+    {{- end }}
+    {{- end }}
+{{- end }}

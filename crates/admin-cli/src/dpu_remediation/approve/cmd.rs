@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
 
-pub async fn approve_dpu_remediation(
+pub(super) async fn approve_dpu_remediation(
     data: Args,
     api_client: &ApiClient,
 ) -> Result<(), CarbideCliError> {

@@ -1,43 +1,51 @@
 # `nico-admin-cli credential delete-nmx-m`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **delete-nmx-m**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **delete-nmx-m***
 
 ## NAME
 
-nico-admin-cli-credential-delete-nmx-m - Delete NmxM credentials
+nico-admin-cli-credential-delete-nmx-m - Deprecated compatibility
+command; NMX-M is no longer supported
 
 ## SYNOPSIS
 
-**nico-admin-cli credential delete-nmx-m** \<**--username**\>
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli credential delete-nmx-m [--username]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
-Delete NmxM credentials
+Deprecated compatibility command. NMX-M is no longer supported. This
+command always returns an error and does not modify credentials. Use
+NMX-C for NVLink partition management.
 
 ## OPTIONS
 
-**--username** *\<USERNAME\>*  
-NmxM url
+`--username <USERNAME>`
 
-**--extended**  
+Legacy NMX-M credential username
+
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary id
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Examples
@@ -48,4 +56,4 @@ nico-admin-cli credential delete-nmx-m --username admin
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

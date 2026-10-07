@@ -369,7 +369,7 @@ where
             if matches!(status.phase, DpuStatusPhase::Rebooting) {
                 let Some(host_bmc_ip) = dpu.spec.bmc_ip.as_deref().and_then(|ip| ip.parse().ok())
                 else {
-                    tracing::warn!(dpu = %dpu_name, "Skipping reboot event with missing or invalid BMC IP");
+                    tracing::warn!(dpu_name = %dpu_name, "Skipping reboot event with missing or invalid BMC IP");
                     return Ok(());
                 };
 

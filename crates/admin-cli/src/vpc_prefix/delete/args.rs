@@ -27,9 +27,9 @@ Delete a VPC prefix by ID:
     $ nico-admin-cli vpc-prefix delete 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(value_name = "VpcPrefixId")]
-    pub vpc_prefix_id: VpcPrefixId,
+    pub(super) vpc_prefix_id: VpcPrefixId,
 }
 
 impl From<Args> for VpcPrefixDeletionRequest {

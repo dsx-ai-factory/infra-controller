@@ -36,16 +36,16 @@ extern "C" {
 		return ffi_logger.isErrorEnabled();
 	}
 
-	void kea_log_generic_debug(int level, char* message) {
+	void kea_log_generic_debug(int level, const char* message) {
 		LOG_DEBUG(ffi_logger, level, isc::log::LOG_CARBIDE_GENERIC).arg(message);
 	}
-	void kea_log_generic_info(char* message) {
+	void kea_log_generic_info(const char* message) {
 		LOG_INFO(ffi_logger, isc::log::LOG_CARBIDE_GENERIC).arg(message);
 	}
-	void kea_log_generic_warn(char* message) {
+	void kea_log_generic_warn(const char* message) {
 		LOG_WARN(ffi_logger, isc::log::LOG_CARBIDE_GENERIC).arg(message);
 	}
-	void kea_log_generic_error(char* message) {
+	void kea_log_generic_error(const char* message) {
 		LOG_ERROR(ffi_logger, isc::log::LOG_CARBIDE_GENERIC).arg(message);
 	}
 }

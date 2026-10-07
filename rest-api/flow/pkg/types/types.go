@@ -51,14 +51,18 @@ type Component struct {
 	BMCs            []BMC
 	ComponentID     string // Component ID from the component manager service
 	RackID          uuid.UUID
+	NVLDomainID     uuid.UUID
 	PowerState      string
 }
 
 // Rack represents a physical rack containing components.
 type Rack struct {
-	Info       DeviceInfo
-	Location   Location
-	Components []Component
+	Info         DeviceInfo
+	Location     Location
+	Components   []Component
+	NVLDomainIDs []uuid.UUID
+	// OperationStatus is Flow's aggregate operability phase for the rack.
+	OperationStatus Phase
 }
 
 // NVLDomain represents an NVL domain (a group of related racks).

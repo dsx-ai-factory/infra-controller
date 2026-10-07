@@ -21,11 +21,11 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData};
+use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
 use carbide_health::metrics::MetricsManager;
 use carbide_health::sink::{
     CollectorEvent, CompositeDataSink, DataSink, EventContext, FirmwareInfo, LogRecord,
-    MetricSample, PrometheusSink,
+    LogSeverity, MetricSample, PrometheusSink,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mac_address::MacAddress;
@@ -39,9 +39,14 @@ impl DataSink for CountingSink {
         "counting_sink"
     }
 
-    fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), carbide_health::HealthError> {
         black_box(context);
         black_box(event);
+        Ok(())
     }
 }
 
@@ -51,15 +56,18 @@ fn event_context() -> EventContext {
         addr: BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             port: Some(443),
-            mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+            mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
         },
         collector_type: "sensor_collector",
+        labels: Default::default(),
         metadata: Some(EndpointMetadata::Machine(MachineData {
-            machine_id: MACHINE_ID.parse().expect("valid machine id"),
+            machine_id: Some(MACHINE_ID.parse().expect("valid machine id")),
             machine_serial: None,
+            system_uuid: SharedSystemUuid::default(),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
+            driver_version: None,
         })),
         rack_id: None,
     }
@@ -116,12 +124,13 @@ fn build_log_event(idx: usize) -> CollectorEvent {
     CollectorEvent::Log(
         LogRecord {
             body: format!("BMC event line {idx}"),
-            severity: "INFO".to_string(),
+            severity: LogSeverity::Info,
             attributes: vec![
                 (Cow::Borrowed("machine_id"), MACHINE_ID.to_string()),
                 (Cow::Borrowed("entry_id"), idx.to_string()),
                 (Cow::Borrowed("service_id"), "logservice-1".to_string()),
             ],
+            diagnostic_record: None,
         }
         .into(),
     )

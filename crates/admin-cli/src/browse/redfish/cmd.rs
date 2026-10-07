@@ -23,7 +23,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn browse(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn browse(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let data = api_client.0.redfish_browse(args.uri).await?;
 
     #[derive(Serialize, Debug)]

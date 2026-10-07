@@ -99,3 +99,57 @@ impl ToTable for MeasurementBundle {
         Ok(table.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+    use chrono::{DateTime, Utc};
+
+    use super::*;
+
+    fn bundle_value(pcr_register: i16, sha_any: &str) -> MeasurementBundleValueRecord {
+        MeasurementBundleValueRecord {
+            pcr_register,
+            sha_any: sha_any.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pcr_value_projection_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "empty bundle",
+                    input: vec![],
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "populated bundle preserves record order",
+                    input: vec![bundle_value(0, "sha-0"), bundle_value(7, "sha-7")],
+                    expect: vec![
+                        PcrRegisterValue {
+                            pcr_register: 0,
+                            sha_any: "sha-0".to_string(),
+                        },
+                        PcrRegisterValue {
+                            pcr_register: 7,
+                            sha_any: "sha-7".to_string(),
+                        },
+                    ],
+                },
+            ],
+            |values| {
+                MeasurementBundle {
+                    bundle_id: MeasurementBundleId::new(),
+                    profile_id: MeasurementSystemProfileId::new(),
+                    name: "test bundle".to_string(),
+                    state: MeasurementBundleState::Active,
+                    values,
+                    ts: DateTime::<Utc>::UNIX_EPOCH,
+                }
+                .pcr_values()
+            },
+        );
+    }
+}

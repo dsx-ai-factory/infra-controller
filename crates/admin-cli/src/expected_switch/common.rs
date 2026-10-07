@@ -22,21 +22,21 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ExpectedSwitchJson {
-    pub bmc_mac_address: MacAddress,
-    pub bmc_username: String,
-    pub bmc_password: String,
-    pub switch_serial_number: String,
+pub(crate) struct ExpectedSwitchJson {
+    pub(crate) bmc_mac_address: MacAddress,
+    pub(crate) bmc_username: String,
+    pub(crate) bmc_password: String,
+    pub(crate) switch_serial_number: String,
     #[serde(default)]
-    pub nvos_mac_addresses: Vec<MacAddress>,
-    pub nvos_username: Option<String>,
-    pub nvos_password: Option<String>,
+    pub(crate) nvos_mac_addresses: Vec<MacAddress>,
+    pub(crate) nvos_username: Option<String>,
+    pub(crate) nvos_password: Option<String>,
     #[serde(default)]
-    pub metadata: Option<rpc::forge::Metadata>,
-    pub rack_id: Option<RackId>,
-    pub bmc_ip_address: Option<IpAddr>,
+    pub(crate) metadata: Option<rpc::forge::Metadata>,
+    pub(crate) rack_id: Option<RackId>,
+    pub(crate) bmc_ip_address: Option<IpAddr>,
     #[serde(default)]
-    pub nvos_ip_address: Option<IpAddr>,
+    pub(crate) nvos_ip_address: Option<IpAddr>,
     #[serde(default)]
-    pub bmc_retain_credentials: Option<bool>,
+    pub(crate) bmc_retain_credentials: Option<bool>,
 }

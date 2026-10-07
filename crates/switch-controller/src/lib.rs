@@ -18,16 +18,23 @@
 //! State Controller implementation for Switches.
 
 pub mod bom_validating;
+pub mod certificate;
 pub mod configuring;
 pub mod context;
 pub mod created;
+mod decommissioning;
 pub mod deleting;
+pub mod endpoint;
 pub mod error_state;
+pub mod fetch_info;
 pub mod handler;
 pub mod initializing;
 pub mod io;
 pub mod maintenance;
 pub mod metrics;
+pub mod nvos_password_rotation;
 pub mod ready;
 pub mod reprovisioning;
+pub mod rotating_bmc;
 pub mod validating;
+pub mod write_ops;

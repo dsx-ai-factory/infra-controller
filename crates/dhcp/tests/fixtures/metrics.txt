@@ -1,9 +1,3 @@
 # HELP carbide_dhcp_certificate_expiration_time The certificate expiration time (epoch seconds)
 # TYPE carbide_dhcp_certificate_expiration_time gauge
 carbide_dhcp_certificate_expiration_time 1740173562
-# HELP carbide_dhcp_dropped_requests_total The number of dropped DHCP requests
-# TYPE carbide_dhcp_dropped_requests_total counter
-carbide_dhcp_dropped_requests_total 1
-# HELP carbide_dhcp_requests_total The total number of DHCP requests
-# TYPE carbide_dhcp_requests_total counter
-carbide_dhcp_requests_total 1

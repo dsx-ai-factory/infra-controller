@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -22,7 +22,7 @@ type ManageSkuInventory struct {
 func (msi *ManageSkuInventory) DiscoverSkuInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverSkuInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[string, *cwssaws.Sku, *cwssaws.SkuInventory]{
+	inventoryImpl := manageInventoryImpl[string, *corev1.Sku, *corev1.SkuInventory]{
 		itemType:               "Sku",
 		config:                 msi.config,
 		internalFindIDs:        skuFindIDs,
@@ -55,9 +55,9 @@ func skuFindIDs(ctx context.Context, grpcClient *cclient.CoreGrpcClient) ([]stri
 	return ids, nil
 }
 
-func skuFindByIDs(ctx context.Context, grpcClient *cclient.CoreGrpcClient, ids []string) ([]*cwssaws.Sku, error) {
+func skuFindByIDs(ctx context.Context, grpcClient *cclient.CoreGrpcClient, ids []string) ([]*corev1.Sku, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	result, err := grpcServiceClient.FindSkusByIds(ctx, &cwssaws.SkusByIdsRequest{
+	result, err := grpcServiceClient.FindSkusByIds(ctx, &corev1.SkusByIdsRequest{
 		Ids: ids,
 	})
 	if err != nil {
@@ -67,9 +67,9 @@ func skuFindByIDs(ctx context.Context, grpcClient *cclient.CoreGrpcClient, ids [
 	return result.Skus, nil
 }
 
-func skuPagedInventory(ids []string, skus []*cwssaws.Sku, input *pagedInventoryInput) *cwssaws.SkuInventory {
+func skuPagedInventory(ids []string, skus []*corev1.Sku, input *pagedInventoryInput) *corev1.SkuInventory {
 	// Create an inventory page
-	inventory := &cwssaws.SkuInventory{
+	inventory := &corev1.SkuInventory{
 		Skus: skus,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),

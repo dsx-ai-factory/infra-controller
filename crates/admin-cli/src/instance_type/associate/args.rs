@@ -33,11 +33,11 @@ Associate several machines (comma-separated, no spaces):
     abcdef01-2345-6789-abcd-ef0123456789,11111111-2222-3333-4444-555555555555
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "InstanceTypeId")]
-    pub instance_type_id: String,
+    instance_type_id: String,
     #[clap(help = "Machine Ids, separated by comma", value_delimiter = ',')]
-    pub machine_ids: Vec<String>,
+    machine_ids: Vec<String>,
 }
 
 impl TryFrom<Args> for AssociateMachinesWithInstanceTypeRequest {

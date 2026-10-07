@@ -10,7 +10,7 @@
 	{% if let Some(json_state) = json_state %}
 	<tr>
 		<th>JSON State</th>
-		<td><div style="overflow: auto;"><pre><code class="prettyjson">{{ json_state }}</code></pre></div></td>
+		<td><div style="overflow: auto;"><pre><code>{{ json_state|pretty_json }}</code></pre></div></td>
 	</tr>
 	{% endif %}
 	<tr><th>State Version</th><td>{{ version|config_version|safe }}</td></tr>

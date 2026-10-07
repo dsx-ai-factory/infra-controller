@@ -46,7 +46,7 @@ use crate::measured_boot::convert_vec;
 
 /// handle_create_measurement_report handles the CreateMeasurementReport
 /// API endpoint.
-pub async fn handle_create_measurement_report(
+pub(crate) async fn handle_create_measurement_report(
     api: &Api,
     req: CreateMeasurementReportRequest,
 ) -> Result<CreateMeasurementReportResponse, Status> {
@@ -71,7 +71,7 @@ pub async fn handle_create_measurement_report(
 
 /// handle_delete_measurement_report handles the DeleteMeasurementReport
 /// API endpoint.
-pub async fn handle_delete_measurement_report(
+pub(crate) async fn handle_delete_measurement_report(
     api: &Api,
     req: DeleteMeasurementReportRequest,
 ) -> Result<DeleteMeasurementReportResponse, Status> {
@@ -94,7 +94,7 @@ pub async fn handle_delete_measurement_report(
 
 /// handle_promote_measurement_report handles the PromoteMeasurementReport
 /// API endpoint.
-pub async fn handle_promote_measurement_report(
+pub(crate) async fn handle_promote_measurement_report(
     api: &Api,
     req: PromoteMeasurementReportRequest,
 ) -> Result<PromoteMeasurementReportResponse, Status> {
@@ -130,7 +130,7 @@ pub async fn handle_promote_measurement_report(
 
 /// handle_revoke_measurement_report handles the RevokeMeasurementReport
 /// API endpoint.
-pub async fn handle_revoke_measurement_report(
+pub(crate) async fn handle_revoke_measurement_report(
     api: &Api,
     req: RevokeMeasurementReportRequest,
 ) -> Result<RevokeMeasurementReportResponse, Status> {
@@ -166,7 +166,7 @@ pub async fn handle_revoke_measurement_report(
 
 /// handle_show_measurement_report_for_id handles the
 /// ShowMeasurementReportForId API endpoint.
-pub async fn handle_show_measurement_report_for_id(
+pub(crate) async fn handle_show_measurement_report_for_id(
     api: &Api,
     req: ShowMeasurementReportForIdRequest,
 ) -> Result<ShowMeasurementReportForIdResponse, Status> {
@@ -191,7 +191,7 @@ pub async fn handle_show_measurement_report_for_id(
 
 /// handle_show_measurement_reports_for_machine handles the
 /// ShowMeasurementReportsForMachine API endpoint.
-pub async fn handle_show_measurement_reports_for_machine(
+pub(crate) async fn handle_show_measurement_reports_for_machine(
     api: &Api,
     req: ShowMeasurementReportsForMachineRequest,
 ) -> Result<ShowMeasurementReportsForMachineResponse, Status> {
@@ -217,7 +217,7 @@ pub async fn handle_show_measurement_reports_for_machine(
 
 /// handle_show_measurement_reports handles the ShowMeasurementReports
 /// API endpoint.
-pub async fn handle_show_measurement_reports(
+pub(crate) async fn handle_show_measurement_reports(
     api: &Api,
     _req: ShowMeasurementReportsRequest,
 ) -> Result<ShowMeasurementReportsResponse, Status> {
@@ -235,7 +235,7 @@ pub async fn handle_show_measurement_reports(
 
 /// handle_list_measurement_report handles the ListMeasurementReport
 /// API endpoint.
-pub async fn handle_list_measurement_report(
+pub(crate) async fn handle_list_measurement_report(
     api: &Api,
     req: ListMeasurementReportRequest,
 ) -> Result<ListMeasurementReportResponse, Status> {
@@ -271,7 +271,7 @@ pub async fn handle_list_measurement_report(
 
 /// handle_match_measurement_report handles the MatchMeasurementReport
 /// API endpoint.
-pub async fn handle_match_measurement_report(
+pub(crate) async fn handle_match_measurement_report(
     api: &Api,
     req: MatchMeasurementReportRequest,
 ) -> Result<MatchMeasurementReportResponse, Status> {

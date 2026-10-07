@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -27,7 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
@@ -101,7 +100,7 @@ func (mskg ManageSSHKeyGroup) SyncSSHKeyGroupViaSiteAgent(ctx context.Context, s
 	}
 
 	// Sync SSHKeyGroup request
-	keysetContent := &cwssaws.TenantKeysetContent{}
+	keysetContent := &corev1.TenantKeysetContent{}
 
 	tx, terr := cdb.BeginTx(ctx, mskg.dbSession, &sql.TxOptions{})
 	if terr != nil {
@@ -123,14 +122,14 @@ func (mskg ManageSSHKeyGroup) SyncSSHKeyGroupViaSiteAgent(ctx context.Context, s
 
 	// Get public keys associated to this SSHKeyGroup
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(mskg.dbSession)
-	skas, total, err := skaDAO.GetAll(ctx, nil, nil, []uuid.UUID{skgsa.SSHKeyGroupID}, []string{cdbm.SSHKeyRelationName}, nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+	skas, total, err := skaDAO.GetAll(ctx, nil, cdbm.SSHKeyAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{skgsa.SSHKeyGroupID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SSHKeyRelationName})
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve SSH Key Associations from DB by SSHKeyGroup ID")
 		return err
 	}
 	if total > 0 {
 		for _, ska := range skas {
-			keysetContent.PublicKeys = append(keysetContent.PublicKeys, &cwssaws.TenantPublicKey{
+			keysetContent.PublicKeys = append(keysetContent.PublicKeys, &corev1.TenantPublicKey{
 				PublicKey: ska.SSHKey.PublicKey,
 				Comment:   ska.SSHKey.Fingerprint,
 			})
@@ -255,7 +254,7 @@ func (mskg ManageSSHKeyGroup) SyncSSHKeyGroupViaSiteAgent(ctx context.Context, s
 }
 
 // UpdateSSHKeyGroupsInDB takes information pushed by Site Agent for a collection of SSH Key Groups associated with the Site and updates the DB
-func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID uuid.UUID, sshKeyGroupInventory *cwssaws.SSHKeyGroupInventory) ([]string, error) {
+func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID uuid.UUID, sshKeyGroupInventory *corev1.SSHKeyGroupInventory) ([]string, error) {
 	logger := log.With().Str("Activity", "UpdateSSHKeyGroupsInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -272,14 +271,14 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 		return nil, err
 	}
 
-	if sshKeyGroupInventory.InventoryStatus == cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if sshKeyGroupInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil, nil
 	}
 
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mskg.dbSession)
 
-	skgsas, _, err := skgsaDAO.GetAll(ctx, nil, nil, &site.ID, nil, nil, nil, nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+	skgsas, _, err := skgsaDAO.GetAll(ctx, nil, cdbm.SSHKeyGroupSiteAssociationFilterInput{SiteID: &site.ID}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to get SSH Key Group Site Associations for Site from DB")
 		return nil, err
@@ -304,7 +303,11 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 		}
 	}
 
-	existingSkgsaTkMap := map[string]*cwssaws.TenantKeyset{}
+	// Absence only means anything once every reported ID has arrived. Acting on a page that
+	// carries no list would read every SSH Key Group it does not hold as missing from the Site.
+	reconcileDeletions := util.ShouldReconcileDeletions(sshKeyGroupInventory.GetInventoryPage())
+
+	existingSkgsaTkMap := map[string]*corev1.TenantKeyset{}
 
 	// Iterate through SSHKeyGroup Inventory and update DB
 	for _, tenantKeyset := range sshKeyGroupInventory.TenantKeysets {
@@ -336,7 +339,10 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 		}
 
 		// Update SSHKeyGroupSiteAssociation missing flag as it is now found on Site
-		_, serr := skgsaDAO.UpdateFromParams(ctx, nil, skgsa.ID, nil, nil, nil, nil, cwutil.GetPtr(false))
+		_, serr := skgsaDAO.Update(ctx, nil, cdbm.SSHKeyGroupSiteAssociationUpdateInput{
+			ID:              skgsa.ID,
+			IsMissingOnSite: cwutil.GetPtr(false),
+		})
 		if serr != nil {
 			slogger.Error().Err(serr).Msg("failed to update SSH Key Group Site Association missing flag in DB")
 			continue
@@ -353,11 +359,11 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 		tenantKeyset, ok := existingSkgsaTkMap[skgID]
 		if !ok {
-			if !reportedSSHKeyGroupIDMap[skgID] {
+			if reconcileDeletions && !reportedSSHKeyGroupIDMap[skgID] {
 				// SSH Key Group was not found on Site
 				if skgsa.Status == cdbm.SSHKeyGroupSiteAssociationStatusDeleting {
 					// If the SSHKeyGroupSiteAssociation was being deleted, we can proceed with removing it from the DB
-					serr := skgsaDAO.DeleteByID(ctx, nil, skgsa.ID)
+					serr := skgsaDAO.Delete(ctx, nil, skgsa.ID)
 					if serr != nil {
 						slogger.Error().Err(serr).Msg("failed to delete SSH Key Group Site Association from DB")
 						continue
@@ -370,12 +376,12 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 				} else {
 					if skgsa.Status == cdbm.SSHKeyGroupSiteAssociationStatusSynced {
 						// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-						if time.Since(skgsa.Created) < cwutil.InventoryReceiptInterval {
+						if site.IsTimeWithinStaleInventoryThreshold(skgsa.Created) {
 							continue
 						}
 
 						// Set isMissingOnSite flag to true and update status, user can decide on deletion
-						_, serr := skgsaDAO.UpdateFromParams(ctx, nil, skgsa.ID, nil, nil, nil, nil, cwutil.GetPtr(true))
+						_, serr := skgsaDAO.Update(ctx, nil, cdbm.SSHKeyGroupSiteAssociationUpdateInput{ID: skgsa.ID, IsMissingOnSite: cwutil.GetPtr(true)})
 						if serr != nil {
 							slogger.Error().Err(serr).Msg("failed to set missing on Site flag in DB for SSH Key Group Site Association")
 							continue
@@ -496,13 +502,13 @@ func (mskg ManageSSHKeyGroup) updateSSHKeyGroupSiteAssociationStatusInDB(ctx con
 	if status != nil {
 		skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mskg.dbSession)
 
-		_, err := skgsaDAO.UpdateFromParams(ctx, tx, skgsaID, nil, nil, nil, status, nil)
+		_, err := skgsaDAO.Update(ctx, tx, cdbm.SSHKeyGroupSiteAssociationUpdateInput{ID: skgsaID, Status: status})
 		if err != nil {
 			return err
 		}
 
 		statusDetailDAO := cdbm.NewStatusDetailDAO(mskg.dbSession)
-		_, err = statusDetailDAO.CreateFromParams(ctx, tx, skgsaID.String(), *status, statusMessage)
+		_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: skgsaID.String(), Status: *status, Message: statusMessage})
 		if err != nil {
 			return err
 		}
@@ -540,7 +546,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 	var sgMessage *string
 
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mskg.dbSession)
-	skgsas, skgsaTotal, err := skgsaDAO.GetAll(ctx, nil, []uuid.UUID{skgID}, nil, nil, nil, nil, nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+	skgsas, skgsaTotal, err := skgsaDAO.GetAll(ctx, nil, cdbm.SSHKeyGroupSiteAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{skgID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to get SSHKey Group Associations from DB for SSH Key Group")
 		return err
@@ -571,7 +577,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 			}
 
 			// Remove all SSH Key associations
-			skas, _, err := skaDAO.GetAll(ctx, tx, nil, []uuid.UUID{skgID}, nil, nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+			skas, _, err := skaDAO.GetAll(ctx, tx, cdbm.SSHKeyAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{skgID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 			if err != nil {
 				logger.Error().Err(err).Msg("failed to retrieve SSH Key Assocications from DB by SSHKeyGroup ID")
 				terr := tx.Rollback()
@@ -582,7 +588,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 			}
 
 			for _, ska := range skas {
-				serr := skaDAO.DeleteByID(ctx, tx, ska.ID)
+				serr := skaDAO.Delete(ctx, tx, ska.ID)
 				if serr != nil {
 					logger.Error().Err(serr).Msg("failed to delete SSH Key Association from DB")
 					terr := tx.Rollback()
@@ -594,7 +600,9 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 			}
 
 			// Remove all Instance associations
-			skgias, _, err := skgiaDAO.GetAll(ctx, tx, []uuid.UUID{skgID}, nil, nil, nil, nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+			skgias, _, err := skgiaDAO.GetAll(ctx, tx, cdbm.SSHKeyGroupInstanceAssociationFilterInput{
+				SSHKeyGroupIDs: []uuid.UUID{skgID},
+			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 			if err != nil {
 				logger.Error().Err(err).Msg("failed to retrieve SSH Key Group Instance associations from DB")
 				terr := tx.Rollback()
@@ -604,7 +612,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 				return err
 			}
 			for _, skgia := range skgias {
-				serr := skgiaDAO.DeleteByID(ctx, tx, skgia.ID)
+				serr := skgiaDAO.Delete(ctx, tx, skgia.ID)
 				if serr != nil {
 					logger.Error().Err(serr).Msg("failed to delete SSH Key Group Instance association from DB")
 					terr := tx.Rollback()
@@ -675,7 +683,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 	}
 
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mskg.dbSession)
-	_, err = statusDetailDAO.CreateFromParams(ctx, nil, skgID.String(), *sgStatus, sgMessage)
+	_, err = statusDetailDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{EntityID: skgID.String(), Status: *sgStatus, Message: sgMessage})
 	if err != nil {
 		return err
 	}
@@ -688,7 +696,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupStatusInDB(ctx context.Context, s
 // IsSSHKeyGroupCreated is helper function to get if sshkeygroup created or not
 func (mskg ManageSSHKeyGroup) IsSSHKeyGroupCreatedOnSite(ctx context.Context, tx *cdb.Tx, sshKeyGroupSiteAssociationID uuid.UUID) (*bool, error) {
 	sdDAO := cdbm.NewStatusDetailDAO(mskg.dbSession)
-	skgsds, _, err := sdDAO.GetAllByEntityID(ctx, tx, sshKeyGroupSiteAssociationID.String(), nil, cwutil.GetPtr(cdbp.TotalLimit), nil)
+	skgsds, _, err := sdDAO.GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{sshKeyGroupSiteAssociationID.String()}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)})
 	if err != nil {
 		return nil, err
 	}

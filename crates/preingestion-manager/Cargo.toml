@@ -5,24 +5,33 @@ edition.workspace = true
 description = "Carbide Pre-ingestion Manager"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "carbide_preingestion_manager"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [dependencies]
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }
 carbide-firmware = { path = "../firmware" }
+carbide-instrument = { path = "../instrument" }
+carbide-rack-controller = { path = "../rack-controller", default-features = false }
 carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets" }
 carbide-ssh = { path = "../ssh" }
 carbide-utils = { path = "../utils" }
+component-manager = { path = "../component-manager" }
 
 # these are alphabetized
 chrono = { workspace = true }
 futures-util = { workspace = true }
 libredfish = { workspace = true }
+mac_address = { workspace = true }
 opentelemetry = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
@@ -33,7 +42,17 @@ tracing = { workspace = true }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+carbide-api-test-helper = { path = "../api-test-helper" }
+carbide-firmware = { path = "../firmware", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-harness = { path = "../test-harness" }
+carbide-test-support = { path = "../test-support" }
+carbide-uuid = { path = "../uuid" }
+libc = { workspace = true }
+librms = { workspace = true }
 prometheus-text-parser = { path = "../prometheus-text-parser" }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -26,8 +26,10 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let endpoints = crate::explored_endpoints::find_all(&mut *db).await?;
-    let managed_hosts = crate::explored_managed_host::find_all(db).await?;
+    let managed_hosts = crate::explored_managed_host::find_all(&mut *db).await?;
+    let last_run = crate::site_explorer_run_status::fetch(&mut *db).await?;
     Ok(SiteExplorationReport {
+        last_run,
         endpoints,
         managed_hosts,
     })

@@ -182,6 +182,6 @@ func (skm SshKeyGroupManager) DeleteSshKeyGroup(ctx context.Context, sshKeyGroup
 	ctx = WithLogger(ctx, skm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, skm.client.Config.Token)
 
-	resp, err := skm.client.apiClient.SSHKeyGroupAPI.DeleteSshKeyGroup(ctx, skm.client.apiMetadata.Organization, sshKeyGroupID).Execute()
+	_, resp, err := skm.client.apiClient.SSHKeyGroupAPI.DeleteSshKeyGroup(ctx, skm.client.apiMetadata.Organization, sshKeyGroupID).Execute()
 	return HandleResponseError(resp, err)
 }

@@ -68,10 +68,11 @@ pub struct MachineConfigFromPxe {
 ///
 /// This is what we READ from /etc/forge/config.toml. In prod most of the fields will default.
 /// We only implement Serialize for unit tests.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default, rename = "forge-system")]
     pub forge_system: ForgeSystemConfig,
+    #[serde(default)]
     pub machine: MachineConfig,
     #[serde(default, rename = "metadata-service")]
     pub metadata_service: MetadataServiceConfig,
@@ -91,6 +92,8 @@ pub struct AgentConfig {
         skip_serializing_if = "MachineIdentityConfig::is_default"
     )]
     pub machine_identity: MachineIdentityConfig,
+    #[serde(default, skip_serializing_if = "NetworkConfig::is_default")]
+    pub network: NetworkConfig,
 }
 
 impl AgentConfig {
@@ -118,6 +121,12 @@ pub struct ForgeSystemConfig {
     pub client_cert: String,
     #[serde(default = "default_client_key")]
     pub client_key: String,
+    /// Unix socket where the agent serves its local API (node tokens for
+    /// co-located services, issue #355). Works the same containerized (DPF)
+    /// and as a plain service on DPU OS; override when `/opt/forge` is not
+    /// the shared credential directory in a deployment.
+    #[serde(default = "default_local_api_socket")]
+    pub local_api_socket: String,
 }
 
 // Called if no `[forge-system]` is provided at all.
@@ -129,6 +138,7 @@ impl Default for ForgeSystemConfig {
             root_ca: default_root_ca(),
             client_cert: default_client_cert(),
             client_key: default_client_key(),
+            local_api_socket: default_local_api_socket(),
         }
     }
 }
@@ -147,6 +157,10 @@ pub fn default_client_cert() -> String {
 
 pub fn default_client_key() -> String {
     tls_default::default_client_key().to_string()
+}
+
+pub fn default_local_api_socket() -> String {
+    ::rpc::node_token_socket::DEFAULT_AGENT_LOCAL_SOCKET.to_string()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,16 +345,60 @@ impl MachineIdentityConfig {
     }
 }
 
+/// Agent-local network configuration knobs (the `[network]` section).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct NetworkConfig {
+    /// Path to an operator-supplied RFC 7386 JSON Merge Patch document that the
+    /// agent merges into the `set` section of its generated NVUE config before
+    /// every apply. Top-level keys must be NVUE config sections the agent
+    /// already models (bridge, evpn, interface, nve, router, system, vrf, acl).
+    /// The file's contents participate in change detection, so editing it in
+    /// place triggers a re-render without an agent restart. When set, the file
+    /// must exist and be readable; an unreadable file fails the network
+    /// reconciliation loudly rather than silently applying an unmerged config.
+    /// An empty string means "not configured", same as omitting the key.
+    #[serde(default, deserialize_with = "empty_path_as_none")]
+    pub supplemental_config_path: Option<PathBuf>,
+}
+
+impl NetworkConfig {
+    // Only referenced by the serde skip_serializing_if attribute above.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Normalizes `supplemental-config-path = ""` to `None`: an empty path means
+/// "disabled", not "read the empty path" (which would fail every network
+/// reconciliation instead of turning the feature off).
+fn empty_path_as_none<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path = Option::<PathBuf>::deserialize(deserializer)?;
+    Ok(path.filter(|path| !path.as_os_str().is_empty()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TelemetryConfig {
     pub metrics_address: String,
+    /// Serves `/metrics` and `/ready` on `metrics_address`. `/ready` is
+    /// bound to this endpoint, so disabling it also removes readiness.
+    #[serde(default = "default_prometheus_enabled")]
+    pub prometheus_enabled: bool,
+}
+
+fn default_prometheus_enabled() -> bool {
+    true
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             metrics_address: TELEMETRY_METRICS_SERVICE_ADDRESS.to_string(),
+            prometheus_enabled: default_prometheus_enabled(),
         }
     }
 }
@@ -493,6 +551,36 @@ mod tests {
             sign_timeout_secs,
             sign_proxy_url: sign_proxy_url.map(ToString::to_string),
             sign_proxy_tls_root_ca: sign_proxy_tls_root_ca.map(ToString::to_string),
+        }
+    }
+
+    // `[network] supplemental-config-path` parsing — one row per input shape.
+    // An empty string must behave exactly like an omitted key (disabled),
+    // never as a readable path.
+    #[test]
+    fn network_config_supplemental_path_parsing() {
+        for (scenario, toml_src, expected) in [
+            ("section omitted", "", None),
+            ("key omitted", "[network]\n", None),
+            (
+                "empty path is disabled",
+                "[network]\nsupplemental-config-path = \"\"\n",
+                None,
+            ),
+            (
+                "non-empty path is kept",
+                "[network]\nsupplemental-config-path = \"/etc/forge/supplemental-network-config/supplemental.json\"\n",
+                Some(PathBuf::from(
+                    "/etc/forge/supplemental-network-config/supplemental.json",
+                )),
+            ),
+        ] {
+            let config: AgentConfig =
+                toml::from_str(toml_src).unwrap_or_else(|e| panic!("{scenario}: {e}"));
+            assert_eq!(
+                config.network.supplemental_config_path, expected,
+                "{scenario}"
+            );
         }
     }
 
@@ -789,12 +877,12 @@ sign-timeout-secs = 9
                 MID_SECTION => Yields(()),
             }
 
-            "completely empty config is rejected (a required field is missing)" {
-                "" => Fails,
+            "completely empty config uses defaults" {
+                "" => Yields(()),
             }
 
-            "unknown top-level key is rejected (deny_unknown_fields)" {
-                "totally-unknown-key = 5\n" => Fails,
+            "unknown top-level key is ignored" {
+                "totally-unknown-key = 5\n" => Yields(()),
             }
 
             "interface-id not a uuid fails" {
@@ -817,6 +905,17 @@ sign-timeout-secs = 9
                 "[fmds-armos-networking.config]\naddresses = [\"not-a-cidr\"]\n" => Fails,
             }
         );
+    }
+
+    #[test]
+    fn machine_identity_only_uses_agent_defaults() {
+        let url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080";
+        let actual: AgentConfig =
+            toml::from_str(&format!("[machine-identity]\nsign-proxy-url = {url:?}\n")).unwrap();
+        let mut expected = AgentConfig::default();
+        expected.machine_identity.sign_proxy_url = Some(url.to_string());
+
+        assert_eq!(actual, expected);
     }
 
     // Field-level assertions on the FULL parse: each original `assert_eq!` becomes
@@ -879,6 +978,10 @@ addresses = ["168.254.169.254/30"]
 
             "telemetry metrics-address" {
                 c.telemetry.metrics_address == "0.0.0.0:8888" => true,
+            }
+
+            "telemetry prometheus-enabled defaults to true when omitted" {
+                c.telemetry.prometheus_enabled => true,
             }
 
             "hbn root-dir" {

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use librms::protos::rack_manager::SwitchService;
 use serde::{Deserialize, Serialize};
 
 use crate::compute_tray_manager::Backend as ComputeBackend;
@@ -8,6 +9,7 @@ use crate::nv_switch_manager::Backend as NvSwitchBackend;
 use crate::power_shelf_manager::Backend as PowerShelfBackend;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentManagerConfig {
     #[serde(default)]
     pub nv_switch_backend: NvSwitchBackend,
@@ -47,9 +49,67 @@ pub struct ComponentManagerConfig {
     /// Defaults to `false`.
     #[serde(default)]
     pub compute_tray_use_state_controller: bool,
+
+    /// Legacy rollout gate retained so existing site configurations deserialize.
+    ///
+    /// The value is accepted and serialized but does not change RMS
+    /// password-rotation support.
+    #[serde(default)]
+    pub nvos_password_rotation_enabled: bool,
+}
+
+/// Identifies a switch service that should use installed mTLS certificates.
+///
+/// Values mirror RMS `SwitchService` and are serialized in TOML as snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchMtlsService {
+    NvueApi,
+    ScaleUpFabricTelemetry,
+    ScaleUpFabricManager,
+    ScaleUpFabricTelemetryInterface,
+}
+
+impl SwitchMtlsService {
+    pub fn default_services() -> Vec<Self> {
+        vec![
+            Self::NvueApi,
+            Self::ScaleUpFabricTelemetry,
+            Self::ScaleUpFabricManager,
+            Self::ScaleUpFabricTelemetryInterface,
+        ]
+    }
+}
+
+/// Maps configured switch mTLS services to RMS `SwitchService` values.
+pub fn switch_mtls_services_as_i32(services: &[SwitchMtlsService]) -> Vec<i32> {
+    services
+        .iter()
+        .map(|service| match service {
+            SwitchMtlsService::NvueApi => SwitchService::NvueApi as i32,
+            SwitchMtlsService::ScaleUpFabricTelemetry => {
+                SwitchService::ScaleUpFabricTelemetry as i32
+            }
+            SwitchMtlsService::ScaleUpFabricManager => SwitchService::ScaleUpFabricManager as i32,
+            SwitchMtlsService::ScaleUpFabricTelemetryInterface => {
+                SwitchService::ScaleUpFabricTelemetryInterface as i32
+            }
+        })
+        .collect()
+}
+
+/// Returns the configured switch mTLS services, or all supported services when
+/// the list was omitted or left empty.
+pub fn effective_switch_mtls_services(services: &[SwitchMtlsService]) -> Vec<SwitchMtlsService> {
+    if services.is_empty() {
+        SwitchMtlsService::default_services()
+    } else {
+        services.to_vec()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendEndpointConfig {
     pub url: String,
     #[serde(default)]
@@ -62,6 +122,7 @@ pub struct BackendEndpointConfig {
 /// containing `ca.crt`, `tls.crt`, and `tls.key`. Alternatively, each
 /// path can be set individually.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendTlsConfig {
     /// Directory containing `ca.crt`, `tls.crt`, `tls.key`.
     /// Individual path fields override files from this directory.
@@ -108,6 +169,8 @@ impl BackendTlsConfig {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
 
     #[test]
@@ -116,77 +179,215 @@ mod tests {
         assert_eq!(cfg.nv_switch_backend, NvSwitchBackend::Rms);
         assert_eq!(cfg.power_shelf_backend, PowerShelfBackend::Rms);
         assert_eq!(cfg.compute_tray_backend, ComputeBackend::Rms);
+        assert!(!cfg.nvos_password_rotation_enabled);
     }
 
-    fn tls_config(
-        cert_dir: Option<&str>,
-        ca: Option<&str>,
-        cert: Option<&str>,
-        key: Option<&str>,
-    ) -> BackendTlsConfig {
+    #[test]
+    fn nvos_password_rotation_config_is_preserved_for_compatibility() {
+        for (toml, expected) in [
+            ("", false),
+            ("nvos_password_rotation_enabled = false", false),
+            ("nvos_password_rotation_enabled = true", true),
+        ] {
+            let cfg: ComponentManagerConfig =
+                toml::from_str(toml).expect("component-manager configuration should deserialize");
+
+            assert_eq!(cfg.nvos_password_rotation_enabled, expected);
+
+            let serialized =
+                toml::to_string(&cfg).expect("component-manager configuration should serialize");
+
+            let serialized_value: toml::Value = toml::from_str(&serialized)
+                .expect("serialized component-manager configuration should be valid TOML");
+
+            assert_eq!(
+                serialized_value
+                    .get("nvos_password_rotation_enabled")
+                    .and_then(toml::Value::as_bool),
+                Some(expected),
+            );
+        }
+    }
+
+    /// One `BackendTlsConfig` worth of path inputs for a resolver table.
+    struct Row {
+        cert_dir: Option<&'static str>,
+        ca: Option<&'static str>,
+        cert: Option<&'static str>,
+        key: Option<&'static str>,
+    }
+
+    fn tls_config(row: Row) -> BackendTlsConfig {
         BackendTlsConfig {
-            cert_dir: cert_dir.map(String::from),
-            ca_cert_path: ca.map(String::from),
-            client_cert_path: cert.map(String::from),
-            client_key_path: key.map(String::from),
+            cert_dir: row.cert_dir.map(String::from),
+            ca_cert_path: row.ca.map(String::from),
+            client_cert_path: row.cert.map(String::from),
+            client_key_path: row.key.map(String::from),
             domain: None,
         }
     }
 
     #[test]
-    fn resolve_ca_cert_explicit_path_wins() {
-        let cfg = tls_config(Some("/dir"), Some("/explicit/ca.pem"), None, None);
-        assert_eq!(cfg.resolve_ca_cert_path().unwrap(), "/explicit/ca.pem");
-    }
-
-    #[test]
-    fn resolve_ca_cert_falls_back_to_dir() {
-        let cfg = tls_config(Some("/certs"), None, None, None);
-        assert_eq!(cfg.resolve_ca_cert_path().unwrap(), "/certs/ca.crt");
-    }
-
-    #[test]
-    fn resolve_ca_cert_none_when_nothing_set() {
-        let cfg = tls_config(None, None, None, None);
-        assert!(cfg.resolve_ca_cert_path().is_none());
-    }
-
-    #[test]
-    fn resolve_client_cert_explicit_path_wins() {
-        let cfg = tls_config(Some("/dir"), None, Some("/explicit/client.pem"), None);
-        assert_eq!(
-            cfg.resolve_client_cert_path().unwrap(),
-            "/explicit/client.pem"
+    fn resolve_ca_cert_path_explicit_wins_then_dir_then_none() {
+        check_values(
+            [
+                Check {
+                    scenario: "explicit path wins",
+                    input: Row {
+                        cert_dir: Some("/dir"),
+                        ca: Some("/explicit/ca.pem"),
+                        cert: None,
+                        key: None,
+                    },
+                    expect: Some("/explicit/ca.pem".to_string()),
+                },
+                Check {
+                    scenario: "falls back to dir",
+                    input: Row {
+                        cert_dir: Some("/certs"),
+                        ca: None,
+                        cert: None,
+                        key: None,
+                    },
+                    expect: Some("/certs/ca.crt".to_string()),
+                },
+                Check {
+                    scenario: "none when nothing set",
+                    input: Row {
+                        cert_dir: None,
+                        ca: None,
+                        cert: None,
+                        key: None,
+                    },
+                    expect: None,
+                },
+            ],
+            |row| tls_config(row).resolve_ca_cert_path(),
         );
     }
 
     #[test]
-    fn resolve_client_cert_falls_back_to_dir() {
-        let cfg = tls_config(Some("/certs"), None, None, None);
-        assert_eq!(cfg.resolve_client_cert_path().unwrap(), "/certs/tls.crt");
+    fn resolve_client_cert_path_explicit_wins_then_dir_then_none() {
+        check_values(
+            [
+                Check {
+                    scenario: "explicit path wins",
+                    input: Row {
+                        cert_dir: Some("/dir"),
+                        ca: None,
+                        cert: Some("/explicit/client.pem"),
+                        key: None,
+                    },
+                    expect: Some("/explicit/client.pem".to_string()),
+                },
+                Check {
+                    scenario: "falls back to dir",
+                    input: Row {
+                        cert_dir: Some("/certs"),
+                        ca: None,
+                        cert: None,
+                        key: None,
+                    },
+                    expect: Some("/certs/tls.crt".to_string()),
+                },
+                Check {
+                    scenario: "none when nothing set",
+                    input: Row {
+                        cert_dir: None,
+                        ca: None,
+                        cert: None,
+                        key: None,
+                    },
+                    expect: None,
+                },
+            ],
+            |row| tls_config(row).resolve_client_cert_path(),
+        );
     }
 
     #[test]
-    fn resolve_client_cert_none_when_nothing_set() {
-        let cfg = tls_config(None, None, None, None);
-        assert!(cfg.resolve_client_cert_path().is_none());
+    fn resolve_client_key_path_explicit_wins_then_dir_then_none() {
+        check_values(
+            [
+                Check {
+                    scenario: "explicit path wins",
+                    input: Row {
+                        cert_dir: Some("/dir"),
+                        ca: None,
+                        cert: None,
+                        key: Some("/explicit/key.pem"),
+                    },
+                    expect: Some("/explicit/key.pem".to_string()),
+                },
+                Check {
+                    scenario: "falls back to dir",
+                    input: Row {
+                        cert_dir: Some("/certs"),
+                        ca: None,
+                        cert: None,
+                        key: None,
+                    },
+                    expect: Some("/certs/tls.key".to_string()),
+                },
+                Check {
+                    scenario: "none when nothing set",
+                    input: Row {
+                        cert_dir: None,
+                        ca: None,
+                        cert: None,
+                        key: None,
+                    },
+                    expect: None,
+                },
+            ],
+            |row| tls_config(row).resolve_client_key_path(),
+        );
     }
 
     #[test]
-    fn resolve_client_key_explicit_path_wins() {
-        let cfg = tls_config(Some("/dir"), None, None, Some("/explicit/key.pem"));
-        assert_eq!(cfg.resolve_client_key_path().unwrap(), "/explicit/key.pem");
+    fn switch_mtls_services_use_defaults_only_when_empty() {
+        check_values(
+            [
+                Check {
+                    scenario: "empty configuration uses every supported service",
+                    input: Vec::new(),
+                    expect: SwitchMtlsService::default_services(),
+                },
+                Check {
+                    scenario: "configured services are preserved",
+                    input: vec![
+                        SwitchMtlsService::NvueApi,
+                        SwitchMtlsService::ScaleUpFabricManager,
+                    ],
+                    expect: vec![
+                        SwitchMtlsService::NvueApi,
+                        SwitchMtlsService::ScaleUpFabricManager,
+                    ],
+                },
+            ],
+            |services| effective_switch_mtls_services(&services),
+        );
     }
 
     #[test]
-    fn resolve_client_key_falls_back_to_dir() {
-        let cfg = tls_config(Some("/certs"), None, None, None);
-        assert_eq!(cfg.resolve_client_key_path().unwrap(), "/certs/tls.key");
-    }
+    fn switch_mtls_services_deserialize_from_snake_case() {
+        #[derive(Deserialize)]
+        struct TestCfg {
+            switch_mtls_services: Vec<SwitchMtlsService>,
+        }
 
-    #[test]
-    fn resolve_client_key_none_when_nothing_set() {
-        let cfg = tls_config(None, None, None, None);
-        assert!(cfg.resolve_client_key_path().is_none());
+        let cfg: TestCfg = toml::from_str(
+            r#"
+            switch_mtls_services = ["nvue_api", "scale_up_fabric_manager"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.switch_mtls_services,
+            vec![
+                SwitchMtlsService::NvueApi,
+                SwitchMtlsService::ScaleUpFabricManager,
+            ]
+        );
     }
 }

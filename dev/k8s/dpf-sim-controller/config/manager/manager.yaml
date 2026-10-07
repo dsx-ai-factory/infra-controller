@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dpf-sim-controller
+  namespace: dpf-operator-system
+  labels:
+    app.kubernetes.io/name: dpf-sim-controller
+    app.kubernetes.io/component: dev-simulator
+spec:
+  replicas: 1 # single-instance dev tooling; no leader election
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dpf-sim-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dpf-sim-controller
+    spec:
+      serviceAccountName: dpf-sim-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: dpf-sim-controller:dev # override via kustomize/`make deploy IMG=...`
+          # Always: dev deploys reuse mutable tags (e.g. :dev); combined with
+          # the rollout restart in `make deploy` this guarantees a repush of
+          # the same tag actually lands on the cluster.
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          args:
+            - --dpf-namespace=dpf-operator-system
+            - --phase-dwell=3s
+          ports:
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi

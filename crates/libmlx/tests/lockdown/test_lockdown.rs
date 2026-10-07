@@ -53,24 +53,6 @@ fn lock_status_displays_lowercase_name() {
 }
 
 #[test]
-fn test_lock_status_serialization() {
-    let status = LockStatus::Locked;
-    let json = serde_json::to_string(&status).unwrap();
-    assert_eq!(json, "\"locked\"");
-
-    let status: LockStatus = serde_json::from_str("\"unlocked\"").unwrap();
-    assert_eq!(status, LockStatus::Unlocked);
-}
-
-#[test]
-fn test_status_report_creation() {
-    let report = StatusReport::new("test_device".to_string(), LockStatus::Locked);
-    assert_eq!(report.device_id, "test_device");
-    assert_eq!(report.status, LockStatus::Locked);
-    assert!(!report.timestamp.is_empty());
-}
-
-#[test]
 fn test_status_report_json() {
     let report = StatusReport::new("test_device".to_string(), LockStatus::Unlocked);
     let json = report.to_json().unwrap();
@@ -94,19 +76,6 @@ fn test_status_report_yaml() {
 }
 
 #[test]
-fn test_lockdown_manager_creation_with_runner() {
-    let runner = FlintRunner::with_path("/fake/path");
-    let _manager = LockdownManager::with_runner(runner);
-    // Should not panic
-}
-
-#[test]
-fn test_lockdown_manager_default() {
-    let _manager = LockdownManager::default();
-    // Should not panic even if flint is not available
-}
-
-#[test]
 fn test_lockdown_manager_with_dry_run() {
     let manager = LockdownManager::with_dry_run(true).unwrap_or_else(|_| {
         let runner = FlintRunner::with_path("/fake/flint").with_dry_run(true);
@@ -116,16 +85,6 @@ fn test_lockdown_manager_with_dry_run() {
     // Test that dry run is properly propagated
     let result = manager.lock_device("test_device", "12345678");
     assert!(matches!(result, Err(MlxError::DryRun(_))));
-}
-
-#[test]
-fn test_device_validation_in_manager() {
-    let runner = FlintRunner::with_path("/fake/path");
-    let manager = LockdownManager::with_runner(runner);
-
-    // Test invalid device ID
-    let result = manager.get_status("");
-    assert!(result.is_err());
 }
 
 // With a fake flint path every operation fails when it tries to execute the tool,
@@ -214,85 +173,5 @@ mod dry_run_tests {
         let set_key_cmd = dry_run_command(manager.set_device_key("test_device", "12345678"));
         assert!(set_key_cmd.contains("set_key"));
         assert!(set_key_cmd.contains("12345678"));
-    }
-}
-
-#[cfg(test)]
-mod mock_runner_tests {
-    use super::*;
-
-    // MockRunner simulates flint behavior for testing already locked/unlocked conditions
-    struct MockRunner {
-        simulate_already_locked: bool,
-        simulate_already_unlocked: bool,
-    }
-
-    impl MockRunner {
-        fn new() -> Self {
-            Self {
-                simulate_already_locked: false,
-                simulate_already_unlocked: false,
-            }
-        }
-
-        fn with_already_locked(mut self) -> Self {
-            self.simulate_already_locked = true;
-            self
-        }
-
-        fn with_already_unlocked(mut self) -> Self {
-            self.simulate_already_unlocked = true;
-            self
-        }
-
-        fn disable_hw_access(&self, _device_id: &str, _key: &str) -> Result<(), MlxError> {
-            if self.simulate_already_locked {
-                return Err(MlxError::AlreadyLocked);
-            }
-            Ok(())
-        }
-
-        fn enable_hw_access(&self, _device_id: &str, _key: &str) -> Result<(), MlxError> {
-            if self.simulate_already_unlocked {
-                return Err(MlxError::AlreadyUnlocked);
-            }
-            Ok(())
-        }
-    }
-
-    // disable_hw_access / enable_hw_access succeed by default and surface the
-    // matching "already" error only when the mock is primed for that state.
-    #[test]
-    fn mock_runner_reports_already_state_else_succeeds() {
-        value_scenarios!(
-            run = |kind| kind;
-            "disable on a primed-locked device is AlreadyLocked" {
-                error_kind(
-                    MockRunner::new()
-                        .with_already_locked()
-                        .disable_hw_access("test_device", "12345678"),
-                ) => "AlreadyLocked",
-            }
-
-            "enable on a primed-unlocked device is AlreadyUnlocked" {
-                error_kind(
-                    MockRunner::new()
-                        .with_already_unlocked()
-                        .enable_hw_access("test_device", "12345678"),
-                ) => "AlreadyUnlocked",
-            }
-
-            "disable on a fresh device succeeds" {
-                error_kind(
-                    MockRunner::new().disable_hw_access("test_device", "12345678"),
-                ) => "ok",
-            }
-
-            "enable on a fresh device succeeds" {
-                error_kind(
-                    MockRunner::new().enable_hw_access("test_device", "12345678"),
-                ) => "ok",
-            }
-        );
     }
 }

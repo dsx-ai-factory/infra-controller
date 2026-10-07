@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::error::Error as StdError;
 use std::fmt;
 
 use nv_redfish::{Bmc, Error as NvRedfishError};
@@ -50,6 +51,19 @@ impl<B: Bmc> fmt::Debug for Error<B> {
                 .finish(),
             Self::BmcNotProvided(what) => f.debug_tuple("BmcNotProvided").field(what).finish(),
             Self::InvalidValue(what) => f.debug_tuple("InvalidValue").field(what).finish(),
+        }
+    }
+}
+
+impl<B> StdError for Error<B>
+where
+    B: Bmc,
+    NvRedfishError<B>: 'static,
+{
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::NvRedfish { err, .. } => Some(err),
+            Self::BmcNotProvided(_) | Self::InvalidValue(_) => None,
         }
     }
 }

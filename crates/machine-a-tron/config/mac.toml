@@ -23,25 +23,12 @@
 carbide_api_url = "https://127.0.0.1:1079"
 # carbide_api_url = "https://carbide-api.forge:443"
 
-# tui_enabled enables a TUI view of machine-a-tron. If set to true, you need to
-# specify log_file to redirect logs.
-#
-# tui_enabled = true
-
-# Logs will be written here, because machine-a-tron shows a TUI by default. You
-# can omit this if tui_enabled = false
+# Logs will be written here.
 log_file = "/tmp/mat.log"
 
-# Network interface to bind to when creating addresses for BMC mocks. BMC mocks
-# will be configured with whatever IP address carbide assigns them, so they will
-# assign new addresses to this interface via `ip address add`.
-
-# running on host
-interface = "lo0"
-# running in docker linux container
-# interface = "lo"
-
-# interface = "cni0"
+# Log format can be "compact" (the default) or "logfmt". Kubernetes deployments
+# use logfmt on stdout so log collectors can preserve structured tracing fields.
+log_format = "compact"
 
 # Set use_pxe_api to true if you want to avoid running a PXE server and instead
 # have machine-a-tron use the carbide API to simulate PXE requests.
@@ -65,6 +52,11 @@ pxe_server_port = "8080"
 #
 bmc_mock_port = 2000
 
+# Set to true to start an independent IPMI/SOL simulator for each IPMI-capable
+# host BMC. This requires ipmi_sim and ipmitool to be available in PATH.
+#
+enable_ipmi_simulation = false
+
 # If set, host/DPU BMC mocks start with the factory default password rotated
 # to this value. Leave unset to keep the factory default.
 #
@@ -73,10 +65,7 @@ bmc_mock_port = 2000
 
 [machines.config]
 host_count = 3
-vpc_count = 3
-# vpc_count = 10
 dpu_per_host_count = 1
-subnets_per_vpc = 2
 dpu_reboot_delay = 10  # in units of seconds
 host_reboot_delay = 10 # in units of seconds
 
@@ -85,14 +74,11 @@ host_reboot_delay = 10 # in units of seconds
 # only used for filling in gateway/relay fields in the DHCP request object
 # (which carbide uses to determine what network the request came from.)
 admin_dhcp_relay_address = "192.168.252.1"
+# Direct host DHCP for zero-DPU hosts and DPUs operating as plain NICs.
+host_inband_dhcp_relay_address = "192.168.253.1"
 oob_dhcp_relay_address = "192.168.2.1"
 # oob_dhcp_relay_address = "192.168.2.1"
 # admin_dhcp_relay_address = "192.164.0.1"
-
-# Configures the location of some JSON templates machine-a-tron uses as a basis
-# for mocking certain data. There is no reason to change this from the default.
-#
-# template_dir = "dev/machine-a-tron/templates"
 
 # Set this to a hostname or IP If you want machine-a-tron to register its BMC-mock as the bmc_proxy host through the
 # dynamic configuration API. (this will be combined with bmc_mock_port to form a host:port pair.) This is useful if you

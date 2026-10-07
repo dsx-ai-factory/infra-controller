@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Carbide is a Bare Metal Provisioning system with auto-discovery and API based machine manipulation"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 # Thin top-level crate: the `carbide-api` binary plus a small `carbide` library
 # that re-exports the server entrypoint. The implementation lives in
@@ -39,21 +40,54 @@ path = "src/main.rs"
 carbide-api-core = { path = "../api-core", default-features = false }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-web = { path = "../api-web" }
+carbide-http-connector = { path = "../http-connector" }
+carbide-instrument = { path = "../instrument" }
+carbide-kms-provider = { path = "../kms-provider" }
+carbide-machine-controller = { path = "../machine-controller" }
+carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-secrets = { path = "../secrets" }
+carbide-site-explorer = { path = "../site-explorer" }
 carbide-version = { path = "../version" }
+carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
+logfmt = { path = "../logfmt" }
+metrics-endpoint = { path = "../metrics-endpoint" }
+spancounter = { path = "../spancounter" }
+sqlx-query-tracing = { path = "../sqlx-query-tracing" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 clap = { workspace = true }
 eyre = { workspace = true }
+ipnetwork = { workspace = true }
+opentelemetry = { workspace = true, features = ["logs"] }
+opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"] }
+opentelemetry-prometheus = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true, features = [
+  "semconv_experimental",
+] }
+opentelemetry_sdk = { workspace = true, features = [
+  "logs",
+  "rt-tokio",
+  "spec_unstable_metrics_views",
+  "testing",
+] }
+prometheus = { workspace = true }
 sqlx = { workspace = true, features = [
   "runtime-tokio",
   "tls-rustls",
   "migrate",
   "postgres",
 ] }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-log = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
+  "env-filter",
+  "local-time",
+] }
+vaultrs = { workspace = true }
 
 [features]
 default = ["linux-build"]
@@ -61,6 +95,21 @@ linux-build = ["carbide-api-core/linux-build"]
 
 [build-dependencies]
 carbide-version = { path = "../version" }
+
+[dev-dependencies]
+# Internal dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+carbide-api-core = { path = "../api-core", default-features = false, features = [
+  "test-support",
+] }
+carbide-test-support = { path = "../test-support" }
+trace-propagation = { path = "../trace-propagation" }
+
+# External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+http = { workspace = true }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "trace"] }
+tempfile = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
 
 [lints]
 workspace = true

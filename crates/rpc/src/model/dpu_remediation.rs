@@ -153,7 +153,11 @@ impl RpcTryFrom<(RevokeRemediationRequest, String)> for RevokeRemediation {
                 "Request must contain a remediation id.",
             ))?;
         let revoked_by = value.1;
-        tracing::info!("Remediation: '{}' revoked by: '{}'", id, revoked_by);
+        tracing::info!(
+            remediation_id = %id,
+            revoked_by = %revoked_by,
+            "Remediation revoked",
+        );
 
         Ok(Self { id })
     }
@@ -170,7 +174,11 @@ impl RpcTryFrom<(EnableRemediationRequest, String)> for EnableRemediation {
                 "Request must contain a remediation id.",
             ))?;
         let enabled_by = value.1;
-        tracing::info!("Remediation: '{}' enabled by: '{}'", id, enabled_by);
+        tracing::info!(
+            remediation_id = %id,
+            enabled_by = %enabled_by,
+            "Remediation enabled",
+        );
 
         Ok(Self { id })
     }
@@ -187,7 +195,11 @@ impl RpcTryFrom<(DisableRemediationRequest, String)> for DisableRemediation {
                 "Request must contain a remediation id.",
             ))?;
         let disabled_by = value.1;
-        tracing::info!("Remediation: '{}' disabled by: '{}'", id, disabled_by);
+        tracing::info!(
+            remediation_id = %id,
+            disabled_by = %disabled_by,
+            "Remediation disabled",
+        );
 
         Ok(Self { id })
     }

@@ -31,97 +31,112 @@ use measured_boot::bundle::MeasurementBundle;
 use measured_boot::records::MeasurementBundleRecord;
 use serde::Serialize;
 
+use crate::attestation::measured_boot::MachineIdList;
 use crate::attestation::measured_boot::bundle::args::{
-    CmdBundle, Create, Delete, FindClosestMatch, List, ListMachines, Rename, SetState, Show,
+    Create, Delete, FindClosestMatch, ListAll, ListMachines, Rename, ReportId, SetState, Show,
 };
-use crate::attestation::measured_boot::{MachineIdList, global};
-use crate::cli_output;
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-/// dispatch matches + dispatches the correct command for
-/// the `bundle` subcommand (e.g. create, delete, set-state).
-pub async fn dispatch(
-    cmd: CmdBundle,
-    cli: &mut global::cmds::CliData<'_, '_>,
-) -> CarbideCliResult<()> {
-    match cmd {
-        CmdBundle::Create(local_args) => {
-            cli_output(
-                create_for_id(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdBundle::Delete(local_args) => {
-            cli_output(
-                delete(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdBundle::Rename(local_args) => {
-            cli_output(
-                rename(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdBundle::SetState(local_args) => {
-            cli_output(
-                set_state(cli.grpc_conn, local_args).await?,
-                &cli.args.format,
-                crate::Destination::Stdout(),
-            )?;
-        }
-        CmdBundle::Show(local_args) => {
-            if local_args.identifier.is_some() {
-                cli_output(
-                    show_by_id_or_name(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            } else {
-                cli_output(
-                    show_all(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-        }
-        CmdBundle::FindClosestMatch(local_args) => {
-            match find_closest_match(cli.grpc_conn, local_args).await? {
-                Some(measurement_bundle) => cli_output(
-                    measurement_bundle,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?,
-                None => tracing::info!("No partially matching bundle found"),
-            };
-        }
-        CmdBundle::List(selector) => match selector {
-            List::Machines(local_args) => {
-                cli_output(
-                    list_machines(cli.grpc_conn, local_args).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-            List::All(_) => {
-                cli_output(
-                    list(cli.grpc_conn).await?,
-                    &cli.args.format,
-                    crate::Destination::Stdout(),
-                )?;
-            }
-        },
+impl Run for Create {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            create_for_id(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
     }
-    Ok(())
+}
+
+impl Run for Delete {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            delete(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Rename {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            rename(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for SetState {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            set_state(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for Show {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if self.identifier.is_some() {
+            crate::cli_output(
+                show_by_id_or_name(&ctx.api_client, self).await?,
+                &ctx.config.format,
+                crate::Destination::Stdout(),
+            )
+        } else {
+            crate::cli_output(
+                show_all(&ctx.api_client, self).await?,
+                &ctx.config.format,
+                crate::Destination::Stdout(),
+            )
+        }
+    }
+}
+
+impl Run for ReportId {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        match find_closest_match(&ctx.api_client, FindClosestMatch::Report(self)).await? {
+            Some(measurement_bundle) => crate::cli_output(
+                measurement_bundle,
+                &ctx.config.format,
+                crate::Destination::Stdout(),
+            ),
+            None => {
+                tracing::info!("No partially matching bundle found");
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Run for ListAll {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list(&ctx.api_client).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
+}
+
+impl Run for ListMachines {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        crate::cli_output(
+            list_machines(&ctx.api_client, self).await?,
+            &ctx.config.format,
+            crate::Destination::Stdout(),
+        )
+    }
 }
 
 /// create_for_id creates a new measurement bundle associated with the
 /// profile w/ the provided profile ID.
-pub async fn create_for_id(
+async fn create_for_id(
     grpc_conn: &ApiClient,
     create: Create,
 ) -> CarbideCliResult<MeasurementBundle> {
@@ -132,7 +147,7 @@ pub async fn create_for_id(
 }
 
 /// delete deletes a measurement bundle with the provided ID.
-pub async fn delete(grpc_conn: &ApiClient, delete: Delete) -> CarbideCliResult<MeasurementBundle> {
+async fn delete(grpc_conn: &ApiClient, delete: Delete) -> CarbideCliResult<MeasurementBundle> {
     let response = grpc_conn.0.delete_measurement_bundle(delete).await?;
 
     MeasurementBundle::from_grpc_opt(response.bundle)
@@ -140,7 +155,7 @@ pub async fn delete(grpc_conn: &ApiClient, delete: Delete) -> CarbideCliResult<M
 }
 
 /// rename renames a measurement bundle with the provided name or ID.
-pub async fn rename(grpc_conn: &ApiClient, rename: Rename) -> CarbideCliResult<MeasurementBundle> {
+async fn rename(grpc_conn: &ApiClient, rename: Rename) -> CarbideCliResult<MeasurementBundle> {
     let response = grpc_conn
         .0
         .rename_measurement_bundle(RenameMeasurementBundleRequest::try_from(rename)?)
@@ -151,7 +166,7 @@ pub async fn rename(grpc_conn: &ApiClient, rename: Rename) -> CarbideCliResult<M
 }
 
 /// set_state updates the state of the bundle (e.g. active, obsolete, retired).
-pub async fn set_state(
+async fn set_state(
     grpc_conn: &ApiClient,
     set_state: SetState,
 ) -> CarbideCliResult<MeasurementBundle> {
@@ -165,7 +180,7 @@ pub async fn set_state(
 }
 
 /// show_by_id dumps all info about a bundle for the given ID or name.
-pub async fn show_by_id_or_name(
+async fn show_by_id_or_name(
     grpc_conn: &ApiClient,
     show: Show,
 ) -> CarbideCliResult<MeasurementBundle> {
@@ -179,7 +194,7 @@ pub async fn show_by_id_or_name(
 }
 
 /// show_all dumps all info about all bundles.
-pub async fn show_all(
+async fn show_all(
     grpc_conn: &ApiClient,
     _get_by_id: Show,
 ) -> CarbideCliResult<MeasurementBundleList> {
@@ -199,7 +214,7 @@ pub async fn show_all(
 }
 
 /// list lists all bundle ids.
-pub async fn list(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementBundleRecordList> {
+async fn list(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementBundleRecordList> {
     Ok(MeasurementBundleRecordList(
         grpc_conn
             .0
@@ -217,7 +232,7 @@ pub async fn list(grpc_conn: &ApiClient) -> CarbideCliResult<MeasurementBundleRe
 
 /// list_machines lists all machines associated with the provided
 /// bundle ID or bundle name.
-pub async fn list_machines(
+async fn list_machines(
     grpc_conn: &ApiClient,
     list_machines: ListMachines,
 ) -> CarbideCliResult<MachineIdList> {
@@ -238,7 +253,7 @@ pub async fn list_machines(
     ))
 }
 
-pub async fn find_closest_match(
+async fn find_closest_match(
     grpc_conn: &ApiClient,
     args: FindClosestMatch,
 ) -> CarbideCliResult<Option<MeasurementBundle>> {
@@ -258,7 +273,7 @@ pub async fn find_closest_match(
 /// for a Vec<MeasurementBundleRecord> so the ToTable trait can
 /// be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementBundleRecordList(Vec<MeasurementBundleRecord>);
+struct MeasurementBundleRecordList(Vec<MeasurementBundleRecord>);
 
 impl ToTable for MeasurementBundleRecordList {
     fn into_table(self) -> eyre::Result<String> {
@@ -287,7 +302,7 @@ impl ToTable for MeasurementBundleRecordList {
 /// pattern for a Vec<MeasurementBundle> so the ToTable
 /// trait can be leveraged (since we don't define Vec).
 #[derive(Serialize)]
-pub struct MeasurementBundleList(Vec<MeasurementBundle>);
+struct MeasurementBundleList(Vec<MeasurementBundle>);
 
 // When `bundle show` gets called (for all entries), and the output format
 // is the default table view, this gets used to print a pretty table.

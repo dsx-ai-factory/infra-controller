@@ -24,7 +24,7 @@ pub(crate) mod ipxe;
 pub(crate) mod metrics;
 pub(crate) mod tls;
 
-pub struct RpcContext;
+struct RpcContext;
 
 impl RpcContext {
     async fn get_pxe_instructions(

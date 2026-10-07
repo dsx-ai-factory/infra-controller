@@ -35,16 +35,16 @@ Filter by name:
     $ nico-admin-cli spx-partition show --name my-partition
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(None),
         help = "The SPX Partition ID to query, leave empty for all (default)"
     )]
-    pub id: Option<SpxPartitionId>,
+    pub(super) id: Option<SpxPartitionId>,
 
     #[clap(short, long, help = "The Tenant Org ID to query")]
-    pub tenant_org_id: Option<String>,
+    pub(super) tenant_org_id: Option<String>,
 
     #[clap(short, long, help = "The SPX Partition name to query")]
-    pub name: Option<String>,
+    pub(super) name: Option<String>,
 }

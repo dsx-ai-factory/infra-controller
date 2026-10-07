@@ -1,0 +1,20 @@
+# HELP carbide_api_ready Whether the NICo API is running
+# TYPE carbide_api_ready gauge
+carbide_api_ready 1
+# HELP carbide_api_version Version (git sha, build date, etc) of this service
+# TYPE carbide_api_version gauge
+carbide_api_version{build_date="2025-02-20",build_hostname="",build_user="ksimon",build_version="v2025.02.28-rc1-0-11-g7a573e969",git_sha="7a573e96",rust_version="rustc 1.84.1 (e71f9a9a9 2025-01-27)"} 1
+# HELP carbide_db_pool_idle_conns Number of idle connections in the carbide database pool
+# TYPE carbide_db_pool_idle_conns gauge
+carbide_db_pool_idle_conns 1
+# HELP carbide_db_pool_total_conns Number of (active + idle) connections in the carbide database pool
+# TYPE carbide_db_pool_total_conns gauge
+carbide_db_pool_total_conns 1
+# HELP carbide_resourcepool_free_count Number of values in the resource pool currently available for allocation
+# TYPE carbide_resourcepool_free_count gauge
+carbide_resourcepool_free_count{pool="pool1"} 20
+carbide_resourcepool_free_count{pool="pool2"} 10
+# HELP carbide_resourcepool_used_count Number of currently allocated values in the resource pool
+# TYPE carbide_resourcepool_used_count gauge
+carbide_resourcepool_used_count{pool="pool1"} 10
+carbide_resourcepool_used_count{pool="pool2"} 20

@@ -23,7 +23,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::health_utils;
 use crate::rpc::ApiClient;
 
-pub async fn handle_health_report(
+pub(super) async fn handle_health_report(
     command: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -43,13 +43,13 @@ pub async fn handle_health_report(
             )?;
 
             if options.print_only {
-                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                println!("{}", serde_json::to_string_pretty(&report)?);
                 return Ok(());
             }
 
             api_client
                 .machine_insert_health_report_override(
-                    options.dpu_id,
+                    &options.dpu_id,
                     report.into(),
                     options.replace,
                 )

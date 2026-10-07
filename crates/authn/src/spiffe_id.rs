@@ -377,6 +377,9 @@ fn is_valid_trust_domain_char(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
     use super::*;
 
     pub(crate) const TD_CHARS: &[char] = &[
@@ -392,34 +395,24 @@ mod tests {
         '2', '3', '4', '5', '6', '7', '8', '9', '.', '-', '_',
     ];
 
-    macro_rules! spiffe_id_success_tests {
-        ($($name:ident: $value:expr,)*) => {
-        $(
-            #[test]
-            fn $name() {
-                let (input, expected) = $value;
-                let spiffe_id = SpiffeId::from_str(input).unwrap();
-                assert_eq!(spiffe_id, expected);
+    #[test]
+    fn spiffe_id_parses_valid_inputs() {
+        scenarios!(
+            run = SpiffeId::from_str;
+            "valid SPIFFE ID without a path" {
+                "spiffe://trustdomain" => Yields(SpiffeId {
+                    trust_domain: TrustDomain::from_str("trustdomain").unwrap(),
+                    path: "".to_string(),
+                }),
             }
-        )*
-        }
-    }
 
-    spiffe_id_success_tests! {
-        from_valid_spiffe_id_str: (
-            "spiffe://trustdomain",
-            SpiffeId {
-                trust_domain: TrustDomain::from_str("trustdomain").unwrap(),
-                path: "".to_string(),
+            "valid URI with a path" {
+                "spiffe://trustdomain/path/element" => Yields(SpiffeId {
+                    trust_domain: TrustDomain::from_str("trustdomain").unwrap(),
+                    path: "/path/element".to_string(),
+                }),
             }
-        ),
-        from_valid_uri_str: (
-            "spiffe://trustdomain/path/element",
-            SpiffeId {
-                trust_domain: TrustDomain::from_str("trustdomain").unwrap(),
-                path: "/path/element".to_string(),
-            }
-        ),
+        );
     }
 
     #[test]
@@ -469,80 +462,82 @@ mod tests {
         assert_eq!(spiffe_id.path, "/path");
     }
 
-    macro_rules! spiffe_id_error_tests {
-        ($($name:ident: $value:expr,)*) => {
-        $(
-            #[test]
-            fn $name() {
-            let (input, expected_error) = $value;
-                let spiffe_id = SpiffeId::from_str(input);
-                let error = spiffe_id.unwrap_err();
-
-                assert_eq!(error, expected_error);
+    #[test]
+    fn spiffe_id_rejects_invalid_inputs() {
+        scenarios!(
+            run = SpiffeId::from_str;
+            "empty string" {
+                "" => FailsWith(SpiffeIdError::Empty),
             }
-        )*
-        }
-    }
 
-    spiffe_id_error_tests! {
-        from_empty_str: ("", SpiffeIdError::Empty),
-        from_short_invalid_str: ("spif", SpiffeIdError::WrongScheme),
-        from_str_invalid_uri_str_contains_ip_address: (
-            "192.168.2.2:6688",
-            SpiffeIdError::WrongScheme,
-        ),
-        from_str_uri_str_invalid_scheme: (
-            "http://domain.test/path/element",
-            SpiffeIdError::WrongScheme,
-        ),
-        from_str_uri_str_empty_authority: (
-            "spiffe:/path/element",
-            SpiffeIdError::WrongScheme,
-        ),
-        from_str_uri_str_empty_authority_after_slashes: (
-            "spiffe:///path/element",
-            SpiffeIdError::MissingTrustDomain,
-        ),
-        from_str_uri_str_empty_authority_no_slashes: (
-            "spiffe:path/element",
-            SpiffeIdError::WrongScheme,
-        ),
-        from_str_uri_str_with_query: (
-            "spiffe://domain.test/path/element?query=1",
-            SpiffeIdError::BadPathSegmentChar,
-        ),
-        from_str_uri_str_with_fragment: (
-            "spiffe://domain.test/path/element#fragment-1",
-            SpiffeIdError::BadPathSegmentChar,
-        ),
-        from_str_uri_str_with_port: (
-            "spiffe://domain.test:8080/path/element",
-            SpiffeIdError::BadTrustDomainChar,
-        ),
-        from_str_uri_str_with_user_info: (
-            "spiffe://user:password@test.org/path/element",
-            SpiffeIdError::BadTrustDomainChar,
-        ),
-        from_str_uri_str_with_trailing_slash: (
-            "spiffe://test.org/",
-            SpiffeIdError::TrailingSlash,
-        ),
-        from_str_uri_str_with_emtpy_segment: (
-            "spiffe://test.org//",
-            SpiffeIdError::EmptySegment,
-        ),
-        from_str_uri_str_with_path_with_trailing_slash: (
-            "spiffe://test.org/path/other/",
-            SpiffeIdError::TrailingSlash,
-        ),
-        from_str_uri_str_with_dot_segment: (
-            "spiffe://test.org/./other",
-            SpiffeIdError::DotSegment,
-        ),
-        from_str_uri_str_with_double_dot_segment: (
-            "spiffe://test.org/../other",
-            SpiffeIdError::DotSegment,
-        ),
+            "too short to hold a scheme" {
+                "spif" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "bare IP address" {
+                "192.168.2.2:6688" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "non-spiffe scheme" {
+                "http://domain.test/path/element" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "single-slash authority" {
+                "spiffe:/path/element" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "empty authority after slashes" {
+                "spiffe:///path/element" => FailsWith(SpiffeIdError::MissingTrustDomain),
+            }
+
+            "no authority slashes" {
+                "spiffe:path/element" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "query string in path" {
+                "spiffe://domain.test/path/element?query=1" => {
+                    FailsWith(SpiffeIdError::BadPathSegmentChar)
+                }
+            }
+
+            "fragment in path" {
+                "spiffe://domain.test/path/element#fragment-1" => {
+                    FailsWith(SpiffeIdError::BadPathSegmentChar)
+                }
+            }
+
+            "port in trust domain" {
+                "spiffe://domain.test:8080/path/element" => {
+                    FailsWith(SpiffeIdError::BadTrustDomainChar)
+                }
+            }
+
+            "user info in trust domain" {
+                "spiffe://user:password@test.org/path/element" => {
+                    FailsWith(SpiffeIdError::BadTrustDomainChar)
+                }
+            }
+
+            "trailing slash, no path" {
+                "spiffe://test.org/" => FailsWith(SpiffeIdError::TrailingSlash),
+            }
+
+            "empty segment" {
+                "spiffe://test.org//" => FailsWith(SpiffeIdError::EmptySegment),
+            }
+
+            "trailing slash after a path" {
+                "spiffe://test.org/path/other/" => FailsWith(SpiffeIdError::TrailingSlash),
+            }
+
+            "dot segment" {
+                "spiffe://test.org/./other" => FailsWith(SpiffeIdError::DotSegment),
+            }
+
+            "double-dot segment" {
+                "spiffe://test.org/../other" => FailsWith(SpiffeIdError::DotSegment),
+            }
+        );
     }
 
     #[test]
@@ -612,47 +607,64 @@ mod tests {
         }
     }
 
-    macro_rules! trust_domain_success_tests {
-        ($($name:ident: $value:expr,)*) => {
-        $(
-            #[test]
-            fn $name() {
-                let (input, expected) = $value;
-                let trust_domain = TrustDomain::new(input).unwrap();
-                assert_eq!(trust_domain, expected);
+    #[test]
+    fn trust_domain_parses_valid_inputs() {
+        scenarios!(
+            run = TrustDomain::new;
+            "bare domain name" {
+                "trustdomain" => Yields(TrustDomain {
+                    name: "trustdomain".to_string(),
+                }),
             }
-        )*
-        }
-    }
 
-    trust_domain_success_tests! {
-        from_str_domain: ("trustdomain", TrustDomain{name: "trustdomain".to_string()}),
-        from_str_spiffeid: ("spiffe://other.test", TrustDomain{name: "other.test".to_string()}),
-        from_str_spiffeid_with_path: ("spiffe://domain.test/path/element", TrustDomain{name: "domain.test".to_string()}),
-    }
-
-    macro_rules! trust_domain_error_tests {
-        ($($name:ident: $value:expr,)*) => {
-        $(
-            #[test]
-            fn $name() {
-                let (input, expected_error) = $value;
-                let trust_domain = TrustDomain::new(input);
-                let error = trust_domain.unwrap_err();
-                assert_eq!(error, expected_error);
+            "SPIFFE ID without a path" {
+                "spiffe://other.test" => Yields(TrustDomain {
+                    name: "other.test".to_string(),
+                }),
             }
-        )*
-        }
+
+            "SPIFFE ID with a path" {
+                "spiffe://domain.test/path/element" => Yields(TrustDomain {
+                    name: "domain.test".to_string(),
+                }),
+            }
+        );
     }
 
-    trust_domain_error_tests! {
-        trust_domain_from_empty_str: ("", SpiffeIdError::MissingTrustDomain),
-        trust_domain_from_invalid_scheme:  ("other://domain.test", SpiffeIdError::WrongScheme),
-        trust_domain_from_uri_with_port: ("spiffe://domain.test:80", SpiffeIdError::BadTrustDomainChar),
-        trust_domain_from_uri_with_userinfo: ("spiffe://user:pass@domain.test", SpiffeIdError::BadTrustDomainChar),
-        trust_domain_from_uri_with_invalid_domain: ("spiffe:// domain.test", SpiffeIdError::BadTrustDomainChar),
-        trust_domain_from_uri_with_empty_scheme: ("://domain.test", SpiffeIdError::WrongScheme),
-        trust_domain_from_uri_with_empty_domain: ("spiffe:///path", SpiffeIdError::MissingTrustDomain),
+    #[test]
+    fn trust_domain_rejects_invalid_inputs() {
+        scenarios!(
+            run = TrustDomain::new;
+            "empty string" {
+                "" => FailsWith(SpiffeIdError::MissingTrustDomain),
+            }
+
+            "non-spiffe scheme" {
+                "other://domain.test" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "port in the domain" {
+                "spiffe://domain.test:80" => FailsWith(SpiffeIdError::BadTrustDomainChar),
+            }
+
+            "user info in the domain" {
+                "spiffe://user:pass@domain.test" => {
+                    FailsWith(SpiffeIdError::BadTrustDomainChar)
+                }
+            }
+
+            "space in the domain" {
+                "spiffe:// domain.test" => FailsWith(SpiffeIdError::BadTrustDomainChar),
+            }
+
+            "empty scheme" {
+                "://domain.test" => FailsWith(SpiffeIdError::WrongScheme),
+            }
+
+            "empty domain" {
+                "spiffe:///path" => FailsWith(SpiffeIdError::MissingTrustDomain),
+            }
+        );
     }
 
     #[test]

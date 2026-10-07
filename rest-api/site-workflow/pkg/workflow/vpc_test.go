@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
@@ -84,15 +84,15 @@ func (cvv2ts *CreateVpcV2TestSuite) Test_CreateVpcV2_Success() {
 	var VpcManager iActivity.ManageVPC
 	activeVni := uint32(7301)
 
-	request := &cwssaws.VpcCreationRequest{
-		Id:                   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcCreationRequest{
+		Id:                   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 		Name:                 "the_name",
 		TenantOrganizationId: "the_org",
 	}
-	controllerVpc := &cwssaws.Vpc{
+	controllerVpc := &corev1.Vpc{
 		Id:   request.Id,
 		Name: request.Name,
-		Status: &cwssaws.VpcStatus{
+		Status: &corev1.VpcStatus{
 			Vni: &activeVni,
 		},
 	}
@@ -106,7 +106,7 @@ func (cvv2ts *CreateVpcV2TestSuite) Test_CreateVpcV2_Success() {
 	cvv2ts.True(cvv2ts.env.IsWorkflowCompleted())
 	cvv2ts.NoError(cvv2ts.env.GetWorkflowError())
 
-	var result cwssaws.Vpc
+	var result corev1.Vpc
 	cvv2ts.NoError(cvv2ts.env.GetWorkflowResult(&result))
 	cvv2ts.Equal(controllerVpc.Id.Value, result.Id.Value)
 	cvv2ts.Equal(controllerVpc.Name, result.Name)
@@ -116,8 +116,8 @@ func (cvv2ts *CreateVpcV2TestSuite) Test_CreateVpcV2_Success() {
 func (cvv2ts *CreateVpcV2TestSuite) Test_CreateVpcV2_Failure() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcCreationRequest{
-		Id:                   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcCreationRequest{
+		Id:                   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 		Name:                 "the_name",
 		TenantOrganizationId: "the_org",
 	}
@@ -156,8 +156,8 @@ func (uvts *UpdateVpcTestSuite) AfterTest(suiteName, testName string) {
 func (uvts *UpdateVpcTestSuite) Test_UpdateVpc_Success() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcUpdateRequest{
-		Id:   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcUpdateRequest{
+		Id:   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 		Name: "the_name",
 	}
 
@@ -174,8 +174,8 @@ func (uvts *UpdateVpcTestSuite) Test_UpdateVpc_Success() {
 func (uvts *UpdateVpcTestSuite) Test_UpdateVpc_Failure() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcUpdateRequest{
-		Id:   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcUpdateRequest{
+		Id:   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 		Name: "the_name",
 	}
 
@@ -213,9 +213,9 @@ func (uvvts *UpdateVpcVirtualizationTestSuite) AfterTest(suiteName, testName str
 func (uvvts *UpdateVpcVirtualizationTestSuite) Test_UpdateVpcVirtualization_Success() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcUpdateVirtualizationRequest{
-		Id:                        &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		NetworkVirtualizationType: cwssaws.VpcVirtualizationType_FNN.Enum(),
+	request := &corev1.VpcUpdateVirtualizationRequest{
+		Id:                        &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		NetworkVirtualizationType: corev1.VpcVirtualizationType_FNN.Enum(),
 	}
 
 	// Mock UpdateVpcOnSite activity
@@ -231,9 +231,9 @@ func (uvvts *UpdateVpcVirtualizationTestSuite) Test_UpdateVpcVirtualization_Succ
 func (uvvts *UpdateVpcVirtualizationTestSuite) Test_UpdateVpcVirtualization_Failure() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcUpdateVirtualizationRequest{
-		Id:                        &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		NetworkVirtualizationType: cwssaws.VpcVirtualizationType_FNN.Enum(),
+	request := &corev1.VpcUpdateVirtualizationRequest{
+		Id:                        &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		NetworkVirtualizationType: corev1.VpcVirtualizationType_FNN.Enum(),
 	}
 
 	errMsg := "Site Controller communication error"
@@ -270,8 +270,8 @@ func (cvv2ts *DeleteVpcV2TestSuite) AfterTest(suiteName, testName string) {
 func (cvv2ts *DeleteVpcV2TestSuite) Test_DeleteVpcV2_Success() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcDeletionRequest{
-		Id: &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcDeletionRequest{
+		Id: &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	// Mock DeleteVpcOnSite activity
@@ -287,8 +287,8 @@ func (cvv2ts *DeleteVpcV2TestSuite) Test_DeleteVpcV2_Success() {
 func (cvv2ts *DeleteVpcV2TestSuite) Test_DeleteVpcV2_Failure() {
 	var VpcManager iActivity.ManageVPC
 
-	request := &cwssaws.VpcDeletionRequest{
-		Id: &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.VpcDeletionRequest{
+		Id: &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	errMsg := "Site Controller communication error"

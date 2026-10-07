@@ -18,11 +18,12 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+pub use carbide_api_core::cfg::file::CarbideConfig;
 use carbide_api_core::test_support::rpc::forge::forge_server::Forge;
 pub use carbide_api_core::test_support::{self, Api, rpc};
-use carbide_site_explorer::SiteExplorer;
 use carbide_site_explorer::config::SiteExplorerConfig;
 pub use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExplorer};
+use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
 use carbide_utils::test_support::test_meter::TestMeter;
 use carbide_uuid::machine::MachineId;
 use sqlx::{PgPool, PgTransaction};
@@ -30,21 +31,29 @@ use tokio::task::JoinSet;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::Request;
 
-use crate::asset::{TestPowerShelf, TestRack, TestSwitch};
+use crate::asset::{TestExpectedSwitch, TestPowerShelf, TestRack, TestSwitch};
 use crate::builder::TestHarnessBuilder;
 use crate::dns::TestDomain;
 use crate::network::controller::TestNetworkController;
-use crate::network::segment::TestNetworkSegment;
+pub use crate::network::segment::TestNetworkSegment;
 
 pub mod asset;
 pub mod builder;
+pub mod db_machine;
 pub mod dns;
+pub mod machine;
+pub mod machine_dpu;
+pub mod machine_host;
 pub mod managed_host;
 pub mod network;
 pub mod prelude;
 pub mod resource_pool;
 
-pub use managed_host::{TestManagedHost, TestManagedHostBuilder};
+pub use db_machine::DbMachineExt;
+pub use machine::TestMachine;
+pub use machine_dpu::TestDpuMachine;
+pub use machine_host::TestHostMachine;
+pub use managed_host::{TestManagedHost, TestManagedHostBuildData, TestManagedHostBuilder};
 
 pub struct TestHarness {
     api: Arc<ApiHandle>,
@@ -56,7 +65,7 @@ impl TestHarness {
     pub fn builder(db_pool: PgPool) -> TestHarnessBuilder {
         builder::TestHarnessBuilder {
             db_pool,
-            api: None,
+            api_builder_fn: None,
             test_meter: None,
             pools: None,
         }
@@ -79,11 +88,17 @@ impl TestHarness {
     }
 
     pub async fn test_domain(&self) -> TestDomain {
-        let name = "testharness.example.com";
+        self.create_test_domain("testharness.example.com").await
+    }
+
+    pub async fn create_test_domain(&self, name: impl Into<String>) -> TestDomain {
+        let name = name.into();
         let id = self
             .api
             .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
-                name: name.to_string(),
+                name: name.clone(),
+                default_ttl: None,
+                vpc_id: None,
             }))
             .await
             .unwrap()
@@ -114,16 +129,23 @@ impl TestHarness {
     pub fn test_site_explorer(&self, config: SiteExplorerConfig) -> TestSiteExplorer {
         let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
         let api = self.api();
+        let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
+            api.database_connection.clone(),
+            endpoint_explorer.clone(),
+            Arc::new(api.runtime_config.get_firmware_config()),
+        ));
         let site_explorer = SiteExplorer::new(
             api.database_connection.clone(),
             config,
             self.test_meter.meter(),
+            endpoint_exploration_service,
             endpoint_explorer.clone(),
-            Arc::new(api.runtime_config.get_firmware_config()),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
+            api.runtime_config.rack_profiles.clone(),
             None,
             api.credential_manager().clone(),
+            false,
         );
         TestSiteExplorer::new(site_explorer, endpoint_explorer)
     }
@@ -144,16 +166,35 @@ impl TestHarness {
             .machines
     }
 
-    pub async fn create_rack(&self) -> TestRack {
-        TestRack::create(self).await
+    /// Creates a randomly identified rack with the supplied profile and default config.
+    pub async fn create_rack(
+        &self,
+        rack_profile_id: carbide_uuid::rack::RackProfileId,
+    ) -> TestRack {
+        TestRack::create(self, rack_profile_id).await
     }
 
     pub async fn create_switch(&self, slot_number: i32, tray_index: i32) -> TestSwitch {
         TestSwitch::create(self, slot_number, tray_index).await
     }
 
-    pub async fn create_power_shelf(&self) -> TestPowerShelf {
-        TestPowerShelf::create(self).await
+    /// Creates an expected-switch fixture through the Forge API.
+    pub async fn create_expected_switch(
+        &self,
+        expected_switch: rpc::forge::ExpectedSwitch,
+    ) -> TestExpectedSwitch {
+        TestExpectedSwitch::create(self, expected_switch).await
+    }
+
+    /// Creates a power shelf directly in the database with the supplied config.
+    ///
+    /// The ID is derived from `config.name`, so repeated names collide in the
+    /// same database. BMC MAC, metadata, and rack association are left unset.
+    pub async fn create_power_shelf(
+        &self,
+        config: model::power_shelf::PowerShelfConfig,
+    ) -> TestPowerShelf {
+        TestPowerShelf::create(self, config).await
     }
 }
 

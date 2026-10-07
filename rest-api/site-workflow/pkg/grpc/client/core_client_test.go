@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	wflows "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestCoreGrpcAtomicClient_GetInitialCertMD5(t *testing.T) {
@@ -95,6 +95,50 @@ func TestCoreGrpcAtomicClient_GetClient_ReturnsClientAfterSwap(t *testing.T) {
 	testClient := &CoreGrpcClient{}
 	cac.value.Store(testClient)
 	assert.Equal(t, testClient, cac.GetClient())
+}
+
+func TestCoreGrpcAtomicClient_SwapClient(t *testing.T) {
+	first := &CoreGrpcClient{}
+	second := &CoreGrpcClient{}
+
+	tests := []struct {
+		name string
+		// seed holds the clients swapped in before the call under test, so each
+		// case reaches its starting state without depending on another case.
+		seed        []*CoreGrpcClient
+		newClient   *CoreGrpcClient
+		wantOld     *CoreGrpcClient
+		wantVersion int64
+	}{
+		{
+			name: "test that the initial swap reports no previous client and still advances the version",
+			// Initial creation is the normal path rather than a failure, even though
+			// there is nothing to hand back.
+			newClient:   first,
+			wantOld:     nil,
+			wantVersion: 1,
+		},
+		{
+			name:        "test that a later swap returns the client it replaced",
+			seed:        []*CoreGrpcClient{first},
+			newClient:   second,
+			wantOld:     first,
+			wantVersion: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cac := &CoreGrpcAtomicClient{
+				value: &atomic.Value{},
+			}
+			for _, seeded := range tt.seed {
+				cac.SwapClient(seeded)
+			}
+			assert.Equal(t, tt.wantOld, cac.SwapClient(tt.newClient))
+			assert.Equal(t, tt.wantVersion, cac.Version())
+			assert.Equal(t, tt.newClient, cac.GetClient())
+		})
+	}
 }
 
 func TestCoreGrpcAtomicClient_CheckCertificates(t *testing.T) {
@@ -191,53 +235,53 @@ func TestCoreGrpcAtomicClient_CheckCertificates(t *testing.T) {
 func TestUuidSliceToChunks(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    []*wflows.UUID
-		expected [][]*wflows.UUID
+		input    []*corev1.UUID
+		expected [][]*corev1.UUID
 	}{
 		{
 			name:     "empty",
-			input:    []*wflows.UUID{},
-			expected: [][]*wflows.UUID{},
+			input:    []*corev1.UUID{},
+			expected: [][]*corev1.UUID{},
 		},
 		{
 			name: "no remainder",
-			input: []*wflows.UUID{
+			input: []*corev1.UUID{
 				{Value: "uuid1"},
 				{Value: "uuid2"},
 				{Value: "uuid3"},
 				{Value: "uuid4"},
 			},
-			expected: [][]*wflows.UUID{
+			expected: [][]*corev1.UUID{
 				{
-					&wflows.UUID{Value: "uuid1"},
-					&wflows.UUID{Value: "uuid2"},
+					&corev1.UUID{Value: "uuid1"},
+					&corev1.UUID{Value: "uuid2"},
 				},
 				{
-					&wflows.UUID{Value: "uuid3"},
-					&wflows.UUID{Value: "uuid4"},
+					&corev1.UUID{Value: "uuid3"},
+					&corev1.UUID{Value: "uuid4"},
 				},
 			},
 		},
 		{
 			name: "with remainder",
-			input: []*wflows.UUID{
+			input: []*corev1.UUID{
 				{Value: "uuid1"},
 				{Value: "uuid2"},
 				{Value: "uuid3"},
 				{Value: "uuid4"},
 				{Value: "uuid5"},
 			},
-			expected: [][]*wflows.UUID{
+			expected: [][]*corev1.UUID{
 				{
-					&wflows.UUID{Value: "uuid1"},
-					&wflows.UUID{Value: "uuid2"},
+					&corev1.UUID{Value: "uuid1"},
+					&corev1.UUID{Value: "uuid2"},
 				},
 				{
-					&wflows.UUID{Value: "uuid3"},
-					&wflows.UUID{Value: "uuid4"},
+					&corev1.UUID{Value: "uuid3"},
+					&corev1.UUID{Value: "uuid4"},
 				},
 				{
-					&wflows.UUID{Value: "uuid5"},
+					&corev1.UUID{Value: "uuid5"},
 				},
 			},
 		},

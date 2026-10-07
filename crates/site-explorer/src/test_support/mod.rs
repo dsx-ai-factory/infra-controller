@@ -18,5 +18,5 @@
 mod mock_endpoint_explorer;
 mod test_site_explorer;
 
-pub use mock_endpoint_explorer::MockEndpointExplorer;
+pub use mock_endpoint_explorer::{MockEndpointExplorationBlocker, MockEndpointExplorer};
 pub use test_site_explorer::TestSiteExplorer;

@@ -20,8 +20,8 @@
 use carbide_uuid::switch::SwitchId;
 use db::db_read::PgPoolReader;
 use db::{ObjectColumnFilter, rack as db_rack, switch as db_switch};
-use model::rack::RackState;
-use model::switch::{ReProvisioningState, Switch, SwitchControllerState};
+use model::rack::{MaintenanceActivity, RackState};
+use model::switch::{ReProvisioningState, Switch, SwitchControllerState, SwitchReprovisionRequest};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -35,6 +35,71 @@ fn is_rack_level_reprovisioning(state: &Switch) -> bool {
         .switch_reprovisioning_requested
         .as_ref()
         .is_some_and(|req| req.initiator.starts_with("rack-"))
+}
+
+fn should_run(activities: &[MaintenanceActivity], activity: &MaintenanceActivity) -> bool {
+    activities.is_empty() || activities.iter().any(|a| a.same_kind(activity))
+}
+
+fn nvos_update_requested(activities: &[MaintenanceActivity]) -> bool {
+    should_run(
+        activities,
+        &MaintenanceActivity::NvosUpdate {
+            config_json: String::new(),
+        },
+    )
+}
+
+fn configure_nmx_cluster_requested(activities: &[MaintenanceActivity]) -> bool {
+    should_run(activities, &MaintenanceActivity::ConfigureNmxCluster)
+}
+
+fn firmware_upgrade_requested(activities: &[MaintenanceActivity]) -> bool {
+    should_run(
+        activities,
+        &MaintenanceActivity::FirmwareUpgrade {
+            firmware_version: None,
+            components: vec![],
+            force_update: false,
+        },
+    )
+}
+
+/// First ReProvisioning sub-state to enter from Ready, based on the request
+/// activities. Empty activities means all phases. Returns `None` when the
+/// activities list has no switch-relevant wait phases.
+pub(crate) fn first_reprovisioning_state(
+    request: &SwitchReprovisionRequest,
+) -> Option<ReProvisioningState> {
+    let activities = &request.activities;
+    if firmware_upgrade_requested(activities) {
+        return Some(ReProvisioningState::WaitingForRackFirmwareUpgrade);
+    }
+    if nvos_update_requested(activities) {
+        return Some(ReProvisioningState::WaitingForNVOSUpgrade);
+    }
+    if configure_nmx_cluster_requested(activities) {
+        return Some(ReProvisioningState::WaitingForNMXCConfigure);
+    }
+    None
+}
+
+/// Next ReProvisioning sub-state after firmware completes.
+fn next_state_after_firmware(request: &SwitchReprovisionRequest) -> Option<ReProvisioningState> {
+    let activities = &request.activities;
+    if nvos_update_requested(activities) {
+        return Some(ReProvisioningState::WaitingForNVOSUpgrade);
+    }
+    if configure_nmx_cluster_requested(activities) {
+        return Some(ReProvisioningState::WaitingForNMXCConfigure);
+    }
+    None
+}
+
+/// Next ReProvisioning sub-state after NVOS completes.
+fn next_state_after_nvos(request: &SwitchReprovisionRequest) -> Option<ReProvisioningState> {
+    configure_nmx_cluster_requested(&request.activities)
+        .then_some(ReProvisioningState::WaitingForNMXCConfigure)
 }
 
 /// If the parent rack is in `RackState::Error`, clear
@@ -107,7 +172,7 @@ pub async fn handle_reprovisioning(
                 .as_ref()
                 .expect("WaitingForRackFirmwareUpgrade requires a rack reprovision request");
             let requested_at = request.requested_at;
-            let continue_after_firmware_upgrade = request.continue_after_firmware_upgrade;
+            let next_after_firmware = next_state_after_firmware(request);
             let Some(firmware_upgrade_status) = state.firmware_upgrade_status.as_ref() else {
                 return Ok(StateHandlerOutcome::wait(
                     "waiting for switch firmware upgrade status".into(),
@@ -126,10 +191,19 @@ pub async fn handle_reprovisioning(
 
             match &firmware_upgrade_status.status {
                 model::rack::RackFirmwareUpgradeState::Completed => {
-                    if continue_after_firmware_upgrade {
+                    tracing::info!(
+                        switch_id = %switch_id,
+                        rack_id = ?state.rack_id,
+                        backend_job_id = %firmware_upgrade_status.task_id,
+                        next_reprovisioning_state = ?next_after_firmware,
+                        returning_to_ready = next_after_firmware.is_none(),
+                        "Switch rack firmware update completed"
+                    );
+
+                    if let Some(reprovisioning_state) = next_after_firmware {
                         return Ok(StateHandlerOutcome::transition(
                             SwitchControllerState::ReProvisioning {
-                                reprovisioning_state: ReProvisioningState::WaitingForNVOSUpgrade,
+                                reprovisioning_state,
                             },
                         ));
                     }
@@ -140,6 +214,14 @@ pub async fn handle_reprovisioning(
                     Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
                 }
                 model::rack::RackFirmwareUpgradeState::Failed { cause } => {
+                    tracing::warn!(
+                        switch_id = %switch_id,
+                        rack_id = ?state.rack_id,
+                        backend_job_id = %firmware_upgrade_status.task_id,
+                        %cause,
+                        "Switch rack firmware update failed; transitioning to Error"
+                    );
+
                     let mut txn = ctx.services.db_pool.begin().await?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;
@@ -157,11 +239,12 @@ pub async fn handle_reprovisioning(
             }
         }
         ReProvisioningState::WaitingForNVOSUpgrade => {
-            let requested_at = state
+            let request = state
                 .switch_reprovisioning_requested
                 .as_ref()
-                .map(|request| request.requested_at)
                 .expect("WaitingForNVOSUpgrade requires a rack reprovision request");
+            let requested_at = request.requested_at;
+            let next_after_nvos = next_state_after_nvos(request);
             let Some(nvos_update_status) = state.nvos_update_status.as_ref() else {
                 return Ok(StateHandlerOutcome::wait(
                     "waiting for switch NVOS update status".into(),
@@ -179,11 +262,23 @@ pub async fn handle_reprovisioning(
             }
 
             match &nvos_update_status.status {
-                model::rack::SwitchNvosUpdateState::Completed => Ok(
-                    StateHandlerOutcome::transition(SwitchControllerState::ReProvisioning {
-                        reprovisioning_state: ReProvisioningState::WaitingForNMXCConfigure,
-                    }),
-                ),
+                model::rack::SwitchNvosUpdateState::Completed => {
+                    if let Some(reprovisioning_state) = next_after_nvos {
+                        Ok(StateHandlerOutcome::transition(
+                            SwitchControllerState::ReProvisioning {
+                                reprovisioning_state,
+                            },
+                        ))
+                    } else {
+                        let mut txn = ctx.services.db_pool.begin().await?;
+                        db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
+                            .await?;
+                        Ok(
+                            StateHandlerOutcome::transition(SwitchControllerState::Ready)
+                                .with_txn(txn),
+                        )
+                    }
+                }
                 model::rack::SwitchNvosUpdateState::Failed { cause } => {
                     let mut txn = ctx.services.db_pool.begin().await?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
@@ -236,5 +331,78 @@ pub async fn handle_reprovisioning(
             db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id).await?;
             Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+    use model::rack::MaintenanceActivity;
+    use model::switch::{ReProvisioningState, SwitchReprovisionRequest};
+
+    use super::{first_reprovisioning_state, next_state_after_firmware};
+
+    fn request(activities: Vec<MaintenanceActivity>) -> SwitchReprovisionRequest {
+        SwitchReprovisionRequest {
+            // Timestamp is unused by activity selection helpers under test.
+            requested_at: Default::default(),
+            initiator: "rack-test".to_string(),
+            activities,
+        }
+    }
+
+    fn firmware() -> MaintenanceActivity {
+        MaintenanceActivity::FirmwareUpgrade {
+            firmware_version: None,
+            components: vec![],
+            force_update: false,
+        }
+    }
+
+    fn nvos() -> MaintenanceActivity {
+        MaintenanceActivity::NvosUpdate {
+            config_json: String::new(),
+        }
+    }
+
+    #[test]
+    fn next_state_after_firmware_treats_empty_activities_as_all_phases() {
+        value_scenarios!(
+            run = |req| next_state_after_firmware(&req);
+            "empty means all remaining phases" {
+                request(vec![]) => Some(ReProvisioningState::WaitingForNVOSUpgrade),
+            }
+
+            "explicit NVOS still advances to NVOS" {
+                request(vec![firmware(), nvos()]) => Some(ReProvisioningState::WaitingForNVOSUpgrade),
+            }
+
+            "firmware-only skips NVOS and later phases" {
+                request(vec![firmware()]) => None,
+            }
+
+            "NMXC-only after firmware skips NVOS" {
+                request(vec![MaintenanceActivity::ConfigureNmxCluster])
+                    => Some(ReProvisioningState::WaitingForNMXCConfigure),
+            }
+        );
+    }
+
+    #[test]
+    fn first_reprovisioning_state_treats_empty_activities_as_all_phases() {
+        value_scenarios!(
+            run = |req| first_reprovisioning_state(&req);
+            "empty starts at firmware wait" {
+                request(vec![]) => Some(ReProvisioningState::WaitingForRackFirmwareUpgrade),
+            }
+
+            "NVOS-only starts at NVOS wait" {
+                request(vec![nvos()]) => Some(ReProvisioningState::WaitingForNVOSUpgrade),
+            }
+
+            "firmware-only starts at firmware wait" {
+                request(vec![firmware()]) => Some(ReProvisioningState::WaitingForRackFirmwareUpgrade),
+            }
+        );
     }
 }

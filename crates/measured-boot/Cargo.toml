@@ -20,6 +20,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "measured_boot"
@@ -39,6 +40,9 @@ clap = { workspace = true, optional = true }
 eyre = { optional = true, workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

@@ -168,6 +168,6 @@ func (nlm NVLinkLogicalPartitionManager) Delete(ctx context.Context, id string) 
 	ctx = WithLogger(ctx, nlm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, nlm.client.Config.Token)
 
-	resp, err := nlm.client.apiClient.NVLinkLogicalPartitionAPI.DeleteNvlinkLogicalPartition(ctx, nlm.client.apiMetadata.Organization, id).Execute()
+	_, resp, err := nlm.client.apiClient.NVLinkLogicalPartitionAPI.DeleteNvlinkLogicalPartition(ctx, nlm.client.apiMetadata.Organization, id).Execute()
 	return HandleResponseError(resp, err)
 }

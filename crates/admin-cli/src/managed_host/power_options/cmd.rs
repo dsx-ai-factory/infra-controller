@@ -20,13 +20,14 @@ use std::fmt::Write;
 use ::rpc::admin_cli::OutputFormat;
 use mac_address::MacAddress;
 use prettytable::{Cell, Row, Table};
+use rpc::errors::RpcDataConversionError;
 use rpc::forge::{BmcEndpointRequest, PowerOptions};
 
 use super::args::{ShowPowerOptions, UpdatePowerOptions};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn power_options_show(
+pub(super) async fn power_options_show(
     args: ShowPowerOptions,
     output_format: OutputFormat,
     api_client: &ApiClient,
@@ -48,12 +49,12 @@ pub async fn power_options_show(
     power_options_show_all(output_format, api_client).await
 }
 
-pub fn power_options_show_one(
+fn power_options_show_one(
     power_option: &PowerOptions,
     output_format: OutputFormat,
 ) -> CarbideCliResult<()> {
     if output_format == OutputFormat::Json {
-        println!("{}", serde_json::to_string(power_option).unwrap());
+        println!("{}", serde_json::to_string(power_option)?);
         return Ok(());
     }
     let mut lines = String::new();
@@ -149,7 +150,7 @@ pub fn power_options_show_one(
     Ok(())
 }
 
-pub async fn power_options_show_all(
+async fn power_options_show_all(
     output_format: OutputFormat,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
@@ -157,7 +158,7 @@ pub async fn power_options_show_all(
     let all_options = api_client.get_power_options(vec![]).await?;
 
     if output_format == OutputFormat::Json {
-        println!("{}", serde_json::to_string(&all_options).unwrap());
+        println!("{}", serde_json::to_string(&all_options)?);
         return Ok(());
     }
     let headers = vec![
@@ -209,17 +210,23 @@ pub async fn power_options_show_all(
     Ok(())
 }
 
-pub async fn update_power_option(
+pub(super) async fn update_power_option(
     args: UpdatePowerOptions,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
-    let updated_power_option = api_client.0.update_power_option(args).await?.response;
+    let Some(updated_power_option) = api_client
+        .0
+        .update_power_option(args)
+        .await?
+        .response
+        .into_iter()
+        .next()
+    else {
+        return Err(RpcDataConversionError::MissingArgument("response").into());
+    };
     println!("Power options updated successfully!!");
     println!("Updated power options are");
-    power_options_show_one(
-        updated_power_option.first().unwrap(),
-        OutputFormat::AsciiTable,
-    )
+    power_options_show_one(&updated_power_option, OutputFormat::AsciiTable)
 }
 
 pub(crate) async fn get_machine_state(

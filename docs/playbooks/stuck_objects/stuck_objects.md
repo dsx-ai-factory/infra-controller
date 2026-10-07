@@ -5,10 +5,11 @@ A common issue that is observed in sites managed by NVIDIA Infra Controller
 for a long amount of time.
 
 Examples of these problems are:
+
 - Instances are not getting provisioned (are stuck in `Provisioning` state)
 - Instances are not getting released (are stuck in `Terminating` state)
 - Subnets (Network Segments) are not getting provisioned or released
-- The Machine Discovery process stops in a certain state (e.g. `Host/WaitingForNetworkConfig`)
+- The Machine Discovery process stops in a certain state (for example, `Host/WaitingForNetworkConfig`)
 
 This runbook explains how operators can troubleshoot why an object doesn't
 advance into the next state.
@@ -16,21 +17,24 @@ advance into the next state.
 ## Step 1: Is it a Cloud or Site problem?
 
 The state of NICo objects is tracked and advanced in 2 different systems:
+
 - The cloud backend, which stores the states that are shown by the
   NGC console and web UI.
 - The actual NICo site, which manages the lifecycle of each object inside the
   site.
 
 If the state of an object doesn't advance, there might be multiple reasons for it:
+
 1. The state of the object isn't advanced on the actual NICo site
-2. The request to change the state of the object is not forwarded from the
-    cloud to the NICo site. Or the notification about the state changed was
-    not forwarded from the NICo site to the cloud.
+1. The request to change the state of the object is not forwarded from the
+   cloud to the NICo site. Or the notification about the state changed was
+   not forwarded from the NICo site to the cloud.
 
 A rule of thumb for locating the source of the problem is:
+
 - If the states that are shown on the site and via the Cloud API are different,
-  reason 1) will apply. This indicates a communication issue in the
-  paths between the cloud backend, site agent and NICo site controller.  
+  reason 1 above applies. This indicates a communication issue in the
+  paths between the cloud backend, site agent and NICo site controller.
   {/* TODO: Document steps to diagnose and remediate these issues */}
 - If the states match, then the state on the site isn't advanced as required.
 
@@ -42,10 +46,9 @@ into the next state on the site.
 
 Another initial check on whether the problem is a cloud or site problem
 is to check whether the cloud backend could actually send the state change
-request (e.g. instance release request) to the site.
+request (such as an instance release request) to the site.
 
-The `statusHistory` field on the cloud API can be helpful for this assessment. E.g. the history for the following Subnet indicates that
-the deletion request was sent to the site, but deletion might be stuck there:
+The `statusHistory` field on the cloud API can be helpful for this assessment. For example, the history for the following Subnet indicates that the deletion request was sent to the site, but deletion might be stuck there:
 
 ```json
 {
@@ -94,25 +97,22 @@ investigation by checking the site state for this subnet.
 
 If you are using the web UI, not all API details like `statusHistory`
 are displayed. However we can work around this by getting
-access to the raw cloud API response.
-A browsers developer tools can be used for this:
-- While on the page that shows the status of the object (E.g. "Virtual
-  Private Clouds"), open the browser developer tools. The F12 key will open
-  it on a lot of browsers.
-- Click the Network Tab
-- Either wait for a request which fetches the state of the object of
-  interest (e.g. `subnet` or `instance`). Or refresh the page in order
-  to force a request.
+access to the raw cloud API response. A browser's developer tools can be used for this:
+
+- On the page that shows the status of the object (such as "Virtual Private Clouds"), open the browser developer tools. The F12 key opens it on many browsers.
+- Click the Network Tab.
+- Either wait for a request that fetches the state of the object of interest (such as `subnet` or `instance`), or refresh the page to force a request.
+- Select the relevant request in the Network panel.
 - Click the `Response` tab.
 
-You should now see the raw cloud API response, as shown in the following
-screenshot:
-![](../../static/playbooks/stuck_objects/browser_devtools.png)
+You should now see the raw cloud API response, as shown in the following screenshot:
 
+![Raw cloud API response in browser developer tools](../../static/playbooks/stuck_objects/browser_devtools.png)
 
 ## Step 2: Determine the actual state an object is in
 
 The web UI only shows a simplified state for users, like
+
 - Provisioning
 - Ready
 - Deleting
@@ -127,14 +127,13 @@ need to determine the full state. This can be done using multiple approaches:
 
 ### 2.1 Using nico-admin-cli
 
-You can inspect the detailed state of a objects on NICo sites using `nico-admin-cli`. Refer to [nico-admin-cli](nico_admin_cli.md) instructions
-on how to utilize it.
+You can inspect the detailed state of an object on NICo sites using `nico-admin-cli`. Refer to [nico-admin-cli](../../manuals/nico-admin-cli.md) for instructions on how to use it.
 
-Using nico-admin-cli, you can inspect the state of an object e.g. with the
-following queries:
+Using nico-admin-cli, you can inspect the state of an object with commands like the following:
 
-```
-nico-admin-cli managed-host show --all
+```bash
+$ nico-admin-cli managed-host show --all
+
 +--------------------+-------------------------------------------------------------+------------------------------------+
 | Hostname           | Machine IDs (H/D)                                           | State                              |
 +--------------------+-------------------------------------------------------------+------------------------------------+
@@ -146,14 +145,16 @@ nico-admin-cli managed-host show --all
 +--------------------+-------------------------------------------------------------+------------------------------------+
 ```
 
-```
-nico-admin-cli managed-host show --host fm100htqrs9la1un8bfscefaciq568m2d23mvr75gjdevagedj7q4h3drr0
+```bash
+$ nico-admin-cli managed-host show --host fm100htqrs9la1un8bfscefaciq568m2d23mvr75gjdevagedj7q4h3drr0
+
 Hostname    : west-massachusetts
 State       : Assigned/BootingWithDiscoveryImage
 ```
 
-```
-/opt/nico/nico-admin-cli -f json machine show --machine  fm100htqrs9la1un8bfscefaciq568m2d23mvr75gjdevagedj7q4h3drr0
+```bash
+$ nico-admin-cli -f json machine show --machine  fm100htqrs9la1un8bfscefaciq568m2d23mvr75gjdevagedj7q4h3drr0
+
 {
   "id": "fm100htqrs9la1un8bfscefaciq568m2d23mvr75gjdevagedj7q4h3drr0",
   "state": "Assigned/BootingWithDiscoveryImage",
@@ -189,8 +190,10 @@ command will also list the history of states - including timestamps when the
 ManagedHost entered a certain state.
 
 For NetworkSegments, you can use the `network-segment` subcommand:
-```
-/opt/nico/nico-admin-cli network-segment show --network 5e85002e-54fd-4183-8c4d-0346c3f3e94e
+
+```bash
+$ nico-admin-cli network-segment show --network 5e85002e-54fd-4183-8c4d-0346c3f3e94e
+
 ID        : 5e85002e-54fd-4183-8c4d-0346c3f3e94e
 DELETED   : Not Deleted
 STATE     : Ready
@@ -202,9 +205,10 @@ In order to get a first impression of whether an object might be stuck in a
 state and why, you can use the NICo Grafana Dashboard.
 
 On the Dashboard, search for the graph which shows the amount of objects
-in a certain state. E.g. for ManagedHosts/Instances, check "ManagedHost States".
+in a certain state. For example, for ManagedHosts/Instances, check "ManagedHost States".
 The graph might look like:
-![](../../static/playbooks/stuck_objects/managedhost_states.png)
+
+![Sample ManagedHost States graph](../../static/playbooks/stuck_objects/managedhost_states.png)
 
 In this diagram we can observe ManagedHosts in various transient states
 (like `assigned bootingwithdiscoverimage` or `dpunotready waitingfornetworkconfig`)
@@ -215,7 +219,7 @@ The dashboard will not tell us which ManagedHost is exactly stuck. But if only o
 ManagedHost is in a stuck state, we can deduct that this might be the ManagedHost a
 user is concerned about.
 
-For other objects whose lifecycle is controlled by NICo - e.g. Subnets,
+For other objects whose lifecycle is controlled by NICo - such as Subnets,
 Network Segments or Infiniband Partitions - a similar diagram will exist.
 
 Another diagram you can look at is the "Time in state" chart that exists
@@ -228,7 +232,7 @@ state is 1.65 weeks. This equals to 1 ManagedHost being stuck in the state for
 this long, or that there exist multiple ManagedHosts in the state and one is stuck
 for even longer.
 
-![](../../static/playbooks/stuck_objects/managedhosts_time_in_state.png)
+![Sample ManagedHosts Time in State graph](../../static/playbooks/stuck_objects/managedhosts_time_in_state.png)
 
 ## Step 3: Determine why an objects state does not advance on the Site
 
@@ -243,6 +247,7 @@ The best documentation for these state changes is the actual state machine
 source code, which codifies the conditions for moving out of each state. Use
 the following links to look at the state machines for objects managed by
 NICo:
+
 - `crates/api/src/state_controller/machine/handler.rs` — ManagedHost State Machine (also used for the lifecycle of instances)
 - `crates/api/src/state_controller/network_segment/handler.rs` — NetworkSegment/Subnet State Machine
 - `crates/api/src/state_controller/ib_partition/handler.rs` — Infiniband Partition State Machine
@@ -262,9 +267,10 @@ iteration of this function, it will automatically be retried 30s later.
 Inside the `handle_object_state` function, you will find a branch that
 indicates what needs to happen in order to move the object into the next state.
 
-E.g. for the `Assigned/BootingWithDiscoveryImage` state that was detected
+For example, for the `Assigned/BootingWithDiscoveryImage` state that was detected
 above, we can find the following logic:
-```rs
+
+```rust
 if let ManagedHostState::Assigned { instance_state } = &state.managed_state {
     match instance_state {
         InstanceState::BootingWithDiscoveryImage => {
@@ -297,6 +303,7 @@ it happens when `nico-scout` is started and asks the `nico-api` server
 via the `NicoAgentControl` API call for instructions.
 
 Therefore we can determine that possible sources of the ManagedHost being stuck are:
+
 - The Host is never rebooted
 - The Host is rebooted, but does not boot into the discovery image
 - The Host is rebooted and boots into the discovery image, but `nico-scout` is
@@ -317,7 +324,7 @@ the state of ManagedHost `fm100htbj4teuomt9p8095cg3nikudaqq69uih6t3gg61tpgkkmtnc
 from state `Assigned/WaitingForNetworkConfig`, but due to a vault issue we failed
 to load the BMC credentials for the reboot request that is required to exit the state:
 
-```
+```text
 level=SPAN span_id="0x807c960ebf6ad096" span_name=state_controller_iteration status="Ok" busy_ns=42812249 code_filepath=api/src/state_controller/controller.rs code_lineno=115 code_namespace=nico::state_controller::controller controller=machine_state_controller elapsed_us=61825 error_types="{\"assigned.waitingfornetworkconfig\":{\"redfish_client_creation_error\":1}}" handler_latencies_us="{\"ready\":{\"min\":20714,\"max\":22499,\"avg\":21551},\"assigned.waitingfornetworkconfig\":{\"min\":55593,\"max\":55593,\"avg\":55593}}" idle_ns=18985935 service_name=nico-api service_namespace=nico-system skipped_iteration=false start_time=2023-09-11T07:55:36.598202068Z states="{\"assigned.waitingfornetworkconfig\":1,\"ready\":3}" times_in_state_s="{\"assigned.waitingfornetworkconfig\":{\"min\":2013,\"max\":2013,\"avg\":2013},\"ready\":{\"min\":1432860,\"max\":2998789,\"avg\":1954860}}"
 level=ERROR span_id="0x807c960ebf6ad096" error="An error occurred with the request" location="/usr/local/cargo/registry/src/index.crates.io-6f17d22bba15001f/vaultrs-0.6.2/src/auth/kubernetes.rs:53"
 level=WARN span_id="0x807c960ebf6ad096" msg="State handler error" error="RedfishClientCreationError(MissingCredentials(Failed to execute kubernetes service account login request\n\nCaused by:\n   0: An error occurred with the request\n   1: Error sending HTTP request\n   2: error sending request for url (https://vault.vault.svc.cluster.local:8200/v1/auth/kubernetes/login): error trying to connect: error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:../ssl/statem/statem_clnt.c:1889: (certificate has expired)\n   3: error trying to connect: error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:../ssl/statem/statem_clnt.c:1889: (certificate has expired)\n   4: error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:../ssl/statem/statem_clnt.c:1889: (certificate has expired)\n   5: error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:../ssl/statem/statem_clnt.c:1889:\n\nLocation:\n    nico_secrets/src/nico_vault.rs:141:22))" object_id=fm100htbj4teuomt9p8095cg3nikudaqq69uih6t3gg61tpgkkmtncvjbgg location="api/src/state_controller/controller.rs:357"
@@ -327,9 +334,10 @@ As seen from the example above, the field `error_types` can also provide
 a quick overview on what errors have occurred in certain states and
 prevented the state machine to advance the state of objects.
 
-```
+```text
 error_types="{\"assigned.waitingfornetworkconfig\":{\"redfish_client_creation_error\":1}}"
 ```
+
 indicates that for ManagedHosts in state `Assigned/WaitingForNetworkConfig`, state handling
 for 1 ManagedHost encountered a `redfish_client_creation_error`. The consequence of
 this is that the reboot request for the Host could not be dispatched.
@@ -344,17 +352,10 @@ been emitted as part of the same RPC request or the same state handler iteration
 
 ### 3.3 Learning more about failures from the NICo Grafana Dashboard
 
-The NICo Grafana Dashboard can also provide a quick overview of why state transitions have failed.
-In case the state handler of a certain object returned an error, the error type
-will also be shown in the diagram which summarizes the amount of objects in a
-certain state for each NICo site.
+The NICo Grafana Dashboard can also provide a quick overview of why state transitions have failed. In case the state handler of a certain object returned an error, the error type will also be shown in the diagram that summarizes the number of objects in a certain state for each NICo site.
 
-E.g. for the following example, we can see state handling for 1 ManagedHost in state
-`assigned waitingfornetworkconfig` failing due to a `redfish_client_creation_error`.
-This is equivalent to the information that we found in logs.
+In the following example, we can see state handling for 1 ManagedHost in the state `assigned waitingfornetworkconfig` failing due to a `redfish_client_creation_error`. This is equivalent to the information that we found in logs.
 
-![](../../static/playbooks/stuck_objects/state_handling_error.png)
+![Sample State Handling Error graph](../../static/playbooks/stuck_objects/state_handling_error.png)
 
-The benefit of the dashboard is that it allows for a very quick assessment on
-what the root cause of a certain issue is. It also shows whether just 1 object
-might be affected by a certain issue, or whether multiple objects are affected.
+The benefit of the dashboard is that it allows for a very quick assessment on what the root cause of a certain issue is. It also shows whether just 1 object is affected by a certain issue, or whether multiple objects are affected.

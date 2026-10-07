@@ -18,9 +18,9 @@ Remove the mapping for a chassis serial:
     $ nico-admin-cli nvlink-nmxc-endpoints delete --chassis-serial 1234567890123
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, value_name = "SERIAL")]
-    pub chassis_serial: String,
+    chassis_serial: String,
 }
 
 impl Run for Args {

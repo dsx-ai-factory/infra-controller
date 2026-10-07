@@ -25,7 +25,10 @@ mod tests {
 
     use ::rpc::measured_boot::{FromGrpc, FromGrpcOpt};
     use carbide_uuid::machine::MachineId;
-    use carbide_uuid::measured_boot::TrustedMachineId;
+    use carbide_uuid::measured_boot::{
+        MeasurementApprovedMachineId, MeasurementApprovedProfileId, MeasurementSystemProfileId,
+        TrustedMachineId,
+    };
     use measured_boot::pcr::PcrRegisterValue;
     use measured_boot::records::MeasurementApprovedMachineRecord;
     use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
@@ -34,14 +37,14 @@ mod tests {
     use crate::measured_boot::convert_vec;
     use crate::measured_boot::rpc::{bundle, journal, machine, profile, report, site};
     use crate::measured_boot::tests::common::{create_test_machine, load_topology_json};
-    use crate::tests::common::api_fixtures::create_test_env;
+    use crate::tests::create_test_env;
 
     // test_measurement_system_profiles is used to test all of the different
     // API handler functions that work with measured boot system profiles,
     // going through the steps of making profiles, making sure they can
     // be read back (via show/list), modified (via update/delete), etc.
     #[crate::sqlx_test]
-    pub async fn test_measurement_system_profiles(
+    async fn test_measurement_system_profiles(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -247,7 +250,7 @@ mod tests {
     // handler functions that work with measured boot machines (show,
     // list, attest, etc).
     #[crate::sqlx_test]
-    pub async fn test_machines(db_conn: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_machines(db_conn: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
         let api = &env.api;
 
@@ -352,7 +355,7 @@ mod tests {
     // measured boot (reports + journals + machines, etc), but this is
     // for focusing specifically on the report calls.
     #[crate::sqlx_test]
-    pub async fn test_measurement_reports(
+    async fn test_measurement_reports(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -522,7 +525,7 @@ mod tests {
     // measured boot (reports + journals + machines, etc), but this is
     // for focusing specifically on the journal calls.
     #[crate::sqlx_test]
-    pub async fn test_measurement_journals(
+    async fn test_measurement_journals(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -618,7 +621,7 @@ mod tests {
     // measured boot (reports + journals + machines, etc), but this is
     // for focusing specifically on the bundle calls.
     #[crate::sqlx_test]
-    pub async fn test_measurement_bundles(
+    async fn test_measurement_bundles(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -838,7 +841,7 @@ mod tests {
     //  this tests the ability to find a the closest matching bundle to a
     // a given report
     #[crate::sqlx_test]
-    pub async fn test_get_closest_match(
+    async fn test_get_closest_match(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -1147,7 +1150,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    pub async fn test_list_attestation_summary(
+    async fn test_list_attestation_summary(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -1304,7 +1307,7 @@ mod tests {
     // boot, including import/export, and management of trusted
     // machine and profile approvals.
     #[crate::sqlx_test]
-    pub async fn test_measurement_site(
+    async fn test_measurement_site(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;
@@ -1641,11 +1644,125 @@ mod tests {
         Ok(())
     }
 
+    #[crate::sqlx_test]
+    async fn test_remove_measurement_trust_approvals(
+        db_conn: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let env = create_test_env(db_conn).await;
+        let api = &env.api;
+
+        let add_resp = site::handle_add_measurement_trusted_machine(
+            api,
+            mbrpc::AddMeasurementTrustedMachineRequest {
+                machine_id: "*".to_string(),
+                approval_type: mbrpc::MeasurementApprovedTypePb::Persist.into(),
+                pcr_registers: String::new(),
+                comments: String::new(),
+            },
+        )
+        .await?;
+        let remove_resp = site::handle_remove_measurement_trusted_machine(
+            api,
+            mbrpc::RemoveMeasurementTrustedMachineRequest {
+                selector: Some(
+                    mbrpc::remove_measurement_trusted_machine_request::Selector::MachineId(
+                        "*".to_string(),
+                    ),
+                ),
+            },
+        )
+        .await?;
+        assert_eq!(
+            add_resp.approval_record.unwrap().approval_id,
+            remove_resp.approval_record.unwrap().approval_id
+        );
+
+        let missing_machine_id = site::handle_remove_measurement_trusted_machine(
+            api,
+            mbrpc::RemoveMeasurementTrustedMachineRequest {
+                selector: Some(
+                    mbrpc::remove_measurement_trusted_machine_request::Selector::MachineId(
+                        "*".to_string(),
+                    ),
+                ),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_machine_id.code(), tonic::Code::NotFound);
+
+        let missing_machine_approval = site::handle_remove_measurement_trusted_machine(
+            api,
+            mbrpc::RemoveMeasurementTrustedMachineRequest {
+                selector: Some(
+                    mbrpc::remove_measurement_trusted_machine_request::Selector::ApprovalId(
+                        MeasurementApprovedMachineId::new(),
+                    ),
+                ),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_machine_approval.code(), tonic::Code::NotFound);
+
+        let missing_profile_id = site::handle_remove_measurement_trusted_profile(
+            api,
+            mbrpc::RemoveMeasurementTrustedProfileRequest {
+                selector: Some(
+                    mbrpc::remove_measurement_trusted_profile_request::Selector::ProfileId(
+                        MeasurementSystemProfileId::new(),
+                    ),
+                ),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_profile_id.code(), tonic::Code::NotFound);
+
+        let missing_profile_approval = site::handle_remove_measurement_trusted_profile(
+            api,
+            mbrpc::RemoveMeasurementTrustedProfileRequest {
+                selector: Some(
+                    mbrpc::remove_measurement_trusted_profile_request::Selector::ApprovalId(
+                        MeasurementApprovedProfileId::new(),
+                    ),
+                ),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_profile_approval.code(), tonic::Code::NotFound);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_trust_approval_requires_existing_profile(
+        db_conn: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let env = create_test_env(db_conn).await;
+
+        let missing_profile = site::handle_add_measurement_trusted_profile(
+            &env.api,
+            mbrpc::AddMeasurementTrustedProfileRequest {
+                profile_id: Some(MeasurementSystemProfileId::new()),
+                approval_type: mbrpc::MeasurementApprovedTypePb::Persist.into(),
+                pcr_registers: None,
+                comments: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_profile.code(), tonic::Code::NotFound);
+
+        Ok(())
+    }
+
     // test_permissive_approvals is used to make sure that
     // having a site-wide "permissive" approval of "*" works
     // as intended.
     #[crate::sqlx_test]
-    pub async fn test_permissive_approvals(
+    async fn test_permissive_approvals(
         db_conn: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let env = create_test_env(db_conn).await;

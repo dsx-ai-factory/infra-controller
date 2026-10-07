@@ -27,11 +27,11 @@ Create a logical partition for a tenant:
     --tenant-organization-id fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short = 'n', long, help = "name of the partition")]
-    pub name: String,
+    name: String,
     #[clap(short = 't', long, help = "tenant organization id of the partition")]
-    pub tenant_organization_id: String,
+    tenant_organization_id: String,
 }
 
 impl From<Args> for forgerpc::NvLinkLogicalPartitionCreationRequest {

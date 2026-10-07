@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +25,6 @@ use dashmap::DashMap;
 use http::Response;
 use http::header::CONTENT_TYPE;
 use hyper::Request;
-use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -34,7 +33,7 @@ use prometheus::proto::LabelPair;
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder, proto,
 };
-use tokio::net::TcpListener;
+use serde::{Deserialize, Serialize};
 
 use crate::HealthError;
 
@@ -45,6 +44,138 @@ pub fn operation_duration_buckets_seconds() -> Vec<f64> {
     vec![
         1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0,
     ]
+}
+
+pub fn bmc_latency_buckets_ms() -> Vec<f64> {
+    vec![
+        5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0, 10_000.0, 30_000.0,
+        60_000.0,
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcLatencyAttribute {
+    HttpResponseStatusCode,
+    HttpRequestMethod,
+    HttpPath,
+    ServerAddress,
+    UrlScheme,
+    BmcVendor,
+    BmcModel,
+    EntityType,
+    MachineId,
+    RackId,
+}
+
+impl BmcLatencyAttribute {
+    pub const ATTRIBUTES: [Self; 10] = [
+        Self::HttpResponseStatusCode,
+        Self::HttpRequestMethod,
+        Self::HttpPath,
+        Self::ServerAddress,
+        Self::UrlScheme,
+        Self::BmcVendor,
+        Self::BmcModel,
+        Self::EntityType,
+        Self::MachineId,
+        Self::RackId,
+    ];
+
+    pub fn label_name(self) -> &'static str {
+        match self {
+            Self::HttpResponseStatusCode => "http_response_status_code",
+            Self::HttpRequestMethod => "http_request_method",
+            Self::HttpPath => "http_path",
+            Self::ServerAddress => "server_address",
+            Self::UrlScheme => "url_scheme",
+            Self::BmcVendor => "bmc_vendor",
+            Self::BmcModel => "bmc_model",
+            Self::EntityType => "entity_type",
+            Self::MachineId => "machine_id",
+            Self::RackId => "rack_id",
+        }
+    }
+
+    pub fn from_label_name(label_name: &str) -> Option<Self> {
+        Self::ATTRIBUTES
+            .iter()
+            .copied()
+            .find(|attribute| attribute.label_name() == label_name)
+    }
+}
+
+#[derive(Clone)]
+pub struct BmcLatencyMetrics {
+    latency_ms: HistogramVec,
+    attributes: Vec<BmcLatencyAttribute>,
+}
+
+pub struct BmcLatencyObservation<'a> {
+    pub status_code: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub server_address: &'a str,
+    pub url_scheme: &'a str,
+    pub bmc_vendor: Option<&'a str>,
+    pub bmc_model: Option<&'a str>,
+    pub entity_type: &'a str,
+    pub machine_id: Option<&'a str>,
+    pub rack_id: Option<&'a str>,
+    pub duration: std::time::Duration,
+}
+
+impl BmcLatencyMetrics {
+    pub fn new(registry: &Registry, prefix: &str) -> Result<Self, prometheus::Error> {
+        Self::new_with_attributes(registry, prefix, &BmcLatencyAttribute::ATTRIBUTES)
+    }
+
+    pub fn new_with_attributes(
+        registry: &Registry,
+        prefix: &str,
+        attributes: &[BmcLatencyAttribute],
+    ) -> Result<Self, prometheus::Error> {
+        let label_names = attributes
+            .iter()
+            .map(|attribute| attribute.label_name())
+            .collect::<Vec<_>>();
+        let latency_ms = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{prefix}_bmc_latency_ms"),
+                "Duration of outbound Redfish HTTP requests to BMCs, in milliseconds",
+            )
+            .buckets(bmc_latency_buckets_ms()),
+            &label_names,
+        )?;
+        registry.register(Box::new(latency_ms.clone()))?;
+
+        Ok(Self {
+            latency_ms,
+            attributes: attributes.to_vec(),
+        })
+    }
+
+    pub fn observe(&self, observation: BmcLatencyObservation<'_>) {
+        let labels = self
+            .attributes
+            .iter()
+            .map(|attribute| match attribute {
+                BmcLatencyAttribute::HttpResponseStatusCode => observation.status_code,
+                BmcLatencyAttribute::HttpRequestMethod => observation.method,
+                BmcLatencyAttribute::HttpPath => observation.path,
+                BmcLatencyAttribute::ServerAddress => observation.server_address,
+                BmcLatencyAttribute::UrlScheme => observation.url_scheme,
+                BmcLatencyAttribute::BmcVendor => observation.bmc_vendor.unwrap_or("unknown"),
+                BmcLatencyAttribute::BmcModel => observation.bmc_model.unwrap_or("unknown"),
+                BmcLatencyAttribute::EntityType => observation.entity_type,
+                BmcLatencyAttribute::MachineId => observation.machine_id.unwrap_or("unknown"),
+                BmcLatencyAttribute::RackId => observation.rack_id.unwrap_or("unknown"),
+            })
+            .collect::<Vec<_>>();
+        self.latency_ms
+            .with_label_values(&labels)
+            .observe(observation.duration.as_secs_f64() * 1_000.0);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +206,7 @@ impl ComponentMetrics {
         let failures_total = IntCounterVec::new(
             prometheus::Opts::new(
                 format!("{prefix}_component_failures_total"),
-                "Count of component operation failures",
+                "Number of component operation failures",
             ),
             &["component_kind", "component_name"],
         )?;
@@ -118,6 +249,10 @@ pub struct MetricsManager {
     global_registry: Registry,
     telemetry_registry: Registry,
     component_metrics: Arc<ComponentMetrics>,
+    /// The instrumentation framework's registry, exposed through the same
+    /// /metrics response so its events are scrapeable without migrating this
+    /// server off its raw prometheus pipeline. Set once at startup.
+    framework_registry: std::sync::OnceLock<Registry>,
 }
 
 impl MetricsManager {
@@ -130,6 +265,7 @@ impl MetricsManager {
             global_registry,
             telemetry_registry,
             component_metrics,
+            framework_registry: std::sync::OnceLock::new(),
         })
     }
 
@@ -157,8 +293,18 @@ impl MetricsManager {
         CollectorRegistry::new(id, self.telemetry_registry.clone(), prefix)
     }
 
+    /// Makes the instrumentation framework's registry part of every
+    /// subsequent /metrics response. A second call is ignored.
+    pub fn expose_framework_registry(&self, registry: Registry) {
+        let _ = self.framework_registry.set(registry);
+    }
+
     pub fn export_metrics(&self) -> Result<String, HealthError> {
-        export_registry(&self.global_registry)
+        let mut exposition = export_registry(&self.global_registry)?;
+        if let Some(framework) = self.framework_registry.get() {
+            exposition.push_str(&export_registry(framework)?);
+        }
+        Ok(exposition)
     }
 
     pub fn export_telemetry(&self) -> Result<String, HealthError> {
@@ -187,7 +333,14 @@ pub struct CollectorRegistry {
 impl CollectorRegistry {
     fn new(id: String, parent: Registry, prefix: impl Into<String>) -> Result<Self, HealthError> {
         let fq_id = id.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-        let desc = Desc::new(fq_id, id, Vec::new(), HashMap::new())?;
+
+        // Prometheus retains descriptor names after unregistering collectors.
+        let desc = Desc::new(
+            "health_collector_registry".to_string(),
+            "Internal health collector registry identity".to_string(),
+            Vec::new(),
+            HashMap::from([("collector_id".to_string(), fq_id)]),
+        )?;
 
         let registry = Box::new(SubRegistry {
             registry: Registry::new(),
@@ -258,7 +411,11 @@ impl Collector for SubRegistry {
 impl Drop for CollectorRegistry {
     fn drop(&mut self) {
         if let Err(e) = self.parent.unregister(self.registry.clone()) {
-            tracing::error!(e=?e, "Could not properly drop registry for collector {}", self.prefix())
+            tracing::error!(
+                error = ?e,
+                collector_prefix = self.prefix().as_str(),
+                "Could not properly drop registry for collector"
+            )
         }
     }
 }
@@ -327,10 +484,13 @@ pub struct GaugeMetrics {
     metric_name_prefix: String,
     metric_help: String,
     static_labels: Vec<proto::LabelPair>,
+    static_label_names: HashSet<String>,
     desc: Desc,
 }
 
 impl GaugeMetrics {
+    /// Registers gauge readings with an ID unique to the registry. The registration
+    /// identity does not add labels or change the names returned by `collect()`.
     pub fn new(
         id: String,
         registry: &Registry,
@@ -338,21 +498,35 @@ impl GaugeMetrics {
         metric_help: impl Into<String>,
         static_labels: Vec<(impl Into<String>, impl Into<String>)>,
     ) -> Result<Self, prometheus::Error> {
-        let desc = Desc::new(id.clone(), id, Vec::new(), HashMap::new())?;
+        // Only collect() supplies exported metric names and labels.
+        let desc = Desc::new(
+            "health_gauge_metrics".to_string(),
+            "Internal health gauge collector identity".to_string(),
+            Vec::new(),
+            HashMap::from([("collector_id".to_string(), id)]),
+        )?;
+
+        let mut static_label_names = HashSet::with_capacity(static_labels.len());
+        let static_labels = static_labels
+            .into_iter()
+            .map(|(name, value)| {
+                let name = name.into();
+                static_label_names.insert(name.clone());
+
+                let mut label = LabelPair::new();
+                label.set_name(name);
+                label.set_value(value.into());
+                label
+            })
+            .collect();
+
         let metrics = Self {
             gauges: Arc::new(DashMap::new()),
             current_generation: Arc::new(AtomicU64::new(0)),
             metric_name_prefix: metric_name_prefix.into(),
             metric_help: metric_help.into(),
-            static_labels: static_labels
-                .into_iter()
-                .map(|(name, value)| {
-                    let mut label = LabelPair::new();
-                    label.set_name(name.into());
-                    label.set_value(value.into());
-                    label
-                })
-                .collect(),
+            static_labels,
+            static_label_names,
             desc,
         };
 
@@ -362,6 +536,10 @@ impl GaugeMetrics {
 
     pub fn begin_update(&self) {
         self.current_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn has_static_label(&self, name: &str) -> bool {
+        self.static_label_names.contains(name)
     }
 
     pub fn record(&self, reading: GaugeReading) {
@@ -378,6 +556,35 @@ impl GaugeMetrics {
                 generation,
             },
         );
+    }
+
+    /// Drops readings with the selected type, unit, and label values. When given,
+    /// label names must match the complete dynamic label set.
+    pub(crate) fn prune(
+        &self,
+        metric_type: Option<&str>,
+        labels: &[(Cow<'static, str>, String)],
+        unit: Option<&str>,
+        label_names: Option<&[Cow<'static, str>]>,
+    ) {
+        self.gauges.retain(|_, data| {
+            let matches = metric_type.is_none_or(|kind| data.metric_type == kind)
+                && labels.iter().all(|label| data.labels.contains(label))
+                && unit.is_none_or(|unit| data.unit == unit)
+                && label_names.is_none_or(|names| {
+                    data.labels.len() == names.len()
+                        && names
+                            .iter()
+                            .all(|name| data.labels.iter().any(|(actual, _)| actual == name))
+                });
+
+            !matches
+        });
+    }
+
+    /// Removes one reading by the key used when it was recorded.
+    pub(crate) fn prune_key(&self, key: &str) {
+        self.gauges.remove(&GaugeKey::from(key));
     }
 
     pub fn sweep_stale(&self) {
@@ -445,13 +652,13 @@ pub async fn run_metrics_server(
     metrics_endpoint: std::net::SocketAddr,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<(), BoxedErr> {
-    let listener = TcpListener::bind(metrics_endpoint)
+    let listener = metrics_endpoint::bind_tcp_listener(metrics_endpoint)
         .await
         .map_err(|e| Box::new(e) as BoxedErr)?;
 
     tracing::info!(
-        "Metrics server listening on {} (paths: /metrics, /telemetry, /livez)",
-        metrics_endpoint
+        %metrics_endpoint,
+        "Metrics server listening (paths: /metrics, /telemetry, /livez)"
     );
 
     loop {
@@ -476,8 +683,8 @@ pub async fn run_metrics_server(
     }
 }
 
-fn serve_request(
-    req: Request<Incoming>,
+fn serve_request<B>(
+    req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
     match req.uri().path() {
@@ -489,7 +696,7 @@ fn serve_request(
         "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
         "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
         _ => Ok(Response::builder()
-            .status(http::StatusCode::OK)
+            .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("not found; use /metrics, /telemetry, or /livez".to_string())
             .expect("BUG: Response::builder error")),
@@ -543,29 +750,215 @@ pub fn sanitize_unit(unit: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
 
     #[test]
-    fn collector_registry_sanitizes_descriptor_fq_name() {
-        for (id, expected_fq_name) in [
-            (
-                "sensor_collector_10.0.0.1:443",
-                "sensor_collector_10_0_0_1_443",
-            ),
-            (
-                "log_collector_bmc-01.example.com",
-                "log_collector_bmc_01_example_com",
-            ),
-            (
-                "collector with spaces/slashes",
-                "collector_with_spaces_slashes",
-            ),
-        ] {
-            let registry = CollectorRegistry::new(id.to_string(), Registry::new(), "test_prefix")
-                .expect("collector registry should accept sanitized id");
+    fn unknown_metrics_route_returns_not_found() {
+        let request = Request::builder()
+            .uri("/definitely-not-a-route")
+            .body(())
+            .expect("test request should be valid");
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
 
-            assert_eq!(registry.registry.desc.fq_name, expected_fq_name);
-            assert_eq!(registry.registry.desc.help, id);
+        let response =
+            serve_request(request, metrics_manager).expect("request should produce a response");
+
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+        assert_eq!(
+            response.body(),
+            "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
+
+    #[test]
+    fn collector_registry_metadata_is_fixed_across_identities() {
+        let parent = Registry::new();
+        let ids = ["sensor_10.0.0.1:443", "log_bmc-01.example.com"];
+
+        let collectors: Vec<_> = ids
+            .iter()
+            .map(|id| CollectorRegistry::new(id.to_string(), parent.clone(), "test").unwrap())
+            .collect();
+
+        for collector in &collectors {
+            assert_eq!(collector.registry.desc.fq_name, "health_collector_registry");
+
+            assert_eq!(
+                collector.registry.desc.dim_hash,
+                collectors[0].registry.desc.dim_hash
+            );
         }
+
+        assert_ne!(
+            collectors[0].registry.desc.id,
+            collectors[1].registry.desc.id
+        );
+
+        assert!(matches!(
+            CollectorRegistry::new(ids[0].to_string(), parent.clone(), "test"),
+            Err(HealthError::PrometheusError(prometheus::Error::AlreadyReg))
+        ));
+
+        assert!(matches!(
+            CollectorRegistry::new("sensor_10_0_0_1_443".to_string(), parent.clone(), "test"),
+            Err(HealthError::PrometheusError(prometheus::Error::AlreadyReg))
+        ));
+
+        drop(collectors);
+
+        CollectorRegistry::new(ids[0].to_string(), parent, "test")
+            .expect("dropped collector identity must register again");
+    }
+
+    #[test]
+    fn gauge_registration_identity_preserves_export_and_unregister() {
+        let collector = CollectorRegistry::new("owner".to_string(), Registry::new(), "test")
+            .expect("collector registry");
+
+        let gauges: Vec<_> = ["endpoint_a", "endpoint_b"]
+            .into_iter()
+            .map(|id| {
+                collector
+                    .create_gauge_metrics(
+                        id.to_string(),
+                        "Sensor readings",
+                        vec![("endpoint".into(), id.to_string())],
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        for gauge in &gauges {
+            gauge.record(
+                GaugeReading::new("reading", "temperature", "sensor", "celsius", 42.0)
+                    .with_labels(vec![("channel".into(), "inlet".to_string())]),
+            );
+        }
+
+        assert_eq!(gauges[0].desc.fq_name, "health_gauge_metrics");
+        assert_eq!(gauges[0].desc.dim_hash, gauges[1].desc.dim_hash);
+        assert_ne!(gauges[0].desc.id, gauges[1].desc.id);
+
+        assert!(matches!(
+            collector.create_gauge_metrics("endpoint_a".to_string(), "Sensor readings", Vec::new()),
+            Err(prometheus::Error::AlreadyReg)
+        ));
+
+        let families = collector.registry().gather();
+
+        assert_eq!(families.len(), 1);
+        assert_eq!(families[0].name(), "test_temperature_sensor_celsius");
+        assert_eq!(families[0].help(), "Sensor readings");
+        assert_eq!(families[0].get_field_type(), proto::MetricType::GAUGE);
+        assert_eq!(families[0].get_metric().len(), 2);
+
+        for (metric, endpoint) in families[0]
+            .get_metric()
+            .iter()
+            .zip(["endpoint_a", "endpoint_b"])
+        {
+            assert_eq!(metric.get_gauge().value(), 42.0);
+            assert_eq!(metric.get_label().len(), 2);
+            assert_eq!(metric.get_label()[0].name(), "endpoint");
+            assert_eq!(metric.get_label()[0].value(), endpoint);
+            assert_eq!(metric.get_label()[1].name(), "channel");
+            assert_eq!(metric.get_label()[1].value(), "inlet");
+        }
+
+        collector
+            .unregister_gauge_metrics(&gauges[0])
+            .expect("unregister first endpoint");
+
+        assert_eq!(collector.registry().gather()[0].get_metric().len(), 1);
+        assert!(collector.unregister_gauge_metrics(&gauges[0]).is_err());
+
+        collector
+            .create_gauge_metrics("endpoint_a".to_string(), "Sensor readings", Vec::new())
+            .expect("removed gauge identity must register again");
+    }
+
+    #[test]
+    fn sanitize_unit_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "percent symbol",
+                    input: "%",
+                    expect: "percent".to_string(),
+                },
+                Check {
+                    scenario: "degree Celsius",
+                    input: "°C",
+                    expect: "celsius".to_string(),
+                },
+                Check {
+                    scenario: "Celsius abbreviation",
+                    input: "c",
+                    expect: "celsius".to_string(),
+                },
+                Check {
+                    scenario: "Redfish Celsius unit",
+                    input: "CEL",
+                    expect: "celsius".to_string(),
+                },
+                Check {
+                    scenario: "degree Fahrenheit",
+                    input: "°F",
+                    expect: "fahrenheit".to_string(),
+                },
+                Check {
+                    scenario: "Fahrenheit abbreviation",
+                    input: "f",
+                    expect: "fahrenheit".to_string(),
+                },
+                Check {
+                    scenario: "volts",
+                    input: "V",
+                    expect: "volts".to_string(),
+                },
+                Check {
+                    scenario: "amperes",
+                    input: "A",
+                    expect: "amperes".to_string(),
+                },
+                Check {
+                    scenario: "amps alias",
+                    input: "Amps",
+                    expect: "amperes".to_string(),
+                },
+                Check {
+                    scenario: "watts",
+                    input: "W",
+                    expect: "watts".to_string(),
+                },
+                Check {
+                    scenario: "hertz",
+                    input: "Hz",
+                    expect: "hertz".to_string(),
+                },
+                Check {
+                    scenario: "revolutions per minute",
+                    input: "RPM",
+                    expect: "rpm".to_string(),
+                },
+                Check {
+                    scenario: "punctuation is normalized",
+                    input: "J/s",
+                    expect: "j_s".to_string(),
+                },
+            ],
+            sanitize_unit,
+        );
     }
 }

@@ -8,15 +8,16 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 )
 
@@ -71,6 +72,52 @@ func testMachineBuildMachineInstanceType(t *testing.T, dbSession *db.Session, ma
 	return m
 }
 
+func TestMachine_MatchesLabelSelector(t *testing.T) {
+	tests := []struct {
+		name    string
+		machine *Machine
+		filters map[string]string
+		want    bool
+	}{
+		{
+			name: "nil Machine",
+		},
+		{
+			name:    "empty filters",
+			machine: &Machine{},
+			want:    true,
+		},
+		{
+			name:    "exact match",
+			machine: &Machine{Labels: map[string]string{"failure-domain": "fd-a"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+			want:    true,
+		},
+		{
+			name:    "subset match",
+			machine: &Machine{Labels: map[string]string{"failure-domain": "fd-a", "power-domain": "pd-2"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+			want:    true,
+		},
+		{
+			name:    "missing key",
+			machine: &Machine{Labels: map[string]string{"power-domain": "pd-2"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+		},
+		{
+			name:    "different value",
+			machine: &Machine{Labels: map[string]string{"failure-domain": "fd-b"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, test.machine.MatchesLabelSelector(test.filters))
+		})
+	}
+}
+
 func TestMachineSQLDAO_Create(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceTypeInitDB(t)
@@ -78,7 +125,7 @@ func TestMachineSQLDAO_Create(t *testing.T) {
 	testMachineSetupSchema(t, dbSession)
 	ip, site, ins := testMachineInstanceTypeBuildInstanceType(t, dbSession, "sm.x86")
 	defMacAddr := "00:1B:44:11:3A:B7"
-	meta := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+	meta := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 	health := map[string]interface{}{"source": "aggregate-health", "alerts": [1]map[string]interface{}{
 		{"id": "test-id", "target": "test-target", "message": "test-message", "classifications": [1]string{"test-classification"}},
 	}}
@@ -244,8 +291,6 @@ func TestMachineSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -269,7 +314,7 @@ func testMachineSQLDAOCreateMachines(ctx context.Context, t *testing.T, dbSessio
 		vendor := "testvendor"
 		productName := "testproductname"
 		serialNumber := uuid.NewString()
-		meta := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+		meta := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 		labels := map[string]string{"key1": "value1", "key2": "value2"}
 
 		createInputs = append(createInputs, MachineCreateInput{
@@ -315,7 +360,7 @@ func testMachineSQLDAOCreateMachines(ctx context.Context, t *testing.T, dbSessio
 		// Machine expected set 2, machine 1
 		ip, site, ins = testMachineInstanceTypeBuildInstanceType(t, dbSession, "med.x86")
 		defaultMacAddress = "00:1B:44:11:3B:A7"
-		meta = &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+		meta = &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 		createInputs = append(createInputs, MachineCreateInput{
 			MachineID:                uuid.NewString(),
 			InfrastructureProviderID: ip.ID,
@@ -446,8 +491,6 @@ func TestMachineSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -475,7 +518,7 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 		vendor := "testvendor"
 		productName := "testproductname"
 		serialNumber := uuid.NewString()
-		meta := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+		meta := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 		labels := map[string]string{"key1": "value1", "key2": "value2"}
 
 		createInputs = append(createInputs, MachineCreateInput{
@@ -557,15 +600,16 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			wantEmpty: false,
 			wantCount: 2,
 			wantStatusMap: map[string]int{
-				MachineStatusUnknown:        0,
-				MachineStatusReady:          0,
-				MachineStatusInUse:          0,
-				MachineStatusDecommissioned: 0,
-				MachineStatusError:          0,
-				MachineStatusReset:          0,
-				MachineStatusMaintenance:    0,
-				MachineStatusInitializing:   2,
-				"total":                     2,
+				MachineStatusUnknown:         0,
+				MachineStatusReady:           0,
+				MachineStatusInUse:           0,
+				MachineStatusDecommissioning: 0,
+				MachineStatusDecommissioned:  0,
+				MachineStatusError:           0,
+				MachineStatusReset:           0,
+				MachineStatusMaintenance:     0,
+				MachineStatusInitializing:    2,
+				"total":                      2,
 			},
 			reqIP:              cutil.GetPtr(created[1].InfrastructureProviderID),
 			verifyChildSpanner: true,
@@ -592,15 +636,16 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			},
 			wantCount: 2,
 			wantStatusMap: map[string]int{
-				MachineStatusUnknown:        0,
-				MachineStatusReady:          0,
-				MachineStatusInUse:          0,
-				MachineStatusDecommissioned: 0,
-				MachineStatusError:          0,
-				MachineStatusReset:          0,
-				MachineStatusMaintenance:    0,
-				MachineStatusInitializing:   2,
-				"total":                     2,
+				MachineStatusUnknown:         0,
+				MachineStatusReady:           0,
+				MachineStatusInUse:           0,
+				MachineStatusDecommissioning: 0,
+				MachineStatusDecommissioned:  0,
+				MachineStatusError:           0,
+				MachineStatusReset:           0,
+				MachineStatusMaintenance:     0,
+				MachineStatusInitializing:    2,
+				"total":                      2,
 			},
 			wantErr:   nil,
 			wantEmpty: false,
@@ -617,15 +662,16 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			wantEmpty: false,
 			wantCount: 2,
 			wantStatusMap: map[string]int{
-				MachineStatusUnknown:        0,
-				MachineStatusReady:          0,
-				MachineStatusInUse:          0,
-				MachineStatusDecommissioned: 0,
-				MachineStatusError:          0,
-				MachineStatusReset:          0,
-				MachineStatusMaintenance:    0,
-				MachineStatusInitializing:   2,
-				"total":                     2,
+				MachineStatusUnknown:         0,
+				MachineStatusReady:           0,
+				MachineStatusInUse:           0,
+				MachineStatusDecommissioning: 0,
+				MachineStatusDecommissioned:  0,
+				MachineStatusError:           0,
+				MachineStatusReset:           0,
+				MachineStatusMaintenance:     0,
+				MachineStatusInitializing:    2,
+				"total":                      2,
 			},
 			reqInstanceType: created[1].InstanceTypeID,
 		},
@@ -653,8 +699,6 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -675,7 +719,7 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 	mist1 := []MachineInstanceType{}
 
 	ip, site, ins1 := testMachineInstanceTypeBuildInstanceType(t, dbSession, "sm.x86")
-	metai1 := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+	metai1 := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 	for i := 0; i < totalCount/2; i++ {
 		macAddress := testGenerateMacAddress(t)
 		st := MachineStatusInitializing
@@ -750,7 +794,7 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 	// Machine Set 2
 	ms2 := []Machine{}
 	ip, site, ins2 := testMachineInstanceTypeBuildInstanceType(t, dbSession, "med.x86")
-	metai2 := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+	metai2 := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 
 	for i := 0; i < totalCount/2; i++ {
 		// Create Machine Instance Type for first 2 Machines in this set
@@ -805,6 +849,14 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 		IsAssigned: cutil.GetPtr(true),
 	})
 	assert.Nil(t, err)
+
+	// Give one Machine a distinct placement label for exact label-filter tests.
+	ms1[1].Labels["failure-domain"] = "fd-a"
+	_, err = msd.Update(ctx, nil, MachineUpdateInput{
+		MachineID: ms1[1].ID,
+		Labels:    ms1[1].Labels,
+	})
+	assert.NoError(t, err)
 
 	// set one of machines in set 2 to be missing on site
 	ms2[0].IsMissingOnSite = true
@@ -871,6 +923,26 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 				IsAssigned: cutil.GetPtr(true),
 			},
 			expectedCount: 1,
+			expectedError: false,
+		},
+		{
+			desc: "GetAll with exact Machine label selector returns matching objects",
+			filter: MachineFilterInput{
+				Labels: map[string]string{
+					"failure-domain": "fd-a",
+					"key1":           "value1",
+				},
+			},
+			expectedCount: 1,
+			firstEntry:    &ms1[1],
+			expectedError: false,
+		},
+		{
+			desc: "GetAll with a non-matching Machine label value returns no objects",
+			filter: MachineFilterInput{
+				Labels: map[string]string{"failure-domain": "missing"},
+			},
+			expectedCount: 0,
 			expectedError: false,
 		},
 		{
@@ -1185,9 +1257,145 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
+		})
+	}
+
+	t.Run("includes soft-deleted Machines when requested", func(t *testing.T) {
+		machineID := ms1[0].ID
+		err := msd.Delete(ctx, nil, machineID, false)
+		require.NoError(t, err)
+
+		active, activeTotal, err := msd.GetAll(
+			ctx,
+			nil,
+			MachineFilterInput{MachineIDs: []string{machineID}},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+		assert.Zero(t, activeTotal)
+
+		withDeleted, totalWithDeleted, err := msd.GetAll(
+			ctx,
+			nil,
+			MachineFilterInput{MachineIDs: []string{machineID}, IncludeDeleted: true},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, withDeleted, 1)
+		assert.Equal(t, 1, totalWithDeleted)
+		assert.NotNil(t, withDeleted[0].Deleted)
+	})
+}
+
+func TestMachineSQLDAO_GetDistinctLabelKeys(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineInstanceTypeSetupSchema(t, dbSession)
+	dao := NewMachineDAO(dbSession)
+	ip, site, instanceType := testMachineInstanceTypeBuildInstanceType(t, dbSession, "label-keys")
+
+	for i, labels := range []map[string]string{
+		{"failure-domain": "fd-b", "nvidia.com/failure-domain": "fd-b"},
+		{"failure-domain": "fd-a"},
+		{"power-domain": "pd-1"},
+		nil,
+	} {
+		machineID := fmt.Sprintf("label-keys-%d", i)
+		_, err := dao.Create(ctx, nil, MachineCreateInput{
+			MachineID: machineID, InfrastructureProviderID: ip.ID, SiteID: site.ID,
+			InstanceTypeID: &instanceType.ID, ControllerMachineID: machineID,
+			ControllerMachineType: instanceType.ControllerMachineType,
+			Labels:                labels, Status: MachineStatusInitializing,
+		})
+		require.NoError(t, err)
+	}
+
+	tests := []struct {
+		name      string
+		filter    MachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted keys", want: []string{"failure-domain", "nvidia.com/failure-domain", "power-domain"}, wantTotal: 3},
+		{
+			name: "descending second result",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelKeyOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"nvidia.com/failure-domain"}, wantTotal: 3,
+		},
+		{name: "empty site scope", filter: MachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelKeys(ctx, nil, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
+func TestMachineSQLDAO_GetDistinctLabelValues(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineInstanceTypeSetupSchema(t, dbSession)
+	dao := NewMachineDAO(dbSession)
+	ip, site, instanceType := testMachineInstanceTypeBuildInstanceType(t, dbSession, "label-values")
+
+	for i, labels := range []map[string]string{
+		{"failure-domain": "fd-b", "nvidia.com/failure-domain": "fd-b"},
+		{"failure-domain": "fd-a"},
+		{"failure-domain": "fd-b", "power-domain": "pd-1"},
+		nil,
+	} {
+		machineID := fmt.Sprintf("label-values-%d", i)
+		_, err := dao.Create(ctx, nil, MachineCreateInput{
+			MachineID: machineID, InfrastructureProviderID: ip.ID, SiteID: site.ID,
+			InstanceTypeID: &instanceType.ID, ControllerMachineID: machineID,
+			ControllerMachineType: instanceType.ControllerMachineType,
+			Labels:                labels, Status: MachineStatusInitializing,
+		})
+		assert.NoError(t, err)
+	}
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		filter    MachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted values", labelKey: "failure-domain", want: []string{"fd-a", "fd-b"}, wantTotal: 2},
+		{name: "different key", labelKey: "power-domain", want: []string{"pd-1"}, wantTotal: 1},
+		{name: "missing key", labelKey: "missing", want: []string{}, wantTotal: 0},
+		{name: "slash in key", labelKey: "nvidia.com/failure-domain", want: []string{"fd-b"}, wantTotal: 1},
+		{name: "provider scope", labelKey: "failure-domain", filter: MachineFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, want: []string{"fd-a", "fd-b"}, wantTotal: 2},
+		{
+			name: "descending second result", labelKey: "failure-domain",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelValueOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"fd-a"}, wantTotal: 2,
+		},
+		{name: "empty site scope", labelKey: "failure-domain", filter: MachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelValues(ctx, nil, tt.labelKey, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
 		})
 	}
 }
@@ -1397,8 +1605,6 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -1551,11 +1757,36 @@ func TestMachineSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		machineID := mcsExp[3].ID
+		err := msd.Delete(ctx, nil, machineID, false)
+		require.NoError(t, err)
+
+		var deleted Machine
+		err = dbSession.DB.NewSelect().
+			Model(&deleted).
+			Where("m.id = ?", machineID).
+			WhereAllWithDeleted().
+			Scan(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, deleted.Deleted)
+
+		restored, err := msd.Clear(ctx, nil, MachineClearInput{
+			MachineID: machineID,
+			Deleted:   true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, restored)
+		assert.Nil(t, restored.Deleted)
+
+		active, err := msd.GetByID(ctx, nil, machineID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, machineID, active.ID)
+	})
 }
 
 func TestMachineSQLDAO_Delete(t *testing.T) {
@@ -1617,8 +1848,6 @@ func TestMachineSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1639,7 +1868,7 @@ func TestMachineSQLDAO_GetCount(t *testing.T) {
 	mist1 := []MachineInstanceType{}
 
 	ip, site, ins1 := testMachineInstanceTypeBuildInstanceType(t, dbSession, "sm.x86")
-	metai1 := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+	metai1 := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 	for i := 0; i < totalCount/2; i++ {
 		macAddress := testGenerateMacAddress(t)
 		st := MachineStatusInitializing
@@ -1703,7 +1932,7 @@ func TestMachineSQLDAO_GetCount(t *testing.T) {
 	// Machine Set 2
 	ms2 := []Machine{}
 	ip, site, ins2 := testMachineInstanceTypeBuildInstanceType(t, dbSession, "med.x86")
-	metai2 := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+	metai2 := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 	for i := 0; i < totalCount/2; i++ {
 		// Create Machine Instance Type for first 2 Machines in this set
 		var itID *uuid.UUID
@@ -1945,7 +2174,7 @@ func TestMachineSQLDAO_GetHealth(t *testing.T) {
 
 	ip, site, ins := testMachineInstanceTypeBuildInstanceType(t, dbSession, "sm.x86")
 	defMacAddr := "00:1B:44:11:3A:B7"
-	meta := &SiteControllerMachine{&cwssaws.Machine{Id: &cwssaws.MachineId{Id: "foo"}}}
+	meta := &SiteControllerMachine{&corev1.Machine{Id: &corev1.MachineId{Id: "foo"}}}
 	health := map[string]interface{}{"source": "aggregate-health", "alerts": []map[string]interface{}{
 		{"id": "test-id", "target": "test-target", "message": "test-message", "classifications": [1]string{"test-classification"}},
 	}, "successes": []map[string]interface{}{}}
@@ -2115,8 +2344,6 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2216,6 +2443,90 @@ func TestMachineSQLDAO_UpdateMultiple_AllFields(t *testing.T) {
 	assert.True(t, updated.IsMissingOnSite, "IsMissingOnSite not updated")
 }
 
+// Machine inventory anchors every write of one reconcile to the time that reconcile started, so
+// the staleness guard reading the same column does not treat the reconciler's own write as an
+// external change. Both write paths have to honor the anchor and both have to keep stamping the
+// current time when the caller does not supply one.
+func TestMachineSQLDAO_WriteTimeAnchor(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	mcsExp := testMachineSQLDAOCreateMachines(ctx, t, dbSession)
+	msd := NewMachineDAO(dbSession)
+	anchor := db.GetCurTime().Add(-30 * time.Second)
+
+	tests := []struct {
+		desc  string
+		write func(machineID string) (*Machine, error)
+		want  func(t *testing.T, before time.Time, got *Machine)
+	}{
+		{
+			desc: "Update stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Update without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+		{
+			desc: "Clear stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Hostname:  true,
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Clear without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Vendor:    true,
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			before := db.GetCurTime()
+
+			got, err := tc.write(mcsExp[i].ID)
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+
+			tc.want(t, before, got)
+		})
+	}
+}
+
 func TestSiteControllerMachine_GetNormalizedState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2231,7 +2542,7 @@ func TestSiteControllerMachine_GetNormalizedState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			scm := SiteControllerMachine{Machine: &cwssaws.Machine{State: tt.in}}
+			scm := SiteControllerMachine{Machine: &corev1.Machine{State: tt.in}}
 			assert.Equal(t, tt.want, scm.GetNormalizedState())
 		})
 	}
@@ -2245,7 +2556,7 @@ func TestMachine_GetControllerState(t *testing.T) {
 	mNoMeta := &Machine{Metadata: nil}
 	assert.Equal(t, "", mNoMeta.GetControllerState())
 
-	scm := &SiteControllerMachine{Machine: &cwssaws.Machine{State: `Ready { "x": 1 }`}}
+	scm := &SiteControllerMachine{Machine: &corev1.Machine{State: `Ready { "x": 1 }`}}
 	mMeta := &Machine{Metadata: scm}
 	assert.Equal(t, "Ready", mMeta.GetControllerState())
 	assert.Equal(t, "Ready", scm.GetNormalizedState())
@@ -2255,27 +2566,27 @@ func TestMachine_ToMaintenanceRequestProto(t *testing.T) {
 	t.Run("enable with reference", func(t *testing.T) {
 		ref := "scheduled work"
 		m := &Machine{ID: "m-1"}
-		req := m.ToMaintenanceRequestProto(cwssaws.MaintenanceOperation_Enable, &ref)
+		req := m.ToMaintenanceRequestProto(corev1.MaintenanceOperation_Enable, &ref)
 		assert.NotNil(t, req)
 		assert.NotNil(t, req.HostId)
 		assert.Equal(t, "m-1", req.HostId.Id)
-		assert.Equal(t, cwssaws.MaintenanceOperation_Enable, req.Operation)
+		assert.Equal(t, corev1.MaintenanceOperation_Enable, req.Operation)
 		assert.Equal(t, &ref, req.Reference)
 	})
 	t.Run("disable with no reference", func(t *testing.T) {
 		m := &Machine{ID: "m-1"}
-		req := m.ToMaintenanceRequestProto(cwssaws.MaintenanceOperation_Disable, nil)
+		req := m.ToMaintenanceRequestProto(corev1.MaintenanceOperation_Disable, nil)
 		assert.NotNil(t, req)
 		assert.NotNil(t, req.HostId)
 		assert.Equal(t, "m-1", req.HostId.Id)
-		assert.Equal(t, cwssaws.MaintenanceOperation_Disable, req.Operation)
+		assert.Equal(t, corev1.MaintenanceOperation_Disable, req.Operation)
 		assert.Nil(t, req.Reference)
 	})
 }
 
 func TestMachine_ToMetadataUpdateRequestProto(t *testing.T) {
 	labelVal := "prod"
-	labels := []*cwssaws.Label{{Key: "env", Value: &labelVal}}
+	labels := []*corev1.Label{{Key: "env", Value: &labelVal}}
 
 	t.Run("uses Machine.ID as Name fallback when metadata is nil", func(t *testing.T) {
 		m := &Machine{ID: "m-1"}
@@ -2292,10 +2603,40 @@ func TestMachine_ToMetadataUpdateRequestProto(t *testing.T) {
 		m := &Machine{
 			ID: "m-1",
 			Metadata: &SiteControllerMachine{
-				Machine: &cwssaws.Machine{Metadata: &cwssaws.Metadata{Name: "stored-name"}},
+				Machine: &corev1.Machine{Metadata: &corev1.Metadata{Name: "stored-name"}},
 			},
 		}
 		req := m.ToMetadataUpdateRequestProto(labels)
 		assert.Equal(t, "stored-name", req.Metadata.Name)
 	})
+}
+
+func TestMachine_StatusForAssignment(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      string
+		wasAssigned bool
+		assigned    bool
+		coreState   string
+		want        string
+	}{
+		{"claim Ready", MachineStatusReady, false, true, "", MachineStatusInUse},
+		{"unassigned Ready", MachineStatusReady, false, false, "", MachineStatusReady},
+		{"release observed Ready", MachineStatusInUse, true, false, ControllerMachineStateReady, MachineStatusReady},
+		{"release before Core readiness", MachineStatusInUse, true, false, "Assigned/Ready", MachineStatusInUse},
+		{"release without inventory", MachineStatusInUse, true, false, "", MachineStatusInUse},
+		{"assigned error", MachineStatusError, false, true, ControllerMachineStateReady, MachineStatusError},
+		{"release during maintenance", MachineStatusMaintenance, true, false, ControllerMachineStateReady, MachineStatusMaintenance},
+		{"assigned cleanup", MachineStatusInitializing, true, true, "WaitingForCleanup", MachineStatusInitializing},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := Machine{Status: tc.status, IsAssigned: tc.wasAssigned}
+			if tc.coreState != "" {
+				machine.Metadata = &SiteControllerMachine{Machine: &corev1.Machine{State: tc.coreState}}
+			}
+			assert.Equal(t, tc.want, machine.StatusForAssignment(tc.assigned))
+			assert.Equal(t, tc.status, machine.Status, "projection must not mutate the snapshot")
+		})
+	}
 }

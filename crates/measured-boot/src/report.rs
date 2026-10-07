@@ -76,3 +76,59 @@ impl ToTable for MeasurementReport {
         Ok(table.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use carbide_uuid::measured_boot::MeasurementReportValueId;
+    use chrono::DateTime;
+
+    use super::*;
+
+    fn report_value(pcr_register: i16, sha_any: &str) -> MeasurementReportValueRecord {
+        MeasurementReportValueRecord {
+            value_id: MeasurementReportValueId::new(),
+            report_id: MeasurementReportId::new(),
+            pcr_register,
+            sha_any: sha_any.to_string(),
+            ts: DateTime::<Utc>::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn pcr_value_projection_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "empty report",
+                    input: vec![],
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "populated report preserves record order",
+                    input: vec![report_value(2, "sha-2"), report_value(11, "sha-11")],
+                    expect: vec![
+                        PcrRegisterValue {
+                            pcr_register: 2,
+                            sha_any: "sha-2".to_string(),
+                        },
+                        PcrRegisterValue {
+                            pcr_register: 11,
+                            sha_any: "sha-11".to_string(),
+                        },
+                    ],
+                },
+            ],
+            |values| {
+                MeasurementReport {
+                    report_id: MeasurementReportId::new(),
+                    machine_id: MachineId::new(MachineIdSource::Tpm, [0x11; 32], MachineType::Host),
+                    ts: DateTime::<Utc>::UNIX_EPOCH,
+                    values,
+                }
+                .pcr_values()
+            },
+        );
+    }
+}

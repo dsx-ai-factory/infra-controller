@@ -35,6 +35,11 @@ const (
 	SequenceIngest  = common.OpCodeIngest
 )
 
+// Decommission sequence names - use shared operation codes
+const (
+	SequenceDecommission = common.OpCodeDecommission
+)
+
 // RequiredOperations maps operation types to their required operations
 // These operations must have rules defined for the system to function properly
 var RequiredOperations = map[common.TaskType][]string{
@@ -68,6 +73,9 @@ var ValidOperations = map[common.TaskType][]string{
 	common.TaskTypeBringUp: {
 		SequenceBringUp,
 		SequenceIngest,
+	},
+	common.TaskTypeDecommission: {
+		SequenceDecommission,
 	},
 }
 

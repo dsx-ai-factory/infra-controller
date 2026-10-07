@@ -36,7 +36,7 @@ Remove a health report source from a DPU:
     internal-maintenance
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "List health report sources for a DPU")]
     #[command(after_long_help = "\
 EXAMPLES:
@@ -91,16 +91,16 @@ Preview the report without sending it to carbide:
     --template internal-maintenance --print-only
 
 ")]
-pub struct HealthAddOptions {
-    pub dpu_id: MachineId,
+pub(crate) struct HealthAddOptions {
+    pub(super) dpu_id: MachineId,
     #[clap(long, help = "New health report as json")]
-    pub health_report: Option<String>,
+    pub(super) health_report: Option<String>,
     #[clap(long, help = "Predefined Template name")]
-    pub template: Option<HealthReportTemplates>,
+    pub(super) template: Option<HealthReportTemplates>,
     #[clap(long, help = "Message to be filled in template.")]
-    pub message: Option<String>,
+    pub(super) message: Option<String>,
     #[clap(long, help = "Replace the DPU health contribution with this source")]
-    pub replace: bool,
+    pub(super) replace: bool,
     #[clap(long, help = "Print the template that is going to be sent to carbide")]
-    pub print_only: bool,
+    pub(super) print_only: bool,
 }

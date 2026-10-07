@@ -1,0 +1,418 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "name": "linux-amd64",
+      "goos": "linux",
+      "goarch": "amd64"
+    },
+    {
+      "name": "linux-arm64",
+      "goos": "linux",
+      "goarch": "arm64"
+    },
+    {
+      "name": "darwin-arm64",
+      "goos": "darwin",
+      "goarch": "arm64"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "api",
+      "package": "./api/cmd/api",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}"
+      ],
+      "output": "bin/api"
+    },
+    {
+      "name": "migrations",
+      "package": "./db/cmd/migrations",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/migrations"
+    },
+    {
+      "name": "sitemgr",
+      "package": "./site-manager/cmd/sitemgr",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/sitemgr"
+    },
+    {
+      "name": "workflow",
+      "package": "./workflow/cmd/workflow",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/workflow"
+    },
+    {
+      "name": "site-agent",
+      "package": "./site-agent/cmd/site-agent",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}"
+      ],
+      "output": "bin/site-agent"
+    },
+    {
+      "name": "mock-core",
+      "package": "./site-agent/cmd/mock-core",
+      "target": "linux-amd64",
+      "cgo_enabled": true,
+      "ldflags": [],
+      "output": "bin/mock-core"
+    },
+    {
+      "name": "mock-flow",
+      "package": "./site-agent/cmd/mock-flow",
+      "target": "linux-amd64",
+      "cgo_enabled": true,
+      "ldflags": [],
+      "output": "bin/mock-flow"
+    },
+    {
+      "name": "credsmgr",
+      "package": "./cert-manager/cmd/credsmgr",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/credsmgr"
+    },
+    {
+      "name": "flow",
+      "package": "./flow",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.BuildTime=${BUILD_TIME_RFC3339}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.GitCommit=${SHORT_SHA}"
+      ],
+      "output": "bin/flow"
+    },
+    {
+      "name": "psm",
+      "package": "./powershelf-manager",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static"
+      ],
+      "output": "bin/psm"
+    },
+    {
+      "name": "nsm",
+      "package": "./nvswitch-manager",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static"
+      ],
+      "output": "bin/nsm"
+    },
+    {
+      "name": "nicocli",
+      "package": "./cli/cmd/cli",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/nicocli"
+    },
+    {
+      "name": "nico-mcp",
+      "package": "./mcp/cmd/nico-mcp",
+      "target": "linux-amd64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/nico-mcp"
+    },
+    {
+      "name": "api",
+      "package": "./api/cmd/api",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}"
+      ],
+      "output": "bin/api"
+    },
+    {
+      "name": "migrations",
+      "package": "./db/cmd/migrations",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/migrations"
+    },
+    {
+      "name": "sitemgr",
+      "package": "./site-manager/cmd/sitemgr",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/sitemgr"
+    },
+    {
+      "name": "workflow",
+      "package": "./workflow/cmd/workflow",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/workflow"
+    },
+    {
+      "name": "site-agent",
+      "package": "./site-agent/cmd/site-agent",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}"
+      ],
+      "output": "bin/site-agent"
+    },
+    {
+      "name": "mock-core",
+      "package": "./site-agent/cmd/mock-core",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/mock-core"
+    },
+    {
+      "name": "mock-flow",
+      "package": "./site-agent/cmd/mock-flow",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/mock-flow"
+    },
+    {
+      "name": "credsmgr",
+      "package": "./cert-manager/cmd/credsmgr",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/credsmgr"
+    },
+    {
+      "name": "flow",
+      "package": "./flow",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.BuildTime=${BUILD_TIME_RFC3339}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.GitCommit=${SHORT_SHA}"
+      ],
+      "output": "bin/flow"
+    },
+    {
+      "name": "psm",
+      "package": "./powershelf-manager",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static"
+      ],
+      "output": "bin/psm"
+    },
+    {
+      "name": "nsm",
+      "package": "./nvswitch-manager",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static"
+      ],
+      "output": "bin/nsm"
+    },
+    {
+      "name": "nicocli",
+      "package": "./cli/cmd/cli",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/nicocli"
+    },
+    {
+      "name": "nico-mcp",
+      "package": "./mcp/cmd/nico-mcp",
+      "target": "linux-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-extldflags=-static",
+        "-w",
+        "-s"
+      ],
+      "output": "bin/nico-mcp"
+    },
+    {
+      "name": "api",
+      "package": "./api/cmd/api",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}"
+      ],
+      "output": "bin/api"
+    },
+    {
+      "name": "migrations",
+      "package": "./db/cmd/migrations",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/migrations"
+    },
+    {
+      "name": "sitemgr",
+      "package": "./site-manager/cmd/sitemgr",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/sitemgr"
+    },
+    {
+      "name": "workflow",
+      "package": "./workflow/cmd/workflow",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/workflow"
+    },
+    {
+      "name": "site-agent",
+      "package": "./site-agent/cmd/site-agent",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}"
+      ],
+      "output": "bin/site-agent"
+    },
+    {
+      "name": "mock-core",
+      "package": "./site-agent/cmd/mock-core",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/mock-core"
+    },
+    {
+      "name": "mock-flow",
+      "package": "./site-agent/cmd/mock-flow",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/mock-flow"
+    },
+    {
+      "name": "credsmgr",
+      "package": "./cert-manager/cmd/credsmgr",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/credsmgr"
+    },
+    {
+      "name": "flow",
+      "package": "./flow",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.Version=${VERSION}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.BuildTime=${BUILD_TIME_RFC3339}",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.GitCommit=${SHORT_SHA}"
+      ],
+      "output": "bin/flow"
+    },
+    {
+      "name": "psm",
+      "package": "./powershelf-manager",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/psm"
+    },
+    {
+      "name": "nsm",
+      "package": "./nvswitch-manager",
+      "target": "darwin-arm64",
+      "cgo_enabled": false,
+      "ldflags": [],
+      "output": "bin/nsm"
+    }
+  ]
+}

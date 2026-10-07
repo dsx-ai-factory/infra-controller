@@ -24,6 +24,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::Meter;
+
 // PublishStats stores a snapshot of sent message statistics.
 #[derive(Debug, Clone)]
 pub struct PublishStats {
@@ -97,6 +100,50 @@ impl PublishStatsTracker {
         self.published_count.store(0, Ordering::Relaxed);
         self.failed_count.store(0, Ordering::Relaxed);
         self.published_bytes.store(0, Ordering::Relaxed);
+    }
+
+    // register_metrics registers observable counters over the tracker's
+    // atomics on the given meter (all three totals are monotonic; the
+    // Prometheus exporter appends the `_total` suffix). Every series is
+    // labeled client=<client> so multiple clients in one process stay
+    // distinct; the value must be a compile-time literal (it is the
+    // cardinality bound). Call once per tracker -- a second registration
+    // would mint duplicate series.
+    //
+    // The callbacks read the atomics at collection time; nothing on the
+    // publish path changes. Note that reset_counters() shows up as an
+    // ordinary Prometheus counter reset.
+    pub fn register_metrics(&self, meter: &Meter, client: &'static str) {
+        let counters = [
+            (
+                "carbide_mqtt_messages_published",
+                "Number of MQTT messages successfully queued for publishing to the broker",
+                &self.published_count,
+            ),
+            (
+                "carbide_mqtt_publish_failures",
+                "Number of failed MQTT message publish attempts",
+                &self.failed_count,
+            ),
+            (
+                "carbide_mqtt_published_bytes",
+                "Number of bytes of MQTT messages successfully queued for publishing to the broker",
+                &self.published_bytes,
+            ),
+        ];
+        for (name, description, total) in counters {
+            let total = total.clone();
+            meter
+                .u64_observable_counter(name)
+                .with_description(description)
+                .with_callback(move |observer| {
+                    observer.observe(
+                        total.load(Ordering::Relaxed) as u64,
+                        &[KeyValue::new("client", client)],
+                    );
+                })
+                .build();
+        }
     }
 
     // to_stats will create an immutable snapshot of current publish

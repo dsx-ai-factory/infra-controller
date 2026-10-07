@@ -251,13 +251,17 @@ where
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
 
-        let (mut fields, elapsed_ms) = {
-            let extensions = span.extensions();
-            let Some(data) = extensions.get::<SpanData>() else {
-                return;
-            };
-            (data.fields.clone(), data.opened_at.elapsed().as_millis())
+        // The span is closing and this layer is the only reader of its
+        // `SpanData`, so take the data out of the extensions rather than
+        // cloning the whole field map.
+        let Some(data) = span.extensions_mut().remove::<SpanData>() else {
+            return;
         };
+        let SpanData {
+            mut fields,
+            opened_at,
+        } = data;
+        let elapsed_ms = opened_at.elapsed().as_millis();
 
         // Put `span_id` to its own slot (for span click-to-filter)
         // and record how long the span was open.

@@ -21,10 +21,23 @@ spec:
       imagePullSecrets:
         - name: image-pull-secret
       serviceAccountName: carbide-rest-site-manager
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
         - name: site-manager
           image: carbide-rest-site-manager
           imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args:
             - --listen-port=8100
             - --creds-manager-url=https://carbide-rest-cert-manager.carbide-rest:8000
@@ -39,6 +52,8 @@ spec:
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "64Mi"
@@ -64,3 +79,9 @@ spec:
         - name: tls-certs
           secret:
             secretName: site-manager-tls
+        # sitemgr skips its own cert issuance while --tls-cert-path and
+        # --tls-key-path are set. Dropping either flag sends it back to writing
+        # /tmp/mgr.cert, so keep this writable alongside the read-only root
+        # filesystem.
+        - name: tmp
+          emptyDir: {}

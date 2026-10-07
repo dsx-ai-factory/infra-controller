@@ -14,10 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use carbide_dhcp_common::VendorClass;
+use carbide_instrument::emit;
 use carbide_rpc_utils::dhcp::{HostConfig, InterfaceInfo};
 use dhcproto::v4::relay::{RelayAgentInformation, RelayCode, RelayInfo};
 use dhcproto::v4::{Decodable, Decoder, DhcpOption, Message, MessageType, OptionCode};
@@ -30,10 +32,12 @@ use tokio::sync::Mutex;
 
 use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
-use crate::vendor_class::VendorClass;
-use crate::{Config, DhcpMode, util};
+use crate::metrics::{DhcpReplySent, DhcpRequestReceived, MessageTypeLabel};
+use crate::modes::DhcpMode;
+use crate::{Config, util};
 
 const PKT_TYPE_OP_REQUEST: u8 = 1;
+const BOOTP_CHADDR_LEN: u8 = 16;
 
 pub struct DecodedPacket {
     packet: Message,
@@ -152,7 +156,7 @@ impl DecodedPacket {
         .ok()
     }
 
-    pub fn get_circuit_id(&self) -> Option<String> {
+    pub(super) fn get_circuit_id(&self) -> Option<String> {
         self.get_option_val(
             OptionCode::RelayAgentInformation,
             Some(RelayCode::AgentCircuitId),
@@ -160,7 +164,7 @@ impl DecodedPacket {
         .ok()
     }
 
-    pub fn get_remote_id(&self) -> Option<String> {
+    fn get_remote_id(&self) -> Option<String> {
         self.get_option_val(
             OptionCode::RelayAgentInformation,
             Some(RelayCode::AgentRemoteId),
@@ -177,16 +181,23 @@ impl DecodedPacket {
             circuit_id: handler.get_circuit_id(self, circuit_id),
             remote_id: self.get_remote_id(),
             desired_address: None,
+            address_family: None,
+            message_kind: None,
+            duid: None,
         }
     }
 
     /// Relay/Gateway IP is used as destination ip.
     /// Only exception is if ciaddr is not empty. If it is not empty means client already has a IP
     /// and listening on it.
-    fn decide_dst_ip(&self, _message_type: MessageType) -> (Ipv4Addr, u16) {
+    fn decide_dst_ip(
+        &self,
+        _message_type: MessageType,
+        relay_response_port: u16,
+    ) -> (Ipv4Addr, u16) {
         // Relayed packet.
         if self.packet.giaddr() != Ipv4Addr::from([0, 0, 0, 0]) {
-            return (self.packet.giaddr(), 67); // Relayed packet. Relay listen on 67
+            return (self.packet.giaddr(), relay_response_port);
         }
 
         // Client unicast packet. Lease renewal case.
@@ -201,16 +212,21 @@ impl DecodedPacket {
 
 pub struct Packet {
     encoded_packet: Vec<u8>,
-    pub dst_address: Ipv4Addr,
-    pub dst_port: u16,
+    sent_packet: Message,
+    dst_address: Ipv4Addr,
+    dst_port: u16,
+    /// The reply's DHCP message type (an Offer, an Ack, a Nak), as the
+    /// bounded label the send path counts lease grants under.
+    message_type: MessageTypeLabel,
 }
 
 impl Packet {
-    #[cfg(test)]
-    pub fn encoded_packet(&self) -> &Vec<u8> {
+    /// Return the encoded DHCPv4 response bytes.
+    pub fn encoded_packet(&self) -> &[u8] {
         &self.encoded_packet
     }
-    pub fn dst_address(&self) -> SocketAddrV4 {
+
+    pub(super) fn dst_address(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.dst_address, self.dst_port)
     }
 }
@@ -221,11 +237,28 @@ impl Packet {
         dst_address: SocketAddrV4,
         socket: Arc<UdpSocket>,
     ) -> Result<(), String> {
-        tracing::info!("Sending packet to {:?}", dst_address);
-        socket
-            .send_to(&self.encoded_packet, dst_address)
-            .await
-            .map_err(|x| x.to_string())?;
+        if let Err(error) = socket.send_to(&self.encoded_packet, dst_address).await {
+            tracing::debug!(
+                packet.send = %self.sent_packet,
+                destination_address = %dst_address,
+                error = %error,
+                "Failed to send DHCP packet"
+            );
+            return Err(error.to_string());
+        }
+
+        emit(DhcpReplySent {
+            message_type: self.message_type,
+            destination_address: dst_address,
+            xid: i64::from(self.sent_packet.xid()),
+            broadcast_flag: self.sent_packet.flags().broadcast(),
+            ciaddr: self.sent_packet.ciaddr(),
+            yiaddr: self.sent_packet.yiaddr(),
+            siaddr: self.sent_packet.siaddr(),
+            giaddr: self.sent_packet.giaddr(),
+            chaddr: util::u8_to_mac(self.sent_packet.chaddr()),
+        });
+        tracing::debug!(packet.send = %self.sent_packet, "Sent DHCP packet");
 
         Ok(())
     }
@@ -233,26 +266,60 @@ impl Packet {
 
 pub async fn process_packet(
     buf: &[u8],
+    source_address: SocketAddr,
     config: &Config,
     circuit_id: &str,
     handler: &dyn DhcpMode,
     machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
 ) -> Result<Packet, DhcpError> {
-    if buf[0] != PKT_TYPE_OP_REQUEST {
+    let (&bootp_op, _) = buf.split_first().ok_or(DhcpError::PacketDecodeFailure(
+        dhcproto::error::DecodeError::NotEnoughBytes,
+    ))?;
+
+    if bootp_op != PKT_TYPE_OP_REQUEST {
         // Not valid packet. Drop it.
-        return Err(DhcpError::UnknownPacket(buf[0]));
+        return Err(DhcpError::UnknownPacket(bootp_op));
     }
 
     let packet = Message::decode(&mut Decoder::new(buf))?;
-    tracing::info!(packet.received=%packet, "Received Packet");
+    let hardware_address_len = packet.hlen();
+    if hardware_address_len > BOOTP_CHADDR_LEN {
+        return Err(DhcpError::InvalidInput(format!(
+            "DHCP hardware address length {hardware_address_len} exceeds the {BOOTP_CHADDR_LEN}-byte BOOTP field"
+        )));
+    }
     let decoded_packet = DecodedPacket { packet };
+
+    // Every packet with a usable decoded BOOTP header counts as a received
+    // request, labelled by its message type (`other` when the option is
+    // missing or unrecognised). The Result is consumed after the relay and
+    // ownership checks so that error precedence stays unchanged.
+    let msg_type: Result<MessageType, DhcpError> =
+        decoded_packet.get_option_val(OptionCode::MessageType, None);
+    emit(DhcpRequestReceived {
+        message_type: msg_type
+            .as_ref()
+            .map_or(MessageTypeLabel::Other, |msg_type| {
+                MessageTypeLabel::from(*msg_type)
+            }),
+        bootp_op: i64::from(bootp_op),
+        source_address,
+        xid: i64::from(decoded_packet.packet.xid()),
+        broadcast_flag: decoded_packet.packet.flags().broadcast(),
+        ciaddr: decoded_packet.packet.ciaddr(),
+        yiaddr: decoded_packet.packet.yiaddr(),
+        siaddr: decoded_packet.packet.siaddr(),
+        giaddr: decoded_packet.packet.giaddr(),
+        chaddr: util::u8_to_mac(decoded_packet.packet.chaddr()),
+    });
+    tracing::debug!(packet.received = %decoded_packet.packet, "Received Packet");
 
     if handler.should_be_relayed() {
         decoded_packet.is_relayed()?;
     }
     decoded_packet.is_this_for_us(config)?;
 
-    let msg_type = decoded_packet.get_option_val(OptionCode::MessageType, None)?;
+    let msg_type = msg_type?;
     let dhcp_response = handler
         .discover_dhcp(
             decoded_packet.get_discovery_request(handler, circuit_id),
@@ -261,20 +328,36 @@ pub async fn process_packet(
         )
         .await?;
 
-    let (dst_address, dst_port) = decoded_packet.decide_dst_ip(msg_type);
+    let (dst_address, dst_port) =
+        decoded_packet.decide_dst_ip(msg_type, config.relay_response_port);
 
     let packet =
         create_dhcp_reply_packet(&decoded_packet, circuit_id, dhcp_response, config, msg_type)?;
-    tracing::info!(packet.send=%packet, "Sending Packet");
+
+    // Read the type off the reply itself: create_dhcp_reply_packet answers a
+    // Request with either an Ack or a Nak.
+    let reply_message_type = packet
+        .opts()
+        .msg_type()
+        .map_or(MessageTypeLabel::Other, MessageTypeLabel::from);
 
     let mut encoded_packet = Vec::new();
     let mut e = Encoder::new(&mut encoded_packet);
-    packet.encode(&mut e)?;
+    if let Err(error) = packet.encode(&mut e) {
+        tracing::debug!(
+            packet.encode = %packet,
+            error = %error,
+            "Failed to encode DHCP packet"
+        );
+        return Err(error.into());
+    }
 
     Ok(Packet {
         encoded_packet,
+        sent_packet: packet,
         dst_address,
         dst_port,
+        message_type: reply_message_type,
     })
 }
 
@@ -331,6 +414,7 @@ fn create_dhcp_reply_packet(
     let (prefix, broadcast) = match parse {
         Ok(prefix) => match prefix {
             IpNetwork::V4(prefix) => (prefix.mask(), prefix.broadcast()),
+            // Kept for safety until v6 path is at parity.
             IpNetwork::V6(prefix) => {
                 return Err(DhcpError::GenericError(format!(
                     "Prefix ({prefix}) is an IPv6 network, which is not supported."
@@ -532,28 +616,38 @@ mod test {
     #[test]
     fn test_get_mtu() {
         let interface_mtu_none = crate::packet_handler::InterfaceInfo {
-            address: <std::net::Ipv4Addr as std::str::FromStr>::from_str("10.12.1.2")
-                .ok()
-                .unwrap(),
-            gateway: <std::net::Ipv4Addr as std::str::FromStr>::from_str("10.12.1.2")
-                .ok()
-                .unwrap(),
-            prefix: "24".to_string(),
+            address: Some(
+                <std::net::Ipv4Addr as std::str::FromStr>::from_str("10.12.1.2")
+                    .ok()
+                    .unwrap(),
+            ),
+            gateway: Some(
+                <std::net::Ipv4Addr as std::str::FromStr>::from_str("10.12.1.2")
+                    .ok()
+                    .unwrap(),
+            ),
+            prefix: Some("24".to_string()),
             fqdn: "fqdn1".to_string(),
             booturl: None,
             mtu: None,
+            ipv6: None,
         };
         let interface_mtu_9000 = crate::packet_handler::InterfaceInfo {
-            address: <std::net::Ipv4Addr as std::str::FromStr>::from_str("20.22.2.2")
-                .ok()
-                .unwrap(),
-            gateway: <std::net::Ipv4Addr as std::str::FromStr>::from_str("20.22.2.2")
-                .ok()
-                .unwrap(),
-            prefix: "16".to_string(),
+            address: Some(
+                <std::net::Ipv4Addr as std::str::FromStr>::from_str("20.22.2.2")
+                    .ok()
+                    .unwrap(),
+            ),
+            gateway: Some(
+                <std::net::Ipv4Addr as std::str::FromStr>::from_str("20.22.2.2")
+                    .ok()
+                    .unwrap(),
+            ),
+            prefix: Some("16".to_string()),
             fqdn: "fqdn2".to_string(),
             booturl: None,
             mtu: Some(9000),
+            ipv6: None,
         };
         let mut interface_mtu_65537 = interface_mtu_none.clone();
         interface_mtu_65537.mtu = Some(65537);

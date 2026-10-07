@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "description": "The cc_phone_home schema from https://github.com/canonical/cloud-init/blob/26.1/cloudinit/config/schemas/schema-cloud-config-v1.json#L2351-L2398.",
+  "type": "object",
+  "required": [
+    "phone_home"
+  ],
+  "properties": {
+    "phone_home": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "The URL to send the phone home data to."
+        },
+        "post": {
+          "description": "A list of keys to post or ``all``. Default: ``all``.",
+          "oneOf": [
+            {
+              "enum": [
+                "all"
+              ]
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "pub_key_rsa",
+                  "pub_key_ecdsa",
+                  "pub_key_ed25519",
+                  "instance_id",
+                  "hostname",
+                  "fqdn"
+                ]
+              }
+            }
+          ]
+        },
+        "tries": {
+          "type": "integer",
+          "description": "The number of times to try sending the phone home data. Default: ``10``.",
+          "default": 10
+        }
+      }
+    }
+  }
+}

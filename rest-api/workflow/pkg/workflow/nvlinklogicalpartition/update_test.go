@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateNVLinkLogicalPartitionTestSuite struct {
@@ -39,8 +39,8 @@ func (s *UpdateNVLinkLogicalPartitionTestSuite) Test_UpdateNVLinkLogicalPartitio
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.NVLinkLogicalPartitionInventory{
-		Partitions: []*cwssaws.NVLinkLogicalPartition{},
+	inv := &corev1.NVLinkLogicalPartitionInventory{
+		Partitions: []*corev1.NVLinkLogicalPartition{},
 	}
 
 	s.env.RegisterActivity(nvlinklogicalpartitionManager.UpdateNVLinkLogicalPartitionsInDB)
@@ -56,8 +56,8 @@ func (s *UpdateNVLinkLogicalPartitionTestSuite) Test_UpdateNVLinkLogicalPartitio
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.NVLinkLogicalPartitionInventory{
-		Partitions: []*cwssaws.NVLinkLogicalPartition{},
+	inv := &corev1.NVLinkLogicalPartitionInventory{
+		Partitions: []*corev1.NVLinkLogicalPartition{},
 	}
 
 	s.env.RegisterActivity(nvlinklogicalpartitionManager.UpdateNVLinkLogicalPartitionsInDB)

@@ -53,7 +53,7 @@ async fn show_machine_table(
     Ok(())
 }
 
-pub async fn show_machines(
+pub(super) async fn show_machines(
     args: ShowSkuOptions,
     api_client: &ApiClient,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,

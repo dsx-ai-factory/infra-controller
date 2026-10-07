@@ -24,4 +24,3 @@ mod client;
 mod errors;
 mod registry;
 mod stats;
-mod traits;

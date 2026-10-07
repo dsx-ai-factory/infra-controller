@@ -24,15 +24,15 @@ use tokio::time::timeout;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CmdError {
-    #[error("Invalid retry value {0} for {1}")]
+    #[error("invalid retry value {0} for {1}")]
     InvalidRetry(u32, String),
-    #[error("Subprocess {0} with arguments {1:?} failed with output: {2}")]
+    #[error("subprocess {0} with arguments {1:?} failed with output: {2}")]
     Subprocess(String, Vec<String>, String),
-    #[error("Command {0} with args {1:?} produced output that is not valid UTF8")]
+    #[error("command {0} with args {1:?} produced output that is not valid UTF8")]
     OutputParse(String, Vec<String>),
-    #[error("Error running '{0}': {1:#}")]
+    #[error("error running '{0}': {1:#}")]
     RunError(String, String),
-    #[error("Error async running '{0}': {1:#}")]
+    #[error("error async running '{0}': {1:#}")]
     TokioRunError(String, String),
 }
 

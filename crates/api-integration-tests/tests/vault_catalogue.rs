@@ -15,26 +15,62 @@
  * limitations under the License.
  */
 
-use std::net::TcpListener;
+use std::net::Ipv6Addr;
+use std::time::Duration;
 
 use carbide_secrets::credentials::{
-    BmcCredentialType, CredentialKey, CredentialPrefix, CredentialWriter, Credentials,
-    MqttCredentialType,
+    BmcCredentialType, CredentialKey, CredentialPrefix, CredentialReader, CredentialWriter,
+    Credentials, MqttCredentialType,
 };
 use carbide_secrets::{ForgeVaultClient, VaultConfig, create_vault_client};
+use eyre::WrapErr;
 use mac_address::MacAddress;
 use serial_test::serial;
-
-fn allocate_port() -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to free port");
-    listener.local_addr().expect("local addr")
-}
 
 fn cred(user: &str, pass: &str) -> Credentials {
     Credentials::UsernamePassword {
         username: user.to_string(),
         password: pass.to_string(),
     }
+}
+
+#[tokio::test]
+async fn credentials_round_trip_over_ipv6_tls() -> eyre::Result<()> {
+    if !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|dir| dir.join("vault").is_file())
+    {
+        eprintln!("Skipping IPv6 Vault test: vault binary not found in PATH");
+        return Ok(());
+    }
+
+    let mut vault = api_test_helper::vault::start_on(Ipv6Addr::LOCALHOST.into()).await?;
+    let key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+    let expected = cred("ipv6-bmc-root", "ipv6-bmc-password");
+    let exchange = tokio::time::timeout(Duration::from_secs(10), async {
+        let config = VaultConfig {
+            address: Some(format!("https://{}", vault.addr)),
+            kv_mount_location: Some("secret".to_string()),
+            pki_mount_location: Some("forgeca".to_string()),
+            pki_role_name: Some("forge-cluster".to_string()),
+            token: Some(vault.token.clone()),
+            vault_cacert: Some(vault.ca_cert.clone()),
+            ..Default::default()
+        };
+        let client = create_vault_client(&config)?;
+        client.set_credentials(&key, &expected).await?;
+        Ok::<_, eyre::Report>(client.get_credentials(&key).await?)
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(5), vault.process.kill())
+        .await
+        .wrap_err("timed out stopping IPv6 vault")?
+        .wrap_err("stopping IPv6 vault")?;
+    let actual = exchange.wrap_err("timed out writing and reading IPv6 vault credentials")??;
+    assert_eq!(actual, Some(expected));
+    Ok(())
 }
 
 /// Sets up a Vault dev server with some test
@@ -53,13 +89,10 @@ async fn setup_vault_with_secrets() -> Option<(
         })
         .next()?;
 
-    let addr = allocate_port();
-    let vault = api_test_helper::vault::start(addr)
-        .await
-        .expect("start vault");
+    let vault = api_test_helper::vault::start().await.expect("start vault");
 
     let config = VaultConfig {
-        address: Some(format!("https://{addr}")),
+        address: Some(format!("https://{}", vault.addr)),
         kv_mount_location: Some("secret".to_string()),
         pki_mount_location: Some("forgeca".to_string()),
         pki_role_name: Some("forge-cluster".to_string()),
@@ -67,9 +100,7 @@ async fn setup_vault_with_secrets() -> Option<(
         vault_cacert: Some(vault.ca_cert.clone()),
         ..Default::default()
     };
-
-    let meter = opentelemetry::global::meter("vault-catalogue-test");
-    let client = create_vault_client(&config, meter).expect("create vault client");
+    let client = create_vault_client(&config).expect("create vault client");
 
     // Populate a mix of secrets across prefixes.
     let secrets = vec![

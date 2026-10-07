@@ -15,4 +15,6 @@
  * limitations under the License.
  */
 
-pub mod registries;
+pub mod registries {
+    include!(concat!(env!("OUT_DIR"), "/registries.rs"));
+}

@@ -17,20 +17,21 @@
 
 use std::borrow::Cow;
 use std::fmt::Display;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
+use futures::future::BoxFuture;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
-pub fn resource() -> redfish::Resource<'static> {
+pub(crate) fn resource() -> redfish::Resource<'static> {
     redfish::Resource {
         odata_id: Cow::Borrowed("/redfish/v1/AccountService"),
         odata_type: Cow::Borrowed("#AccountService.v1_9_0.AccountService"),
@@ -39,15 +40,15 @@ pub fn resource() -> redfish::Resource<'static> {
     }
 }
 
-pub fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(&resource().odata_id, get(get_root).patch(patch_root))
         .route(
             &ACCOUNTS_COLLECTION_RESOURCE.odata_id,
-            get(get_accounts).post(create_account),
+            get(get_accounts::<C>).post(create_account),
         )
         .route(
             format!("{}/{{account_id}}", ACCOUNTS_COLLECTION_RESOURCE.odata_id).as_str(),
-            get(get_account).patch(patch_account),
+            get(get_account::<C>).patch(patch_account::<C>),
         )
 }
 
@@ -56,24 +57,89 @@ const ACCOUNTS_COLLECTION_RESOURCE: redfish::Collection<'static> = redfish::Coll
     odata_type: Cow::Borrowed("#ManagerAccountCollection.ManagerAccountCollection"),
     name: Cow::Borrowed("Accounts Collection"),
 };
+const ADMINISTRATOR_ROLE_ID: &str = "Administrator";
 
 #[derive(Debug)]
 pub struct AccountServiceState {
     accounts: Mutex<Vec<Account>>,
+    password_updater: Mutex<Option<Weak<dyn PasswordUpdater>>>,
+}
+
+pub(crate) trait PasswordUpdater: Send + Sync {
+    fn update_password<'a>(
+        &'a self,
+        username: &'a str,
+        current_password: &'a str,
+        new_password: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>>;
+}
+
+/// A snapshot of one BMC account's current password, suitable for durable
+/// persistence and later restoration after a mock rebuild.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BmcAccountCredential {
+    /// Redfish account id this credential belongs to.
+    pub account_id: String,
+    /// Account username, used together with `account_id` to match this
+    /// credential back onto an account during `restore_credentials`.
+    pub username: String,
+    /// The account's current password. Sensitive: this snapshot is written
+    /// to disk as plaintext for restoration after a mock rebuild.
+    pub password: String,
 }
 
 impl AccountServiceState {
-    pub fn new(factory_default_account: Account) -> Self {
+    pub(crate) fn new(factory_default_account: Account) -> Self {
         Self {
             accounts: Mutex::new(vec![factory_default_account]),
+            password_updater: Mutex::new(None),
         }
     }
 
-    pub fn accounts(&self) -> Vec<Account> {
+    pub(crate) fn set_password_updater(&self, updater: &Arc<dyn PasswordUpdater>) {
+        *self.password_updater.lock().expect("mutex poisoned") = Some(Arc::downgrade(updater));
+    }
+
+    /// Exports the current password of every account for durable persistence.
+    pub fn export_credentials(&self) -> Vec<BmcAccountCredential> {
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .iter()
+            .map(|account| BmcAccountCredential {
+                account_id: account.id.clone(),
+                username: account.username.clone(),
+                password: account.password.clone(),
+            })
+            .collect()
+    }
+
+    /// Restores previously exported passwords onto matching accounts. Accounts
+    /// are matched by id and username; the factory-default password recorded at
+    /// construction is left untouched so factory-default detection still works.
+    /// Credentials that don't match any current account (e.g. from an
+    /// old/stale snapshot) are silently ignored.
+    pub fn restore_credentials(&self, credentials: &[BmcAccountCredential]) {
+        let mut accounts = self.accounts.lock().expect("mutex poisoned");
+        for credential in credentials {
+            if let Some(account) = accounts.iter_mut().find(|account| {
+                account.id == credential.account_id && account.username == credential.username
+            }) {
+                account.password = credential.password.clone();
+            } else {
+                tracing::warn!(
+                    account_id = %credential.account_id,
+                    "BMC credential snapshot did not match a current account"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn accounts(&self) -> Vec<Account> {
         self.accounts.lock().expect("mutex poisoned").clone()
     }
 
-    pub fn find(&self, account_id: &str) -> Option<Account> {
+    pub(crate) fn find(&self, account_id: &str) -> Option<Account> {
         self.accounts
             .lock()
             .expect("mutex poisoned")
@@ -82,7 +148,16 @@ impl AccountServiceState {
             .cloned()
     }
 
-    pub fn is_authorized(&self, username: &str, password: &str) -> bool {
+    pub(crate) fn administrator_credentials(&self) -> Option<(String, String)> {
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .iter()
+            .find(|account| account.role_id == ADMINISTRATOR_ROLE_ID)
+            .map(|account| (account.username.clone(), account.password.clone()))
+    }
+
+    pub(crate) fn is_authorized(&self, username: &str, password: &str) -> bool {
         self.accounts
             .lock()
             .expect("mutex poisoned")
@@ -90,7 +165,7 @@ impl AccountServiceState {
             .any(|account| account.matches(username, password))
     }
 
-    pub fn is_factory_default_password(&self, username: &str, password: &str) -> bool {
+    pub(crate) fn is_factory_default_password(&self, username: &str, password: &str) -> bool {
         self.accounts
             .lock()
             .expect("mutex poisoned")
@@ -98,29 +173,55 @@ impl AccountServiceState {
             .any(|account| account.matches_factory_default_password(username, password))
     }
 
-    pub fn update_password(&self, account_id: &str, password: impl Into<String>) -> bool {
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        let Some(account) = accounts.iter_mut().find(|account| account.id == account_id) else {
-            return false;
+    pub(crate) async fn update_password(
+        &self,
+        account_id: &str,
+        password: impl Into<String>,
+    ) -> Result<bool, String> {
+        let password = password.into();
+        let account = self.find(account_id);
+        let Some(account) = account else {
+            return Ok(false);
         };
-        account.password = password.into();
-        true
+        let updater = self
+            .password_updater
+            .lock()
+            .expect("mutex poisoned")
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(updater) = updater {
+            updater
+                .update_password(&account.username, &account.password, &password)
+                .await?;
+        }
+
+        {
+            let mut accounts = self.accounts.lock().expect("mutex poisoned");
+            let account = accounts
+                .iter_mut()
+                .find(|candidate| candidate.id == account_id)
+                .expect("account existed before password synchronization");
+            account.password = password;
+        }
+        Ok(true)
     }
 
     /// Rotates every account on its factory default password to `new_password`
     pub fn change_factory_default_password(&self, new_password: impl Into<String>) {
         let new_password = new_password.into();
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        for account in accounts.iter_mut() {
-            if account.password == account.factory_default_password {
-                account.password = new_password.clone();
+        {
+            let mut accounts = self.accounts.lock().expect("mutex poisoned");
+            for account in accounts.iter_mut() {
+                if account.password == account.factory_default_password {
+                    account.password = new_password.clone();
+                }
             }
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Account {
+pub(crate) struct Account {
     id: String,
     username: String,
     password: String,
@@ -129,7 +230,7 @@ pub struct Account {
 }
 
 impl Account {
-    pub fn administrator(
+    pub(crate) fn administrator(
         id: impl Into<String>,
         username: impl Into<String>,
         password: impl Into<String>,
@@ -140,7 +241,7 @@ impl Account {
             username: username.into(),
             password: password.clone(),
             factory_default_password: password,
-            role_id: "Administrator".into(),
+            role_id: ADMINISTRATOR_ROLE_ID.into(),
         }
     }
 
@@ -162,7 +263,7 @@ impl Account {
     }
 }
 
-pub async fn get_root() -> Response {
+async fn get_root() -> Response {
     let service_attrs = json!({
         "AccountLockoutCounterResetAfter": 0,
         "AccountLockoutDuration": 0,
@@ -178,11 +279,11 @@ pub async fn get_root() -> Response {
         .into_ok_response()
 }
 
-pub async fn patch_root() -> Response {
+async fn patch_root() -> Response {
     http::ok_no_content()
 }
 
-pub fn account_resource(id: impl Display) -> redfish::Resource<'static> {
+fn account_resource(id: impl Display) -> redfish::Resource<'static> {
     redfish::Resource {
         odata_id: Cow::Owned(format!("{}/{id}", ACCOUNTS_COLLECTION_RESOURCE.odata_id)),
         odata_type: Cow::Borrowed("#ManagerAccount.v1_8_0.ManagerAccount"),
@@ -191,7 +292,7 @@ pub fn account_resource(id: impl Display) -> redfish::Resource<'static> {
     }
 }
 
-pub async fn get_accounts(State(state): State<BmcState>) -> Response {
+async fn get_accounts<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let members = state
         .account_service_state
         .accounts()
@@ -203,12 +304,12 @@ pub async fn get_accounts(State(state): State<BmcState>) -> Response {
         .into_ok_response()
 }
 
-pub async fn create_account() -> Response {
+async fn create_account() -> Response {
     json!({}).into_ok_response()
 }
 
-pub async fn patch_account(
-    State(state): State<BmcState>,
+async fn patch_account<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(account_id): Path<String>,
     Json(patch_account): Json<serde_json::Value>,
 ) -> Response {
@@ -219,18 +320,23 @@ pub async fn patch_account(
         return json!("Password must be a string").into_response(StatusCode::BAD_REQUEST);
     };
 
-    if state
+    match state
         .account_service_state
         .update_password(&account_id, password)
+        .await
     {
-        http::ok_no_content()
-    } else {
-        http::not_found()
+        Ok(true) => http::ok_no_content(),
+        Ok(false) => http::not_found(),
+        Err(error) => {
+            tracing::error!(%error, %account_id, "failed to synchronize BMC account password");
+            json!("Failed to synchronize BMC account password")
+                .into_response(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
-pub async fn get_account(
-    State(state): State<BmcState>,
+async fn get_account<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(account_id): Path<String>,
 ) -> Response {
     state
@@ -238,4 +344,130 @@ pub async fn get_account(
         .find(&account_id)
         .map(|account| account.to_json().into_ok_response())
         .unwrap_or_else(http::not_found)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::future::BoxFuture;
+
+    use super::{Account, AccountServiceState, PasswordUpdater};
+
+    struct TestPasswordUpdater {
+        result: Result<(), String>,
+    }
+
+    impl PasswordUpdater for TestPasswordUpdater {
+        fn update_password<'a>(
+            &'a self,
+            _username: &'a str,
+            _current_password: &'a str,
+            _new_password: &'a str,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let result = self.result.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    fn state_with_updater(
+        result: Result<(), String>,
+    ) -> (AccountServiceState, Arc<dyn PasswordUpdater>) {
+        let state = AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        let updater: Arc<dyn PasswordUpdater> = Arc::new(TestPasswordUpdater { result });
+        state.set_password_updater(&updater);
+        (state, updater)
+    }
+
+    #[tokio::test]
+    async fn update_password_commits_after_ipmi_update_succeeds() {
+        let (state, _updater) = state_with_updater(Ok(()));
+
+        assert_eq!(state.update_password("1", "new-password").await, Ok(true));
+        assert!(state.is_authorized("root", "new-password"));
+    }
+
+    #[tokio::test]
+    async fn rotated_password_survives_bmc_rebuild() {
+        // Regression test for issue #5966: machine-a-tron loses rotated BMC
+        // passwords on pod restart because AccountServiceState is in-memory only.
+        let (state, _updater) = state_with_updater(Ok(()));
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        assert!(state.is_authorized("root", "rotated-password"));
+
+        // The credentials exported on each password change are persisted in
+        // the machine-a-tron device snapshot.
+        let exported = state.export_credentials();
+
+        // Simulate a machine-a-tron pod restart: run_bmc_mock rebuilds every
+        // BMC from its factory-default configuration, then restores the
+        // snapshot-saved credentials.
+        let restarted =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restarted.restore_credentials(&exported);
+
+        assert!(
+            restarted.is_authorized("root", "rotated-password"),
+            "rotated password must survive a BMC mock rebuild (issue #5966)"
+        );
+        assert!(
+            !restarted.is_authorized("root", "old-password"),
+            "factory-default password must stay rejected after rotation (issue #5966)"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_credentials_preserves_factory_default_detection() {
+        let (state, _updater) = state_with_updater(Ok(()));
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        let exported = state.export_credentials();
+
+        let restarted =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restarted.restore_credentials(&exported);
+
+        // The restored password is not the factory default, and the factory
+        // default recorded at construction must remain intact underneath.
+        assert!(!restarted.is_factory_default_password("root", "rotated-password"));
+        assert!(!restarted.is_factory_default_password("root", "old-password"));
+
+        // A never-rotated export restores onto a fresh state as still-factory.
+        let untouched =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        let untouched_export = untouched.export_credentials();
+        let restored_untouched =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restored_untouched.restore_credentials(&untouched_export);
+        assert!(restored_untouched.is_factory_default_password("root", "old-password"));
+    }
+
+    #[tokio::test]
+    async fn restore_credentials_ignores_unknown_accounts() {
+        let state = AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        state.restore_credentials(&[super::BmcAccountCredential {
+            account_id: "2".to_string(),
+            username: "other".to_string(),
+            password: "whatever".to_string(),
+        }]);
+        assert!(state.is_authorized("root", "old-password"));
+        assert!(!state.is_authorized("other", "whatever"));
+    }
+
+    #[tokio::test]
+    async fn update_password_preserves_redfish_password_when_ipmi_update_fails() {
+        let (state, _updater) = state_with_updater(Err("IPMI update failed".to_string()));
+
+        assert_eq!(
+            state.update_password("1", "new-password").await,
+            Err("IPMI update failed".to_string())
+        );
+        assert!(state.is_authorized("root", "old-password"));
+        assert!(!state.is_authorized("root", "new-password"));
+    }
 }

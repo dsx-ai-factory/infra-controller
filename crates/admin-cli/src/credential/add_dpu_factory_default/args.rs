@@ -22,15 +22,27 @@ use rpc::{CredentialType, forge as forgerpc};
 #[command(after_long_help = "\
 EXAMPLES:
 
-Add the factory-default DPU BMC credential:
-    $ nico-admin-cli credential add-dpu-factory-default --username admin --password mypassword
+Add the factory-default DPU BMC credential for all unrecognized models (backward-compatible default):
+    $ nico-admin-cli credential add-dpu-factory-default --username root --password mypassword
+
+Add a model-specific factory-default for BlueField-3 DPUs:
+    $ nico-admin-cli credential add-dpu-factory-default --model bf3 --username root --password mypassword
+
+Add a model-specific factory-default for BlueField-4 DPUs:
+    $ nico-admin-cli credential add-dpu-factory-default --model bf4 --username admin --password mynewpassword
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, required(true), help = "Default username: root, ADMIN, etc")]
-    pub username: String,
+    username: String,
     #[clap(long, required(true), help = "DPU manufacturer default password")]
-    pub password: String,
+    password: String,
+    #[clap(
+        long,
+        default_value = "unknown",
+        help = "DPU model: bf2, bf3, bf4, or unknown (catch-all / backward-compatible default)"
+    )]
+    model: bmc_vendor::DpuModel,
 }
 
 impl From<Args> for forgerpc::CredentialCreationRequest {
@@ -40,7 +52,8 @@ impl From<Args> for forgerpc::CredentialCreationRequest {
             username: Some(args.username),
             password: args.password,
             mac_address: None,
-            vendor: None,
+            vendor: Some(args.model.to_string()),
+            credential_name: None,
         }
     }
 }

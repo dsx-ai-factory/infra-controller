@@ -21,6 +21,7 @@ edition.workspace = true
 description = "Carbide is a Bare Metal Provisioning system with auto-discovery and API based machine manipulation"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
@@ -35,3 +36,6 @@ path = "fuzz_targets/ssh_console_escape_filter.rs"
 test = false
 doc = false
 bench = false
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

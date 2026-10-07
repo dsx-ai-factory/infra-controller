@@ -23,17 +23,20 @@ use rpc::forge::{MachineArchitecture, PxeInstructions};
 
 use crate::tests::common::api_fixtures::Api;
 
-pub struct TestMachineInterface {
+pub(in crate::tests) struct TestMachineInterface {
     id: MachineInterfaceId,
     api: Arc<Api>,
 }
 
 impl TestMachineInterface {
-    pub fn new(id: MachineInterfaceId, api: Arc<Api>) -> Self {
+    pub(in crate::tests) fn new(id: MachineInterfaceId, api: Arc<Api>) -> Self {
         Self { id, api }
     }
 
-    pub async fn get_pxe_instructions(&self, arch: MachineArchitecture) -> PxeInstructions {
+    pub(in crate::tests) async fn get_pxe_instructions(
+        &self,
+        arch: MachineArchitecture,
+    ) -> PxeInstructions {
         let mut txn = self.api.txn_begin().await.unwrap();
         let iface = db::machine_interface::find_one(txn.as_pgconn(), self.id)
             .await

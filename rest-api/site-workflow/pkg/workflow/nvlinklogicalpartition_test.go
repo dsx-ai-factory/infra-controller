@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
@@ -83,20 +83,20 @@ func (cnvllvts *CreateNVLinkLogicalPartitionTestSuite) AfterTest(suiteName, test
 func (cnvllvts *CreateNVLinkLogicalPartitionTestSuite) Test_CreateNVLinkLogicalPartition_Success() {
 	var NVLinkLogicalPartitionManager iActivity.ManageNVLinkLogicalPartition
 
-	request := &cwssaws.NVLinkLogicalPartitionCreationRequest{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.NVLinkLogicalPartitionConfig{
-			Metadata: &cwssaws.Metadata{
+	request := &corev1.NVLinkLogicalPartitionCreationRequest{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.NVLinkLogicalPartitionConfig{
+			Metadata: &corev1.Metadata{
 				Name: "the_name",
 			},
 			TenantOrganizationId: "test_org",
 		},
 	}
 
-	nvLinkLogicalPartition := &cwssaws.NVLinkLogicalPartition{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.NVLinkLogicalPartitionConfig{
-			Metadata: &cwssaws.Metadata{
+	nvLinkLogicalPartition := &corev1.NVLinkLogicalPartition{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.NVLinkLogicalPartitionConfig{
+			Metadata: &corev1.Metadata{
 				Name: "the_name",
 			},
 			TenantOrganizationId: "test_org",
@@ -113,7 +113,7 @@ func (cnvllvts *CreateNVLinkLogicalPartitionTestSuite) Test_CreateNVLinkLogicalP
 	cnvllvts.NoError(cnvllvts.env.GetWorkflowError())
 
 	// Verify result
-	var result cwssaws.NVLinkLogicalPartition
+	var result corev1.NVLinkLogicalPartition
 	cnvllvts.NoError(cnvllvts.env.GetWorkflowResult(&result))
 	cnvllvts.NotNil(result.Id)
 	cnvllvts.Equal(nvLinkLogicalPartition.Id.Value, result.Id.Value)
@@ -125,10 +125,10 @@ func (cnvllvts *CreateNVLinkLogicalPartitionTestSuite) Test_CreateNVLinkLogicalP
 func (cnvllvts *CreateNVLinkLogicalPartitionTestSuite) Test_CreateNVLinkLogicalPartition_Failure() {
 	var NVLinkLogicalPartitionManager iActivity.ManageNVLinkLogicalPartition
 
-	request := &cwssaws.NVLinkLogicalPartitionCreationRequest{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.NVLinkLogicalPartitionConfig{
-			Metadata: &cwssaws.Metadata{
+	request := &corev1.NVLinkLogicalPartitionCreationRequest{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.NVLinkLogicalPartitionConfig{
+			Metadata: &corev1.Metadata{
 				Name: "the_name",
 			},
 			TenantOrganizationId: "test_org",
@@ -169,10 +169,10 @@ func (cnvllvts *UpdateNVLinkLogicalPartitionTestSuite) AfterTest(suiteName, test
 func (cnvllvts *UpdateNVLinkLogicalPartitionTestSuite) Test_UpdateNVLinkLogicalPartition_Success() {
 	var NVLinkLogicalPartitionManager iActivity.ManageNVLinkLogicalPartition
 
-	request := &cwssaws.NVLinkLogicalPartitionUpdateRequest{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.NVLinkLogicalPartitionConfig{
-			Metadata: &cwssaws.Metadata{
+	request := &corev1.NVLinkLogicalPartitionUpdateRequest{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.NVLinkLogicalPartitionConfig{
+			Metadata: &corev1.Metadata{
 				Name: "the_name",
 			},
 		},
@@ -191,10 +191,10 @@ func (cnvllvts *UpdateNVLinkLogicalPartitionTestSuite) Test_UpdateNVLinkLogicalP
 func (cnvllvts *UpdateNVLinkLogicalPartitionTestSuite) Test_UpdateNVLinkLogicalPartition_Failure() {
 	var NVLinkLogicalPartitionManager iActivity.ManageNVLinkLogicalPartition
 
-	request := &cwssaws.NVLinkLogicalPartitionUpdateRequest{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &cwssaws.NVLinkLogicalPartitionConfig{
-			Metadata: &cwssaws.Metadata{
+	request := &corev1.NVLinkLogicalPartitionUpdateRequest{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config: &corev1.NVLinkLogicalPartitionConfig{
+			Metadata: &corev1.Metadata{
 				Name: "the_name",
 			},
 		},
@@ -234,8 +234,8 @@ func (cnvllvts *DeleteNVLinkLogicalPartitionTestSuite) AfterTest(suiteName, test
 func (cnvllvts *DeleteNVLinkLogicalPartitionTestSuite) Test_DeleteNVLinkLogicalPartition_Success() {
 	var NVLinkLogicalPartitionManager iActivity.ManageNVLinkLogicalPartition
 
-	request := &cwssaws.NVLinkLogicalPartitionDeletionRequest{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.NVLinkLogicalPartitionDeletionRequest{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	// Mock DeleteNVLinkLogicalPartitionOnSite activity
@@ -251,8 +251,8 @@ func (cnvllvts *DeleteNVLinkLogicalPartitionTestSuite) Test_DeleteNVLinkLogicalP
 func (cnvllvts *DeleteNVLinkLogicalPartitionTestSuite) Test_DeleteNVLinkLogicalPartition_Failure() {
 	var NVLinkLogicalPartitionManager iActivity.ManageNVLinkLogicalPartition
 
-	request := &cwssaws.NVLinkLogicalPartitionDeletionRequest{
-		Id: &cwssaws.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+	request := &corev1.NVLinkLogicalPartitionDeletionRequest{
+		Id: &corev1.NVLinkLogicalPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 	}
 
 	errMsg := "Site Controller communication error"

@@ -25,7 +25,7 @@ use crate::rpc::ApiClient;
 /// Update a network security group.
 /// On successful update, the details of the
 /// group will be displayed.
-pub async fn update(
+pub(super) async fn update(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

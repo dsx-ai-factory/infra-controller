@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn create_association(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn create_association(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let req: ::rpc::forge::AssociateMachinesWithInstanceTypeRequest = args.try_into()?;
     api_client
         .0

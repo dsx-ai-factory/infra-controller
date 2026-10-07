@@ -25,21 +25,23 @@ use rpc::forge_api_client::ForgeApiClient;
 use russh::server::{Server as RusshServer, run_stream};
 use russh::{MethodKind, MethodSet};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio::sync::oneshot::Sender;
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::bmc::client_pool::BmcConnectionStore;
 use crate::config::Config;
 use crate::frontend::{Handler, HandlerError};
 use crate::shutdown_handle::ShutdownHandle;
+use crate::{fork_cancel_token, tcp_listener};
 
-pub async fn spawn(
+pub(crate) async fn spawn(
     config: Arc<Config>,
     forge_api_client: ForgeApiClient,
     bmc_connection_store: BmcConnectionStore,
     meter: &Meter,
+    cancel_token: CancellationToken,
 ) -> Result<Handle, SpawnError> {
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let metrics = Arc::new(ServerMetrics::new(meter, &config));
     let listen_address = config.listen_address;
     use SpawnError::*;
@@ -69,45 +71,54 @@ pub async fn spawn(
         metrics,
     };
 
-    let listener = TcpListener::bind(listen_address)
-        .await
-        .map_err(|error| Listening {
-            addr: listen_address,
-            error,
-        })?;
-    tracing::info!("listening on {}", listen_address);
+    let (listener, listen_address) =
+        tcp_listener::bind(listen_address)
+            .await
+            .map_err(|error| Listening {
+                addr: listen_address,
+                error,
+            })?;
+    tracing::info!(%listen_address, "SSH server listening");
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join_handle = tokio::spawn(server.run(listener, shutdown_rx));
+    let join_handle = tokio::spawn(server.run(listener, cancel_token));
 
     Ok(Handle {
-        shutdown_tx,
+        listen_address,
         join_handle,
+        drop_guard,
     })
 }
 
 #[derive(thiserror::Error, Debug)]
+// Kept public because `crate::SpawnError` exposes it as a payload.
 pub enum SpawnError {
-    #[error("Error reading host key file at {path}: {error}")]
+    #[error("error reading host key file at {path}: {error}")]
     ReadingHostKeyFile {
         path: String,
         error: russh::keys::ssh_key::Error,
     },
-    #[error("Error listening on {addr}: {error}")]
+    #[error("error listening on {addr}: {error}")]
     Listening {
         addr: SocketAddr,
         error: std::io::Error,
     },
 }
 
-pub struct Handle {
-    shutdown_tx: oneshot::Sender<()>,
+pub(crate) struct Handle {
+    listen_address: SocketAddr,
     join_handle: JoinHandle<()>,
+    drop_guard: DropGuard,
+}
+
+impl Handle {
+    pub(crate) fn listen_address(&self) -> SocketAddr {
+        self.listen_address
+    }
 }
 
 impl ShutdownHandle<()> for Handle {
-    fn into_parts(self) -> (Sender<()>, JoinHandle<()>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 
@@ -122,85 +133,80 @@ struct SshServer {
 impl SshServer {
     /// Run an instance of ssh-console on the given socket, looping forever until `shutdown` is
     /// received (or if the sending end of `shutdown` is dropped.)
-    pub async fn run(mut self, socket: TcpListener, mut shutdown: oneshot::Receiver<()>) {
-        loop {
-            tokio::select! {
-                accept_result = socket.accept() => {
-                    match accept_result {
-                        Ok((socket, _)) => {
-                            let russh_config = self.russh_config.clone();
-                            let handler = self.new_client(socket.peer_addr().ok());
+    async fn run(mut self, socket: TcpListener, cancel_token: CancellationToken) {
+        while let Some(accept_result) = cancel_token.run_until_cancelled(socket.accept()).await {
+            match accept_result {
+                Ok((socket, _)) => {
+                    let russh_config = self.russh_config.clone();
+                    let handler = self.new_client(socket.peer_addr().ok());
 
-                            tokio::spawn(async move {
-                                if russh_config.nodelay
-                                    && let Err(error) = socket.set_nodelay(true) {
-                                        tracing::warn!(%error, "set_nodelay() failed");
-                                    }
+                    tokio::spawn(async move {
+                        if russh_config.nodelay
+                            && let Err(error) = socket.set_nodelay(true)
+                        {
+                            tracing::warn!(%error, "set_nodelay() failed");
+                        }
 
-                                let session = match run_stream(russh_config, socket, handler).await {
-                                    Ok(s) => s,
-                                    Err(HandlerError::Russh(russh::Error::Disconnect)) => {
-                                        // If it was a simple disconnect, don't log a scary looking
-                                        // error.
-                                        tracing::debug!("client disconnected");
-                                        return;
-                                    }
-                                    Err(HandlerError::Russh(russh::Error::ConnectionTimeout)) => {
-                                        // ditto connection timeout
-                                        tracing::debug!("client connection timeout");
-                                        return;
-                                    }
-                                    Err(HandlerError::Russh(error)) => {
-                                        tracing::warn!(%error, "Connection setup failed with internal russh error");
-                                        return;
-                                    }
-                                    Err(error) => {
-                                        // I think this is impossible, none of our code is run yet.
-                                        tracing::warn!(%error, "Connection setup failed");
-                                        return;
-                                    }
-                                };
+                        let session = match run_stream(russh_config, socket, handler).await {
+                            Ok(s) => s,
+                            Err(HandlerError::Russh(russh::Error::Disconnect)) => {
+                                // If it was a simple disconnect, don't log a scary looking
+                                // error.
+                                tracing::debug!("client disconnected");
+                                return;
+                            }
+                            Err(HandlerError::Russh(russh::Error::ConnectionTimeout)) => {
+                                // ditto connection timeout
+                                tracing::debug!("client connection timeout");
+                                return;
+                            }
+                            Err(HandlerError::Russh(error)) => {
+                                tracing::warn!(%error, "Connection setup failed with internal russh error");
+                                return;
+                            }
+                            Err(error) => {
+                                // I think this is impossible, none of our code is run yet.
+                                tracing::warn!(%error, "Connection setup failed");
+                                return;
+                            }
+                        };
 
-                                match session.await {
-                                    Ok(_) => tracing::debug!("Connection closed"),
-                                    Err(HandlerError::Russh(russh::Error::IO(io_error))) => {
-                                        match io_error.kind() {
-                                            io::ErrorKind::UnexpectedEof => {
-                                                tracing::debug!("eof from client");
-                                            }
-                                            error => {
-                                                tracing::warn!(%error, "Connection closed with error");
-                                            }
-                                        }
+                        match session.await {
+                            Ok(_) => tracing::debug!("Connection closed"),
+                            Err(HandlerError::Russh(russh::Error::IO(io_error))) => {
+                                match io_error.kind() {
+                                    io::ErrorKind::UnexpectedEof => {
+                                        tracing::debug!("eof from client");
                                     }
-                                    Err(error) => {
+                                    error => {
                                         tracing::warn!(%error, "Connection closed with error");
                                     }
                                 }
-                            });
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "Connection closed with error");
+                            }
                         }
+                    });
+                }
 
-                        Err(error) => {
-                            tracing::error!(%error, "Error accepting SSH connection from socket");
-                            break;
-                        },
-                    }
-                },
-
-                _ = &mut shutdown => break,
+                Err(error) => {
+                    tracing::error!(%error, "Error accepting SSH connection from socket");
+                    break;
+                }
             }
         }
     }
 }
 
-pub struct ServerMetrics {
-    pub total_clients: UpDownCounter<i64>,
-    pub client_auth_failures_total: Counter<u64>,
+pub(crate) struct ServerMetrics {
+    pub(crate) total_clients: UpDownCounter<i64>,
+    pub(crate) client_auth_failures_total: Counter<u64>,
     _auth_enforced: ObservableGauge<u64>,
     _include_dpus: ObservableGauge<u64>,
 
     // per-BMC stats
-    pub bmc_clients: UpDownCounter<i64>,
+    pub(crate) bmc_clients: UpDownCounter<i64>,
 }
 
 impl ServerMetrics {
@@ -208,11 +214,11 @@ impl ServerMetrics {
         Self {
             total_clients: meter
                 .i64_up_down_counter("ssh_console_total_clients")
-                .with_description("The number of SSH clients currently connected to the service")
+                .with_description("Number of SSH clients currently connected to the service")
                 .build(),
             client_auth_failures_total: meter
                 .u64_counter("ssh_console_client_auth_failures")
-                .with_description("The number of SSH clients authentication attempts denied")
+                .with_description("Number of SSH client authentication attempts denied")
                 .build(),
             _auth_enforced: meter
                 .u64_observable_gauge("ssh_console_auth_enforced")

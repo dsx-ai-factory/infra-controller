@@ -18,13 +18,35 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use rpc::PciDeviceProperties;
-use rpc::machine_discovery::{Gpu, GpuPlatformInfo, InfinibandInterface, MemoryDevice};
+use crate::hw::rack::{RackElevation, RackUnit};
+use crate::{HardwareType, redfish};
 
-use crate::redfish;
+pub(crate) fn nvl72_rack_elevation(
+    compute_tray: HardwareType,
+    power_shelf: HardwareType,
+    nvlink_switch_tray: HardwareType,
+) -> RackElevation {
+    let mut units = Vec::with_capacity(35);
+
+    units.extend((11..=18).chain(28..=37).map(|position| RackUnit {
+        position,
+        hardware_type: compute_tray,
+    }));
+    units.extend((19..=27).map(|position| RackUnit {
+        position,
+        hardware_type: nvlink_switch_tray,
+    }));
+    units.extend((6..=9).chain(39..=42).map(|position| RackUnit {
+        position,
+        hardware_type: power_shelf,
+    }));
+    units.sort_unstable_by_key(|unit| unit.position);
+
+    RackElevation { version: 1, units }
+}
 
 #[derive(Clone, Copy)]
-pub enum BoardIndex {
+pub(crate) enum BoardIndex {
     Board0,
     Board1,
 }
@@ -39,19 +61,34 @@ impl fmt::Display for BoardIndex {
     }
 }
 
-pub struct BiancaBoard<'a> {
-    pub index: BoardIndex,
-    pub cpu_serial_number: Cow<'a, str>,
-    pub gpu_serial_number: Cow<'a, str>,
+pub(crate) struct BiancaBoard<'a> {
+    pub(crate) index: BoardIndex,
+    pub(crate) cpu_serial_number: Cow<'a, str>,
+    pub(crate) gpu_serial_number: Cow<'a, str>,
 }
 
-pub struct GpuChassisIds {
-    pub chassis_id: Cow<'static, str>,
-    pub pcie_device_id: Cow<'static, str>,
+struct GpuChassisIds {
+    chassis_id: Cow<'static, str>,
+    pcie_device_id: Cow<'static, str>,
+    index: usize,
+}
+
+const GPU_MODEL: &str = "GB200 186GB HBM3e";
+
+/// Stable per-slot GPU UUID, so a test can assert that a given slot reports a
+/// specific device identity.
+///
+/// Hardware reports one UUID per GPU on the GPU's `Processor`, its enclosing
+/// `Chassis` and its `PCIeDevice` alike, so every fixture for a slot uses this.
+fn gpu_uuid(index: usize) -> String {
+    format!("2b8c1f4a-6d33-4a11-9c02-7f5e0a1b{index:04x}")
 }
 
 impl BiancaBoard<'_> {
-    pub fn hgx_cpu_chassis(&self, id: Cow<'static, str>) -> redfish::chassis::SingleChassisConfig {
+    pub(super) fn hgx_cpu_chassis(
+        &self,
+        id: Cow<'static, str>,
+    ) -> redfish::chassis::SingleChassisConfig {
         let sensors = redfish::sensor::generate_chassis_sensors(
             &id,
             redfish::sensor::Layout {
@@ -84,18 +121,19 @@ impl BiancaBoard<'_> {
         }
     }
 
-    pub fn gpu_chassis_ids(&self) -> [GpuChassisIds; 2] {
+    fn gpu_chassis_ids(&self) -> [GpuChassisIds; 2] {
         let base = self.gpu_base_index();
         [0, 1].map(|local| {
             let n = base + local;
             GpuChassisIds {
                 chassis_id: format!("HGX_GPU_{n}").into(),
                 pcie_device_id: format!("GPU_{n}").into(),
+                index: n,
             }
         })
     }
 
-    pub fn hgx_gpu_processors(&self, system_id: &str) -> [redfish::processor::Processor; 2] {
+    pub(super) fn hgx_gpu_processors(&self, system_id: &str) -> [redfish::processor::Processor; 2] {
         self.gpu_chassis_ids().map(|ids| {
             let voltage_sensor_id =
                 redfish::sensor::sensor_id(redfish::sensor::SensorKind::Voltage, 1);
@@ -105,11 +143,27 @@ impl BiancaBoard<'_> {
                 redfish::sensor::chassis_resource(&ids.chassis_id, &voltage_sensor_id)
                     .odata_id
                     .as_ref(),
+                &redfish::processor::GpuIdentity {
+                    uuid: &gpu_uuid(ids.index),
+                    serial_number: &self.gpu_serial_number,
+                    model: GPU_MODEL,
+                },
             )
         })
     }
 
-    pub fn hgx_gpu_chassis(&self) -> [redfish::chassis::SingleChassisConfig; 2] {
+    /// The HBM stack behind each GPU on this board.
+    ///
+    /// Capacity mirrors the `GB200 186GB HBM3e` model the GPU chassis
+    /// reports.
+    pub(super) fn hgx_gpu_memory(&self, system_id: &str) -> [redfish::memory::Memory; 2] {
+        self.gpu_chassis_ids().map(|ids| {
+            let memory_id = format!("{}_DRAM_0", ids.pcie_device_id);
+            redfish::memory::hbm(system_id, &memory_id, 186 * 1024)
+        })
+    }
+
+    pub(super) fn hgx_gpu_chassis(&self) -> [redfish::chassis::SingleChassisConfig; 2] {
         self.gpu_chassis_ids().map(|ids| {
             let sensors = redfish::sensor::generate_chassis_sensors(
                 &ids.chassis_id,
@@ -126,17 +180,19 @@ impl BiancaBoard<'_> {
                 chassis_type: "Component".into(),
                 manufacturer: Some("NVIDIA".into()),
                 part_number: Some("NA".into()),
-                model: Some("GB200 186GB HBM3e".into()),
+                model: Some(GPU_MODEL.into()),
                 serial_number: Some(self.gpu_serial_number.to_string().into()),
+                uuid: Some(gpu_uuid(ids.index).into()),
                 pcie_devices: Some(vec![
                     redfish::pcie_device::builder(&redfish::pcie_device::chassis_resource(
                         &ids.chassis_id,
                         &ids.pcie_device_id,
                     ))
                     .manufacturer("NVIDIA")
-                    .model("GB200 186GB HBM3e")
+                    .model(GPU_MODEL)
                     .part_number("2941-892-A1")
                     .serial_number(&self.gpu_serial_number)
+                    .uuid(&gpu_uuid(ids.index))
                     .build(),
                 ]),
                 id: ids.chassis_id,
@@ -145,63 +201,17 @@ impl BiancaBoard<'_> {
             }
         })
     }
-
-    pub fn discovery_gpu(&self) -> [Gpu; 2] {
-        [0, 1].map(|gpun| Gpu {
-            name: "NVIDIA GB200".into(),
-            serial: self.gpu_serial_number.to_string(),
-            driver_version: "580.126.16".into(),
-            vbios_version: "97.00.B9.00.76".into(),
-            inforom_version: "G548.0201.00.06".into(),
-            total_memory: "189471 MiB".into(),
-            frequency: "2062 MHz".into(),
-            pci_bus_id: self.pcie_address(gpun).to_string(),
-            platform_info: Some(GpuPlatformInfo {
-                chassis_serial: format!("182100000000{}{gpun}", self.index),
-                slot_number: 24,
-                tray_index: 14,
-                host_id: 1,
-                module_id: self.module_id(gpun),
-                fabric_guid: format!("0xfeeeeeeeeeeeee{gpun:02x}"),
-            }),
-        })
-    }
-
-    pub fn discovery_memory(&self) -> MemoryDevice {
-        MemoryDevice {
-            size_mb: Some(491520),
-            mem_type: Some("LPDDR5".into()),
-        }
-    }
-
-    fn pcie_address(&self, gpu_index: u8) -> &'static str {
-        match (self.index, gpu_index) {
-            (BoardIndex::Board0, 0) => "00000008:01:00.0",
-            (BoardIndex::Board0, 1) => "00000009:01:00.0",
-            (BoardIndex::Board1, 0) => "00000018:01:00.0",
-            (BoardIndex::Board1, 1) => "00000019:01:00.0",
-            _ => panic!("unexpected gpu index: {gpu_index}"),
-        }
-    }
-
-    fn module_id(&self, gpu_index: u8) -> u32 {
-        match (self.index, gpu_index) {
-            (BoardIndex::Board0, 0) => 2,
-            (BoardIndex::Board0, 1) => 1,
-            (BoardIndex::Board1, 0) => 4,
-            (BoardIndex::Board1, 1) => 3,
-            _ => panic!("unexpected gpu index: {gpu_index}"),
-        }
-    }
 }
 
-pub struct IoBoard<'a> {
-    pub index: BoardIndex,
-    pub serial_number: Cow<'a, str>,
+pub(crate) struct IoBoard<'a> {
+    pub(crate) serial_number: Cow<'a, str>,
 }
 
 impl IoBoard<'_> {
-    pub fn as_chassis(&self, id: Cow<'static, str>) -> redfish::chassis::SingleChassisConfig {
+    pub(super) fn as_chassis(
+        &self,
+        id: Cow<'static, str>,
+    ) -> redfish::chassis::SingleChassisConfig {
         let sensors = redfish::sensor::generate_chassis_sensors(
             &id,
             redfish::sensor::Layout {
@@ -236,53 +246,6 @@ impl IoBoard<'_> {
             sensors: Some(sensors),
             id,
             ..redfish::chassis::SingleChassisConfig::defaults()
-        }
-    }
-
-    pub fn discovery_infiniband(&self) -> [InfinibandInterface; 2] {
-        [0, 1].map(|n| {
-            let numa_node = self.numa_node();
-            let domain = self.pcie_domain(n);
-            let device_name = if domain == 0 {
-                Cow::Borrowed("ibp3s0")
-            } else {
-                format!("ibP{domain}p3s0").into()
-            };
-            InfinibandInterface {
-                pci_properties: Some(PciDeviceProperties {
-                    vendor: "Mellanox Technologies".into(),
-                    device: "MT2910 Family [ConnectX-7]".into(),
-                    path: format!(
-                        "/devices/pci{domain:02x}:00\
-                             /{domain:02x}:00:00.0\
-                             /{domain:02x}:01:00.0\
-                             /{domain:02x}:02:00.0\
-                             /{domain:02x}:03:00.0\
-                             /infiniband/{device_name}"
-                    ),
-                    numa_node,
-                    description: Some("MT2910 Family [ConnectX-7]".into()),
-                    slot: format!("{domain}:03:00.0").into(),
-                }),
-                guid: format!("7c8c09000000000{n}"),
-            }
-        })
-    }
-
-    fn numa_node(&self) -> i32 {
-        match self.index {
-            BoardIndex::Board0 => 0,
-            BoardIndex::Board1 => 1,
-        }
-    }
-
-    fn pcie_domain(&self, dev_number: u8) -> u32 {
-        match (self.index, dev_number) {
-            (BoardIndex::Board0, 0) => 0x0000,
-            (BoardIndex::Board0, 1) => 0x0002,
-            (BoardIndex::Board1, 0) => 0x0010,
-            (BoardIndex::Board1, 1) => 0x0012,
-            _ => panic!("unexpected dev number: {dev_number}"),
         }
     }
 }

@@ -15,11 +15,14 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmds;
+// `redfish` is intentionally OUTSIDE the `Dispatch`/`Run` trait flow: it talks
+// straight to a machine's BMC, so `main` handles it *before* the API client
+// (and thus `RuntimeContext`) is built -- see the `CliCommand::Redfish` branch
+// in `main.rs`, which calls `redfish::action` directly. Those traits carry a
+// `RuntimeContext` redfish never has, so it stays a plain `action` fn rather
+// than implementing them. Please don't "realign" it onto the traits.
+mod args;
+mod cmds;
 
-#[cfg(test)]
-mod tests;
-
-pub use args::RedfishAction;
-pub use cmds::action;
+pub(crate) use args::RedfishAction;
+pub(crate) use cmds::action;

@@ -407,10 +407,10 @@ fn ip_or_dormant(ctx: &NamingContext<'_>) -> DatabaseResult<String> {
     }
 }
 
-/// Builds the IP-derived hostname: IPv4 dotted-quad with dashes (`10.1.2.3` ->
-/// `10-1-2-3`); IPv6 fully-expanded hex segments with dashes. Validates the
-/// result is a legal DNS name.
-fn address_to_hostname(address: &IpAddr) -> DatabaseResult<String> {
+/// `address_to_hostname` builds the IP-derived hostname: IPv4 dotted-quad with
+/// dashes (`10.1.2.3` -> `10-1-2-3`); IPv6 fully-expanded hex segments with
+/// dashes. It validates the result as a legal DNS name before returning it.
+pub fn address_to_hostname(address: &IpAddr) -> DatabaseResult<String> {
     let hostname = match address {
         IpAddr::V4(_) => address.to_string().replace('.', "-"),
         IpAddr::V6(v6) => v6
@@ -697,7 +697,7 @@ async fn claim_bare_serial_hostname(
             )));
         }
         tracing::info!(
-            interface_id = %sibling.id,
+            machine_interface_id = %sibling.id,
             hostname = %bare,
             renamed = %renamed,
             "reclaiming the bare serial name from a demoted interface of the same machine"
@@ -732,10 +732,10 @@ async fn update_interface_hostname(
     sqlx::query(query)
         .bind(hostname)
         .bind(interface_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    crate::dns::domain::bump_serial_for_interface(txn, interface_id).await
 }
 
 #[cfg(test)]
@@ -774,6 +774,17 @@ mod tests {
         let address: IpAddr = "2001:db8:abcd::2".parse().unwrap();
         assert_eq!(
             "2001-0db8-abcd-0000-0000-0000-0000-0002",
+            address_to_hostname(&address).unwrap()
+        );
+    }
+
+    #[test]
+    fn address_to_hostname_v4_mapped_ipv6_is_stable() {
+        // An IPv4-mapped IPv6 address renders as a fully-expanded v6 label, like any
+        // other v6 -- locking it guards the persisted-label format against drift.
+        let address: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+        assert_eq!(
+            "0000-0000-0000-0000-0000-ffff-c0a8-0101",
             address_to_hostname(&address).unwrap()
         );
     }

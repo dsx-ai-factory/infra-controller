@@ -177,6 +177,10 @@ spec:
                     description: The name of the device that was created by the storage
                       vendor plugin
                     type: string
+                  funcVUID:
+                    description: The VUID of the emulated function. For a VF, this
+                      is the parent PF VUID.
+                    type: string
                   nvmeAttrs:
                     description: The attributes of the emulated NVME function
                     properties:

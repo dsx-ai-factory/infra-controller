@@ -434,8 +434,8 @@ macro_rules! typed_uuid_tests {
 mod tests {
     use super::*;
 
-    pub type ThingyId = TypedUuid<ThingyFlavor>;
-    pub struct ThingyFlavor {}
+    type ThingyId = TypedUuid<ThingyFlavor>;
+    struct ThingyFlavor {}
     impl UuidSubtype for ThingyFlavor {
         const TYPE_NAME: &'static str = "ThingyId";
     }
@@ -443,9 +443,9 @@ mod tests {
     typed_uuid_tests!(ThingyId, "ThingyId", "id");
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-    pub struct ThingyWithId {
-        pub id: ThingyId,
-        pub name: String,
+    struct ThingyWithId {
+        id: ThingyId,
+        name: String,
     }
 
     #[test]

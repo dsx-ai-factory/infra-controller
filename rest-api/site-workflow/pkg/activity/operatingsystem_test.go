@@ -7,12 +7,15 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	gcodes "google.golang.org/grpc/codes"
+	gstatus "google.golang.org/grpc/status"
 )
 
 func TestManageOsImage_CreateOsImageOnSite(t *testing.T) {
@@ -28,7 +31,7 @@ func TestManageOsImage_CreateOsImageOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.OsImageAttributes
+		request *corev1.OsImageAttributes
 	}
 	tests := []struct {
 		name    string
@@ -43,7 +46,7 @@ func TestManageOsImage_CreateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					TenantOrganizationId: orgID,
 					SourceUrl:            "http://imagenet.com",
 					Digest:               "1231d1dffq213123",
@@ -58,7 +61,7 @@ func TestManageOsImage_CreateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					SourceUrl: "http://imagenet.com",
 					Digest:    "1231d1dffq213123",
 				},
@@ -72,7 +75,7 @@ func TestManageOsImage_CreateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					TenantOrganizationId: orgID,
 					Digest:               "1231d1dffq213123",
 				},
@@ -86,7 +89,7 @@ func TestManageOsImage_CreateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					SourceUrl:            "http://imagenet.com",
 					TenantOrganizationId: orgID,
 				},
@@ -131,7 +134,7 @@ func TestManageOsImage_UpdateOsImageOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.OsImageAttributes
+		request *corev1.OsImageAttributes
 	}
 	tests := []struct {
 		name    string
@@ -146,7 +149,7 @@ func TestManageOsImage_UpdateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					TenantOrganizationId: orgID,
 					SourceUrl:            "http://updateimagenet.com",
 					Digest:               "1231231dqweffqwq342",
@@ -161,7 +164,7 @@ func TestManageOsImage_UpdateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					SourceUrl: "http://updateimagenet.com",
 					Digest:    "1231231dqweffqwq342",
 				},
@@ -175,7 +178,7 @@ func TestManageOsImage_UpdateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					TenantOrganizationId: orgID,
 					Digest:               "1231231dqweffqwq342",
 				},
@@ -189,7 +192,7 @@ func TestManageOsImage_UpdateOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.OsImageAttributes{
+				request: &corev1.OsImageAttributes{
 					SourceUrl:            "http://updateimagenet.com",
 					TenantOrganizationId: orgID,
 				},
@@ -234,7 +237,7 @@ func TestManageOsImage_DeleteOsImageOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.DeleteOsImageRequest
+		request *corev1.DeleteOsImageRequest
 	}
 	tests := []struct {
 		name    string
@@ -249,8 +252,8 @@ func TestManageOsImage_DeleteOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.DeleteOsImageRequest{
-					Id:                   &cwssaws.UUID{Value: uuid.NewString()},
+				request: &corev1.DeleteOsImageRequest{
+					Id:                   &corev1.UUID{Value: uuid.NewString()},
 					TenantOrganizationId: orgID,
 				},
 			},
@@ -263,7 +266,7 @@ func TestManageOsImage_DeleteOsImageOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx:     context.Background(),
-				request: &cwssaws.DeleteOsImageRequest{},
+				request: &corev1.DeleteOsImageRequest{},
 			},
 			wantErr: true,
 		},
@@ -312,6 +315,9 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 	type args struct {
 		wantTotalItems int
 		findIDsError   error
+		// fallbackError makes the fallback's own Core call fail, which is the path that used to
+		// publish the FAILED page twice under one workflow ID.
+		fallbackError error
 	}
 	tests := []struct {
 		name   string
@@ -344,6 +350,23 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 				wantTotalItems: 195,
 			},
 		},
+		{
+			// osImageFindIDs always reports Unimplemented, so this exercises the fallback
+			// failing. The fallback owns its own failure reporting, so Cloud has to receive
+			// exactly one FAILED page rather than a second one under the same workflow ID.
+			name: "test collecting and publishing os image inventory fallback, collection fails",
+			fields: fields{
+				siteID:               uuid.New(),
+				coreGrpcAtomicClient: coreGrpcAtomicClient,
+				temporalPublishQueue: "test-queue",
+				sitePageSize:         100,
+				cloudPageSize:        25,
+			},
+			args: args{
+				wantTotalItems: 195,
+				fallbackError:  gstatus.Error(gcodes.Internal, "Core is unavailable"),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -367,6 +390,9 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 			if tt.args.findIDsError != nil {
 				ctx = context.WithValue(ctx, "wantError", tt.args.findIDsError)
 			}
+			if tt.args.fallbackError != nil {
+				ctx = context.WithValue(ctx, "wantError", tt.args.fallbackError)
+			}
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {
@@ -374,6 +400,16 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 			}
 
 			err := manageOsImage.DiscoverOsImageInventory(ctx)
+			if tt.args.fallbackError != nil {
+				assert.Error(t, err)
+
+				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				inventory, ok := tc.Calls[0].Arguments[4].(*corev1.OsImageInventory)
+				require.True(t, ok)
+				assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_FAILED, inventory.InventoryStatus)
+				assert.Nil(t, inventory.InventoryPage, "a failure carries no paging metadata")
+				return
+			}
 			assert.NoError(t, err)
 
 			if tt.args.wantTotalItems == 0 {
@@ -382,7 +418,7 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.OsImageInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.OsImageInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -391,12 +427,12 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.OsImages))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

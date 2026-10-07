@@ -26,13 +26,23 @@ global:
 namespaceOverride: ""
 
 replicas: 1
+
+## Container resource requests and limits. Empty by default.
+resources: {}
+
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-ssh-console-rs.name" . }}-config-files'
+
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
 
 imagePullSecrets: []
 
 service:
   port: 22
+  grpcPort: 1079
 
 metrics:
   port: 9009
@@ -60,6 +70,16 @@ readinessProbe:
   failureThreshold: 3
   successThreshold: 1
 
+livenessProbe:
+  tcpSocket:
+    port: ssh
+  initialDelaySeconds: 20
+  periodSeconds: 30
+  # Keep liveness more forgiving than readiness so Kubernetes drains first,
+  # then restarts only after the listener stays down.
+  failureThreshold: 6
+  successThreshold: 1
+
 ## OpenTelemetry Collector Contrib sidecar for shipping console logs to Loki.
 ## This requires a separate image from the BMM core services.
 ## Example: repository: otel/opentelemetry-collector-contrib, tag: "0.81.0"
@@ -75,6 +95,22 @@ serviceMonitor:
   enabled: false
   interval: 30s
   scrapeTimeout: 25s
+
+## Operator authentication with OpenSSH certificates.
+##
+## ssh-console admits a certificate when it is signed by a trusted CA and its
+## key_id carries `roles=<adminCertificateRole>`. Both settings are empty by
+## default, which trusts no CA and disables certificate auth.
+##
+## These are substituted into the packaged config.toml, so a deployment can set
+## just these two rather than restating the whole file. They are ignored when
+## configFiles.config supplies a complete config.
+sshConsole:
+  ## CA fingerprints in the form `ssh-keygen -lf` prints, for example
+  ## ["SHA256:0wdgK9aNegCbsccq9nwulAMo34TakGz+RP7sCS2e7Oc"].
+  opensshCertificateCaFingerprints: []
+  ## Role that must appear in the certificate key_id `roles=` field.
+  adminCertificateRole: ""
 
 # Config files - can be overridden
 configFiles:

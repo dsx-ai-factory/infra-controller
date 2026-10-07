@@ -26,7 +26,8 @@ if [ $# -ne 2 ]; then
 fi
 
 MAX_RETRY=10
-API_SERVER=$1:$2
+source "$(dirname "${BASH_SOURCE[0]}")/host_port.sh" || exit $?
+API_SERVER=$(host_port "$1" "$2")
 DPU_CONFIG_FILE="/tmp/forge-dpu-agent-sim-config.toml"
 
 HOST_MACHINE_ID=$(grpcurl -d '{}' -insecure "${API_SERVER}" forge.Forge/FindMachines | python3 -c "import sys,json
@@ -50,7 +51,7 @@ echo "Found machine with host: $HOST_MACHINE_ID and DPU: $DPU_MACHINE_ID."
 # Check Instance state
 INSTANCE_ID=$(grpcurl -d '{}' -insecure "${API_SERVER}" forge.Forge/FindInstances | jq ".instances[0].id.value" | tr -d '"')
 
-if [[ "$INSTANCE_ID" != "null" ]]; then
+if [[ -n "$INSTANCE_ID" && "$INSTANCE_ID" != "null" ]]; then
 	INSTANCE_STATE=$(grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/FindInstances | jq ".instances[0].status.tenant.state" | tr -d '"')
 	echo "Instance found with ID $INSTANCE_ID in state $INSTANCE_STATE"
 fi
@@ -64,9 +65,14 @@ echo "Triggering DPU reprovision."
 grpcurl -d "{\"dpu_id\": { \"id\": \"$DPU_MACHINE_ID\" }, \"mode\": 0, \"initiator\": 0, \"update_firmware\": true}" -insecure "${API_SERVER}" forge.Forge/TriggerDpuReprovisioning
 
 # In case of Instance, reprovision will be triggered after user approval.
-if [[ "$INSTANCE_ID" != "null" ]]; then
+if [[ -n "$INSTANCE_ID" && "$INSTANCE_ID" != "null" ]]; then
 	echo "Sending reboot message with apply_updates_on_reboot true".
-	grpcurl -d "{\"operation\": 0, \"machine_id\": { \"id\": \"$HOST_MACHINE_ID\" }, \"apply_updates_on_reboot\": true}" -insecure "${API_SERVER}" forge.Forge/InvokeInstancePower
+	if ! grpcurl -d "{\"operation\": 0, \"instance_id\": { \"value\": \"$INSTANCE_ID\" }, \"apply_updates_on_reboot\": true}" -insecure "${API_SERVER}" forge.Forge/InvokeInstancePower; then
+		echo "Failed to send reboot approval for instance $INSTANCE_ID." >&2
+		exit 1
+	fi
+else
+	echo "No instance found; skipping tenant reboot approval."
 fi
 
 #
@@ -138,7 +144,7 @@ export PREV_PATH=$PATH
 export PATH=${REPO_ROOT}/dev/bin:$PATH
 cargo run -p agent -- --config-path "$DPU_CONFIG_FILE" run --override-machine-id ${DPU_MACHINE_ID} &
 
-if [[ "$INSTANCE_ID" == "null" ]]; then # No instance is configured
+if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "null" ]]; then # No instance is configured
 	# Next state is Discovered.
 	i=0
 	while [[ $i -lt $MAX_RETRY ]]; do

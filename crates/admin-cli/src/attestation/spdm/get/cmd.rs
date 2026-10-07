@@ -19,7 +19,7 @@ use crate::attestation::spdm::get::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let attestation = api_client
         .0
         .get_attestation_machine(args.machine_id)

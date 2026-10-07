@@ -15,10 +15,9 @@
  * limitations under the License.
  */
 
-pub mod api_logs;
-pub mod level_filter;
-pub mod log_limiter;
-pub mod metrics_endpoint;
-pub mod service_health_metrics;
-pub mod setup;
-pub mod stream;
+pub(crate) mod api_logs;
+pub(crate) mod level_filter;
+pub(crate) mod log_limiter;
+pub(crate) mod service_health_metrics;
+pub(crate) mod setup;
+pub(crate) mod stream;

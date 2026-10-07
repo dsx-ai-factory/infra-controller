@@ -36,16 +36,16 @@ Find a power shelf by its BMC MAC address:
     $ nico-admin-cli power-shelf list --bmc-mac 00:11:22:33:44:55
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     /// Include deleted power shelves
     #[clap(long, value_enum, default_value = "exclude")]
-    pub deleted: DeletedFilter,
+    pub(super) deleted: DeletedFilter,
 
     /// Filter by controller state (e.g. "ready", "initializing", "error")
     #[clap(long)]
-    pub controller_state: Option<String>,
+    pub(super) controller_state: Option<String>,
 
     /// Filter by BMC MAC address
     #[clap(long)]
-    pub bmc_mac: Option<MacAddress>,
+    pub(super) bmc_mac: Option<MacAddress>,
 }

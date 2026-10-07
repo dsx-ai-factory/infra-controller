@@ -10,14 +10,15 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
+
+	"github.com/labstack/echo/v4"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	wutil "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
-	"github.com/labstack/echo/v4"
 
 	"go.opentelemetry.io/otel/attribute"
 	temporalClient "go.temporal.io/sdk/client"
@@ -27,14 +28,18 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	powerutil "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util"
 	common "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
@@ -42,21 +47,21 @@ import (
 
 // CreateVPCHandler is the API Handler for creating new VPC
 type CreateVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewCreateVPCHandler initializes and returns a new handler for creating Tenant
-func NewCreateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config) CreateVPCHandler {
+func NewCreateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) CreateVPCHandler {
 	return CreateVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -72,7 +77,7 @@ func NewCreateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *s
 // @Success 201 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc [post]
 func (cvh CreateVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Create", c, cvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -129,7 +134,6 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must be in Registered state in order to proceed", site.ID))
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must be in Registered state in order to proceed", nil)
 	}
-
 	// Get Tenant for this org
 	tenant, err := common.GetTenantForOrg(ctx, nil, cvh.dbSession, org)
 	if err != nil {
@@ -214,6 +218,9 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	if site.Config != nil {
 		siteConfig = site.Config
 	}
+	if apiErr := util.ValidateSitePowerManagement(siteConfig, apiRequest.PowerResourceGroup); apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
 
 	// Network Virtualization type support
 	networkVirtualizationType := apiRequest.NetworkVirtualizationType
@@ -227,6 +234,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	slaacEnabled := apiRequest.SlaacEnabled != nil && *apiRequest.SlaacEnabled
 	// Verify if site has been enabled for FNN type
 	if *networkVirtualizationType == cdbm.VpcFNN {
 		if !siteConfig.NativeNetworking {
@@ -234,12 +242,42 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must have native networking enabled in order to create FNN VPCs", nil)
 		}
 	}
+	if slaacEnabled && *networkVirtualizationType != cdbm.VpcFNN {
+		logger.Warn().Str("networkVirtualizationType", *networkVirtualizationType).Msg("SLAAC is not supported for network virtualization type")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "`slaacEnabled` is only supported when network virtualization type is `FNN`", nil)
+	}
+	if slaacEnabled && !siteConfig.VpcSlaac {
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site does not advertise support for SLAAC-enabled VPCs", nil)
+	}
+
+	// TargetedInstanceCreation supplies both policies, but keep write authorization
+	// separate from effective-profile response visibility.
+	tenantCanSetRoutingProfile := false
+	tenantCanViewEffectiveRoutingProfile := false
+	if cdbm.VpcTypeSupportsRoutingProfile(networkVirtualizationType) || apiRequest.RoutingProfile != nil {
+		tenantHasTargetedInstanceCreation, err := common.TenantHasTargetedInstanceCreation(ctx, nil, cvh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
+		if err != nil {
+			logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to verify privileges for Site", nil)
+		}
+		tenantCanSetRoutingProfile = tenantHasTargetedInstanceCreation
+		tenantCanViewEffectiveRoutingProfile = tenantHasTargetedInstanceCreation
+	}
+
+	if apiRequest.RoutingProfileOverrides != nil && !cdbm.VpcTypeSupportsRoutingProfile(networkVirtualizationType) {
+		logger.Warn().Str("networkVirtualizationType", *networkVirtualizationType).Msg("routing profile overrides are not supported for network virtualization type")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Routing profile overrides are not supported for network virtualization type: %s", *networkVirtualizationType), nil)
+	}
+
+	if apiRequest.RoutingProfileOverrides != nil && !tenantCanSetRoutingProfile {
+		logger.Warn().Msg("tenant does not have sufficient privileges to set `routingProfileOverrides`")
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have sufficient privileges to set `routingProfileOverrides`", nil)
+	}
 
 	var routingProfile *string
 	if apiRequest.RoutingProfile != nil {
-		// For now, we gate on TargetedInstanceCreation permission,
-		// Which implies a "privileged tenant"
-		if tenant.Config == nil || !tenant.Config.TargetedInstanceCreation {
+		// Routing-profile writes require TargetedInstanceCreation for the VPC's Site.
+		if !tenantCanSetRoutingProfile {
 			logger.Warn().Msg("tenant does not have sufficient privileges to set `routingProfile`")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have sufficient privileges to set `routingProfile`", nil)
 		}
@@ -303,11 +341,34 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		labels = apiRequest.Labels
 	}
 
+	dpsGroupCreated := false
+	if cvh.cfg.GetDPSEnabled() && apiRequest.PowerResourceGroup != nil {
+		if cvh.dps == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusServiceUnavailable, "DPS power provisioning is unavailable", nil)
+		}
+		if apiRequest.ID == nil {
+			apiRequest.ID = cutil.GetPtr(uuid.New())
+		}
+		externalID, derr := dpsclient.ExternalIDFromVPCID(apiRequest.ID.String())
+		if derr != nil {
+			logger.Error().Err(derr).Str("vpcID", apiRequest.ID.String()).Msg("failed to derive DPS resource group ID")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to derive DPS resource group ID", nil)
+		}
+		derr = cvh.dps.CreateResourceGroup(ctx, *apiRequest.PowerResourceGroup, externalID)
+		if derr != nil {
+			logger.Error().Err(derr).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("failed to create DPS resource group")
+			apiErr := powerResourceGroupAPIError(derr, "Failed to create DPS resource group")
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dpsGroupCreated = true
+	}
+
 	sdDAO := cdbm.NewStatusDetailDAO(cvh.dbSession)
 
 	var vpc *cdbm.Vpc
 	var ssd *cdbm.StatusDetail
-	controllerVpc := &cwssaws.Vpc{}
+	controllerVpc := &corev1.Vpc{}
+	controllerVpcModel := &cdbm.Vpc{}
 
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that
@@ -327,7 +388,10 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 			TenantID:                  tenant.ID,
 			SiteID:                    site.ID,
 			NetworkVirtualizationType: networkVirtualizationType,
+			SlaacEnabled:              slaacEnabled,
 			RoutingProfile:            routingProfile,
+			PowerResourceGroup:        apiRequest.PowerResourceGroup,
+			RoutingProfileOverrides:   apiRequest.RoutingProfileOverrides.ToDB(),
 			NVLinkLogicalPartitionID:  defaultNvllPartitionId,
 			Labels:                    labels,
 			Status:                    cdbm.VpcStatusProvisioning,
@@ -356,22 +420,20 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		vpc = updatedVpc
 
 		// Create status detail
-		createdSsd, derr := sdDAO.CreateFromParams(ctx, tx, vpc.ID.String(), cdbm.VpcStatusProvisioning,
-			cutil.GetPtr("VPC provisioning has been initiated on Site"))
+		createdSsd, derr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: vpc.ID.String(), Status: cdbm.VpcStatusProvisioning, Message: cutil.GetPtr("VPC provisioning has been initiated on Site")})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for VPC", nil)
 		}
 		if createdSsd == nil {
-			logger.Error().Msg("Status Detail DB entry not returned from CreateFromParams")
+			logger.Error().Msg("Status Detail DB entry not returned from Create")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to get new Status Detail for VPC", nil)
 		}
 		ssd = createdSsd
 
-		// Get the temporal client for the site we are working with.
-		stc, derr := cvh.scp.GetClientByID(vpc.SiteID)
-		if derr != nil {
-			logger.Error().Err(derr).Msg("failed to retrieve Temporal client for Site")
+		stc, clientErr := cvh.scp.GetClientByID(vpc.SiteID)
+		if clientErr != nil {
+			logger.Error().Err(clientErr).Msg("failed to retrieve Temporal client for Site")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
@@ -416,6 +478,19 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create VPC on Site: %s", unwrapped), nil)
 		}
 
+		controllerVpcModel.FromProto(controllerVpc)
+		if controllerVpcModel.RoutingProfile != nil {
+			updatedVpc, derr := vpcDAO.Update(ctx, tx, cdbm.VpcUpdateInput{
+				VpcID:          vpc.ID,
+				RoutingProfile: controllerVpcModel.RoutingProfile,
+			})
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error persisting Core-resolved VPC routing profile")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to persist Core-resolved VPC routing profile", nil)
+			}
+			vpc = updatedVpc
+		}
+
 		logger.Info().Str("Workflow ID", wid).Msg("completed synchronous create VPC workflow")
 		return nil
 	})
@@ -426,45 +501,64 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	if err != nil {
 		var apiErr *cutil.APIError
 		if !errors.As(err, &apiErr) || timeoutResp == nil {
+			if dpsGroupCreated {
+				cleanupErr := cvh.dps.DeleteResourceGroup(context.WithoutCancel(ctx), *apiRequest.PowerResourceGroup)
+				if cleanupErr != nil {
+					logger.Error().Err(cleanupErr).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("failed to compensate DPS resource group after VPC creation failure")
+				}
+			}
 			return common.HandleTxError(c, logger, err, "Failed to create VPC due to DB transaction error")
 		}
 	}
 	if timeoutResp != nil {
-		return timeoutResp()
+		responseErr := timeoutResp()
+		if dpsGroupCreated {
+			cleanupErr := cvh.dps.DeleteResourceGroup(context.WithoutCancel(ctx), *apiRequest.PowerResourceGroup)
+			if cleanupErr != nil {
+				logger.Error().Err(cleanupErr).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("failed to compensate DPS resource group after VPC creation failure")
+			}
+		}
+		return responseErr
 	}
 
 	statusDetails := []cdbm.StatusDetail{*ssd}
 
-	// Make a best-effort attempt to return a response with the allocated VNI.
-	if controllerVpc.GetStatus() != nil {
-		activeVni := wutil.GetUint32PtrToIntPtr(controllerVpc.GetStatus().Vni)
-
+	// Make a best-effort attempt to cache the remaining controller-reported
+	// state for the response. The resolved routing profile was committed above.
+	activeVni := controllerVpcModel.ActiveVni
+	effectiveRoutingProfile := controllerVpcModel.EffectiveRoutingProfile
+	if activeVni != nil || effectiveRoutingProfile != nil {
 		uvpcInput := cdbm.VpcUpdateInput{
-			VpcID:     vpc.ID,
-			ActiveVni: activeVni,
-			Status:    cutil.GetPtr(cdbm.VpcStatusReady),
+			VpcID:                   vpc.ID,
+			ActiveVni:               activeVni,
+			EffectiveRoutingProfile: effectiveRoutingProfile,
+		}
+		if activeVni != nil {
+			uvpcInput.Status = cutil.GetPtr(cdbm.VpcStatusReady)
 		}
 		updatedVpc, err := vpcDAO.Update(ctx, nil, uvpcInput)
 		if err != nil {
-			logger.Error().Err(err).Msg("error while updating VPC DB entry for VNI")
+			logger.Error().Err(err).Msg("error while caching controller-reported VPC VNI and effective routing profile")
 		} else {
 			// Update the vpc being returned if all went well.
 			vpc = updatedVpc
 
-			// Best effort create status detail
-			ssd, err = sdDAO.CreateFromParams(ctx, nil, vpc.ID.String(), cdbm.VpcStatusReady, cutil.GetPtr("VPC is ready for use"))
-			if err != nil {
-				logger.Error().Err(err).Msg("error creating Status Detail DB entry")
-			} else if ssd == nil {
-				logger.Error().Err(err).Msg("unexpected nil Status Detail returned from DB")
-			} else {
-				statusDetails = append(statusDetails, *ssd)
+			if activeVni != nil {
+				// Best effort create status detail
+				ssd, err = sdDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{EntityID: vpc.ID.String(), Status: cdbm.VpcStatusReady, Message: cutil.GetPtr("VPC is ready for use")})
+				if err != nil {
+					logger.Error().Err(err).Msg("error creating Status Detail DB entry")
+				} else if ssd == nil {
+					logger.Error().Err(err).Msg("unexpected nil Status Detail returned from DB")
+				} else {
+					statusDetails = append(statusDetails, *ssd)
+				}
 			}
 		}
 	}
 
 	// Create response
-	apiVpc := model.NewAPIVpc(*vpc, statusDetails)
+	apiVpc := model.NewAPIVpc(*vpc, statusDetails, tenantCanViewEffectiveRoutingProfile)
 
 	logger.Info().Msg("finishing API handler")
 
@@ -475,21 +569,21 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 // UpdateVPCHandler is the API Handler for updating a VPC
 type UpdateVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewUpdateVPCHandler initializes and returns a new handler for updating VPC
-func NewUpdateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config) UpdateVPCHandler {
+func NewUpdateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) UpdateVPCHandler {
 	return UpdateVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -506,7 +600,7 @@ func NewUpdateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *s
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id} [patch]
 func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update", c, uvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -535,7 +629,7 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	// Get vpc instance ID from URL param
 	vpcStrID := c.Param("id")
 
-	uvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID))
 
 	// Validate request
 	// Bind request data to API model
@@ -568,7 +662,6 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 		logger.Error().Err(err).Msg("error retrieving VPC DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve VPC", nil)
 	}
-
 	// Get Tenant for this org
 	tenant, err := common.GetTenantForOrg(ctx, nil, uvh.dbSession, org)
 	if err != nil {
@@ -582,6 +675,34 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	// Check that VPC belongs to the Tenant
 	if vpc.TenantID != tenant.ID {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "VPC does not belong to current Tenant", nil)
+	}
+
+	// TargetedInstanceCreation supplies both policies, but keep write authorization
+	// separate from effective-profile response visibility.
+	tenantCanSetRoutingProfile := false
+	tenantCanViewEffectiveRoutingProfile := false
+	if cdbm.VpcTypeSupportsRoutingProfile(vpc.NetworkVirtualizationType) {
+		tenantHasTargetedInstanceCreation, err := common.TenantHasTargetedInstanceCreation(ctx, nil, uvh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &vpc.SiteID})
+		if err != nil {
+			logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
+		}
+		tenantCanSetRoutingProfile = tenantHasTargetedInstanceCreation
+		tenantCanViewEffectiveRoutingProfile = tenantHasTargetedInstanceCreation
+	}
+
+	if apiRequest.RoutingProfileOverrides != nil && !cdbm.VpcTypeSupportsRoutingProfile(vpc.NetworkVirtualizationType) {
+		networkVirtualizationType := "<unspecified>"
+		if vpc.NetworkVirtualizationType != nil {
+			networkVirtualizationType = *vpc.NetworkVirtualizationType
+		}
+		logger.Warn().Str("networkVirtualizationType", networkVirtualizationType).Msg("routing profile overrides are not supported for network virtualization type")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Routing profile overrides are not supported for network virtualization type: %s", networkVirtualizationType), nil)
+	}
+
+	if apiRequest.RoutingProfileOverrides != nil && !tenantCanSetRoutingProfile {
+		logger.Warn().Msg("tenant does not have sufficient privileges to set `routingProfileOverrides`")
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have sufficient privileges to set `routingProfileOverrides`", nil)
 	}
 
 	// Ensure that Tenant has an Allocation with specified Site
@@ -651,6 +772,9 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	siteConfig := &cdbm.SiteConfig{}
 	if vpc.Site != nil && vpc.Site.Config != nil {
 		siteConfig = vpc.Site.Config
+	}
+	if apiErr := util.ValidateSitePowerManagement(siteConfig, apiRequest.PowerResourceGroup); apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
 	var defaultNvllPartitionId *uuid.UUID
@@ -726,6 +850,9 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	sdDAO := cdbm.NewStatusDetailDAO(uvh.dbSession)
 	var ssds []cdbm.StatusDetail
 
+	var dpsChange *powerutil.PowerChange
+	var dpsOldGroup, dpsNewGroup string
+
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that
 	// the DB tx unwinds before we make the second remote call. nil means
@@ -733,13 +860,62 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	var timeoutResp func() error
 
 	err = cdb.WithTx(ctx, uvh.dbSession, func(tx *cdb.Tx) error {
+		if uvh.cfg.GetDPSEnabled() && apiRequest.PowerResourceGroup != nil {
+			lockErr := powerutil.AcquireVPCPowerLock(ctx, tx, vpc.ID)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to serialize DPS operations for VPC")
+				return cutil.NewAPIError(http.StatusConflict, "Another power operation is already in progress for the VPC", nil)
+			}
+			lockedVPC, lockErr := vpcDAO.GetByID(ctx, tx, vpc.ID, nil)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to reload VPC after acquiring its power lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
+			}
+			vpc = lockedVPC
+
+			if vpc.PowerResourceGroup != nil {
+				dpsOldGroup = *vpc.PowerResourceGroup
+			}
+			dpsNewGroup = *apiRequest.PowerResourceGroup
+			if strings.TrimSpace(dpsOldGroup) != strings.TrimSpace(dpsNewGroup) {
+				instances, _, derr := cdbm.NewInstanceDAO(uvh.dbSession).GetAll(ctx, tx, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+				if derr != nil {
+					logger.Error().Err(derr).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve VPC instances for DPS migration")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve VPC instances for DPS migration", nil)
+				}
+				assignments := make([]powerutil.MachinePowerAssignment, 0, len(instances))
+				for _, instance := range instances {
+					if instance.MachineID == nil {
+						return cutil.NewAPIError(http.StatusConflict, "Cannot change the power resource group while a VPC instance has no machine", nil)
+					}
+					assignment := powerutil.MachinePowerAssignment{MachineID: *instance.MachineID}
+					if instance.PowerProfile != nil {
+						assignment.PowerProfile = *instance.PowerProfile
+					}
+					assignments = append(assignments, assignment)
+				}
+				externalID, derr := dpsclient.ExternalIDFromVPCID(vpc.ID.String())
+				if derr != nil {
+					logger.Error().Err(derr).Str("vpcID", vpc.ID.String()).Msg("failed to derive DPS resource group ID")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to derive DPS resource group ID", nil)
+				}
+				dpsChange, derr = powerutil.PreparePowerResourceGroupChange(ctx, uvh.dps, externalID, dpsOldGroup, dpsNewGroup, assignments)
+				if derr != nil {
+					logger.Error().Err(derr).Str("oldPowerResourceGroup", dpsOldGroup).Str("newPowerResourceGroup", dpsNewGroup).Msg("failed to prepare DPS resource group migration")
+					return powerResourceGroupAPIError(derr, "Failed to change DPS resource group")
+				}
+			}
+		}
+
 		// Update VPC
 		uvpcInput := cdbm.VpcUpdateInput{
-			VpcID:                  vpc.ID,
-			Name:                   apiRequest.Name,
-			Description:            apiRequest.Description,
-			Labels:                 labels,
-			NetworkSecurityGroupID: nsgID,
+			VpcID:                   vpc.ID,
+			Name:                    apiRequest.Name,
+			Description:             apiRequest.Description,
+			Labels:                  labels,
+			NetworkSecurityGroupID:  nsgID,
+			RoutingProfileOverrides: apiRequest.RoutingProfileOverrides.ToDB(),
+			PowerResourceGroup:      apiRequest.PowerResourceGroup,
 		}
 
 		if defaultNvllPartitionId != nil {
@@ -755,13 +931,9 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 
 		clearInput := cdbm.VpcClearInput{VpcID: vpc.ID}
 		shouldClear := false
-		// If this request is attempting to clear the OS for the instance, set it.
-		if apiRequest.NetworkSecurityGroupID != nil && *apiRequest.NetworkSecurityGroupID == "" {
-			clearInput.NetworkSecurityGroupID = true
-			shouldClear = true
-		}
 
-		// If this request is attempting to clear NSG for the VPC, set it.
+		// NSG updates clear propagation details so users do not see stale status.
+		// An empty ID also clears the VPC association itself.
 		if apiRequest.NetworkSecurityGroupID != nil {
 			if *apiRequest.NetworkSecurityGroupID == "" {
 				clearInput.NetworkSecurityGroupID = true
@@ -779,6 +951,17 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 			shouldClear = true
 		}
 
+		// A changed desired definition invalidates the last controller-resolved value.
+		if apiRequest.RoutingProfileOverrides != nil {
+			clearInput.EffectiveRoutingProfile = true
+			shouldClear = true
+		}
+
+		if apiRequest.PowerResourceGroup != nil && *apiRequest.PowerResourceGroup == "" {
+			clearInput.PowerResourceGroup = true
+			shouldClear = true
+		}
+
 		// Clear it in the db if something should be cleared.
 		if shouldClear {
 			clearedVpc, derr := vpcDAO.Clear(ctx, tx, clearInput)
@@ -790,7 +973,7 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 		}
 
 		// Get status details
-		fetchedSsds, _, derr := sdDAO.GetAllByEntityID(ctx, tx, vpc.ID.String(), nil, cutil.GetPtr(pagination.MaxPageSize), nil)
+		fetchedSsds, _, derr := sdDAO.GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{vpc.ID.String()}}, cdbp.PageInput{Limit: cutil.GetPtr(pagination.MaxPageSize)})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Status Details for VPC from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Status Details for VPC", nil)
@@ -855,39 +1038,63 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	if err != nil {
 		var apiErr *cutil.APIError
 		if !errors.As(err, &apiErr) || timeoutResp == nil {
+			if dpsChange != nil {
+				rollbackErr := dpsChange.Rollback()
+				if rollbackErr != nil {
+					logger.Error().Err(rollbackErr).Str("oldPowerResourceGroup", dpsOldGroup).Str("newPowerResourceGroup", dpsNewGroup).Msg("failed to compensate DPS resource group migration")
+				}
+			}
 			return common.HandleTxError(c, logger, err, "Failed to update VPC due to DB transaction error")
 		}
 	}
 	if timeoutResp != nil {
-		return timeoutResp()
+		responseErr := timeoutResp()
+		if dpsChange != nil {
+			rollbackErr := dpsChange.Rollback()
+			if rollbackErr != nil {
+				logger.Error().Err(rollbackErr).Str("oldPowerResourceGroup", dpsOldGroup).Str("newPowerResourceGroup", dpsNewGroup).Msg("failed to compensate DPS resource group migration")
+			}
+		}
+		return responseErr
+	}
+	if dpsChange != nil {
+		cleanupErr := dpsChange.Complete()
+		if cleanupErr != nil {
+			logger.Error().Err(cleanupErr).Msg("failed to delete previous DPS resource group; external reconciliation is required")
+		}
 	}
 
 	// Create response
-	apiVpc := model.NewAPIVpc(*vpc, ssds)
+	apiVpc := model.NewAPIVpc(*vpc, ssds, tenantCanViewEffectiveRoutingProfile)
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiVpc)
+}
+
+func powerResourceGroupAPIError(err error, fallbackMessage string) *cutil.APIError {
+	if errors.Is(err, dpsclient.ErrResourceGroupAlreadyExists) {
+		return cutil.NewAPIError(http.StatusConflict, "Power resource group already exists", nil)
+	}
+	return cutil.NewAPIError(http.StatusServiceUnavailable, fallbackMessage, nil)
 }
 
 // ~~~~~ Update Virtualization Handler ~~~~~ //
 
 // UpdateVPCVirtualizationHandler is the API Handler for updating virtualization of a VPC
 type UpdateVPCVirtualizationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateVPCVirtualizationHandler initializes and returns a new handler for updating virtualization of a VPC
 func NewUpdateVPCVirtualizationHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config) UpdateVPCVirtualizationHandler {
 	return UpdateVPCVirtualizationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
 	}
 }
 
@@ -904,7 +1111,7 @@ func NewUpdateVPCVirtualizationHandler(dbSession *cdb.Session, tc temporalClient
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id}/virtualization [patch]
 func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update Virtualization", c, uvvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update Virtualization", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -933,7 +1140,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	// Get vpc instance ID from URL param
 	vpcStrID := c.Param("id")
 
-	uvvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID))
 
 	// Validate request
 	// Bind request data to API model
@@ -980,6 +1187,12 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	// Check that VPC belongs to the Tenant
 	if vpc.TenantID != tenant.ID {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "VPC does not belong to current Tenant", nil)
+	}
+
+	tenantCanViewEffectiveRoutingProfile, err := common.TenantHasTargetedInstanceCreation(ctx, nil, uvvh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &vpc.SiteID})
+	if err != nil {
+		logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
 	}
 
 	// Ensure that Tenant has access to Site
@@ -1055,7 +1268,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 		uv = updatedVpc
 
 		// Get status details
-		fetchedSsds, _, derr := sdDAO.GetAllByEntityID(ctx, tx, uv.ID.String(), nil, cutil.GetPtr(pagination.MaxPageSize), nil)
+		fetchedSsds, _, derr := sdDAO.GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{uv.ID.String()}}, cdbp.PageInput{Limit: cutil.GetPtr(pagination.MaxPageSize)})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Status Details for VPC from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve status history for VPC", nil)
@@ -1070,9 +1283,9 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 		}
 
 		// VPC virtualization type can only be updated to FNN, the request validator guarantees that
-		siteVirtualizationType := cwssaws.VpcVirtualizationType_FNN
-		siteRequest := &cwssaws.VpcUpdateVirtualizationRequest{
-			Id:                        &cwssaws.VpcId{Value: vpc.GetSiteID().String()},
+		siteVirtualizationType := corev1.VpcVirtualizationType_FNN
+		siteRequest := &corev1.VpcUpdateVirtualizationRequest{
+			Id:                        &corev1.VpcId{Value: vpc.GetSiteID().String()},
 			NetworkVirtualizationType: &siteVirtualizationType,
 		}
 
@@ -1132,7 +1345,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiVpc := model.NewAPIVpc(*uv, ssds)
+	apiVpc := model.NewAPIVpc(*uv, ssds, tenantCanViewEffectiveRoutingProfile)
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiVpc)
@@ -1142,19 +1355,17 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 
 // GetVPCHandler is the API Handler for getting a VPC
 type GetVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetVPCHandler initializes and returns a new handler for getting VPC
 func NewGetVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetVPCHandler {
 	return GetVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1171,7 +1382,7 @@ func NewGetVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *con
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id} [get]
 func (gvh GetVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Get", c, gvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1208,7 +1419,7 @@ func (gvh GetVPCHandler) Handle(c echo.Context) error {
 	// Get VPC ID from URL param
 	vpcIDStr := c.Param("id")
 
-	gvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcIDStr), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcIDStr))
 
 	// Get VPC
 	vpcDAO := cdbm.NewVpcDAO(gvh.dbSession)
@@ -1242,6 +1453,17 @@ func (gvh GetVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "VPC does not belong to current Tenant", nil)
 	}
 
+	tenantCanViewEffectiveRoutingProfile := false
+	// Existing non-FNN rows can carry cached effective state, so gate that state
+	// instead of hiding it solely based on VPC type.
+	if cdbm.VpcTypeSupportsRoutingProfile(vpc.NetworkVirtualizationType) || vpc.EffectiveRoutingProfile != nil {
+		tenantCanViewEffectiveRoutingProfile, err = common.TenantHasTargetedInstanceCreation(ctx, nil, gvh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &vpc.SiteID})
+		if err != nil {
+			logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
+		}
+	}
+
 	// Get status details
 	sdDAO := cdbm.NewStatusDetailDAO(gvh.dbSession)
 
@@ -1252,7 +1474,7 @@ func (gvh GetVPCHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	vc := model.NewAPIVpc(*vpc, ssds)
+	vc := model.NewAPIVpc(*vpc, ssds, tenantCanViewEffectiveRoutingProfile)
 
 	logger.Info().Msg("finishing API handler")
 
@@ -1263,19 +1485,17 @@ func (gvh GetVPCHandler) Handle(c echo.Context) error {
 
 // GetAllVPCHandler is the API Handler for retrieving all VPCs
 type GetAllVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllVPCHandler initializes and returns a new handler for retreiving all VPCs
 func NewGetAllVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllVPCHandler {
 	return GetAllVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1298,7 +1518,7 @@ func NewGetAllVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Success 200 {array} []model.APIVpc
 // @Router /v2/org/{org}/nico/vpc [get]
 func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "GetAll", c, gavh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1347,32 +1567,12 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, errMsg, nil)
 	}
 
-	// Get infrastructure provider ID from query param
-	var infrastructureProviderID *uuid.UUID
-	qInfrastructureProviderID := c.QueryParam("infrastructureProviderId")
-	if qInfrastructureProviderID != "" {
-		id, serr := uuid.Parse(qInfrastructureProviderID)
-		if serr != nil {
-			logger.Warn().Err(serr).Msg("error parsing infrastructureProviderId in query into uuid")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Infrastructure Provider ID in query", nil)
-		}
-		infrastructureProviderID = &id
-
-		// Check for IP existence
-		ipDAO := cdbm.NewInfrastructureProviderDAO(gavh.dbSession)
-		_, verr := ipDAO.GetByID(ctx, nil, *infrastructureProviderID, nil)
-		if verr != nil {
-			logger.Warn().Err(verr).Msg("error retrieving InfrastructureProvider from DB by ID")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not retrieve InfrastructureProvider with ID specified in query", nil)
-		}
-	}
-
 	// Get site IDs from query param
 	var siteIDs []uuid.UUID
 
 	siteIDStrs := qParams["siteId"]
 	if len(siteIDStrs) > 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs))
 		for _, idStr := range siteIDStrs {
 			parsedID, serr := uuid.Parse(idStr)
 			if serr != nil {
@@ -1404,13 +1604,13 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
 	var statuses []string
 	if statusStrings := qParams["status"]; len(statusStrings) != 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusStrings), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusStrings))
 		for _, status := range statusStrings {
 			_, ok := cdbm.VpcStatusMap[status]
 			if !ok {
@@ -1424,7 +1624,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	// Get Tenant for this org
 	tnDAO := cdbm.NewTenantDAO(gavh.dbSession)
 
-	tenants, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tenants, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant for org", nil)
@@ -1435,14 +1635,23 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	}
 	tenant := tenants[0]
 
+	privilegedSiteIDs, err := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, gavh.dbSession, &tenant)
+	if err != nil {
+		logger.Error().Err(err).Msg("error resolving privileged Site access for Tenant")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
+	}
+	privilegedSites := make(map[uuid.UUID]bool, len(privilegedSiteIDs))
+	for _, siteID := range privilegedSiteIDs {
+		privilegedSites[siteID] = true
+	}
+
 	// Get all VPCs by Tenant, and Site, if specified
 	vpcDAO := cdbm.NewVpcDAO(gavh.dbSession)
 
 	vpcFilter := cdbm.VpcFilterInput{
-		Org:                      &org,
-		InfrastructureProviderID: infrastructureProviderID,
-		SearchQuery:              searchQuery,
-		TenantIDs:                []uuid.UUID{tenant.ID},
+		Org:         &org,
+		SearchQuery: searchQuery,
+		TenantIDs:   []uuid.UUID{tenant.ID},
 	}
 
 	if len(siteIDs) > 0 {
@@ -1456,7 +1665,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	// Get network security group IDs from query param
 	networkSecurityGroupIDs := qParams["networkSecurityGroupId"]
 	if len(networkSecurityGroupIDs) > 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("networkSecurityGroupId", networkSecurityGroupIDs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("networkSecurityGroupId", networkSecurityGroupIDs))
 		networkSecurityGroupDAO := cdbm.NewNetworkSecurityGroupDAO(gavh.dbSession)
 
 		networkSecurityGroups, _, err := networkSecurityGroupDAO.GetAll(
@@ -1484,7 +1693,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 	qNvLinkLogicalPartitionIDStrs := qParams["nvLinkLogicalPartitionId"]
 	if len(qNvLinkLogicalPartitionIDStrs) > 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkLogicalPartitionId", qNvLinkLogicalPartitionIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkLogicalPartitionId", qNvLinkLogicalPartitionIDStrs))
 		nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(gavh.dbSession)
 		nvLinkLogicalPartitionIDs := make([]uuid.UUID, 0, len(qNvLinkLogicalPartitionIDStrs))
 		for _, nvLinkLogicalPartitionIDStr := range qNvLinkLogicalPartitionIDStrs {
@@ -1552,7 +1761,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	apiVpcs := []model.APIVpc{}
 
 	for _, vpc := range vpcs {
-		apiVpc := model.NewAPIVpc(vpc, ssdMap[vpc.ID.String()])
+		apiVpc := model.NewAPIVpc(vpc, ssdMap[vpc.ID.String()], privilegedSites[vpc.SiteID])
 		apiVpcs = append(apiVpcs, apiVpc)
 	}
 
@@ -1575,21 +1784,21 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 // DeleteVPCHandler is the API Handler for deleting a VPC
 type DeleteVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewDeleteVPCHandler initializes and returns a new handler for deleting VPC
-func NewDeleteVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteVPCHandler {
+func NewDeleteVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) DeleteVPCHandler {
 	return DeleteVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		dps:       dps,
+		scp:       scp,
 	}
 }
 
@@ -1605,7 +1814,7 @@ func NewDeleteVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *
 // @Success 202
 // @Router /v2/org/{org}/nico/vpc/{id} [delete]
 func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Delete", c, dvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1638,7 +1847,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid VPC ID in URL", nil)
 	}
 
-	dvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID))
 
 	// Get VPC from DB
 	vpcDAO := cdbm.NewVpcDAO(dvh.dbSession)
@@ -1721,6 +1930,28 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 	var timeoutResp func() error
 
 	err = cdb.WithTx(ctx, dvh.dbSession, func(tx *cdb.Tx) error {
+		if dvh.cfg.GetDPSEnabled() {
+			lockErr := powerutil.AcquireVPCPowerLock(ctx, tx, vpc.ID)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to serialize DPS operations for VPC")
+				return cutil.NewAPIError(http.StatusConflict, "Another power operation is already in progress for the VPC", nil)
+			}
+			lockedVPC, lockErr := vpcDAO.GetByID(ctx, tx, vpc.ID, nil)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to reload VPC after acquiring its power lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
+			}
+			vpc = lockedVPC
+			lockedInstances, _, lockErr := insDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{TenantIDs: []uuid.UUID{vpc.TenantID}, VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, nil)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve instances for VPC deletion")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve instances for this VPC", nil)
+			}
+			if len(lockedInstances) > 0 {
+				return cutil.NewAPIError(http.StatusConflict, "Cannot delete VPC, one or more instances for this VPC", nil)
+			}
+		}
+
 		// Update VPC to set status to Deleting
 		uvpcInput := cdbm.VpcUpdateInput{
 			VpcID:  vpc.ID,
@@ -1732,8 +1963,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 		}
 
 		// Create status detail (best-effort: original code only logs on error)
-		if _, derr := sdDAO.CreateFromParams(ctx, tx, vpc.ID.String(), *cutil.GetPtr(cdbm.VpcStatusDeleting),
-			cutil.GetPtr("received request for deletion, pending processing")); derr != nil {
+		if _, derr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: vpc.ID.String(), Status: *cutil.GetPtr(cdbm.VpcStatusDeleting), Message: cutil.GetPtr("received request for deletion, pending processing")}); derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 		}
 
@@ -1744,8 +1974,8 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		deleteVpcRequest := &cwssaws.VpcDeletionRequest{
-			Id: &cwssaws.VpcId{Value: vpc.GetSiteID().String()},
+		deleteVpcRequest := &corev1.VpcDeletionRequest{
+			Id: &corev1.VpcId{Value: vpc.GetSiteID().String()},
 		}
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
@@ -1814,9 +2044,15 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 	if timeoutResp != nil {
 		return timeoutResp()
 	}
+	if dvh.cfg.GetDPSEnabled() && vpc.PowerResourceGroup != nil && dvh.dps != nil {
+		cleanupErr := dvh.dps.DeleteResourceGroup(context.WithoutCancel(ctx), *vpc.PowerResourceGroup)
+		if cleanupErr != nil {
+			logger.Error().Err(cleanupErr).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to delete DPS resource group; external reconciliation is required")
+		}
+	}
 
 	// Return response
 	logger.Info().Msg("finishing API handler")
 
-	return c.String(http.StatusAccepted, "Deletion request was accepted")
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

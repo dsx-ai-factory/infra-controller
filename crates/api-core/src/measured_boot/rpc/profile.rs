@@ -49,7 +49,7 @@ use crate::api::Api;
 
 /// handle_create_system_measurement_profile handles the
 /// CreateMeasurementSystemProfile API endpoint.
-pub async fn handle_create_system_measurement_profile(
+pub(crate) async fn handle_create_system_measurement_profile(
     api: &Api,
     req: CreateMeasurementSystemProfileRequest,
 ) -> Result<CreateMeasurementSystemProfileResponse, Status> {
@@ -77,7 +77,7 @@ pub async fn handle_create_system_measurement_profile(
 
 /// handle_rename_measurement_system_profile handles the
 /// RenameMeasurementSystemProfile API endpoint.
-pub async fn handle_rename_measurement_system_profile(
+pub(crate) async fn handle_rename_measurement_system_profile(
     api: &Api,
     req: RenameMeasurementSystemProfileRequest,
 ) -> Result<RenameMeasurementSystemProfileResponse, Status> {
@@ -125,7 +125,7 @@ pub async fn handle_rename_measurement_system_profile(
 
 /// handle_delete_measurement_system_profile handles the
 /// DeleteMeasurementSystemProfile API endpoint.
-pub async fn handle_delete_measurement_system_profile(
+pub(crate) async fn handle_delete_measurement_system_profile(
     api: &Api,
     req: DeleteMeasurementSystemProfileRequest,
 ) -> Result<DeleteMeasurementSystemProfileResponse, Status> {
@@ -160,7 +160,7 @@ pub async fn handle_delete_measurement_system_profile(
 
 /// handle_show_measurement_system_profile handles the
 /// ShowMeasurementSystemProfile API endpoint.
-pub async fn handle_show_measurement_system_profile(
+pub(crate) async fn handle_show_measurement_system_profile(
     api: &Api,
     req: ShowMeasurementSystemProfileRequest,
 ) -> Result<ShowMeasurementSystemProfileResponse, Status> {
@@ -194,7 +194,7 @@ pub async fn handle_show_measurement_system_profile(
 
 /// handle_show_measurement_system_profiles handles the
 /// ShowMeasurementSystemProfiles API endpoint.
-pub async fn handle_show_measurement_system_profiles(
+pub(crate) async fn handle_show_measurement_system_profiles(
     api: &Api,
     _req: ShowMeasurementSystemProfilesRequest,
 ) -> Result<ShowMeasurementSystemProfilesResponse, Status> {
@@ -212,7 +212,7 @@ pub async fn handle_show_measurement_system_profiles(
 
 /// handle_list_measurement_system_profiles handles the
 /// ListMeasurementSystemProfiles API endpoint.
-pub async fn handle_list_measurement_system_profiles(
+pub(crate) async fn handle_list_measurement_system_profiles(
     api: &Api,
     _req: ListMeasurementSystemProfilesRequest,
 ) -> Result<ListMeasurementSystemProfilesResponse, Status> {
@@ -231,7 +231,7 @@ pub async fn handle_list_measurement_system_profiles(
 
 /// handle_list_measurement_system_profile_bundles handles the
 /// ListMeasurementSystemProfileBundles API endpoint.
-pub async fn handle_list_measurement_system_profile_bundles(
+pub(crate) async fn handle_list_measurement_system_profile_bundles(
     api: &Api,
     req: ListMeasurementSystemProfileBundlesRequest,
 ) -> Result<ListMeasurementSystemProfileBundlesResponse, Status> {
@@ -266,7 +266,7 @@ pub async fn handle_list_measurement_system_profile_bundles(
 
 /// handle_list_measurement_system_profile_machines handles the
 /// ListMeasurementSystemProfileMachines API endpoint.
-pub async fn handle_list_measurement_system_profile_machines(
+pub(crate) async fn handle_list_measurement_system_profile_machines(
     api: &Api,
     req: ListMeasurementSystemProfileMachinesRequest,
 ) -> Result<ListMeasurementSystemProfileMachinesResponse, Status> {

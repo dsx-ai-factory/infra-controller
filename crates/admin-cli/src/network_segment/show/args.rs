@@ -32,16 +32,16 @@ Filter by tenant org:
     $ nico-admin-cli network-segment show --tenant-org-id fds34511233a
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         default_value(None),
         help = "The network segment to query, leave empty for all (default)"
     )]
-    pub network: Option<NetworkSegmentId>,
+    pub(crate) network: Option<NetworkSegmentId>,
 
     #[clap(short, long, help = "The Tenant Org ID to query")]
-    pub tenant_org_id: Option<String>,
+    pub(crate) tenant_org_id: Option<String>,
 
     #[clap(short, long, help = "The VPC name to query")]
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
 }

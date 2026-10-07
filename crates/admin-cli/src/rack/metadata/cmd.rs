@@ -16,6 +16,7 @@
  */
 
 use ::rpc::admin_cli::OutputFormat;
+use rpc::errors::RpcDataConversionError;
 
 use super::args::{
     Args, RackMetadataCommandAddLabel, RackMetadataCommandFromExpectedRack,
@@ -24,7 +25,7 @@ use super::args::{
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn metadata(
+pub(super) async fn metadata(
     api_client: &ApiClient,
     cmd: Args,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -72,7 +73,12 @@ async fn metadata_set(api_client: &ApiClient, cmd: RackMetadataCommandSet) -> Ca
     let rack = fetch_rack(api_client, cmd.rack).await?;
     let metadata = crate::metadata::apply_set(rack.metadata, cmd.name, cmd.description)?;
     api_client
-        .update_rack_metadata(rack.id.unwrap(), metadata, rack.version)
+        .update_rack_metadata(
+            rack.id
+                .ok_or(RpcDataConversionError::MissingArgument("rack.id"))?,
+            metadata,
+            rack.version,
+        )
         .await
 }
 
@@ -83,7 +89,12 @@ async fn metadata_add_label(
     let rack = fetch_rack(api_client, cmd.rack).await?;
     let metadata = crate::metadata::apply_add_label(rack.metadata, cmd.key, cmd.value)?;
     api_client
-        .update_rack_metadata(rack.id.unwrap(), metadata, rack.version)
+        .update_rack_metadata(
+            rack.id
+                .ok_or(RpcDataConversionError::MissingArgument("rack.id"))?,
+            metadata,
+            rack.version,
+        )
         .await
 }
 
@@ -94,7 +105,12 @@ async fn metadata_remove_labels(
     let rack = fetch_rack(api_client, cmd.rack).await?;
     let metadata = crate::metadata::apply_remove_labels(rack.metadata, cmd.keys)?;
     api_client
-        .update_rack_metadata(rack.id.unwrap(), metadata, rack.version)
+        .update_rack_metadata(
+            rack.id
+                .ok_or(RpcDataConversionError::MissingArgument("rack.id"))?,
+            metadata,
+            rack.version,
+        )
         .await?;
     Ok(())
 }
@@ -162,7 +178,12 @@ async fn metadata_from_expected_rack(
     }
 
     api_client
-        .update_rack_metadata(rack.id.unwrap(), metadata, rack.version)
+        .update_rack_metadata(
+            rack.id
+                .ok_or(RpcDataConversionError::MissingArgument("rack.id"))?,
+            metadata,
+            rack.version,
+        )
         .await?;
     Ok(())
 }

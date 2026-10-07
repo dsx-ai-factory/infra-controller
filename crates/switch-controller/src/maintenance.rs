@@ -20,47 +20,79 @@
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::switch::SwitchId;
 use component_manager::nv_switch_manager::{SwitchComponentResult, SwitchEndpoint};
 use db::switch as db_switch;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
-use model::switch::{Switch, SwitchControllerState, SwitchMaintenanceOperation};
+use model::switch::{
+    ConfigureCertificateState, Switch, SwitchControllerState, SwitchMaintenanceOperation,
+    SwitchMaintenanceRequest,
+};
 use sqlx::PgPool;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
+use crate::certificate::{
+    ConfigureSwitchCertificateMode, ConfigureSwitchCertificatePollOutcome,
+    StartConfigureSwitchCertificateResult, poll_configure_switch_certificate_job,
+    start_configure_switch_certificate,
+};
 use crate::context::SwitchStateHandlerContextObjects;
 
 /// Handles the Maintenance state for a switch, dispatching on the requested
-/// operation (`PowerOn` / `PowerOff` / `Reset`).
+/// operation (`PowerOn` / `PowerOff` / `Reset` / `ReconfigureCertificate`).
 pub async fn handle_maintenance(
     switch_id: &SwitchId,
     state: &mut Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    let operation = match &state.controller_state.value {
-        SwitchControllerState::Maintenance { operation } => *operation,
-        _ => unreachable!("handle_maintenance called with non-Maintenance state"),
+    let SwitchControllerState::Maintenance {
+        operation,
+        request,
+        configure_certificate,
+    } = &state.controller_state.value
+    else {
+        unreachable!("handle_maintenance called with non-Maintenance state");
     };
+    let request = request.as_ref();
 
     match operation {
-        SwitchMaintenanceOperation::PowerOn => handle_power_on(switch_id, state, ctx).await,
-        SwitchMaintenanceOperation::PowerOff => handle_power_off(switch_id, state, ctx).await,
-        SwitchMaintenanceOperation::Reset => handle_reset(switch_id, state, ctx).await,
+        SwitchMaintenanceOperation::PowerOn => {
+            handle_power_on(switch_id, state, request, ctx).await
+        }
+        SwitchMaintenanceOperation::PowerOff { graceful } => {
+            handle_power_off(switch_id, state, request, ctx, *graceful).await
+        }
+        SwitchMaintenanceOperation::Reset => handle_reset(switch_id, state, request, ctx).await,
+        SwitchMaintenanceOperation::ReconfigureCertificate => {
+            handle_reconfigure_certificate(
+                switch_id,
+                state,
+                request,
+                ctx,
+                configure_certificate
+                    .clone()
+                    .unwrap_or(ConfigureCertificateState::Start),
+            )
+            .await
+        }
     }
 }
 
 async fn handle_power_on(
     switch_id: &SwitchId,
-    state: &mut Switch,
+    state: &Switch,
+    request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     tracing::info!(switch_id = %switch_id, "Switch maintenance: PowerOn");
     invoke_power_operation(
         switch_id,
         state,
+        request,
         ctx,
         PowerAction::On,
         "PowerOn",
@@ -71,15 +103,23 @@ async fn handle_power_on(
 
 async fn handle_power_off(
     switch_id: &SwitchId,
-    state: &mut Switch,
+    state: &Switch,
+    request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!(switch_id = %switch_id, "Switch maintenance: PowerOff");
+    let action = if graceful {
+        PowerAction::GracefulShutdown
+    } else {
+        PowerAction::ForceOff
+    };
+    tracing::info!(switch_id = %switch_id, graceful, "Switch maintenance: PowerOff");
     invoke_power_operation(
         switch_id,
         state,
+        request,
         ctx,
-        PowerAction::ForceOff,
+        action,
         "PowerOff",
         SwitchControllerState::Ready,
     )
@@ -88,13 +128,15 @@ async fn handle_power_off(
 
 async fn handle_reset(
     switch_id: &SwitchId,
-    state: &mut Switch,
+    state: &Switch,
+    request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     tracing::info!(switch_id = %switch_id, "Switch maintenance: Reset");
     invoke_power_operation(
         switch_id,
         state,
+        request,
         ctx,
         PowerAction::ForceRestart,
         "Reset",
@@ -103,9 +145,138 @@ async fn handle_reset(
     .await
 }
 
+async fn handle_reconfigure_certificate(
+    switch_id: &SwitchId,
+    state: &Switch,
+    request: Option<&SwitchMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    configure_certificate: ConfigureCertificateState,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    match configure_certificate {
+        ConfigureCertificateState::Start => {
+            handle_reconfigure_certificate_start(switch_id, state, request, ctx).await
+        }
+        ConfigureCertificateState::WaitForComplete { job_id } => {
+            handle_reconfigure_certificate_wait_for_complete(switch_id, request, ctx, &job_id).await
+        }
+    }
+}
+
+async fn handle_reconfigure_certificate_start(
+    switch_id: &SwitchId,
+    state: &Switch,
+    request: Option<&SwitchMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    tracing::info!(switch_id = %switch_id, "Switch maintenance: ReconfigureCertificate");
+    match start_configure_switch_certificate(
+        switch_id,
+        state,
+        ctx,
+        None,
+        ConfigureSwitchCertificateMode::Reconfigure,
+    )
+    .await?
+    {
+        StartConfigureSwitchCertificateResult::EarlyTransition(outcome) => {
+            finish_maintenance_outcome(switch_id, request, ctx, outcome).await
+        }
+        StartConfigureSwitchCertificateResult::JobStarted(job_id) => Ok(
+            StateHandlerOutcome::transition(SwitchControllerState::Maintenance {
+                operation: SwitchMaintenanceOperation::ReconfigureCertificate,
+                request: request.cloned(),
+                configure_certificate: Some(ConfigureCertificateState::WaitForComplete { job_id }),
+            }),
+        ),
+    }
+}
+
+async fn handle_reconfigure_certificate_wait_for_complete(
+    switch_id: &SwitchId,
+    request: Option<&SwitchMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    job_id: &str,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    match poll_configure_switch_certificate_job(switch_id, ctx, job_id).await? {
+        ConfigureSwitchCertificatePollOutcome::Completed => {
+            tracing::info!(
+                %job_id,
+                switch_id = %switch_id,
+                "Switch certificate reconfiguration completed; returning Switch to Ready"
+            );
+            finish_maintenance(switch_id, request, ctx, SwitchControllerState::Ready).await
+        }
+        ConfigureSwitchCertificatePollOutcome::Failed(cause) => {
+            finish_maintenance_with_error(
+                switch_id,
+                request,
+                ctx,
+                format!("Switch {switch_id} maintenance (ReconfigureCertificate): {cause}"),
+            )
+            .await
+        }
+        ConfigureSwitchCertificatePollOutcome::InProgress => Ok(StateHandlerOutcome::wait(
+            format!("switch certificate reconfiguration job {job_id} in progress"),
+        )),
+    }
+}
+
+async fn finish_maintenance(
+    switch_id: &SwitchId,
+    request: Option<&SwitchMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    next_state: SwitchControllerState,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    let Some(request) = request else {
+        // Older saved states cannot identify the request that started this
+        // operation. Preserve the pending request, even if that repeats work.
+        tracing::warn!(
+            %switch_id,
+            "Maintenance completed without its original request; preserving pending maintenance"
+        );
+        return Ok(StateHandlerOutcome::transition(next_state));
+    };
+
+    let mut txn = ctx.services.db_pool.begin().await?;
+    if let db::ConditionalWrite::NotApplied(reason) =
+        db_switch::clear_switch_maintenance_requested(&mut txn, *switch_id, request).await?
+    {
+        tracing::debug!(
+            %switch_id,
+            ?reason,
+            "Completed maintenance request is no longer pending"
+        );
+    }
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
+}
+
+async fn finish_maintenance_outcome(
+    switch_id: &SwitchId,
+    request: Option<&SwitchMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    outcome: StateHandlerOutcome<SwitchControllerState>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    match outcome {
+        StateHandlerOutcome::Transition { next_state, .. }
+            if matches!(next_state, SwitchControllerState::Error { .. }) =>
+        {
+            let SwitchControllerState::Error { cause } = next_state else {
+                unreachable!();
+            };
+            finish_maintenance_with_error(switch_id, request, ctx, cause).await
+        }
+        StateHandlerOutcome::Transition {
+            next_state: SwitchControllerState::Ready,
+            ..
+        } => finish_maintenance(switch_id, request, ctx, SwitchControllerState::Ready).await,
+        other => Ok(other),
+    }
+}
+
 async fn invoke_power_operation(
     switch_id: &SwitchId,
     state: &Switch,
+    request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
     action: PowerAction,
     operation_label: &'static str,
@@ -114,6 +285,7 @@ async fn invoke_power_operation(
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         return finish_maintenance_with_error(
             switch_id,
+            request,
             ctx,
             format!(
                 "Switch {} maintenance ({}): component manager not configured",
@@ -126,6 +298,7 @@ async fn invoke_power_operation(
     let Some(rack_id) = state.rack_id.as_ref() else {
         return finish_maintenance_with_error(
             switch_id,
+            request,
             ctx,
             format!(
                 "Switch {} maintenance ({}): switch has no rack association",
@@ -147,6 +320,7 @@ async fn invoke_power_operation(
         Err(cause) => {
             return finish_maintenance_with_error(
                 switch_id,
+                request,
                 ctx,
                 format!(
                     "Switch {} maintenance ({}): {}",
@@ -177,9 +351,7 @@ async fn invoke_power_operation(
                     backend = component_manager.nv_switch.name(),
                     "Switch power control succeeded; returning Switch to Ready"
                 );
-                let mut txn = ctx.services.db_pool.begin().await?;
-                db_switch::clear_switch_maintenance_requested(&mut txn, *switch_id).await?;
-                return Ok(StateHandlerOutcome::transition(success_state).with_txn(txn));
+                return finish_maintenance(switch_id, request, ctx, success_state).await;
             }
 
             let summary = result
@@ -197,7 +369,7 @@ async fn invoke_power_operation(
                 "Switch {} maintenance ({}): power control failed: {}",
                 switch_id, operation_label, summary
             );
-            finish_maintenance_with_error(switch_id, ctx, cause).await
+            finish_maintenance_with_error(switch_id, request, ctx, cause).await
         }
         Err(error) => {
             let cause = format!(
@@ -212,7 +384,7 @@ async fn invoke_power_operation(
                 error = %error,
                 "Switch power control transport error",
             );
-            finish_maintenance_with_error(switch_id, ctx, cause).await
+            finish_maintenance_with_error(switch_id, request, ctx, cause).await
         }
     }
 }
@@ -253,9 +425,16 @@ pub(super) async fn build_switch_endpoint(
         nvos_mac,
         bmc_credentials,
         nvos_credentials,
+        nvos_host_name: endpoint.nvos_hostname.none_if_empty(),
     })
 }
 
+/// Resolve the per-device BMC root credentials for the given MAC.
+///
+/// Per-device secrets are authoritative; there is deliberately no site-wide
+/// fallback. A missing per-MAC secret means the switch has not been
+/// (re)ingested, and falling back to the rotating site-wide credential would
+/// mask that and break the moment the site rotates.
 async fn lookup_bmc_credentials(
     credential_manager: &dyn CredentialManager,
     bmc_mac: MacAddress,
@@ -265,29 +444,14 @@ async fn lookup_bmc_credentials(
             bmc_mac_address: bmc_mac,
         },
     };
-    let creds = match credential_manager.get_credentials(&bmc_key).await {
-        Ok(Some(creds)) => Some(creds),
-        Ok(None) => None,
-        Err(error) => {
-            return Err(format!(
-                "failed to read BMC credentials for {}: {}",
-                bmc_mac, error
-            ));
-        }
-    };
-
-    match creds {
-        Some(creds) => Ok(creds),
-        None => {
-            let sitewide_key = CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::SiteWideRoot,
-            };
-            credential_manager
-                .get_credentials(&sitewide_key)
-                .await
-                .map_err(|error| format!("failed to read site-wide BMC credentials: {}", error))?
-                .ok_or_else(|| format!("no BMC credentials configured for {} or sitewide", bmc_mac))
-        }
+    match credential_manager.get_credentials(&bmc_key).await {
+        Ok(Some(creds)) => Ok(creds),
+        Ok(None) => Err(format!(
+            "no per-device BMC credentials configured for {bmc_mac}; the device must be (re)ingested"
+        )),
+        Err(error) => Err(format!(
+            "failed to read BMC credentials for {bmc_mac}: {error}"
+        )),
     }
 }
 
@@ -307,10 +471,15 @@ async fn lookup_nvos_credentials(
 
 async fn finish_maintenance_with_error(
     switch_id: &SwitchId,
+    request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
     cause: String,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-    db_switch::clear_switch_maintenance_requested(&mut txn, *switch_id).await?;
-    Ok(StateHandlerOutcome::transition(SwitchControllerState::Error { cause }).with_txn(txn))
+    finish_maintenance(
+        switch_id,
+        request,
+        ctx,
+        SwitchControllerState::Error { cause },
+    )
+    .await
 }

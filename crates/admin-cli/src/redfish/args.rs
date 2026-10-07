@@ -44,9 +44,9 @@ Update host firmware from a local package:
     update-firmware-multipart --filename ./host-fw.bin
 
 ")]
-pub struct RedfishAction {
+pub(crate) struct RedfishAction {
     #[clap(subcommand)]
-    pub command: Cmd,
+    pub(super) command: Cmd,
 
     // A non-`Option` field is required by clap automatically, which renders
     // `--address <ADDRESS>` (unbracketed) in the usage line and rejects a
@@ -55,18 +55,18 @@ pub struct RedfishAction {
         long,
         help = "IP:port of machine BMC. Port is optional and defaults to 443"
     )]
-    pub address: String,
+    pub(super) address: String,
 
     #[clap(long, help = "Username for machine BMC")]
-    pub username: Option<String>,
+    pub(super) username: Option<String>,
 
     #[clap(long, help = "Password for machine BMC")]
-    pub password: Option<String>,
+    pub(super) password: Option<String>,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
 #[clap(rename_all = "kebab_case")]
-pub enum Cmd {
+pub(super) enum Cmd {
     /// List BIOS attributes
     BiosAttrs,
     /// Set hard drive first in boot order
@@ -170,7 +170,11 @@ Gracefully shut a machine down (also accepted as the alias `shutdown`):
     /// Reset BMC to factory defaults
     BmcResetToDefaults,
     /// Reboot the BMC itself
-    BmcReset,
+    BmcReset {
+        /// Redfish Manager.Reset type. Omit for the vendor default.
+        #[clap(long = "reset-type", value_enum)]
+        reset_type: Option<crate::bmc_machine::common::ResetTypeArg>,
+    },
     /// Get Secure boot status
     GetSecureBoot,
     /// Disable Secure Boot
@@ -231,6 +235,21 @@ Clear the UEFI password (supply the current one):
     ClearNvram,
     /// Set BIOS options
     SetBios(SetBios),
+    /// Reset BIOS settings to factory defaults. Returns once the BMC accepts
+    /// the reset request. A system restart is required for the settings to
+    /// take effect.
+    #[command(after_long_help = "\
+EXAMPLES:
+
+Reset BIOS settings to factory defaults:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword reset-bios
+
+Reset BIOS settings and restart the system to apply the change:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    reset-bios --reboot
+
+")]
+    ResetBios(ResetBiosArgs),
     /// Get DPU mode
     GetNicMode,
     /// Is infinite boot enable
@@ -293,11 +312,11 @@ Show one boot option by ID:
     get-boot-option --id Boot0001
 
 ")]
-pub struct BootOptionSelector {
+pub(super) struct BootOptionSelector {
     #[clap(long)]
-    pub all: bool,
+    all: bool,
     #[clap(long)]
-    pub id: Option<String>,
+    pub(super) id: Option<String>,
 }
 
 #[derive(clap::Parser, Debug, PartialEq, Clone)]
@@ -313,7 +332,7 @@ Show DPU port information:
     dpu ports
 
 ")]
-pub enum DpuOperations {
+pub(super) enum DpuOperations {
     /// BMC's FW Commands
     #[clap(visible_alias = "fw", about = "BMC's FW Commands", subcommand)]
     Firmware(FwCommand),
@@ -338,7 +357,7 @@ Show all discovered firmware versions:
     dpu firmware show --all
 
 ")]
-pub enum FwCommand {
+pub(super) enum FwCommand {
     /// Print FW update status
     Status,
     /// Update BMC's FW to the given FW package
@@ -356,17 +375,17 @@ Install a DPU BMC firmware package:
     dpu firmware update --package ./bmc-fw.fwpkg
 
 ")]
-pub struct FwPackage {
+pub(super) struct FwPackage {
     #[clap(short, long, help = "FW package to install")]
-    pub package: PathBuf,
+    pub(super) package: PathBuf,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
-pub struct UefiPassword {
+pub(super) struct UefiPassword {
     #[clap(long, help = "Current UEFI password")]
-    pub current_password: String,
+    pub(super) current_password: String,
     #[clap(long, help = "New UEFI password")]
-    pub new_password: String,
+    pub(super) new_password: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -378,11 +397,11 @@ Rename a BMC account:
     change-bmc-username --old-user svc-ops --new-user svc-platform
 
 ")]
-pub struct BmcUsername {
+pub(super) struct BmcUsername {
     #[clap(long, help = "Old username")]
-    pub old_user: String,
+    pub(super) old_user: String,
     #[clap(long, help = "New username")]
-    pub new_user: String,
+    pub(super) new_user: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -394,11 +413,11 @@ Change a BMC user's password:
     change-bmc-password --user svc-ops --new-password 'mynewpassword'
 
 ")]
-pub struct BmcPassword {
+pub(super) struct BmcPassword {
     #[clap(long, help = "New BMC password")]
-    pub new_password: String,
+    pub(super) new_password: String,
     #[clap(long, help = "BMC user")]
-    pub user: String,
+    pub(super) user: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -414,14 +433,14 @@ Update firmware and specify the component type:
     update-firmware-multipart --filename ./uefi.bin --component-type uefi
 
 ")]
-pub struct Multipart {
+pub(super) struct Multipart {
     #[clap(long, help = "Local filename for the firmware to be installed")]
-    pub filename: String,
+    pub(super) filename: String,
     #[clap(
         long,
         help = "Firmware type, ignored by some platforms and optional on others"
     )]
-    pub component_type: Option<ComponentType>,
+    pub(super) component_type: Option<ComponentType>,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -433,9 +452,9 @@ Get details for a Redfish task:
     get-task --taskid JID_123456789012
 
 ")]
-pub struct Task {
+pub(super) struct Task {
     #[clap(long, help = "Task ID")]
-    pub taskid: String,
+    pub(super) taskid: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -447,9 +466,9 @@ Show one chassis subsystem by ID:
     get-chassis --chassis-id Chassis-1
 
 ")]
-pub struct Chassis {
+pub(super) struct Chassis {
     #[clap(long, help = "Chassis ID")]
-    pub chassis_id: String,
+    pub(super) chassis_id: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -465,17 +484,17 @@ Create a read-only BMC user:
     create-bmc-user --user auditor --new-password 'mynewpassword' --role-id readonly
 
 ")]
-pub struct BmcUser {
+pub(super) struct BmcUser {
     #[clap(long, help = "BMC password")]
-    pub new_password: String,
+    pub(super) new_password: String,
     #[clap(long, help = "BMC user")]
-    pub user: String,
+    pub(super) user: String,
     #[clap(
         long,
         value_enum,
         help = "BMC role for the new account (default: administrator)"
     )]
-    pub role_id: Option<crate::bmc_role::BmcRole>,
+    pub(super) role_id: Option<crate::bmc_role::BmcRole>,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -487,9 +506,9 @@ Delete a BMC user by name:
     delete-bmc-user --user svc-ops
 
 ")]
-pub struct DeleteBmcUser {
+pub(super) struct DeleteBmcUser {
     #[clap(long, help = "BMC user")]
-    pub user: String,
+    pub(super) user: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -501,13 +520,13 @@ Run the standard machine setup:
     machine-setup --boot-interface-mac 00:11:22:33:44:55
 
 ")]
-pub struct MachineSetupArgs {
+pub(super) struct MachineSetupArgs {
     #[clap(long, help = "boot_interface_mac")]
-    pub boot_interface_mac: Option<String>,
+    pub(super) boot_interface_mac: Option<String>,
     #[clap(long, help = "BIOS profile config in JSON format")]
-    pub bios_profiles: Option<String>,
+    pub(super) bios_profiles: Option<String>,
     #[clap(long, help = "BIOS profile to use")]
-    pub selected_profile: Option<libredfish::BiosProfileType>,
+    pub(super) selected_profile: Option<libredfish::BiosProfileType>,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -519,15 +538,25 @@ Check what machine-setup steps remain:
     machine-setup-status --boot-interface-mac 00:11:22:33:44:55
 
 ")]
-pub struct MachineSetupStatusArgs {
+pub(super) struct MachineSetupStatusArgs {
     #[clap(long, help = "boot_interface_mac")]
-    pub boot_interface_mac: Option<String>,
+    pub(super) boot_interface_mac: Option<String>,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
-pub struct SetBootOrderDpuFirstArgs {
+pub(super) struct ResetBiosArgs {
+    #[clap(
+        short,
+        long,
+        help = "Perform a forced restart after the BMC accepts the BIOS reset request"
+    )]
+    pub(super) reboot: bool,
+}
+
+#[derive(Parser, Debug, PartialEq, Clone)]
+pub(super) struct SetBootOrderDpuFirstArgs {
     #[clap(long, help = "boot_interface_mac")]
-    pub boot_interface_mac: String,
+    pub(super) boot_interface_mac: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -539,9 +568,9 @@ Decommission a storage controller:
     decommission-controller --controller-id RAID.Slot.1-1
 
 ")]
-pub struct DecomissionControllerArgs {
+pub(super) struct DecomissionControllerArgs {
     #[clap(long, help = "controller_id")]
-    pub controller_id: String,
+    pub(super) controller_id: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -553,11 +582,11 @@ Create a volume on a storage controller:
     create-volume --controller-id RAID.Slot.1-1 --volume-name data0
 
 ")]
-pub struct CreateVolumeArgs {
+pub(super) struct CreateVolumeArgs {
     #[clap(long, help = "controller_id")]
-    pub controller_id: String,
+    pub(super) controller_id: String,
     #[clap(long, help = "volume_name")]
-    pub volume_name: String,
+    pub(super) volume_name: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -581,7 +610,7 @@ Show a specific firmware type by name:
     dpu firmware show DPU_NIC
 
 ")]
-pub struct ShowFw {
+pub(super) struct ShowFw {
     #[clap(
         short,
         long,
@@ -589,10 +618,10 @@ pub struct ShowFw {
         conflicts_with = "fw",
         help = "Show all discovered firmware key/values"
     )]
-    pub all: bool,
+    pub(super) all: bool,
 
     #[clap(long, action, conflicts_with = "fw", help = "Show BMC FW Version")]
-    pub bmc: bool,
+    pub(super) bmc: bool,
 
     #[clap(
         long,
@@ -600,7 +629,7 @@ pub struct ShowFw {
         conflicts_with = "fw",
         help = "Show DPU OS version (shortcut for `show DPU_OS`)"
     )]
-    pub dpu_os: bool,
+    pub(super) dpu_os: bool,
 
     #[clap(
         long,
@@ -608,13 +637,13 @@ pub struct ShowFw {
         conflicts_with = "fw",
         help = "Show UEFI version (shortcut for `show DPU_UEFI`)"
     )]
-    pub uefi: bool,
+    pub(super) uefi: bool,
 
     #[clap(
         default_value(""),
         help = "The firmware type to query (e.g. DPU_OS, DPU_UEFI, DPU_NIC), leave empty for all (default)"
     )]
-    pub fw: String,
+    pub(super) fw: String,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -630,7 +659,7 @@ Show a single port by name:
     dpu ports eth0
 
 ")]
-pub struct ShowPort {
+pub(super) struct ShowPort {
     #[clap(
         short,
         long,
@@ -638,13 +667,13 @@ pub struct ShowPort {
         conflicts_with = "port",
         help = "Show all ports (DEPRECATED)"
     )]
-    pub all: bool,
+    pub(super) all: bool,
 
     #[clap(
         default_value(""),
         help = "The port to query (e.g. eth0, eth1), leave empty for all (default)"
     )]
-    pub port: String,
+    pub(super) port: String,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -656,10 +685,10 @@ Set one or more BIOS attributes from JSON:
     set-bios --attributes '{\"OperatingModes_ChooseOperatingMode\": \"MaximumPerformance\"}'
 
 ")]
-pub struct SetBios {
+pub(super) struct SetBios {
     #[clap(
         long,
         help = "BIOS attributes to set in JSON, ex: {\"OperatingModes_ChooseOperatingMode\": \"MaximumPerformance\"}"
     )]
-    pub attributes: String,
+    pub(super) attributes: String,
 }

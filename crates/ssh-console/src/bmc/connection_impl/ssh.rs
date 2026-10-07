@@ -31,10 +31,10 @@ use ringbuf::traits::RingBuffer;
 use russh::client::{AuthResult, GexParams, KeyboardInteractiveAuthResponse};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::{Channel, ChannelMsg, MethodKind};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::POWER_RESET_COMMAND;
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection_impl::echo_connected_message;
 use crate::bmc::message_proxy::{
@@ -42,17 +42,19 @@ use crate::bmc::message_proxy::{
 };
 use crate::bmc::pending_output_line::PendingOutputLine;
 use crate::bmc::vendor::SshBmcVendor;
+use crate::{POWER_RESET_COMMAND, fork_cancel_token};
 
 static RUSSH_CLIENT_CONFIG: LazyLock<Arc<russh::client::Config>> =
     LazyLock::new(russh_client_config);
 
 /// Connect to a BMC one time, returning a [`Handle`]. Will not retry on connection errors.
-pub async fn spawn(
+pub(in crate::bmc) async fn spawn(
     connection_details: Arc<ConnectionDetails>,
     to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     metrics: Arc<BmcPoolMetrics>,
+    cancel_token: CancellationToken,
 ) -> Result<Handle, SpawnError> {
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let (to_bmc_msg_tx, mut to_bmc_msg_rx) = mpsc::channel::<ToBmcMessage>(1);
     let metrics_attrs = vec![KeyValue::new(
         "machine_id",
@@ -62,17 +64,28 @@ pub async fn spawn(
     let machine_id = connection_details.machine_id;
     let bmc_vendor = connection_details.bmc_vendor;
 
-    let bmc_ssh_client = make_authenticated_client(&connection_details).await?;
+    let bmc_ssh_client = cancel_token
+        .run_until_cancelled(make_authenticated_client(&connection_details))
+        .await
+        .ok_or(SpawnError::Cancelled(CancelPhase::ClientCreation))??;
     let connected_since = Utc::now();
 
     // Channel to send data to/from the BMC
-    let mut ssh_client_channel = bmc_ssh_client
-        .channel_open_session()
+    let mut ssh_client_channel = cancel_token
+        .run_until_cancelled(bmc_ssh_client.channel_open_session())
         .await
+        .ok_or(SpawnError::Cancelled(CancelPhase::ChannelOpenSession))?
         .map_err(|error| SpawnError::OpeningSession { error })?;
 
     tracing::info!(%machine_id, "BMC SSH connection has established");
-    trigger_and_await_sol_console(machine_id, &mut ssh_client_channel, bmc_vendor).await?;
+    cancel_token
+        .run_until_cancelled(trigger_and_await_sol_console(
+            machine_id,
+            &mut ssh_client_channel,
+            bmc_vendor,
+        ))
+        .await
+        .ok_or(SpawnError::Cancelled(CancelPhase::TriggeringSolConsole))??;
     tracing::info!(%machine_id, "SOL console setup completed");
 
     let mut output_ringbuf: LocalRb<Array<u8, 1024>> = ringbuf::LocalRb::default();
@@ -87,7 +100,7 @@ pub async fn spawn(
 
         loop {
             tokio::select! {
-                _ = &mut shutdown_rx => {
+                _ = cancel_token.cancelled() => {
                     tracing::info!(%machine_id, "BMC connection shutting down");
                     break;
                 }
@@ -104,7 +117,11 @@ pub async fn spawn(
                                 && ringbuf_contains(&output_ringbuf, bmc_prompt) {
                                     let mut ringbuf_str = String::new();
                                     output_ringbuf.read_to_string(&mut ringbuf_str).ok();
-                                    tracing::warn!(%machine_id, "BMC dropped to system prompt, exiting. output: {ringbuf_str:?}");
+                                    tracing::warn!(
+                                        %machine_id,
+                                        output = ?ringbuf_str,
+                                        "BMC dropped to system prompt, exiting"
+                                    );
                                     break;
                                 }
                         }
@@ -170,34 +187,49 @@ pub async fn spawn(
 
     Ok(Handle {
         to_bmc_msg_tx,
-        shutdown_tx,
         join_handle,
+        drop_guard,
     })
 }
 
 /// A handle to a BMC connection, which will shut down when dropped.
-pub struct Handle {
-    pub to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
-    pub shutdown_tx: oneshot::Sender<()>,
-    pub join_handle: JoinHandle<Result<(), SpawnError>>,
+pub(in crate::bmc) struct Handle {
+    pub(in crate::bmc) to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
+    pub(in crate::bmc) join_handle: JoinHandle<Result<(), SpawnError>>,
+    pub(in crate::bmc) drop_guard: DropGuard,
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum SpawnError {
+pub(in crate::bmc) enum SpawnError {
     #[error("error sending message from BMC to frontend: no active receivers")]
     SendingMsgToFrontend,
-    #[error("Error connecting to SSH BMC: {0}")]
+    #[error("error connecting to SSH BMC: {0}")]
     ClientCreation(#[from] ClientCreationError),
-    #[error("Error opening session to SSH BMC: {error}")]
+    #[error("error opening session to SSH BMC: {error}")]
     OpeningSession { error: russh::Error },
-    #[error("Error activating serial console: {0}")]
+    #[error("error activating serial console: {0}")]
     ConsoleActivation(#[from] ConsoleActivateError),
-    #[error("Error proxying message to BMC: {error}")]
+    #[error("error proxying message to BMC: {error}")]
     MessageProxying { error: MessageProxyError },
+    #[error("cancelled during {0:?}")]
+    Cancelled(CancelPhase),
+}
+
+impl SpawnError {
+    pub(in crate::bmc) fn is_cancelled(&self) -> bool {
+        matches!(self, SpawnError::Cancelled(_))
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::bmc) enum CancelPhase {
+    ClientCreation,
+    ChannelOpenSession,
+    TriggeringSolConsole,
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ClientCreationError {
+pub(in crate::bmc) enum ClientCreationError {
     #[error("error connecting to {addr}: {error}")]
     Connection {
         addr: SocketAddr,
@@ -208,12 +240,12 @@ pub enum ClientCreationError {
         addr: SocketAddr,
         error: russh::Error,
     },
-    #[error("Error loading SSH key from BMC override at {path}: {error}")]
+    #[error("error loading SSH key from BMC override at {path}: {error}")]
     LoadingSshKey {
         path: String,
         error: russh::keys::Error,
     },
-    #[error("Error attempting {kind} authentication as {user} to {addr}: {error}")]
+    #[error("error attempting {kind} authentication as {user} to {addr}: {error}")]
     AuthenticationAttempt {
         kind: &'static str,
         user: String,
@@ -221,21 +253,21 @@ pub enum ClientCreationError {
         error: russh::Error,
     },
 
-    #[error("Could not authenticate to {addr} as {user}, all authentication attempts failed")]
+    #[error("could not authenticate to {addr} as {user}, all authentication attempts failed")]
     AuthenticationFailed { user: String, addr: SocketAddr },
 
-    #[error("Error sending message to BMC: {0}")]
+    #[error("error sending message to BMC: {0}")]
     SendingMessageToBmc(#[from] MessageProxyError),
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ConsoleActivateError {
+pub(in crate::bmc) enum ConsoleActivateError {
     #[error("error while {phase}: {error}")]
     Request {
         phase: &'static str,
         error: russh::Error,
     },
-    #[error("Unable to activate serial console after timeout")]
+    #[error("unable to activate serial console after timeout")]
     Timeout,
 }
 
@@ -262,7 +294,7 @@ async fn make_authenticated_client(
         .map_err(|error| ClientCreationError::Authentication { addr: *addr, error })?
     {
         AuthResult::Success => {
-            tracing::warn!(%machine_id, %addr, %user, "auth_none succeeded, it shouldn't have!");
+            tracing::warn!(%machine_id, bmc_address = %addr, %user, "auth_none succeeded, it shouldn't have!");
             return Ok(client);
         }
         AuthResult::Failure {
@@ -302,13 +334,13 @@ async fn make_authenticated_client(
                     })? {
                     AuthResult::Success => {
                         tracing::debug!(
-                            %machine_id, %user, %addr,
+                            %machine_id, %user, bmc_address = %addr,
                             "PublicKey authentication succeeded"
                         );
                         return Ok(client);
                     }
                     AuthResult::Failure { .. } => {
-                        tracing::warn!(%machine_id, %user, %addr, "PublicKey authentication failed")
+                        tracing::warn!(%machine_id, %user, bmc_address = %addr, "PublicKey authentication failed")
                     }
                 }
             }
@@ -342,14 +374,14 @@ async fn make_authenticated_client(
                         }
                         KeyboardInteractiveAuthResponse::Success => {
                             tracing::debug!(
-                                %machine_id, %user, %addr,
+                                %machine_id, %user, bmc_address = %addr,
                                 "KeyboardInteractive authentication succeeded"
                             );
                             return Ok(client);
                         }
                         KeyboardInteractiveAuthResponse::Failure { .. } => {
                             tracing::warn!(
-                                %machine_id, %user, %addr,
+                                %machine_id, %user, bmc_address = %addr,
                                 "KeyboardInteractive authentication failed"
                             );
                             break;
@@ -369,18 +401,18 @@ async fn make_authenticated_client(
                     })? {
                     AuthResult::Success => {
                         tracing::debug!(
-                            %machine_id, %user, %addr,
+                            %machine_id, %user, bmc_address = %addr,
                             "Password authentication succeeded"
                         );
                         return Ok(client);
                     }
                     AuthResult::Failure { .. } => {
-                        tracing::warn!(%machine_id, %user, %addr, "Password authentication failed");
+                        tracing::warn!(%machine_id, %user, bmc_address = %addr, "Password authentication failed");
                     }
                 }
             }
             other => {
-                tracing::debug!(%machine_id, "Ignoring unsupported auth method {other:?}")
+                tracing::debug!(%machine_id, ?other, "Ignoring unsupported auth method")
             }
         }
     }
@@ -392,8 +424,8 @@ async fn make_authenticated_client(
 }
 
 // Interact with the serial-on-lan console within the BMC ssh session, calling the vendor's serial
-// activation command (`connect com1`, etc) and ensuring we're in the serial console before
-// continuing.
+// activation command (`connect com1`, etc), falling back when needed, and ensuring we're in the
+// serial console before continuing.
 async fn trigger_and_await_sol_console(
     machine_id: MachineId,
     ssh_client_channel: &mut Channel<russh::client::Msg>,
@@ -439,12 +471,15 @@ async fn trigger_and_await_sol_console(
         })?;
 
     let mut prompt_buf: Vec<u8> = Vec::with_capacity(1024);
-    let timeout = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut timeout = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     // After sending the activate command, wait for this much data to be read back (the command
     // itself echoing back, plus the prompt length) before continuing. (If we let the client use the
     // console before this, we get false positives about seeing a bmc prompt while we're supposed to
     // be in the console.)
-    let skip_data_read_len = bmc_prompt.len() + activate_command.len();
+    let mut skip_data_read_len = bmc_prompt.len() + activate_command.len();
+    let mut fallback_activate_sent = false;
+    let mut fallback_activate_commands: Option<&'static [&'static [u8]]> = None;
+    let mut next_fallback_command_index = 0;
 
     let mut activation_step = SerialConsoleActivationStep::WaitingForBmcPrompt;
     loop {
@@ -467,14 +502,12 @@ async fn trigger_and_await_sol_console(
                                 // We saw the prompt, send the serial activate command (`connect com1`,
                                 // etc) one byte at a time: This seems to work better with some
                                 // consoles.
-                                for byte in activate_command {
-                                    ssh_client_channel
-                                        .data([*byte].as_slice())
-                                        .await
-                                    .map_err(|error| ConsoleActivateError::Request { phase: "sending serial activate command to BMC", error })?;
-                                }
-                                ssh_client_channel.data(b"\n".as_slice()).await
-                                    .map_err(|error| ConsoleActivateError::Request { phase: "sending data to BMC", error })?;
+                                send_command_bytewise(
+                                    ssh_client_channel,
+                                    activate_command,
+                                    "sending serial activate command to BMC",
+                                )
+                                .await?;
                                 activation_step = SerialConsoleActivationStep::ActivateSent;
                                 // Clear the prompt
                                 prompt_buf.clear();
@@ -486,7 +519,77 @@ async fn trigger_and_await_sol_console(
                         // get false positives about seeing a bmc prompt while we're supposed to be
                         // in the console.)
                         if matches!(activation_step, SerialConsoleActivationStep::ActivateSent)
-                            && prompt_buf.len() > skip_data_read_len {
+                            && let Some(fallback_commands) = bmc_vendor
+                                .fallback_serial_activate_commands_if_needed(
+                                    &prompt_buf,
+                                    fallback_activate_sent,
+                                )
+                        {
+                            tracing::info!(
+                                %machine_id,
+                                "Primary SOL activation failed, trying fallback"
+                            );
+                            fallback_activate_sent = true;
+                            fallback_activate_commands = Some(fallback_commands);
+                            next_fallback_command_index = 0;
+                            let fallback_command = fallback_commands[next_fallback_command_index];
+                            next_fallback_command_index += 1;
+                            skip_data_read_len = bmc_prompt.len() + fallback_command.len();
+                            timeout = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                            send_command_bytewise(
+                                ssh_client_channel,
+                                fallback_command,
+                                "sending fallback serial activate command to BMC",
+                            )
+                            .await?;
+                            prompt_buf.clear();
+                        }
+
+                        if matches!(activation_step, SerialConsoleActivationStep::ActivateSent)
+                            && let Some(fallback_commands) = fallback_activate_commands
+                            && next_fallback_command_index < fallback_commands.len()
+                            && prompt_buf.len() > skip_data_read_len
+                            && prompt_buf.windows(bmc_prompt.len()).any(|window| window == bmc_prompt)
+                        {
+                            let fallback_command = fallback_commands[next_fallback_command_index];
+                            next_fallback_command_index += 1;
+                            skip_data_read_len = bmc_prompt.len() + fallback_command.len();
+                            timeout = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                            send_command_bytewise(
+                                ssh_client_channel,
+                                fallback_command,
+                                "sending fallback serial activate command to BMC",
+                            )
+                            .await?;
+                            prompt_buf.clear();
+                        }
+
+                        let waiting_for_fallback_prompt = fallback_activate_commands
+                            .is_some_and(|commands| next_fallback_command_index < commands.len());
+                        let fallback_sequence_complete = fallback_activate_commands
+                            .is_some_and(|commands| next_fallback_command_index == commands.len());
+                        let activation_output = if fallback_sequence_complete
+                            && let Some(fallback_commands) = fallback_activate_commands
+                        {
+                            let final_fallback_command = fallback_commands[fallback_commands.len() - 1];
+                            prompt_buf
+                                .windows(final_fallback_command.len())
+                                .rposition(|window| window == final_fallback_command)
+                                .map(|command_offset| &prompt_buf[command_offset..])
+                        } else {
+                            Some(prompt_buf.as_slice())
+                        };
+                        if matches!(activation_step, SerialConsoleActivationStep::ActivateSent)
+                            && !waiting_for_fallback_prompt
+                            && let Some(activation_output) = activation_output
+                            && !(fallback_sequence_complete
+                                && activation_output
+                                    .windows(bmc_prompt.len())
+                                    .any(|window| window == bmc_prompt))
+                            && bmc_vendor.should_accept_sol_activation_output(
+                                activation_output,
+                                skip_data_read_len,
+                            ) {
                             tracing::debug!(%machine_id, "confirmed serial activate command sent, letting client use console");
                             break;
                         }
@@ -494,7 +597,8 @@ async fn trigger_and_await_sol_console(
                     msg => {
                         tracing::debug!(
                             %machine_id,
-                            "message from BMC while activating serial prompt: {msg:?}"
+                            bmc_message = ?msg,
+                            "message from BMC while activating serial prompt"
                         )
                     }
                 }
@@ -535,6 +639,27 @@ fn russh_client_config() -> Arc<russh::client::Config> {
 enum SerialConsoleActivationStep {
     WaitingForBmcPrompt,
     ActivateSent,
+}
+
+async fn send_command_bytewise(
+    ssh_client_channel: &mut Channel<russh::client::Msg>,
+    command: &[u8],
+    phase: &'static str,
+) -> Result<(), ConsoleActivateError> {
+    for byte in command {
+        ssh_client_channel
+            .data([*byte].as_slice())
+            .await
+            .map_err(|error| ConsoleActivateError::Request { phase, error })?;
+    }
+    ssh_client_channel
+        .data(b"\n".as_slice())
+        .await
+        .map_err(|error| ConsoleActivateError::Request {
+            phase: "sending data to BMC",
+            error,
+        })?;
+    Ok(())
 }
 
 /// Returns `true` if `buf` contains the byte sequence `pat` anywhere
@@ -603,13 +728,13 @@ fn test_ringbuf_contains() {
 }
 
 #[derive(Clone)]
-pub struct ConnectionDetails {
-    pub machine_id: MachineId,
-    pub addr: SocketAddr,
-    pub user: String,
-    pub password: String,
-    pub ssh_key_path: Option<PathBuf>,
-    pub bmc_vendor: SshBmcVendor,
+pub(in crate::bmc) struct ConnectionDetails {
+    pub(in crate::bmc) machine_id: MachineId,
+    pub(in crate::bmc) addr: SocketAddr,
+    pub(in crate::bmc) user: String,
+    pub(in crate::bmc) password: String,
+    pub(in crate::bmc) ssh_key_path: Option<PathBuf>,
+    pub(in crate::bmc) bmc_vendor: SshBmcVendor,
 }
 
 impl Debug for ConnectionDetails {

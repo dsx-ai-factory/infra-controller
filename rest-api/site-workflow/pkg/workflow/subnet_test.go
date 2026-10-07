@@ -14,7 +14,7 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 )
@@ -40,10 +40,10 @@ func (s *CreateSubnetV2TestSuite) Test_CreateSubnetV2_Success() {
 	subnetName := "the_best_subnet"
 	vpcID := "9001"
 
-	request := &cwssaws.NetworkSegmentCreationRequest{
+	request := &corev1.NetworkSegmentCreationRequest{
 		Name:  subnetName,
-		VpcId: &cwssaws.VpcId{Value: vpcID},
-		Prefixes: []*cwssaws.NetworkPrefix{
+		VpcId: &corev1.VpcId{Value: vpcID},
+		Prefixes: []*corev1.NetworkPrefix{
 			{
 				Prefix: "10.0.0.1/8",
 			},
@@ -66,10 +66,10 @@ func (s *CreateSubnetV2TestSuite) Test_CreateSubnetV2_Failure() {
 	subnetName := "the_best_subnet"
 	vpcID := "9001"
 
-	request := &cwssaws.NetworkSegmentCreationRequest{
+	request := &corev1.NetworkSegmentCreationRequest{
 		Name:  subnetName,
-		VpcId: &cwssaws.VpcId{Value: vpcID},
-		Prefixes: []*cwssaws.NetworkPrefix{
+		VpcId: &corev1.VpcId{Value: vpcID},
+		Prefixes: []*corev1.NetworkPrefix{
 			{
 				Prefix: "10.0.0.1/8",
 			},
@@ -112,8 +112,8 @@ func (s *DeleteSubnetV2TestSuite) Test_DeleteSubnetV2_Success() {
 
 	subnetID := "555"
 
-	request := &cwssaws.NetworkSegmentDeletionRequest{
-		Id: &cwssaws.NetworkSegmentId{Value: subnetID},
+	request := &corev1.NetworkSegmentDeletionRequest{
+		Id: &corev1.NetworkSegmentId{Value: subnetID},
 	}
 
 	// Mock DeleteSubnetOnSite activity
@@ -131,8 +131,8 @@ func (s *DeleteSubnetV2TestSuite) Test_DeleteSubnetV2_Failure() {
 
 	subnetID := "555"
 
-	request := &cwssaws.NetworkSegmentDeletionRequest{
-		Id: &cwssaws.NetworkSegmentId{Value: subnetID},
+	request := &corev1.NetworkSegmentDeletionRequest{
+		Id: &corev1.NetworkSegmentId{Value: subnetID},
 	}
 
 	errMsg := "Site Controller communication error"

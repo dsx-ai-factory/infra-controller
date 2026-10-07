@@ -171,7 +171,7 @@ struct Timing {
 }
 
 impl Timing {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let now = std::time::Instant::now();
         Self {
             busy_ns: 0,
@@ -211,7 +211,7 @@ struct LogFmtData {
 }
 
 impl LogFmtData {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             timing: Timing::new(),
             suppressed: false,
@@ -220,7 +220,7 @@ impl LogFmtData {
         }
     }
 
-    pub fn update_attribute(&mut self, field: &Field, value: String) {
+    fn update_attribute(&mut self, field: &Field, value: String) {
         // Note that this doesn't use the `.entry()` API to avoid unnecessary
         // allocations for `.to_string()` if the entry does already exist
         match self.attributes.get_mut(field.name()) {
@@ -382,9 +382,22 @@ where
             if let Some(message) = &visitor.message {
                 write!(out, "{} ", kvp("msg", message))?;
             }
-            visitor.fields.sort();
-            for s in visitor.fields {
-                write!(out, "{s} ")?;
+            visitor.fields.sort_by(RenderedField::emit_order);
+            for field in &visitor.fields {
+                // Deliberately raw byte copies rather than the obvious
+                // `write!(out, "{key}={value} ")`: this loop is the hottest
+                // path in the layer, and routing each field through
+                // `core::fmt`'s dispatch costs the line a measurable slice of
+                // its win (about -14% per line instead of -25%, per the
+                // `logfmt_event_line_10_fields` bench -- re-verify there when
+                // touching this). It is safe precisely because both parts are
+                // fully rendered at record time: nothing here quotes, escapes,
+                // or interprets -- a field emits as three straight copies into
+                // the reused buffer.
+                out.extend_from_slice(field.key.as_str().as_bytes());
+                out.push(b'=');
+                out.extend_from_slice(field.value.as_bytes());
+                out.push(b' ');
             }
             writeln!(
                 out,
@@ -529,12 +542,18 @@ enum EscapedKeyName<'a> {
     Escaped(String),
 }
 
+impl EscapedKeyName<'_> {
+    fn as_str(&self) -> &str {
+        match self {
+            EscapedKeyName::Original(s) => s,
+            EscapedKeyName::Escaped(s) => s,
+        }
+    }
+}
+
 impl std::fmt::Display for EscapedKeyName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EscapedKeyName::Original(s) => s.fmt(f),
-            EscapedKeyName::Escaped(s) => s.fmt(f),
-        }
+        self.as_str().fmt(f)
     }
 }
 
@@ -560,28 +579,84 @@ fn kvp<K, V>(key: K, value: V) -> Kvp<K, V> {
     Kvp { key, value }
 }
 
+/// Returns `true` if [`char::escape_debug`] would rewrite `c` into something
+/// other than the character itself (e.g. `\`, `"`, `'`, or a control
+/// character). Such characters are only safe inside a quoted value: an escaped
+/// character emitted in an unquoted token would be read back literally,
+/// corrupting the value.
+///
+/// Constructing the `escape_debug` iterator per character is comparatively
+/// expensive, so [`value_needs_quoting`] only consults this for non-ASCII
+/// characters; ASCII is classified by [`ascii_needs_quoting`].
+fn char_is_escaped(c: char) -> bool {
+    let mut escaped = c.escape_debug();
+    escaped.next() != Some(c) || escaped.next().is_some()
+}
+
+/// Whether an ASCII byte forces the value it appears in to be quoted: space
+/// and everything below it (the C0 controls), DEL, `=`, `"`, `'`, and `\` -
+/// exactly the ASCII characters matched by the quoting rule: `c <= ' '` and
+/// `c == '='` directly, plus those [`char::escape_debug`] rewrites (the
+/// escaped quotes/backslash and the non-printable controls).
+/// `quoting_classifier_matches_escape_debug_probe_for_every_char` pins this
+/// to the `escape_debug`-probe classification for every character.
+fn ascii_needs_quoting(byte: u8) -> bool {
+    matches!(byte, 0..=b' ' | 0x7F | b'=' | b'"' | b'\'' | b'\\')
+}
+
+/// Whether `c` forces the value it appears in to be quoted.
+fn char_needs_quoting(c: char) -> bool {
+    if c.is_ascii() {
+        ascii_needs_quoting(c as u8)
+    } else {
+        // Non-ASCII is never `<= ' '` or `=`, so only the escape probe applies.
+        char_is_escaped(c)
+    }
+}
+
+/// Returns `true` if the value must be rendered quoted: it contains whitespace
+/// or `=` (which would break an unquoted token), or any character that
+/// `escape_debug` rewrites. Escaping is only meaningful inside quotes, so a
+/// value that needs escaping must also be quoted; a value escaped yet left
+/// unquoted (e.g. one containing a backslash but no whitespace) would be
+/// corrupted when read back.
+///
+/// Values are overwhelmingly clean ASCII, so the scan proves the whole value
+/// ASCII once (a vectorized check) and then classifies plain bytes; only
+/// values with non-ASCII characters take the per-`char` path.
+fn value_needs_quoting(value: &str) -> bool {
+    if value.is_ascii() {
+        value.bytes().any(ascii_needs_quoting)
+    } else {
+        value.chars().any(char_needs_quoting)
+    }
+}
+
 impl<K: AsRef<str>, V: AsRef<str>> std::fmt::Display for Kvp<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let escaped_key = escape_key_name(self.key.as_ref());
+        let value = self.value.as_ref();
 
-        if self
-            .value
-            .as_ref()
-            .as_bytes()
-            .iter()
-            .any(|c| *c <= b' ' || matches!(*c, b'=' | b'"'))
-        {
-            write!(
-                f,
-                r#"{}="{}""#,
-                escaped_key,
-                self.value.as_ref().escape_debug()
-            )?;
+        if value_needs_quoting(value) {
+            write!(f, r#"{}="{}""#, escaped_key, value.escape_debug())?;
         } else {
-            write!(f, "{}={}", escaped_key, self.value.as_ref().escape_debug())?;
+            write!(f, "{}={}", escaped_key, value)?;
         }
 
         Ok(())
+    }
+}
+
+/// Hooks for `benches/` only (behind the `bench-hooks` feature): re-exports
+/// internals so the benchmarks measure the real code paths. Not part of the
+/// crate's API.
+#[cfg(feature = "bench-hooks")]
+pub mod bench_hooks {
+    /// Thin `#[inline]` wrapper over the crate-private quoting scan, so the
+    /// benchmark measures the real implementation.
+    #[inline]
+    pub fn value_needs_quoting(value: &str) -> bool {
+        super::value_needs_quoting(value)
     }
 }
 
@@ -621,49 +696,138 @@ impl field::Visit for SpanAttributeVisitor<'_> {
     }
 }
 
+/// One event field, rendered and ready to emit: the key as it will be written
+/// (dots already rewritten to underscores) and the value bytes exactly as they
+/// will appear after the `=` (quoted and escaped when required). Rendering at
+/// record time keeps the per-field work to a single owned `String` (the value)
+/// and lets the sort and the final write run over ready bytes.
+struct RenderedField {
+    key: EscapedKeyName<'static>,
+    value: String,
+}
+
+impl RenderedField {
+    fn new(field: &Field, value: String) -> Self {
+        Self {
+            key: escape_key_name(field.name()),
+            value,
+        }
+    }
+
+    /// Byte order of the emitted `key=value` tokens - the order event fields
+    /// have always been written in (previously achieved by sorting the fully
+    /// formatted token strings). Comparing the parts directly is a pair of
+    /// cheap `str` compares in almost every case; only when one key is a
+    /// strict prefix of the other does the `=` terminator compete with the
+    /// longer key's next byte (e.g. `a1=2` sorts before `a=1` because
+    /// '1' < '='). Identifier field names cannot contain `=`, but tracing
+    /// also accepts string-literal names that can: that ties the byte
+    /// comparison, and the remaining token bytes then decide -- keeping the
+    /// order total (a non-total comparator can panic `sort_by`) and equal to
+    /// the rendered-token order in every case.
+    fn emit_order(&self, other: &Self) -> std::cmp::Ordering {
+        let a = self.key.as_str().as_bytes();
+        let b = other.key.as_str().as_bytes();
+        match a.cmp(b) {
+            std::cmp::Ordering::Equal => self.value.cmp(&other.value),
+            _ if a.len() < b.len() && b.starts_with(a) => b'='.cmp(&b[a.len()]).then_with(|| {
+                self.value.as_bytes().iter().cmp(
+                    b[a.len() + 1..]
+                        .iter()
+                        .chain(std::iter::once(&b'='))
+                        .chain(other.value.as_bytes()),
+                )
+            }),
+            _ if b.len() < a.len() && a.starts_with(b) => a[b.len()].cmp(&b'=').then_with(|| {
+                a[b.len() + 1..]
+                    .iter()
+                    .chain(std::iter::once(&b'='))
+                    .chain(self.value.as_bytes())
+                    .cmp(other.value.as_bytes().iter())
+            }),
+            ord => ord,
+        }
+    }
+}
+
+/// The quoted-and-`escape_debug`-escaped rendering of a value that needs it:
+/// the single source of truth for the quoted form, shared by every render
+/// path so they cannot drift apart.
+#[inline]
+fn render_quoted(value: &str) -> String {
+    format!("\"{}\"", value.escape_debug())
+}
+
+/// Renders a value the exact way [`Kvp`] emits it after the `=`: quoted and
+/// `escape_debug`-escaped when required, verbatim otherwise. Takes the value
+/// by `String` so the (typical) clean case reuses the allocation.
+fn render_value(value: String) -> String {
+    if value_needs_quoting(&value) {
+        render_quoted(&value)
+    } else {
+        value
+    }
+}
+
 /// A visitor for recording fields in span events
-pub struct FieldVisitor {
-    pub message: Option<String>,
-    pub fields: Vec<String>,
+struct FieldVisitor {
+    message: Option<String>,
+    fields: Vec<RenderedField>,
+}
+
+impl FieldVisitor {
+    /// Numeric and bool renderings never contain characters that need
+    /// quoting, so they are emitted verbatim (as the numeric visitor paths
+    /// always have been).
+    fn push_unquoted(&mut self, field: &Field, value: impl ToString) {
+        self.fields
+            .push(RenderedField::new(field, value.to_string()));
+    }
 }
 
 impl Visit for FieldVisitor {
+    // Same decision as `render_value`, taken from `&str` so a value that
+    // needs quoting renders straight into its quoted form without first
+    // paying an intermediate `String`.
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields.push(format!("{}", kvp(field.name(), value)));
+        let rendered = if value_needs_quoting(value) {
+            render_quoted(value)
+        } else {
+            value.to_string()
+        };
+        self.fields.push(RenderedField::new(field, rendered));
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             self.message = Some(format!("{value:?}"));
             return;
         }
-        self.record_str(field, &format!("{value:?}"));
+        // Render the debug value once and requote only when needed, rather
+        // than formatting the rendered value a second time.
+        let rendered = render_value(format!("{value:?}"));
+        self.fields.push(RenderedField::new(field, rendered));
     }
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.fields
-            .push(format!("{}={value}", escape_key_name(field.name())));
+        self.push_unquoted(field, value);
     }
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields
-            .push(format!("{}={value}", escape_key_name(field.name())));
+        self.push_unquoted(field, value);
     }
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields
-            .push(format!("{}={value}", escape_key_name(field.name())));
+        self.push_unquoted(field, value);
     }
     fn record_i128(&mut self, field: &Field, value: i128) {
-        self.fields
-            .push(format!("{}={value}", escape_key_name(field.name())));
+        self.push_unquoted(field, value);
     }
     fn record_u128(&mut self, field: &Field, value: u128) {
-        self.fields
-            .push(format!("{}={value}", escape_key_name(field.name())));
+        self.push_unquoted(field, value);
     }
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields
-            .push(format!("{}={value}", escape_key_name(field.name())));
+        self.push_unquoted(field, value);
     }
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.record_str(field, &value.to_string());
+        let rendered = render_value(value.to_string());
+        self.fields.push(RenderedField::new(field, rendered));
     }
 }
 
@@ -696,13 +860,13 @@ mod tests {
     }
 
     impl TestWriter {
-        pub fn new() -> Self {
+        fn new() -> Self {
             Self {
                 buf: Arc::new(Mutex::new(vec![])),
             }
         }
 
-        pub fn text(&self) -> String {
+        fn text(&self) -> String {
             let guard = self.buf.lock().unwrap();
             String::from_utf8_lossy(&guard).into_owned()
         }
@@ -1443,5 +1607,146 @@ mod tests {
             event_line.contains("service=deep-comp"),
             "deeply nested span did not inherit service: {event_line}"
         );
+    }
+
+    #[test]
+    fn quoting_classifier_matches_escape_debug_probe_for_every_char() {
+        // The previous classifier: probe `char::escape_debug` per character.
+        // Kept here verbatim as the reference the table-based classifier must
+        // match for every Unicode scalar value (which subsumes all ASCII, the
+        // controls, DEL, `\` `"` `'`, accented letters, and emoji).
+        fn old_needs_quoting(c: char) -> bool {
+            let mut escaped = c.escape_debug();
+            let is_escaped = escaped.next() != Some(c) || escaped.next().is_some();
+            c <= ' ' || c == '=' || is_escaped
+        }
+
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            assert_eq!(
+                char_needs_quoting(c),
+                old_needs_quoting(c),
+                "classifier mismatch for {c:?} (U+{:04X})",
+                c as u32
+            );
+        }
+
+        // And the value-level scan agrees for representative mixed values.
+        for value in [
+            "plain",
+            "café",
+            "ok😀",
+            r"a\b",
+            "O'Brien",
+            "a\"b",
+            "a b",
+            "a=b",
+            "tab\there",
+            "e\u{301}",
+            "\u{301}e",
+            "",
+        ] {
+            assert_eq!(
+                value_needs_quoting(value),
+                value.chars().any(old_needs_quoting),
+                "value scan mismatch for {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn event_fields_sort_in_rendered_token_order() {
+        // Pins the exact field ordering on an event line: byte order of the
+        // rendered `key=value` tokens, including the cases where that differs
+        // from ordering by (key, value):
+        //   * a key extending another key with a digit ('1' < '='), so `a1=2`
+        //     sorts before `a=1`;
+        //   * dotted keys sort by their emitted (underscore) form, so `aZ=4`
+        //     ('Z' < '_') sorts before `a_b=3` despite '.' < 'Z';
+        //   * duplicate keys order by rendered value bytes, where a quoted
+        //     rendering (`k="a b"`, '"' = 0x22) sorts before an unquoted
+        //     `k=#` (0x23).
+        let writer = TestWriter::new();
+        let cloned_writer = writer.clone();
+        let layer = layer().with_writer(Arc::new(move || Box::new(cloned_writer.clone())));
+
+        let _subscriber = tracing_subscriber::registry().with(layer).set_default();
+
+        tracing::warn!(
+            a = "1",
+            a1 = "2",
+            a.b = "3",
+            aZ = "4",
+            k = "#",
+            k = "a b",
+            "ordering"
+        );
+
+        let lines: Vec<String> = writer.text().lines().map(ToString::to_string).collect();
+        assert_eq!(lines.len(), 1, "got {}: {:?}", lines.len(), lines);
+        assert!(
+            lines[0].starts_with(
+                r#"level=WARN msg=ordering a1=2 a=1 aZ=4 a_b=3 k="a b" k=# location=""#
+            ),
+            "Line is: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn literal_key_containing_equals_keeps_the_order_total() {
+        // Field names are almost always identifiers, but tracing accepts
+        // string-literal names, so a key can contain `=`. The comparator's
+        // prefix arm then ties on the `=` byte and falls through to the
+        // remaining token bytes -- keeping the comparison total (a non-total
+        // comparator can panic `sort_by`) and the output in rendered-token
+        // byte order: `k==z` ('=' is 0x3D) sorts before `k=a` and `k=b`.
+        let writer = TestWriter::new();
+        let cloned_writer = writer.clone();
+        let layer = layer().with_writer(Arc::new(move || Box::new(cloned_writer.clone())));
+
+        let _subscriber = tracing_subscriber::registry().with(layer).set_default();
+
+        tracing::warn!(k = "b", "k=" = "z", k = "a", "total-order");
+
+        let lines: Vec<String> = writer.text().lines().map(ToString::to_string).collect();
+        assert_eq!(lines.len(), 1, "got {}: {:?}", lines.len(), lines);
+        assert!(
+            lines[0].starts_with(r#"level=WARN msg=total-order k==z k=a k=b location=""#),
+            "Line is: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn grapheme_extended_values_are_quoted_but_escaped_only_when_leading() {
+        // The quoting probe is per-char (`char::escape_debug`): a combining
+        // mark (grapheme-extended) anywhere in the value forces quoting. The
+        // rendering is `str::escape_debug`, which escapes a grapheme-extended
+        // char only in the first position - mid-string it stays literal inside
+        // the quotes.
+        assert_eq!(kvp("k", "e\u{301}").to_string(), "k=\"e\u{301}\"");
+        assert_eq!(kvp("k", "\u{301}e").to_string(), r#"k="\u{301}e""#);
+        // Printable non-ASCII (emoji) stays unquoted.
+        assert_eq!(kvp("k", "ok😀").to_string(), "k=ok😀");
+    }
+
+    #[test]
+    fn values_needing_escapes_are_quoted() {
+        use super::kvp;
+
+        // A backslash (with no whitespace) must be quoted: an escaped value
+        // emitted unquoted would be read back literally and corrupted.
+        assert_eq!(kvp("path", r"a\b").to_string(), r#"path="a\\b""#);
+        // Apostrophes and embedded quotes likewise require quoting.
+        assert_eq!(kvp("name", "O'Brien").to_string(), r#"name="O\'Brien""#);
+        assert_eq!(kvp("q", "a\"b").to_string(), r#"q="a\"b""#);
+
+        // Clean single-token values stay unquoted and unescaped.
+        assert_eq!(kvp("plain", "hello").to_string(), "plain=hello");
+        assert_eq!(kvp("unicode", "café").to_string(), "unicode=café");
+
+        // Whitespace and `=` still force quoting.
+        assert_eq!(kvp("k", "a b").to_string(), r#"k="a b""#);
+        assert_eq!(kvp("k", "a=b").to_string(), r#"k="a=b""#);
     }
 }

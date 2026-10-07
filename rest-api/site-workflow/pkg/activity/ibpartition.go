@@ -8,10 +8,10 @@ import (
 	"errors"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -26,7 +26,7 @@ type ManageInfiniBandPartitionInventory struct {
 func (mmi *ManageInfiniBandPartitionInventory) DiscoverInfiniBandPartitionInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverIBPartitionInventory").Logger()
 	logger.Info().Msg("Starting activity")
-	inventoryImpl := manageInventoryImpl[*cwssaws.IBPartitionId, *cwssaws.IBPartition, *cwssaws.InfiniBandPartitionInventory]{
+	inventoryImpl := manageInventoryImpl[*corev1.IBPartitionId, *corev1.IBPartition, *corev1.InfiniBandPartitionInventory]{
 		itemType:               "InfiniBandPartition",
 		config:                 mmi.config,
 		internalFindIDs:        ibpFindIDs,
@@ -43,18 +43,18 @@ func NewManageInfiniBandPartitionInventory(config ManageInventoryConfig) ManageI
 	}
 }
 
-func ibpFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*cwssaws.IBPartitionId, error) {
+func ibpFindIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient) ([]*corev1.IBPartitionId, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	idList, err := grpcServiceClient.FindIBPartitionIds(ctx, &cwssaws.IBPartitionSearchFilter{})
+	idList, err := grpcServiceClient.FindIBPartitionIds(ctx, &corev1.IBPartitionSearchFilter{})
 	if err != nil {
 		return nil, err
 	}
 	return idList.GetIbPartitionIds(), nil
 }
 
-func ibpFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*cwssaws.IBPartitionId) ([]*cwssaws.IBPartition, error) {
+func ibpFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids []*corev1.IBPartitionId) ([]*corev1.IBPartition, error) {
 	grpcServiceClient := grpcClient.GrpcServiceClient()
-	list, err := grpcServiceClient.FindIBPartitionsByIds(ctx, &cwssaws.IBPartitionsByIdsRequest{
+	list, err := grpcServiceClient.FindIBPartitionsByIds(ctx, &corev1.IBPartitionsByIdsRequest{
 		IbPartitionIds: ids,
 	})
 	if err != nil {
@@ -63,14 +63,14 @@ func ibpFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, ids [
 	return list.GetIbPartitions(), nil
 }
 
-func ibpPagedInventory(allItemIDs []*cwssaws.IBPartitionId, pagedItems []*cwssaws.IBPartition, input *pagedInventoryInput) *cwssaws.InfiniBandPartitionInventory {
+func ibpPagedInventory(allItemIDs []*corev1.IBPartitionId, pagedItems []*corev1.IBPartition, input *pagedInventoryInput) *corev1.InfiniBandPartitionInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetValue())
 	}
 
 	// Create an inventory page with the subset of VPCs
-	inventory := &cwssaws.InfiniBandPartitionInventory{
+	inventory := &corev1.InfiniBandPartitionInventory{
 		IbPartitions: pagedItems,
 		Timestamp: &timestamppb.Timestamp{
 			Seconds: time.Now().Unix(),
@@ -98,7 +98,7 @@ func NewManageInfiniBandPartition(coreGrpcAtomicClient *cClient.CoreGrpcAtomicCl
 }
 
 // Function to create InfiniBand Partition with NICo
-func (mibp *ManageInfiniBandPartition) CreateInfiniBandPartitionOnSite(ctx context.Context, request *cwssaws.IBPartitionCreationRequest) error {
+func (mibp *ManageInfiniBandPartition) CreateInfiniBandPartitionOnSite(ctx context.Context, request *corev1.IBPartitionCreationRequest) error {
 	logger := log.With().Str("Activity", "CreateInfiniBandPartitionOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -131,19 +131,20 @@ func (mibp *ManageInfiniBandPartition) CreateInfiniBandPartitionOnSite(ctx conte
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
 	// Call Core gRPC endpoint
+	start := time.Now()
 	_, err = grpcServiceClient.CreateIBPartition(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create InfiniBand Partition using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to create InfiniBand Partition using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // UpdateInfiniBandPartitionOnSite applies an IB partition update on the site NICo controller
-func (mibp *ManageInfiniBandPartition) UpdateInfiniBandPartitionOnSite(ctx context.Context, request *cwssaws.IBPartitionUpdateRequest) error {
+func (mibp *ManageInfiniBandPartition) UpdateInfiniBandPartitionOnSite(ctx context.Context, request *corev1.IBPartitionUpdateRequest) error {
 	logger := log.With().Str("Activity", "UpdateInfiniBandPartitionOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -168,19 +169,20 @@ func (mibp *ManageInfiniBandPartition) UpdateInfiniBandPartitionOnSite(ctx conte
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.UpdateIBPartition(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update InfiniBand Partition using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to update InfiniBand Partition using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }
 
 // Function to delete InfiniBand Partition on NICo
-func (mipb *ManageInfiniBandPartition) DeleteInfiniBandPartitionOnSite(ctx context.Context, request *cwssaws.IBPartitionDeletionRequest) error {
+func (mipb *ManageInfiniBandPartition) DeleteInfiniBandPartitionOnSite(ctx context.Context, request *corev1.IBPartitionDeletionRequest) error {
 	logger := log.With().Str("Activity", "DeleteInfiniBandPartitionOnSite").Logger()
 
 	logger.Info().Msg("Starting activity")
@@ -205,13 +207,14 @@ func (mipb *ManageInfiniBandPartition) DeleteInfiniBandPartitionOnSite(ctx conte
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
+	start := time.Now()
 	_, err = grpcServiceClient.DeleteIBPartition(ctx, request)
+	duration := time.Since(start)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to delete InfiniBand Partition using Core gRPC API")
+		logger.Warn().Err(err).Dur("grpc_duration", duration).Msg("Failed to delete InfiniBand Partition using Core gRPC API")
 		return swe.WrapErr(err)
 	}
-
-	logger.Info().Msg("Completed activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed activity")
 
 	return nil
 }

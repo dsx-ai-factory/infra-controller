@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateSkuTestSuite struct {
@@ -39,7 +39,7 @@ func (s *UpdateSkuTestSuite) Test_UpdateSkuInventory_Success() {
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.SkuInventory{Skus: []*cwssaws.Sku{}}
+	inv := &corev1.SkuInventory{Skus: []*corev1.Sku{}}
 
 	s.env.RegisterActivity(skuManager.UpdateSkusInDB)
 	s.env.OnActivity(skuManager.UpdateSkusInDB, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -54,7 +54,7 @@ func (s *UpdateSkuTestSuite) Test_UpdateSkuInventory_ActivityFails() {
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.SkuInventory{Skus: []*cwssaws.Sku{}}
+	inv := &corev1.SkuInventory{Skus: []*corev1.Sku{}}
 
 	s.env.RegisterActivity(skuManager.UpdateSkusInDB)
 	s.env.OnActivity(skuManager.UpdateSkusInDB, mock.Anything, mock.Anything, mock.Anything).Return(errors.New("UpdateSkuInventory Failure"))

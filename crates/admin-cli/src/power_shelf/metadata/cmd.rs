@@ -16,6 +16,7 @@
  */
 
 use ::rpc::admin_cli::OutputFormat;
+use rpc::errors::RpcDataConversionError;
 
 use super::args::{
     Args, PowerShelfMetadataCommandAddLabel, PowerShelfMetadataCommandFromExpectedPowerShelf,
@@ -25,7 +26,7 @@ use super::args::{
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-pub async fn metadata(
+pub(super) async fn metadata(
     api_client: &ApiClient,
     cmd: Args,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -81,7 +82,12 @@ async fn metadata_set(
     let ps = fetch_power_shelf(api_client, cmd.power_shelf).await?;
     let metadata = crate::metadata::apply_set(ps.metadata, cmd.name, cmd.description)?;
     api_client
-        .update_power_shelf_metadata(ps.id.unwrap(), metadata, ps.version)
+        .update_power_shelf_metadata(
+            ps.id
+                .ok_or(RpcDataConversionError::MissingArgument("power_shelf.id"))?,
+            metadata,
+            ps.version,
+        )
         .await
 }
 
@@ -92,7 +98,12 @@ async fn metadata_add_label(
     let ps = fetch_power_shelf(api_client, cmd.power_shelf).await?;
     let metadata = crate::metadata::apply_add_label(ps.metadata, cmd.key, cmd.value)?;
     api_client
-        .update_power_shelf_metadata(ps.id.unwrap(), metadata, ps.version)
+        .update_power_shelf_metadata(
+            ps.id
+                .ok_or(RpcDataConversionError::MissingArgument("power_shelf.id"))?,
+            metadata,
+            ps.version,
+        )
         .await
 }
 
@@ -103,7 +114,12 @@ async fn metadata_remove_labels(
     let ps = fetch_power_shelf(api_client, cmd.power_shelf).await?;
     let metadata = crate::metadata::apply_remove_labels(ps.metadata, cmd.keys)?;
     api_client
-        .update_power_shelf_metadata(ps.id.unwrap(), metadata, ps.version)
+        .update_power_shelf_metadata(
+            ps.id
+                .ok_or(RpcDataConversionError::MissingArgument("power_shelf.id"))?,
+            metadata,
+            ps.version,
+        )
         .await
 }
 
@@ -181,7 +197,13 @@ async fn metadata_from_expected_power_shelf(
     }
 
     api_client
-        .update_power_shelf_metadata(power_shelf.id.unwrap(), metadata, power_shelf.version)
+        .update_power_shelf_metadata(
+            power_shelf
+                .id
+                .ok_or(RpcDataConversionError::MissingArgument("power_shelf.id"))?,
+            metadata,
+            power_shelf.version,
+        )
         .await?;
     Ok(())
 }

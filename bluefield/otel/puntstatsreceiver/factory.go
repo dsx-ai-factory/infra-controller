@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	typeStr       = "punt_stats"
-	prefixStr     = typeStr + "_"
-	ReceiverName  = "puntstatsreceiver"
-	stability     = component.StabilityLevelAlpha
+	typeStr      = "punt_stats"
+	prefixStr    = typeStr + "_"
+	ReceiverName = "puntstatsreceiver"
+	stability    = component.StabilityLevelAlpha
 )
 
 var sourceStr string = fmt.Sprintf("%s:%s", ReceiverName, Version)
@@ -50,7 +50,7 @@ func NewFactory() receiver.Factory {
 
 func createMetricsReceiver(
 	_ context.Context,
-	set receiver.CreateSettings,
+	set receiver.Settings,
 	cfg component.Config,
 	next consumer.Metrics,
 ) (receiver.Metrics, error) {

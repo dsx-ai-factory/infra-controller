@@ -19,7 +19,7 @@
 // Tests for MlxConfigSettable and MlxConfigQueryable traits
 
 use carbide_test_support::Outcome::*;
-use carbide_test_support::scenarios;
+use carbide_test_support::{scenarios, value_scenarios};
 use libmlx::runner::traits::{self, MlxConfigQueryable, MlxConfigSettable};
 use libmlx::variables::value::MlxValueType;
 
@@ -39,73 +39,60 @@ fn test_mlx_config_settable_vec_config_value() {
     assert_eq!(result[0].value, MlxValueType::Boolean(true));
 }
 
+// `to_config_values` over string-tuple assignments works whether they're passed
+// as an owned array `[...]` or an array reference `&[...]`. Each row calls the
+// trait on its own container type (identity closure) and projects the unordered
+// result to name->value pairs sorted by name.
+//
+// The `&[...]` borrow is load-bearing: it selects the `&[T; N]` trait impl, which
+// is the distinct coverage this row adds over the owned-array row, so the borrow
+// must stay despite clippy seeing it as droppable.
+#[allow(clippy::needless_borrows_for_generic_args)]
 #[test]
-fn test_mlx_config_settable_string_tuples() {
+fn config_values_from_string_tuples_across_container_forms() {
+    fn pairs<T: MlxConfigSettable>(
+        assignments: T,
+        registry: &libmlx::variables::registry::MlxVariableRegistry,
+    ) -> Vec<(String, MlxValueType)> {
+        let mut pairs: Vec<(String, MlxValueType)> = assignments
+            .to_config_values(registry)
+            .unwrap()
+            .iter()
+            .map(|v| (v.name().to_string(), v.value.clone()))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    }
+
     let registry = common::create_test_registry();
 
-    let assignments = &[
-        ("SRIOV_EN", "true"),
-        ("NUM_OF_VFS", "16"),
-        ("POWER_MODE", "HIGH"),
-    ];
+    value_scenarios!(
+        run = |p| p;
+        "owned array [...]" {
+            pairs(
+                [
+                    ("SRIOV_EN", "true"),
+                    ("NUM_OF_VFS", "16"),
+                    ("POWER_MODE", "HIGH"),
+                ],
+                &registry,
+            ) => vec![
+                ("NUM_OF_VFS".to_string(), MlxValueType::Integer(16)),
+                ("POWER_MODE".to_string(), MlxValueType::Enum("HIGH".to_string())),
+                ("SRIOV_EN".to_string(), MlxValueType::Boolean(true)),
+            ],
+        }
 
-    let result = assignments.to_config_values(&registry).unwrap();
-
-    assert_eq!(result.len(), 3);
-
-    // Find each variable and verify
-    let sriov = result.iter().find(|v| v.name() == "SRIOV_EN").unwrap();
-    assert_eq!(sriov.value, MlxValueType::Boolean(true));
-
-    let vfs = result.iter().find(|v| v.name() == "NUM_OF_VFS").unwrap();
-    assert_eq!(vfs.value, MlxValueType::Integer(16));
-
-    let power = result.iter().find(|v| v.name() == "POWER_MODE").unwrap();
-    assert_eq!(power.value, MlxValueType::Enum("HIGH".to_string()));
-}
-
-#[test]
-fn test_mlx_config_settable_arrays_direct() {
-    let registry = common::create_test_registry();
-
-    // Test that we can pass arrays directly without needing as &[_]
-    let assignments = [
-        ("SRIOV_EN", "true"),
-        ("NUM_OF_VFS", "16"),
-        ("POWER_MODE", "HIGH"),
-    ];
-
-    let result = assignments.to_config_values(&registry).unwrap();
-
-    assert_eq!(result.len(), 3);
-
-    // Find each variable and verify
-    let sriov = result.iter().find(|v| v.name() == "SRIOV_EN").unwrap();
-    assert_eq!(sriov.value, MlxValueType::Boolean(true));
-
-    let vfs = result.iter().find(|v| v.name() == "NUM_OF_VFS").unwrap();
-    assert_eq!(vfs.value, MlxValueType::Integer(16));
-
-    let power = result.iter().find(|v| v.name() == "POWER_MODE").unwrap();
-    assert_eq!(power.value, MlxValueType::Enum("HIGH".to_string()));
-}
-
-#[test]
-fn test_mlx_config_settable_array_references() {
-    let registry = common::create_test_registry();
-
-    // Test that array references also work
-    let assignments = &[("SRIOV_EN", "false"), ("NUM_OF_VFS", "32")];
-
-    let result = assignments.to_config_values(&registry).unwrap();
-
-    assert_eq!(result.len(), 2);
-
-    let sriov = result.iter().find(|v| v.name() == "SRIOV_EN").unwrap();
-    assert_eq!(sriov.value, MlxValueType::Boolean(false));
-
-    let vfs = result.iter().find(|v| v.name() == "NUM_OF_VFS").unwrap();
-    assert_eq!(vfs.value, MlxValueType::Integer(32));
+        "array reference &[...]" {
+            pairs(
+                &[("SRIOV_EN", "false"), ("NUM_OF_VFS", "32")],
+                &registry,
+            ) => vec![
+                ("NUM_OF_VFS".to_string(), MlxValueType::Integer(32)),
+                ("SRIOV_EN".to_string(), MlxValueType::Boolean(false)),
+            ],
+        }
+    );
 }
 
 #[test]
@@ -129,46 +116,83 @@ fn test_mlx_config_settable_different_array_sizes() {
     assert_eq!(result.len(), 5);
 }
 
+// `to_config_values` over indexed array assignments builds the same sparse
+// arrays whether passed as an owned array `[...]` or an array reference `&[...]`.
+// Each row calls the trait on its own container type and projects the result to
+// name->value pairs (the full array value) sorted by name. The expected arrays
+// pin the same per-index slots the originals asserted: GPIO_ENABLED size 4 with
+// [0]=true,[2]=false and GPIO_MODES size 8 with [1]=output,[3]=bidirectional.
+//
+// The `&[...]` borrow is load-bearing: it selects the `&[T; N]` trait impl, which
+// is the distinct coverage this row adds over the owned-array row, so the borrow
+// must stay despite clippy seeing it as droppable.
+#[allow(clippy::needless_borrows_for_generic_args)]
 #[test]
-fn test_mlx_config_settable_arrays_with_indices() {
+fn config_values_from_indexed_arrays_across_container_forms() {
+    fn pairs<T: MlxConfigSettable>(
+        assignments: T,
+        registry: &libmlx::variables::registry::MlxVariableRegistry,
+    ) -> Vec<(String, MlxValueType)> {
+        let mut pairs: Vec<(String, MlxValueType)> = assignments
+            .to_config_values(registry)
+            .unwrap()
+            .iter()
+            .map(|v| (v.name().to_string(), v.value.clone()))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    }
+
     let registry = common::create_test_registry();
 
-    // Test that array index syntax works with direct arrays
-    let assignments = [
-        ("GPIO_ENABLED[0]", "true"),
-        ("GPIO_ENABLED[2]", "false"),
-        ("GPIO_MODES[1]", "output"),
-        ("GPIO_MODES[3]", "bidirectional"),
-    ];
+    let expected = || {
+        vec![
+            (
+                "GPIO_ENABLED".to_string(),
+                MlxValueType::BooleanArray(vec![Some(true), None, Some(false), None]),
+            ),
+            (
+                "GPIO_MODES".to_string(),
+                MlxValueType::EnumArray(vec![
+                    None,
+                    Some("output".to_string()),
+                    None,
+                    Some("bidirectional".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ]),
+            ),
+        ]
+    };
 
-    let result = assignments.to_config_values(&registry).unwrap();
+    value_scenarios!(
+        run = |p| p;
+        "owned array [...]" {
+            pairs(
+                [
+                    ("GPIO_ENABLED[0]", "true"),
+                    ("GPIO_ENABLED[2]", "false"),
+                    ("GPIO_MODES[1]", "output"),
+                    ("GPIO_MODES[3]", "bidirectional"),
+                ],
+                &registry,
+            ) => expected(),
+        }
 
-    assert_eq!(result.len(), 2); // Two arrays: GPIO_ENABLED and GPIO_MODES
-
-    // Find GPIO_ENABLED array
-    let gpio_enabled = result.iter().find(|v| v.name() == "GPIO_ENABLED").unwrap();
-    if let MlxValueType::BooleanArray(values) = &gpio_enabled.value {
-        assert_eq!(values.len(), 4); // Array size from registry spec
-        assert_eq!(values[0], Some(true));
-        assert_eq!(values[1], None); // Not set in assignments
-        assert_eq!(values[2], Some(false));
-        assert_eq!(values[3], None); // Not set in assignments
-    } else {
-        panic!("Expected BooleanArray for GPIO_ENABLED");
-    }
-
-    // Find GPIO_MODES array
-    let gpio_modes = result.iter().find(|v| v.name() == "GPIO_MODES").unwrap();
-    if let MlxValueType::EnumArray(values) = &gpio_modes.value {
-        assert_eq!(values.len(), 8); // Array size from registry spec
-        assert_eq!(values[0], None);
-        assert_eq!(values[1], Some("output".to_string()));
-        assert_eq!(values[2], None);
-        assert_eq!(values[3], Some("bidirectional".to_string()));
-        assert!(values[4..8].iter().all(|v| v.is_none()));
-    } else {
-        panic!("Expected EnumArray for GPIO_MODES");
-    }
+        "array reference &[...]" {
+            pairs(
+                &[
+                    ("GPIO_ENABLED[0]", "true"),
+                    ("GPIO_ENABLED[2]", "false"),
+                    ("GPIO_MODES[1]", "output"),
+                    ("GPIO_MODES[3]", "bidirectional"),
+                ],
+                &registry,
+            ) => expected(),
+        }
+    );
 }
 
 #[test]
@@ -192,47 +216,6 @@ fn test_mlx_config_settable_vec_string_tuples() {
 }
 
 #[test]
-fn test_mlx_config_settable_array_indices() {
-    let registry = common::create_test_registry();
-
-    let assignments = &[
-        ("GPIO_ENABLED[0]", "true"),
-        ("GPIO_ENABLED[2]", "false"),
-        ("GPIO_MODES[1]", "output"),
-        ("GPIO_MODES[3]", "bidirectional"),
-    ];
-
-    let result = assignments.to_config_values(&registry).unwrap();
-
-    assert_eq!(result.len(), 2); // Two arrays: GPIO_ENABLED and GPIO_MODES
-
-    // Find GPIO_ENABLED array
-    let gpio_enabled = result.iter().find(|v| v.name() == "GPIO_ENABLED").unwrap();
-    if let MlxValueType::BooleanArray(values) = &gpio_enabled.value {
-        assert_eq!(values.len(), 4); // Array size from registry spec
-        assert_eq!(values[0], Some(true));
-        assert_eq!(values[1], None); // Not set in assignments
-        assert_eq!(values[2], Some(false));
-        assert_eq!(values[3], None); // Not set in assignments
-    } else {
-        panic!("Expected BooleanArray for GPIO_ENABLED");
-    }
-
-    // Find GPIO_MODES array
-    let gpio_modes = result.iter().find(|v| v.name() == "GPIO_MODES").unwrap();
-    if let MlxValueType::EnumArray(values) = &gpio_modes.value {
-        assert_eq!(values.len(), 8); // Array size from registry spec
-        assert_eq!(values[0], None);
-        assert_eq!(values[1], Some("output".to_string()));
-        assert_eq!(values[2], None);
-        assert_eq!(values[3], Some("bidirectional".to_string()));
-        assert!(values[4..8].iter().all(|v| v.is_none()));
-    } else {
-        panic!("Expected EnumArray for GPIO_MODES");
-    }
-}
-
-#[test]
 fn test_mlx_config_settable_variable_not_found() {
     let registry = common::create_test_registry();
 
@@ -248,47 +231,44 @@ fn test_mlx_config_settable_variable_not_found() {
     }
 }
 
+// `to_variable_names` over scalar variable names yields them unchanged whether
+// passed as an owned array `[...]` or an array reference `&[...]`. Each row calls
+// the trait on its own container type and projects to a sorted name list.
+//
+// The `&[...]` borrow is load-bearing: it selects the `&[T; N]` trait impl, which
+// is the distinct coverage this row adds over the owned-array row, so the borrow
+// must stay despite clippy seeing it as droppable.
+#[allow(clippy::needless_borrows_for_generic_args)]
 #[test]
-fn test_mlx_config_queryable_string_slice() {
+fn variable_names_from_scalars_across_container_forms() {
+    fn names<T: MlxConfigQueryable>(
+        variables: T,
+        registry: &libmlx::variables::registry::MlxVariableRegistry,
+    ) -> Vec<String> {
+        let mut names = variables.to_variable_names(registry).unwrap();
+        names.sort();
+        names
+    }
+
     let registry = common::create_test_registry();
+    let expected = || {
+        vec![
+            "NUM_OF_VFS".to_string(),
+            "POWER_MODE".to_string(),
+            "SRIOV_EN".to_string(),
+        ]
+    };
 
-    let variables = &["SRIOV_EN", "NUM_OF_VFS", "POWER_MODE"];
-    let result = variables.to_variable_names(&registry).unwrap();
+    value_scenarios!(
+        run = |n| n;
+        "owned array [...]" {
+            names(["SRIOV_EN", "NUM_OF_VFS", "POWER_MODE"], &registry) => expected(),
+        }
 
-    assert_eq!(result.len(), 3);
-    assert!(result.contains(&"SRIOV_EN".to_string()));
-    assert!(result.contains(&"NUM_OF_VFS".to_string()));
-    assert!(result.contains(&"POWER_MODE".to_string()));
-}
-
-#[test]
-fn test_mlx_config_queryable_arrays_direct() {
-    let registry = common::create_test_registry();
-
-    // Test that we can pass arrays directly without needing as &[_]
-    let variables = ["SRIOV_EN", "NUM_OF_VFS", "POWER_MODE"];
-    let result = variables.to_variable_names(&registry).unwrap();
-
-    assert_eq!(result.len(), 3);
-    assert!(result.contains(&"SRIOV_EN".to_string()));
-    assert!(result.contains(&"NUM_OF_VFS".to_string()));
-    assert!(result.contains(&"POWER_MODE".to_string()));
-}
-
-#[test]
-fn test_mlx_config_queryable_array_references() {
-    let registry = common::create_test_registry();
-
-    // Test that array references also work
-    let variables = &["GPIO_ENABLED", "THERMAL_SENSORS"];
-    let result = variables.to_variable_names(&registry).unwrap();
-
-    // GPIO_ENABLED has size 4, THERMAL_SENSORS has size 6
-    assert_eq!(result.len(), 10); // 4 + 6
-
-    // Check that array expansion works
-    assert!(result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[5]".to_string()));
+        "array reference &[...]" {
+            names(&["SRIOV_EN", "NUM_OF_VFS", "POWER_MODE"], &registry) => expected(),
+        }
+    );
 }
 
 #[test]
@@ -323,29 +303,42 @@ fn test_mlx_config_queryable_vec_string() {
     assert!(result.contains(&"DEVICE_NAME".to_string()));
 }
 
+// A full array name expands to one entry per index, sized from the registry
+// spec; passing several array names expands them together. This folds the former
+// `array_references` (spot-checked `GPIO_ENABLED[0]`/`THERMAL_SENSORS[5]`) and
+// `array_expansion` (listed every index) tests -- same `&[...]` input and data --
+// into one row that pins the entire combined expansion: GPIO_ENABLED size 4 +
+// THERMAL_SENSORS size 6 = 10 indexed names.
 #[test]
-fn test_mlx_config_queryable_array_expansion() {
+fn variable_names_expand_full_arrays_to_indices() {
+    fn names<T: MlxConfigQueryable>(
+        variables: T,
+        registry: &libmlx::variables::registry::MlxVariableRegistry,
+    ) -> Vec<String> {
+        let mut names = variables.to_variable_names(registry).unwrap();
+        names.sort();
+        names
+    }
+
     let registry = common::create_test_registry();
 
-    let variables = &["GPIO_ENABLED", "THERMAL_SENSORS"];
-    let result = variables.to_variable_names(&registry).unwrap();
-
-    // GPIO_ENABLED has size 4, THERMAL_SENSORS has size 6
-    assert_eq!(result.len(), 10); // 4 + 6
-
-    // Check GPIO_ENABLED indices
-    assert!(result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[1]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[2]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[3]".to_string()));
-
-    // Check THERMAL_SENSORS indices
-    assert!(result.contains(&"THERMAL_SENSORS[0]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[1]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[2]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[3]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[4]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[5]".to_string()));
+    value_scenarios!(
+        run = |n| n;
+        "a full array name expands to every index of each named array" {
+            names(["GPIO_ENABLED", "THERMAL_SENSORS"], &registry) => vec![
+                "GPIO_ENABLED[0]".to_string(),
+                "GPIO_ENABLED[1]".to_string(),
+                "GPIO_ENABLED[2]".to_string(),
+                "GPIO_ENABLED[3]".to_string(),
+                "THERMAL_SENSORS[0]".to_string(),
+                "THERMAL_SENSORS[1]".to_string(),
+                "THERMAL_SENSORS[2]".to_string(),
+                "THERMAL_SENSORS[3]".to_string(),
+                "THERMAL_SENSORS[4]".to_string(),
+                "THERMAL_SENSORS[5]".to_string(),
+            ],
+        }
+    );
 }
 
 #[test]
@@ -654,25 +647,6 @@ fn test_mixed_variables_and_arrays() {
 }
 
 #[test]
-fn test_mlx_config_queryable_single_array_index() {
-    let registry = common::create_test_registry();
-
-    // Test querying specific array indices
-    let variables = &["GPIO_ENABLED[0]", "GPIO_ENABLED[2]", "THERMAL_SENSORS[3]"];
-    let result = variables.to_variable_names(&registry).unwrap();
-
-    // Should return exactly the specified indices, not expanded arrays
-    assert_eq!(result.len(), 3);
-    assert!(result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[2]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[3]".to_string()));
-
-    // Should NOT contain other indices
-    assert!(!result.contains(&"GPIO_ENABLED[1]".to_string()));
-    assert!(!result.contains(&"THERMAL_SENSORS[0]".to_string()));
-}
-
-#[test]
 fn test_mlx_config_queryable_mixed_array_and_indices() {
     let registry = common::create_test_registry();
 
@@ -802,25 +776,4 @@ fn test_mlx_config_queryable_array_index_with_non_array_variable() {
 
     assert!(result.is_err());
     // Should get a ValueConversion error when trying to get array size from boolean spec
-}
-
-#[test]
-fn test_mlx_config_queryable_preserve_vs_expand_behavior() {
-    let registry = common::create_test_registry();
-
-    // Test that behavior is consistent: specific indices are preserved, base names are expanded
-
-    // Query just the base array name - should expand all indices
-    let base_query = &["GPIO_ENABLED"];
-    let base_result = base_query.to_variable_names(&registry).unwrap();
-    assert_eq!(base_result.len(), 4); // Full expansion
-
-    // Query specific indices - should preserve exact indices
-    let index_query = &["GPIO_ENABLED[1]", "GPIO_ENABLED[3]"];
-    let index_result = index_query.to_variable_names(&registry).unwrap();
-    assert_eq!(index_result.len(), 2); // Only specified indices
-    assert!(index_result.contains(&"GPIO_ENABLED[1]".to_string()));
-    assert!(index_result.contains(&"GPIO_ENABLED[3]".to_string()));
-    assert!(!index_result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(!index_result.contains(&"GPIO_ENABLED[2]".to_string()));
 }

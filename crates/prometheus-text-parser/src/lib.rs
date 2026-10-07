@@ -100,35 +100,35 @@ impl FromStr for ParsedPrometheusMetrics {
 
 #[derive(thiserror::Error, Debug)]
 pub enum MetricsParsingError {
-    #[error("Invalid HELP line: {0}")]
+    #[error("invalid HELP line: {0}")]
     InvalidHelpLine(String),
-    #[error("Unexpected TYPE line: {0}")]
+    #[error("unexpected TYPE line: {0}")]
     UnexpectedTypeLine(String),
-    #[error("Unexpected metric definition with no preceding TYPE/HELP line: {0}")]
+    #[error("unexpected metric definition with no preceding TYPE/HELP line: {0}")]
     UnexpectedDefLine(String),
-    #[error("Metric definition wrong name from TYPE line: {0}")]
+    #[error("metric definition wrong name from TYPE line: {0}")]
     DefLineMismatch(String),
     #[error(
-        "Metric name mismatch: HELP line is for metric {help_name} but TYPE line is for {type_name}"
+        "metric name mismatch: HELP line is for metric {help_name} but TYPE line is for {type_name}"
     )]
     NameMismatch {
         help_name: String,
         type_name: String,
     },
-    #[error("Unknown metric type {metric_type} for metric {metric_name}")]
+    #[error("unknown metric type {metric_type} for metric {metric_name}")]
     UnknownMetricType {
         metric_name: String,
         metric_type: String,
     },
-    #[error("Invalid bucket line {0}")]
+    #[error("invalid bucket line {0}")]
     InvalidBucketLine(String),
-    #[error("Invalid value {0}")]
+    #[error("invalid value {0}")]
     InvalidValue(String),
-    #[error("Invalid attributes string: {0}")]
+    #[error("invalid attributes string: {0}")]
     InvalidAttributes(String),
-    #[error("Invalid metric line: {0}")]
+    #[error("invalid metric line: {0}")]
     InvalidMetricLine(String),
-    #[error("Metric line is for metric we have not seen a HELP or TYPE for yet: {0}")]
+    #[error("metric line is for metric we have not seen a HELP or TYPE for yet: {0}")]
     UnknownMetricLine(String),
 }
 
@@ -167,7 +167,7 @@ impl UnknownMetric {
         if name != self.name {
             return Err(MetricsParsingError::NameMismatch {
                 help_name: self.name,
-                type_name: type_str.to_string(),
+                type_name: name.to_string(),
             });
         }
 
@@ -648,6 +648,22 @@ build_info{build_date="real-date",git_sha="real-sha",role="api"} 1
             "other attributes are left alone" {
                 "role" => Some("\"api\"".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn name_mismatch_error_reports_type_line_name() {
+        let error = "# HELP metric help\n# TYPE other counter\n"
+            .parse::<ParsedPrometheusMetrics>()
+            .expect_err("mismatched HELP/TYPE names should fail to parse");
+        let message = error.to_string();
+        assert!(
+            message.contains("HELP line is for metric metric"),
+            "error should name the HELP-line metric: {message}"
+        );
+        assert!(
+            message.contains("TYPE line is for other"),
+            "error should name the TYPE-line metric, not its type: {message}"
         );
     }
 }

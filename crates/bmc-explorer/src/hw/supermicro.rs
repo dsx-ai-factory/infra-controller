@@ -20,7 +20,7 @@ use crate::hw::BiosAttr;
 // Real attribute names examples:
 // "IPv4HTTPSupport_009F", "DeviceSelect_0034", "DeviceSelect_003D", "SR_IOVSupport_002B"
 // This constant defines prefixes till last underscore.
-pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 14] = [
+pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 15] = [
     BiosAttr::new_bool("QuietBoot", false),
     BiosAttr::new_str("Re_tryBoot", "EFI Boot"),
     BiosAttr::new_str("CSMSupport", "Disabled"),
@@ -32,7 +32,8 @@ pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 14] = [
     // Attributes to enable CPU virtualization support for faster VMs
     // Not that some are "Enable" and some are "Enabled". Subtle.
     BiosAttr::new_str("IntelVTforDirectedI_O_VT_d", "Enable"),
-    BiosAttr::new_str("IntelVirtualizationTechnology", "Enable"),
+    BiosAttr::new_any_str("IntelVirtualizationTechnology", &["Enable", "Enabled"]),
+    BiosAttr::new_str("SR-IOVSupport", "Enabled"),
     BiosAttr::new_str("SR_IOVSupport", "Enabled"),
     // UEFI NIC boot
     BiosAttr::new_str("IPv4HTTPSupport", "Enabled"),
@@ -42,3 +43,22 @@ pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 14] = [
     // TPM:
     BiosAttr::new_any_str("SecurityDeviceSupport", &["Enabled", "Enable"]),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hw::BiosAttrValue;
+
+    #[test]
+    fn intel_virtualization_accepts_both_value_vocabularies() {
+        let expected = EXPECTED_BIOS_ATTRS_PREFIXES
+            .iter()
+            .find(|attr| attr.key == "IntelVirtualizationTechnology")
+            .expect("Intel virtualization expectation");
+        let BiosAttrValue::AnyStr(values) = expected.value else {
+            panic!("Intel virtualization must accept multiple value vocabularies");
+        };
+
+        assert_eq!(values, &["Enable", "Enabled"]);
+    }
+}

@@ -21,7 +21,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn network(
+pub(super) async fn network(
     api_client: &ApiClient,
     cmd: Args,
     format: OutputFormat,

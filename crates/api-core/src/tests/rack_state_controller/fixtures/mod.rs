@@ -15,4 +15,4 @@
  * limitations under the License.
  */
 
-pub mod rack;
+pub(in crate::tests) mod rack;

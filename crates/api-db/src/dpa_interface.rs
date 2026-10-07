@@ -19,21 +19,20 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
-use carbide_uuid::dpa_interface::{DpaInterfaceId, NULL_DPA_INTERFACE_ID};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::dpa_interface::DpaInterfaceId;
+use carbide_uuid::machine::HostMachineId;
 use config_version::ConfigVersion;
-use eyre::eyre;
 use mac_address::MacAddress;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::{
-    DpaInterface, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, NewDpaInterface,
+    DpaInterface, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaSearchConfig,
+    NewDpaInterface,
 };
-use model::machine::LoadSnapshotOptions;
 use sqlx::PgConnection;
 
 use super::DatabaseError;
 use crate::db_read::DbReader;
-use crate::managed_host;
+use crate::{ConditionalWrite, ControllerStateNotCurrent};
 
 pub async fn persist(
     value: NewDpaInterface,
@@ -198,7 +197,7 @@ pub async fn find_by_ip(
 // are found, because multiple would not make sense.
 pub async fn get_for_pci_name(
     txn: impl DbReader<'_>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     pci_name: &str,
 ) -> Result<DpaInterface, DatabaseError> {
     let query = "SELECT row_to_json(m.*) from (select * from dpa_interfaces WHERE deleted is NULL AND machine_id = $1 AND pci_name = $2) m";
@@ -250,7 +249,7 @@ pub async fn find_by_mac_addr(
 /// is always available.
 pub async fn update_device_info(
     txn: &mut PgConnection,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
     device_info: &MlxDeviceInfo,
 ) -> Result<(), DatabaseError> {
@@ -280,21 +279,171 @@ pub async fn update_card_state(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// The `only_svpc` and `only_astra` filters are mutually exclusive.
+fn validate_search_config(search_config: &DpaSearchConfig) -> Result<(), DatabaseError> {
+    if search_config.only_svpc && search_config.only_astra {
+        return Err(DatabaseError::Internal {
+            message: "only_svpc and only_astra cannot be true at the same time".to_string(),
+        });
+    }
+    Ok(())
+}
+
 // Used by the machine statemachine controller to find all DPAs associated with a given machine
 pub async fn find_by_machine_id(
     txn: impl DbReader<'_>,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
+    search_config: DpaSearchConfig,
 ) -> Result<Vec<DpaInterface>, DatabaseError> {
-    let query = "SELECT row_to_json(m.*) from (select * from dpa_interfaces WHERE deleted is NULL AND machine_id = $1) m";
+    validate_search_config(&search_config)?;
+
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT row_to_json(m.*) from (select * from dpa_interfaces WHERE deleted is NULL AND machine_id = $1",
+    );
+
+    if search_config.only_svpc {
+        builder.push(" AND interface_type = 'Svpc'");
+    }
+
+    if search_config.only_astra {
+        builder.push(" AND interface_type = 'Astra'");
+    }
+
+    builder.push(") m");
+
     let results: Vec<DpaInterface> = {
-        sqlx::query_as(query)
+        builder
+            .build_query_as()
             .bind(machine_id)
             .fetch_all(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(builder.sql(), e))?
     };
 
     Ok(results)
+}
+
+/// Batch-load DPA interfaces for many machines in a single query.
+///
+/// This is the set-oriented counterpart to [`find_by_machine_id`]: callers that
+/// have already batch-loaded a group of hosts can attach every host's DPA
+/// interfaces with one round trip instead of one query per machine. The returned
+/// map is keyed by machine id; a machine with no interfaces simply has no entry
+/// (callers default such machines to an empty list).
+pub async fn find_by_machine_ids(
+    txn: impl DbReader<'_>,
+    machine_ids: &[HostMachineId],
+    search_config: DpaSearchConfig,
+) -> Result<std::collections::HashMap<HostMachineId, Vec<DpaInterface>>, DatabaseError> {
+    validate_search_config(&search_config)?;
+
+    // No machines means no interfaces; skip the round trip entirely.
+    if machine_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT row_to_json(m.*) from (select * from dpa_interfaces WHERE deleted is NULL AND machine_id = ANY(",
+    );
+    builder.push_bind(machine_ids);
+    builder.push(")");
+
+    if search_config.only_svpc {
+        builder.push(" AND interface_type = 'Svpc'");
+    }
+
+    if search_config.only_astra {
+        builder.push(" AND interface_type = 'Astra'");
+    }
+
+    builder.push(") m");
+
+    let interfaces: Vec<DpaInterface> = builder
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(builder.sql(), e))?;
+
+    Ok(interfaces.into_iter().fold(
+        std::collections::HashMap::<HostMachineId, Vec<DpaInterface>>::new(),
+        |mut by_machine, interface| {
+            by_machine
+                .entry(interface.machine_id)
+                .or_default()
+                .push(interface);
+            by_machine
+        },
+    ))
+}
+
+/// A SpectrumX attachment-selector group projected from non-deleted DPA interfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumXDeviceCapability {
+    /// The non-empty device description used as the attachment `device` selector.
+    pub device: String,
+    /// The number of interfaces in the group. Valid `device_instance` selectors
+    /// are `0..count`, resolved in PCI-name order during attachment allocation.
+    pub count: u32,
+}
+
+/// Batch-load SpectrumX attachment-selector inventory for a set of host machines.
+///
+/// This intentionally projects and aggregates only the fields needed by
+/// machine capability discovery instead of loading complete DPA-interface rows,
+/// whose configuration and device-info JSON can be substantially wider. This
+/// inventory does not represent site-level SpectrumX enablement or readiness.
+pub async fn find_spectrum_x_capabilities_by_machine_ids(
+    txn: impl DbReader<'_>,
+    machine_ids: &[HostMachineId],
+) -> Result<std::collections::HashMap<HostMachineId, Vec<SpectrumXDeviceCapability>>, DatabaseError>
+{
+    if machine_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct SpectrumXCapabilityRow {
+        machine_id: HostMachineId,
+        device: String,
+        count: i64,
+    }
+
+    let query = "SELECT machine_id, device_description AS device, COUNT(*) AS count
+        FROM dpa_interfaces
+        WHERE deleted IS NULL
+          AND machine_id = ANY($1)
+          AND device_description IS NOT NULL
+          AND device_description <> ''
+        GROUP BY machine_id, device_description
+        ORDER BY machine_id, device_description";
+    let rows = sqlx::query_as::<_, SpectrumXCapabilityRow>(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let mut capabilities_by_machine =
+        std::collections::HashMap::<HostMachineId, Vec<SpectrumXDeviceCapability>>::new();
+    for row in rows {
+        let count = row
+            .count
+            .try_into()
+            .map_err(|error| DatabaseError::Internal {
+                message: format!(
+                    "SpectrumX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
+                    row.count, row.machine_id, row.device,
+                ),
+            })?;
+        capabilities_by_machine
+            .entry(row.machine_id)
+            .or_default()
+            .push(SpectrumXDeviceCapability {
+                device: row.device,
+                count,
+            });
+    }
+
+    Ok(capabilities_by_machine)
 }
 
 pub async fn find_by_ids(
@@ -306,8 +455,8 @@ pub async fn find_by_ids(
         sqlx::QueryBuilder::new("select row_to_json(m.*) from
                 (SELECT si.*, COALESCE(history_agg.json, '[]'::json) AS history FROM dpa_interfaces si
                 LEFT JOIN LATERAL (
-                SELECT h.interface_id, json_agg(json_build_object('interface_id', h.interface_id, 'state', h.state::text, 'state_version', h.state_version,
-                'timestamp', h.timestamp)) AS json FROM dpa_interface_state_history h WHERE h.interface_id = si.id GROUP BY h.interface_id ) AS history_agg ON true
+                SELECT h.object_id, json_agg(json_build_object('interface_id', h.object_id, 'state', h.state::text, 'state_version', h.state_version,
+                'timestamp', h.timestamp) ORDER BY h.id ASC) AS json FROM dpa_interface_state_history h WHERE h.object_id = si.id::text GROUP BY h.object_id ) AS history_agg ON true
                 WHERE deleted is NULL")
     } else {
         sqlx::QueryBuilder::new(
@@ -370,18 +519,19 @@ pub async fn all_dpa_states_in_sync(
     Ok(true)
 }
 
-/// Updates the dpa interface state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` updates the DPA controller state when its
+/// version matches `expected_version`, replacing that version with `new_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// Returns `NotApplied(ControllerStateNotCurrent)` if the row is missing or its
+/// version differs. `new_version` must advance `expected_version`; the caller must
+/// commit any surrounding transaction. Database failures are returned as errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     id: DpaInterfaceId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &DpaInterfaceControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, DpaInterfaceId>(query)
         .bind(new_version)
@@ -392,7 +542,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -411,13 +564,6 @@ pub async fn update_controller_state_outcome(
 }
 
 pub async fn delete(value: DpaInterface, txn: &mut PgConnection) -> Result<(), DatabaseError> {
-    let query = "delete from dpa_interface_state_history where interface_id=$1";
-    sqlx::query(query)
-        .bind(value.id)
-        .execute(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
     let query = "delete from dpa_interfaces where id=$1";
     sqlx::query(query)
         .bind(value.id)
@@ -427,58 +573,9 @@ pub async fn delete(value: DpaInterface, txn: &mut PgConnection) -> Result<(), D
         .map(|_| ())
 }
 
-// get_dpa_vni figures out the VNI to be used for this DPA interface
-// when we are transitioning to ASSIGNED state. This happens when we are
-// moving from Ready to WaitingForSetVNI or when we are still in WaitingForSetVNI
-// states.
-//
-// Given the DPA Interface, we know its associated machine ID. From that, we need
-// to find the VPC the machine belongs to. From the VPC, we can find the DPA VNI,
-// which is just the VPC VNI.
-pub async fn get_dpa_vni<DB>(state: &mut DpaInterface, txn: &mut DB) -> Result<i32, eyre::Report>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
-    let machine_id = state.machine_id;
-
-    let maybe_snapshot =
-        managed_host::load_snapshot(&mut *txn, &machine_id, LoadSnapshotOptions::default()).await?;
-
-    let snapshot = match maybe_snapshot {
-        Some(sn) => sn,
-        None => return Err(eyre!("machine {machine_id} snapshot not found")),
-    };
-
-    let instance = match snapshot.instance {
-        Some(inst) => inst,
-        None => {
-            return Err(eyre!("Expected an instance and found none"));
-        }
-    };
-
-    let interfaces = &instance.config.network.interfaces;
-    let Some(network_segment_id) = interfaces[0].network_segment_id else {
-        // Network segment allocation is done before persisting record in db. So if still
-        // network segment is empty, return error.
-        return Err(eyre!("Expected Network Segment"));
-    };
-
-    let vpc = crate::vpc::find_by_segment(txn, network_segment_id).await?;
-
-    match vpc.status.as_ref().and_then(|s| s.vni) {
-        Some(vni) => {
-            if vni == 0 {
-                tracing::warn!("Did not expect DPA VNI to be zero");
-            }
-            Ok(vni)
-        }
-        None => Err(eyre!("Expected VNI. Found none")),
-    }
-}
-
 pub async fn is_machine_dpa_capable(
     txn: &mut PgConnection,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
 ) -> Result<bool, DatabaseError> {
     let result = batch_is_machine_dpa_capable(txn, &[machine_id]).await?;
     Ok(result.contains(&machine_id))
@@ -488,8 +585,8 @@ pub async fn is_machine_dpa_capable(
 /// Returns a HashSet of machine IDs that have DPA interfaces.
 pub async fn batch_is_machine_dpa_capable(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashSet<MachineId>, DatabaseError> {
+    machine_ids: &[HostMachineId],
+) -> Result<HashSet<HostMachineId>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(HashSet::new());
     }
@@ -497,48 +594,52 @@ pub async fn batch_is_machine_dpa_capable(
     let query = "SELECT DISTINCT machine_id FROM dpa_interfaces
                  WHERE deleted IS NULL AND machine_id = ANY($1)";
 
-    let rows: Vec<(String,)> = sqlx::query_as(query)
-        .bind(
-            machine_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>(),
-        )
+    Ok(sqlx::query_scalar(query)
+        .bind(machine_ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    Ok(rows
+        .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()
-        .filter_map(|(id,)| id.parse::<MachineId>().ok())
         .collect())
 }
 
-/// Updates the desired network configuration for a host
+/// `DpaNetworkConfigNotCurrent` means the interface is missing or its network
+/// config version no longer matches the snapshot. The write does not distinguish
+/// these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DpaNetworkConfigNotCurrent;
+
+/// `try_update_network_config` updates the desired DPA network configuration and
+/// advances its version when it matches `expected_version`.
+///
+/// Returns `Applied(interface_id)` when the update applies, or
+/// `NotApplied(DpaNetworkConfigNotCurrent)` if the interface is missing or its
+/// version differs. The caller must commit any surrounding transaction.
+/// Database failures are returned as errors.
 pub async fn try_update_network_config(
     txn: &mut PgConnection,
     interface_id: &DpaInterfaceId,
     expected_version: ConfigVersion,
     new_state: &DpaInterfaceNetworkConfig,
-) -> Result<DpaInterfaceId, DatabaseError> {
+) -> Result<ConditionalWrite<DpaInterfaceId, DpaNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
     let query = "UPDATE dpa_interfaces SET network_config_version=$1, network_config=$2::json
             WHERE id=$3::uuid AND network_config_version=$4
             RETURNING id";
-    let query_result: Result<DpaInterfaceId, _> = sqlx::query_as(query)
+    let result: Option<DpaInterfaceId> = sqlx::query_as(query)
         .bind(next_version)
         .bind(sqlx::types::Json(new_state))
         .bind(interface_id)
         .bind(expected_version)
-        .fetch_one(txn)
-        .await;
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
 
-    match query_result {
-        Ok(interface_id) => Ok(interface_id),
-        Err(sqlx::Error::RowNotFound) => Ok(NULL_DPA_INTERFACE_ID),
-        Err(e) => Err(DatabaseError::query(query, e)),
-    }
+    Ok(match result {
+        Some(interface_id) => ConditionalWrite::Applied(interface_id),
+        None => ConditionalWrite::NotApplied(DpaNetworkConfigNotCurrent),
+    })
 }
 
 #[cfg(test)]
@@ -546,12 +647,288 @@ mod test {
     use std::str::FromStr;
 
     use carbide_libmlx_model::device::info::MlxDeviceInfo;
-    use carbide_uuid::machine::MachineId;
+    use carbide_test_support::query_counter::count_queries;
+    use carbide_uuid::dpa_interface::DpaInterfaceId;
+    use carbide_uuid::machine::{
+        HostMachineId as MachineId, MachineId as GenericMachineId, MachineIdSource, MachineType,
+    };
     use mac_address::MacAddress;
-    use model::dpa_interface::{DpaInterfaceType, NewDpaInterface};
+    use model::dpa_interface::{
+        DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType, DpaSearchConfig,
+        NewDpaInterface,
+    };
     use model::machine::ManagedHostState;
 
-    use crate::machine;
+    use super::{DpaNetworkConfigNotCurrent, try_update_network_config};
+    use crate::{ConditionalWrite, machine};
+
+    /// Query-count regression guard for the batched DPA-interface loader.
+    ///
+    /// This test is the deliverable of the N+1 fix: it seeds several machines,
+    /// each with one interface, and asserts that loading them via the
+    /// per-machine [`find_by_machine_id`] loop issues one query *per machine*
+    /// (the N+1), while the batched [`find_by_machine_ids`] issues exactly one
+    /// query regardless of how many machines are involved. The per-machine
+    /// count is asserted to equal N so that a future regression that quietly
+    /// reintroduces per-row queries fails loudly.
+    #[crate::sqlx_test]
+    async fn find_by_machine_ids_issues_one_query(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Seed helper: create `n` distinct machines, each with exactly one
+        // dpa_interface, and return their ids. Each MachineId is minted from a
+        // per-index hardware hash (the same shape as the `test_machine_id`
+        // helpers elsewhere in the tree), so every id is distinct and valid.
+        async fn seed(
+            pool: &sqlx::PgPool,
+            offset: usize,
+            n: usize,
+        ) -> Result<Vec<MachineId>, Box<dyn std::error::Error>> {
+            let mut ids = Vec::with_capacity(n);
+            let mut txn = pool.begin().await?;
+            for i in offset..(offset + n) {
+                let mut hash = [0u8; 32];
+                hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                let id: MachineId = GenericMachineId::new(
+                    MachineIdSource::ProductBoardChassisSerial,
+                    hash,
+                    MachineType::Host,
+                )
+                .try_into()
+                .unwrap();
+                machine::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2).await?;
+                crate::dpa_interface::persist(
+                    NewDpaInterface {
+                        machine_id: id,
+                        mac_address: MacAddress::from([
+                            0x00,
+                            0x11,
+                            0x22,
+                            0x33,
+                            (i >> 8) as u8,
+                            i as u8,
+                        ]),
+                        device_type: "Bluefield 3".to_string(),
+                        pci_name: format!("{i:02x}:00.0"),
+                        device_description: None,
+                        interface_type: DpaInterfaceType::Svpc,
+                    },
+                    &mut txn,
+                )
+                .await?;
+                ids.push(id);
+            }
+            txn.commit().await?;
+            Ok(ids)
+        }
+
+        // ---- Scenario 1: N = 5 ----
+        const N: usize = 5;
+        let ids = seed(&pool, 0, N).await?;
+
+        // BEFORE: the per-machine loop (the N+1 pattern).
+        let (per_machine, before): (std::collections::HashMap<MachineId, Vec<_>>, usize) = {
+            let pool = &pool;
+            let ids = &ids;
+            count_queries(async move {
+                let mut out = std::collections::HashMap::new();
+                for id in ids {
+                    let v = crate::dpa_interface::find_by_machine_id(
+                        pool,
+                        *id,
+                        DpaSearchConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    out.insert(*id, v);
+                }
+                out
+            })
+            .await
+        };
+        println!("BEFORE (per-machine loop, N={N}): {before} queries");
+
+        // BITE-CHECK: the per-machine loop MUST issue one query per machine.
+        // If this reads 0, the counter is not observing sqlx events; if it
+        // reads 1, the counter is under-counting. Either way, fail loudly.
+        assert_eq!(
+            before, N,
+            "per-machine loop should issue exactly N={N} queries (the N+1 pattern being fixed); \
+             a count of 0 means the query counter isn't seeing sqlx::query events"
+        );
+
+        // AFTER: the batched loader.
+        let (batched, after) = {
+            let pool = &pool;
+            let ids = &ids;
+            count_queries(async move {
+                crate::dpa_interface::find_by_machine_ids(pool, ids, DpaSearchConfig::default())
+                    .await
+                    .unwrap()
+            })
+            .await
+        };
+        println!("AFTER (batched find_by_machine_ids, N={N}): {after} queries");
+        assert_eq!(after, 1, "batched loader must issue exactly one query");
+
+        // Correctness: the batched map holds the same interfaces (by id) as the
+        // per-machine loop produced, for every machine.
+        for id in &ids {
+            let mut expected: Vec<_> = per_machine[id].iter().map(|i| i.id).collect();
+            let mut got: Vec<_> = batched
+                .get(id)
+                .map(|v| v.iter().map(|i| i.id).collect())
+                .unwrap_or_default();
+            expected.sort();
+            got.sort();
+            assert_eq!(
+                got, expected,
+                "batched result for machine {id} must match the per-machine loop"
+            );
+        }
+
+        // ---- Scenario 2: N = 10, batched count STILL 1 (constant, not linear) ----
+        const N2: usize = 10;
+        let ids2 = seed(&pool, 100, N2).await?;
+
+        // Re-confirm the per-machine loop scales linearly at N2 as well, so the
+        // "constant vs linear" contrast is anchored on both sides.
+        let ((), before2) = {
+            let pool = &pool;
+            let ids2 = &ids2;
+            count_queries(async move {
+                for id in ids2 {
+                    crate::dpa_interface::find_by_machine_id(pool, *id, DpaSearchConfig::default())
+                        .await
+                        .unwrap();
+                }
+            })
+            .await
+        };
+        println!("BEFORE (per-machine loop, N={N2}): {before2} queries");
+        assert_eq!(
+            before2, N2,
+            "per-machine loop should issue exactly N={N2} queries"
+        );
+
+        let (batched2, after2) = {
+            let pool = &pool;
+            let ids2 = &ids2;
+            count_queries(async move {
+                crate::dpa_interface::find_by_machine_ids(pool, ids2, DpaSearchConfig::default())
+                    .await
+                    .unwrap()
+            })
+            .await
+        };
+        println!("AFTER (batched find_by_machine_ids, N={N2}): {after2} queries");
+        assert_eq!(
+            after2, 1,
+            "batched loader must issue exactly one query regardless of N"
+        );
+        assert_eq!(
+            batched2.len(),
+            N2,
+            "every seeded machine should appear in the batched result"
+        );
+
+        // ---- Scenario 3: N = 0, no query at all ----
+        // An empty id slice short-circuits before building the query, matching
+        // the sibling batch helpers.
+        let (batched_empty, empty_count) = {
+            let pool = &pool;
+            count_queries(async move {
+                crate::dpa_interface::find_by_machine_ids(pool, &[], DpaSearchConfig::default())
+                    .await
+                    .unwrap()
+            })
+            .await
+        };
+        println!("EMPTY (batched find_by_machine_ids, N=0): {empty_count} queries");
+        assert_eq!(
+            empty_count, 0,
+            "empty input must return without issuing any query"
+        );
+        assert!(
+            batched_empty.is_empty(),
+            "empty input must produce an empty map"
+        );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn network_config_requires_current_interface(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        let interface = super::persist(
+            NewDpaInterface {
+                machine_id,
+                mac_address: "00:11:22:33:44:55".parse()?,
+                device_type: "SuperNIC".to_string(),
+                pci_name: "0000:cc:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+            },
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let old_version = interface.network_config.version;
+        let desired = DpaInterfaceNetworkConfig {
+            use_admin_network: Some(false),
+            ..Default::default()
+        };
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            try_update_network_config(&mut txn, &interface.id, old_version, &desired).await?,
+            ConditionalWrite::Applied(interface.id)
+        );
+        txn.commit().await?;
+
+        for (scenario, id) in [
+            ("stale snapshot", interface.id),
+            ("missing interface", DpaInterfaceId::nil()),
+        ] {
+            let mut txn = pool.begin().await?;
+            assert_eq!(
+                try_update_network_config(
+                    &mut txn,
+                    &id,
+                    old_version,
+                    &DpaInterfaceNetworkConfig::default(),
+                )
+                .await?,
+                ConditionalWrite::NotApplied(DpaNetworkConfigNotCurrent),
+                "{scenario}"
+            );
+            txn.commit().await?;
+        }
+
+        let persisted = super::find_by_ids(&pool, &[interface.id], false)
+            .await?
+            .pop()
+            .expect("DPA interface exists");
+        assert_eq!(persisted.network_config.value, desired);
+        assert_eq!(
+            persisted.network_config.version.version_nr(),
+            old_version.version_nr() + 1
+        );
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn test_find_interfaces(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -582,6 +959,155 @@ mod test {
 
         assert_eq!(db_intf.len(), 1);
         assert_eq!(db_intf[0].id, intf.id);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn deleting_interface_retains_state_history(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        let interface = crate::dpa_interface::persist(
+            NewDpaInterface {
+                mac_address: MacAddress::from_str("00:11:22:33:44:55")?,
+                machine_id,
+                device_type: "Bluefield 3".to_string(),
+                pci_name: "5e:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+            },
+            &mut txn,
+        )
+        .await?;
+        crate::state_history::persist(
+            &mut txn,
+            crate::state_history::StateHistoryTableId::DpaInterface,
+            &interface.id,
+            &DpaInterfaceControllerState::Provisioning,
+            config_version::ConfigVersion::initial(),
+        )
+        .await?;
+        crate::state_history::persist(
+            &mut txn,
+            crate::state_history::StateHistoryTableId::DpaInterface,
+            &interface.id,
+            &DpaInterfaceControllerState::Ready,
+            config_version::ConfigVersion::new(2),
+        )
+        .await?;
+
+        let expected_history = crate::state_history::for_object(
+            txn.as_mut(),
+            crate::state_history::StateHistoryTableId::DpaInterface,
+            &interface.id,
+        )
+        .await?;
+
+        let interfaces_with_history =
+            crate::dpa_interface::find_by_ids(txn.as_mut(), &[interface.id], true).await?;
+        assert_eq!(interfaces_with_history.len(), 1);
+        assert_eq!(
+            interfaces_with_history[0]
+                .history
+                .iter()
+                .map(|record| record.state.as_str())
+                .collect::<Vec<_>>(),
+            expected_history
+                .iter()
+                .map(|record| record.state.as_str())
+                .collect::<Vec<_>>(),
+            "DPA include-history query should use the shared object_id column and ordering",
+        );
+
+        crate::dpa_interface::delete(interface.clone(), &mut txn).await?;
+
+        assert!(
+            crate::dpa_interface::find_by_ids(txn.as_mut(), &[interface.id], false)
+                .await?
+                .is_empty(),
+            "DPA interface should be deleted",
+        );
+        let history = crate::state_history::for_object(
+            txn.as_mut(),
+            crate::state_history::StateHistoryTableId::DpaInterface,
+            &interface.id,
+        )
+        .await?;
+        assert_eq!(history.len(), 2, "DPA state history should be retained");
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn deleting_machine_retains_dpa_interface_state_history(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        let interface = crate::dpa_interface::persist(
+            NewDpaInterface {
+                mac_address: MacAddress::from_str("00:11:22:33:44:55")?,
+                machine_id,
+                device_type: "Bluefield 3".to_string(),
+                pci_name: "5e:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+            },
+            &mut txn,
+        )
+        .await?;
+        crate::state_history::persist(
+            &mut txn,
+            crate::state_history::StateHistoryTableId::DpaInterface,
+            &interface.id,
+            &DpaInterfaceControllerState::Provisioning,
+            config_version::ConfigVersion::initial(),
+        )
+        .await?;
+
+        machine::force_cleanup(&mut txn, &machine_id).await?;
+
+        assert!(
+            crate::dpa_interface::find_by_ids(txn.as_mut(), &[interface.id], false)
+                .await?
+                .is_empty(),
+            "DPA interface should be deleted with its machine",
+        );
+        let history = crate::state_history::for_object(
+            txn.as_mut(),
+            crate::state_history::StateHistoryTableId::DpaInterface,
+            &interface.id,
+        )
+        .await?;
+        assert_eq!(
+            history.len(),
+            1,
+            "DPA state history should survive machine cleanup",
+        );
 
         Ok(())
     }
@@ -679,7 +1205,13 @@ mod test {
         // Verify device_info starts as None, because in this case,
         // one hasn't been reported yet (and also allows for backwards
         // compatibility checks from before this existed).
-        let intfs = crate::dpa_interface::find_by_machine_id(txn.as_mut(), machine_id).await?;
+        let dpa_search_config = DpaSearchConfig {
+            only_svpc: true,
+            only_astra: false,
+        };
+        let intfs =
+            crate::dpa_interface::find_by_machine_id(txn.as_mut(), machine_id, dpa_search_config)
+                .await?;
         assert_eq!(intfs.len(), 1);
         assert!(intfs[0].device_info.is_none());
         assert!(intfs[0].device_info_ts.is_none());
@@ -699,6 +1231,7 @@ mod test {
             uefi_version_virtio_blk_current: None,
             uefi_version_virtio_net_current: None,
             base_mac: Some(MacAddress::from_str("00:11:22:33:44:55")?),
+            base_guid: None,
             status: Some("OK".to_string()),
         };
 
@@ -707,7 +1240,13 @@ mod test {
 
         // Read back and verify everything we put into
         // the database came back as we originally put it.
-        let intfs = crate::dpa_interface::find_by_machine_id(txn.as_mut(), machine_id).await?;
+        let dpa_search_config = DpaSearchConfig {
+            only_svpc: true,
+            only_astra: false,
+        };
+        let intfs =
+            crate::dpa_interface::find_by_machine_id(txn.as_mut(), machine_id, dpa_search_config)
+                .await?;
         assert_eq!(intfs.len(), 1);
 
         let info = intfs[0]

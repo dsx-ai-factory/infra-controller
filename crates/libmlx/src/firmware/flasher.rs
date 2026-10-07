@@ -152,7 +152,7 @@ impl FirmwareFlasher {
                 tracing::debug!(output = %output, "Flint output");
             }
             Err(crate::lockdown::error::MlxError::DryRun(cmd)) => {
-                tracing::debug!(cmd = %cmd, "Dry run");
+                tracing::debug!(command = %cmd, "Dry run");
             }
             Err(e) => return Err(FirmwareError::FlintError(e)),
         };
@@ -220,7 +220,7 @@ impl FirmwareFlasher {
                 Ok(output)
             }
             Err(crate::lockdown::error::MlxError::DryRun(cmd)) => {
-                tracing::debug!(cmd = %cmd, "Dry run");
+                tracing::debug!(command = %cmd, "Dry run");
                 Ok(format!("[DRY RUN] {cmd}"))
             }
             Err(e) => Err(FirmwareError::VerificationFailed(e.to_string())),
@@ -287,7 +287,7 @@ impl FirmwareFlasher {
     pub fn reset_with_level(&self, level: u8) -> FirmwareResult<String> {
         tracing::info!(
             device = %self.device_id,
-            level = %level,
+            reset_level = %level,
             "Resetting device via mlxfwreset"
         );
 
@@ -304,7 +304,7 @@ impl FirmwareFlasher {
                 Ok(output)
             }
             Err(FirmwareError::DryRun(cmd)) => {
-                tracing::debug!(cmd = %cmd, "Dry run");
+                tracing::debug!(command = %cmd, "Dry run");
                 Ok(format!("[DRY RUN] {cmd}"))
             }
             Err(e) => Err(e),
@@ -338,7 +338,7 @@ impl FirmwareFlasher {
             Some(match self.reset_with_level(options.reset_level) {
                 Ok(_) => true,
                 Err(e) => {
-                    tracing::error!(device = %self.device_id, %e, "post-flash reset failed");
+                    tracing::error!(device = %self.device_id, error = %e, "post-flash reset failed");
                     false
                 }
             })
@@ -352,7 +352,7 @@ impl FirmwareFlasher {
             Some(match self.verify_image(&profile.flash_spec).await {
                 Ok(_) => true,
                 Err(e) => {
-                    tracing::error!(device = %self.device_id, %e, "post-flash image verification failed");
+                    tracing::error!(device = %self.device_id, error = %e, "post-flash image verification failed");
                     false
                 }
             })
@@ -363,14 +363,23 @@ impl FirmwareFlasher {
 
         // Step 4: Verify firmware version (if enabled).
         let (observed_version, verified_version) = if options.verify_version {
-            let observed = match crate::device::discovery::discover_device(&self.device_id) {
-                Ok(info) => info.fw_version_current,
-                Err(e) => {
-                    tracing::error!(
-                        device = %self.device_id, %e,
-                        "failed to query device for observed firmware version"
-                    );
-                    None
+            // Dry run simulates the requested lifecycle, so don't turn around
+            // and query the real device after the simulated flash. Use the
+            // configured target here; the live path below still reports a real
+            // mismatch.
+            let observed = if self.dry_run {
+                tracing::debug!(device = %self.device_id, "Dry run: skipping version query");
+                Some(self.firmware_spec.version.clone())
+            } else {
+                match crate::device::discovery::discover_device(&self.device_id) {
+                    Ok(info) => info.fw_version_current,
+                    Err(e) => {
+                        tracing::error!(
+                            device = %self.device_id, error = %e,
+                            "failed to query device for observed firmware version"
+                        );
+                        None
+                    }
                 }
             };
 
@@ -432,5 +441,338 @@ impl FirmwareFlasher {
         );
 
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases, check_cases_async};
+
+    use super::*;
+    use crate::firmware::config::FlashOptions;
+
+    const DEVICE_ID: &str = "test-device";
+    const TARGET_VERSION: &str = "32.43.1014";
+
+    #[derive(Debug, PartialEq)]
+    struct Report {
+        flashed: bool,
+        reset: Option<bool>,
+        verified_image: Option<bool>,
+        verified_version: Option<bool>,
+        observed_version: Option<String>,
+        expected_version: Option<String>,
+    }
+
+    impl From<FirmwareFlashReport> for Report {
+        fn from(report: FirmwareFlashReport) -> Self {
+            Self {
+                flashed: report.flashed,
+                reset: report.reset,
+                verified_image: report.verified_image,
+                verified_version: report.verified_version,
+                observed_version: report.observed_version,
+                expected_version: report.expected_version,
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ApplyError {
+        Missing(PathBuf),
+        Unexpected(String),
+    }
+
+    fn firmware_spec() -> FirmwareSpec {
+        FirmwareSpec {
+            part_number: "test-part-number".to_string(),
+            psid: "test-psid".to_string(),
+            version: TARGET_VERSION.to_string(),
+        }
+    }
+
+    fn dry_run_flasher() -> FirmwareFlasher {
+        FirmwareFlasher {
+            device_id: DEVICE_ID.to_string(),
+            firmware_spec: firmware_spec(),
+            dry_run: false,
+        }
+        .with_dry_run(true)
+    }
+
+    fn flash_spec(
+        firmware: &Path,
+        cache_dir: &Path,
+        device_conf: Option<&Path>,
+        verify_from_cache: bool,
+    ) -> FlashSpec {
+        FlashSpec {
+            firmware_url: firmware.to_string_lossy().into_owned(),
+            firmware_credentials: None,
+            device_conf_url: device_conf.map(|path| path.to_string_lossy().into_owned()),
+            device_conf_credentials: None,
+            verify_from_cache,
+            cache_dir: Some(cache_dir.to_path_buf()),
+        }
+    }
+
+    fn profile(
+        firmware: &Path,
+        cache_dir: &Path,
+        device_conf: Option<&Path>,
+        flash_options: FlashOptions,
+    ) -> FirmwareFlasherProfile {
+        FirmwareFlasherProfile {
+            firmware_spec: firmware_spec(),
+            flash_spec: flash_spec(firmware, cache_dir, device_conf, false),
+            flash_options,
+        }
+    }
+
+    fn expected_report(reset: bool, verify_image: bool, verify_version: bool) -> Report {
+        Report {
+            flashed: true,
+            reset: reset.then_some(true),
+            verified_image: verify_image.then_some(true),
+            verified_version: verify_version.then_some(true),
+            observed_version: verify_version.then(|| TARGET_VERSION.to_string()),
+            expected_version: Some(TARGET_VERSION.to_string()),
+        }
+    }
+
+    fn apply_error(error: FirmwareError) -> ApplyError {
+        match error {
+            FirmwareError::FileNotFound(path) => ApplyError::Missing(path),
+            error => ApplyError::Unexpected(format!("{error:?}")),
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_apply_reports_requested_lifecycle_steps() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let firmware = temp_dir.path().join("firmware.bin");
+        let device_conf = temp_dir.path().join("device.conf");
+        let missing_firmware = temp_dir.path().join("missing.bin");
+        fs::write(&firmware, b"firmware").unwrap();
+        fs::write(&device_conf, b"config").unwrap();
+
+        let flasher = dry_run_flasher();
+        check_cases_async(
+            [
+                Case {
+                    scenario: "flash only",
+                    input: profile(
+                        &firmware,
+                        &temp_dir.path().join("flash-only-cache"),
+                        None,
+                        FlashOptions::default(),
+                    ),
+                    expect: Yields(expected_report(false, false, false)),
+                },
+                Case {
+                    scenario: "reset only",
+                    input: profile(
+                        &firmware,
+                        &temp_dir.path().join("reset-cache"),
+                        None,
+                        FlashOptions {
+                            reset: true,
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Yields(expected_report(true, false, false)),
+                },
+                Case {
+                    scenario: "image verification only",
+                    input: profile(
+                        &firmware,
+                        &temp_dir.path().join("image-cache"),
+                        None,
+                        FlashOptions {
+                            verify_image: true,
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Yields(expected_report(false, true, false)),
+                },
+                Case {
+                    scenario: "version verification only",
+                    input: profile(
+                        &firmware,
+                        &temp_dir.path().join("version-cache"),
+                        None,
+                        FlashOptions {
+                            verify_version: true,
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Yields(expected_report(false, false, true)),
+                },
+                Case {
+                    scenario: "every optional step with a device config",
+                    input: profile(
+                        &firmware,
+                        &temp_dir.path().join("all-cache"),
+                        Some(&device_conf),
+                        FlashOptions {
+                            verify_image: true,
+                            verify_version: true,
+                            reset: true,
+                            reset_level: 7,
+                        },
+                    ),
+                    expect: Yields(expected_report(true, true, true)),
+                },
+                Case {
+                    scenario: "missing firmware fails before reporting",
+                    input: profile(
+                        &missing_firmware,
+                        &temp_dir.path().join("missing-cache"),
+                        None,
+                        FlashOptions::default(),
+                    ),
+                    expect: FailsWith(ApplyError::Missing(missing_firmware)),
+                },
+            ],
+            |profile| {
+                let flasher = &flasher;
+                async move {
+                    flasher
+                        .apply(&profile)
+                        .await
+                        .map(Report::from)
+                        .map_err(apply_error)
+                }
+            },
+        )
+        .await;
+    }
+
+    fn selected_image(output: String) -> Result<PathBuf, String> {
+        let (_, image_and_command) = output
+            .split_once(" -i ")
+            .ok_or_else(|| format!("missing image argument in {output:?}"))?;
+        let image = image_and_command
+            .strip_suffix(" verify")
+            .ok_or_else(|| format!("missing verify command in {output:?}"))?;
+        Ok(PathBuf::from(image))
+    }
+
+    #[tokio::test]
+    async fn dry_run_verify_image_selects_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let firmware = source_dir.join("firmware.bin");
+        let missing_firmware = temp_dir.path().join("missing-source/firmware.bin");
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(&firmware, b"source").unwrap();
+
+        let disabled_cache = temp_dir.path().join("disabled-cache");
+        let hit_cache = temp_dir.path().join("hit-cache");
+        let miss_cache = temp_dir.path().join("miss-cache");
+        fs::create_dir(&disabled_cache).unwrap();
+        fs::create_dir(&hit_cache).unwrap();
+        let disabled_cached_firmware = disabled_cache.join("firmware.bin");
+        let hit_cached_firmware = hit_cache.join("firmware.bin");
+        fs::write(&disabled_cached_firmware, b"cached").unwrap();
+        fs::write(&hit_cached_firmware, b"cached").unwrap();
+
+        let flasher = dry_run_flasher();
+        check_cases_async(
+            [
+                Case {
+                    scenario: "disabled cache selects the local source",
+                    input: flash_spec(&firmware, &disabled_cache, None, false),
+                    expect: Yields(firmware.clone()),
+                },
+                Case {
+                    scenario: "enabled cache hit does not resolve the missing source",
+                    input: flash_spec(&missing_firmware, &hit_cache, None, true),
+                    expect: Yields(hit_cached_firmware),
+                },
+                Case {
+                    scenario: "enabled cache miss falls back to the local source",
+                    input: flash_spec(&firmware, &miss_cache, None, true),
+                    expect: Yields(firmware),
+                },
+            ],
+            |spec| {
+                let flasher = &flasher;
+                async move {
+                    flasher
+                        .verify_image(&spec)
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(selected_image)
+                }
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn dry_run_verify_version_returns_target() {
+        Case {
+            scenario: "dry run returns the configured target",
+            input: dry_run_flasher(),
+            expect: Yields(Some(TARGET_VERSION.to_string())),
+        }
+        .check(|flasher| flasher.verify_version().map_err(|error| error.to_string()));
+    }
+
+    enum ResetRequest {
+        Default,
+        Level(u8),
+    }
+
+    fn reset_level(output: String) -> Result<u8, String> {
+        let mut words = output.split_whitespace();
+        while let Some(word) = words.next() {
+            if word == "--level" {
+                return words
+                    .next()
+                    .ok_or_else(|| format!("missing reset level in {output:?}"))?
+                    .parse()
+                    .map_err(|error| format!("invalid reset level in {output:?}: {error}"));
+            }
+        }
+        Err(format!("missing --level argument in {output:?}"))
+    }
+
+    #[test]
+    fn dry_run_reset_forwards_level() {
+        let flasher = dry_run_flasher();
+        check_cases(
+            [
+                Case {
+                    scenario: "reset uses the default level",
+                    input: ResetRequest::Default,
+                    expect: Yields(DEFAULT_RESET_LEVEL),
+                },
+                Case {
+                    scenario: "explicit level accepts zero",
+                    input: ResetRequest::Level(0),
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "explicit level accepts u8 max",
+                    input: ResetRequest::Level(u8::MAX),
+                    expect: Yields(u8::MAX),
+                },
+            ],
+            |request| {
+                let output = match request {
+                    ResetRequest::Default => flasher.reset(),
+                    ResetRequest::Level(level) => flasher.reset_with_level(level),
+                };
+                output
+                    .map_err(|error| error.to_string())
+                    .and_then(reset_level)
+            },
+        );
     }
 }

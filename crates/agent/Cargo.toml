@@ -20,6 +20,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "agent"
@@ -39,6 +40,7 @@ carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
 carbide-dpu-fmds-shared = { path = "../dpu-fmds-shared" }
 carbide-dpu-remediation = { path = "../dpu-remediation" }
 carbide-host-support = { path = "../host-support" }
+carbide-instrument = { path = "../instrument" }
 carbide-http-connector = { path = "../http-connector" }
 carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-network = { path = "../network" }
@@ -50,6 +52,7 @@ carbide-health-report = { path = "../health-report" }
 carbide-rpc = { path = "../rpc" }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
+metrics-endpoint = { path = "../metrics-endpoint" }
 nvue-client = { path = "../nvue-client" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
@@ -102,7 +105,9 @@ regex = { workspace = true }
 resolv-conf = { workspace = true }
 rtnetlink = { workspace = true }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }
+json-patch = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
@@ -110,9 +115,12 @@ similar = { workspace = true }
 surge-ping = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 reqwest = { default-features = false, features = [
   "rustls",
   "stream",
@@ -131,9 +139,10 @@ carbide-version = { path = "../version" }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
-ctor = { workspace = true }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+rcgen = { workspace = true }
 prost = { workspace = true }
-rustls-pemfile = { workspace = true }
 rustls-pki-types = { workspace = true }
 
 [lints]

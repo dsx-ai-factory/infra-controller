@@ -30,31 +30,31 @@ use x509_parser::prelude::{FromDer, GeneralName};
 use crate::attestation::get_ek_cert_by_machine_id;
 use crate::{CarbideError, CarbideResult};
 
-pub fn extract_ca_fields(
+pub(crate) fn extract_ca_fields(
     ca_cert_bytes: &[u8],
 ) -> CarbideResult<(DateTime<Utc>, DateTime<Utc>, Vec<u8>)> {
     let ca_cert = X509Certificate::from_der(ca_cert_bytes)
-        .map_err(|e| CarbideError::InvalidArgument(format!("Could not parse CA cert: {e}")))?
+        .map_err(|e| CarbideError::InvalidArgument(format!("could not parse CA cert: {e}")))?
         .1;
 
     Ok((
         DateTime::<Utc>::from_timestamp(ca_cert.validity.not_before.timestamp(), 0).ok_or(
-            CarbideError::internal("Could not parse CA's NOT BEFORE field".to_string()),
+            CarbideError::internal("could not parse CA's NOT BEFORE field".to_string()),
         )?,
         DateTime::<Utc>::from_timestamp(ca_cert.validity.not_after.timestamp(), 0).ok_or(
-            CarbideError::internal("Could not parse CA's NOT AFTER field".to_string()),
+            CarbideError::internal("could not parse CA's NOT AFTER field".to_string()),
         )?,
         (*(ca_cert.subject.as_raw())).to_vec(),
     ))
 }
 
-pub async fn match_insert_new_ek_cert_status_against_ca(
+pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
     txn: &mut PgConnection,
     tpm_ek_cert: &TpmEkCertificate,
     machine_id: &MachineId,
 ) -> CarbideResult<()> {
     let ek_cert = X509Certificate::from_der(tpm_ek_cert.as_bytes())
-        .map_err(|e| CarbideError::InvalidArgument(format!("Could not parse EK cert: {e}")))?
+        .map_err(|e| CarbideError::InvalidArgument(format!("could not parse EK cert: {e}")))?
         .1;
 
     // get the issuer
@@ -67,7 +67,7 @@ pub async fn match_insert_new_ek_cert_status_against_ca(
         Some(ca_cert_db_entry) => {
             let ca_cert = X509Certificate::from_der(ca_cert_db_entry.ca_cert_der.as_slice())
                 .map_err(|e| {
-                    CarbideError::InvalidArgument(format!("Could not parse CA cert: {e}"))
+                    CarbideError::InvalidArgument(format!("could not parse CA cert: {e}"))
                 })?
                 .1;
 
@@ -77,18 +77,18 @@ pub async fn match_insert_new_ek_cert_status_against_ca(
                     ca_id = Some(ca_cert_db_entry.id);
                 }
                 Err(e) => tracing::error!(
-                    "Could not verify signature for EK cert serial - {}, issuer - {}, supposedly signed by CA subject - {}, error: {}",
-                    ek_cert.raw_serial_as_string(),
-                    ek_cert.issuer.to_string(),
-                    ca_cert.subject.to_string(),
-                    e
+                    ek_certificate_serial = %ek_cert.raw_serial_as_string(),
+                    issuer = %ek_cert.issuer.to_string(),
+                    subject = %ca_cert.subject.to_string(),
+                    error = %e,
+                    "Could not verify signature for EK certificate",
                 ),
             }
         }
         None => tracing::info!(
-            "No CA cert found for EK cert: serial - {}, issuer - {}",
-            ek_cert.raw_serial_as_string(),
-            ek_cert.issuer.to_string()
+            ek_certificate_serial = %ek_cert.raw_serial_as_string(),
+            issuer = %ek_cert.issuer.to_string(),
+            "No CA certificate found for EK certificate",
         ),
     }
 
@@ -111,10 +111,10 @@ pub async fn match_insert_new_ek_cert_status_against_ca(
         .await?;
 
         tracing::info!(
-            "Set CA verification status to {} for EK serial - {}, issuer - {}",
             found_signing_ca,
-            ek_cert.raw_serial_as_string(),
-            ek_cert.issuer.to_string()
+            ek_certificate_serial = %ek_cert.raw_serial_as_string(),
+            issuer = %ek_cert.issuer.to_string(),
+            "Set CA verification status for EK certificate",
         );
     } else {
         // we must insert the new entry entirely
@@ -154,10 +154,10 @@ pub async fn match_insert_new_ek_cert_status_against_ca(
         .await?;
 
         tracing::info!(
-            "Added new CA verification status for EK serial - {}, issuer - {}, status is {}",
-            ek_cert.raw_serial_as_string(),
-            ek_cert.issuer.to_string(),
-            found_signing_ca
+            ek_certificate_serial = %ek_cert.raw_serial_as_string(),
+            issuer = %ek_cert.issuer.to_string(),
+            found_signing_ca,
+            "Added new CA verification status for EK certificate",
         );
     }
 
@@ -165,7 +165,7 @@ pub async fn match_insert_new_ek_cert_status_against_ca(
 }
 
 // returns true if ek cert has been matched and status was updated, false otherwise
-pub async fn match_update_existing_ek_cert_status_against_ca(
+pub(crate) async fn match_update_existing_ek_cert_status_against_ca(
     txn: &mut PgConnection,
     ca_id: i32,
     ca_cert_bytes: &[u8],
@@ -177,22 +177,22 @@ pub async fn match_update_existing_ek_cert_status_against_ca(
 
     // create X509 EK cert
     let ek_cert = X509Certificate::from_der(tpm_ek_cert.as_bytes())
-        .map_err(|e| CarbideError::internal(format!("Could not parse EK cert: {e}")))?
+        .map_err(|e| CarbideError::internal(format!("could not parse EK cert: {e}")))?
         .1;
 
     // create X509 CA cert
     let ca_cert = X509Certificate::from_der(ca_cert_bytes)
-        .map_err(|e| CarbideError::internal(format!("Could not parse CA cert: {e}")))?
+        .map_err(|e| CarbideError::internal(format!("could not parse CA cert: {e}")))?
         .1;
 
     // verify signature
     if let Err(e) = ek_cert.verify_signature(Some(ca_cert.public_key())) {
         tracing::error!(
-            "Could not verify signature for EK cert serial - {}, issuer - {}, supposedly signed by CA subject - {}, error: {}",
-            ek_cert.raw_serial_as_string(),
-            ek_cert.issuer.to_string(),
-            ca_cert.subject.to_string(),
-            e
+            ek_certificate_serial = %ek_cert.raw_serial_as_string(),
+            issuer = %ek_cert.issuer.to_string(),
+            subject = %ca_cert.subject.to_string(),
+            error = %e,
+            "Could not verify signature for EK certificate",
         );
         return Ok(false); // nothing more to do here
     }
@@ -207,7 +207,7 @@ pub async fn match_update_existing_ek_cert_status_against_ca(
     .await
     .map_err(|e| {
         CarbideError::internal(format!(
-            "Could not update CA verification status for EK serial - {}, issuer - {}, error: {}",
+            "could not update CA verification status for EK serial - {}, issuer - {}, error: {}",
             ek_cert.raw_serial_as_string(),
             ek_cert.issuer,
             e
@@ -215,9 +215,9 @@ pub async fn match_update_existing_ek_cert_status_against_ca(
     })?;
 
     tracing::info!(
-        "Set CA verification status to true for EK serial - {}, issuer - {}",
-        ek_cert.raw_serial_as_string(),
-        ek_cert.issuer.to_string()
+        ek_certificate_serial = %ek_cert.raw_serial_as_string(),
+        issuer = %ek_cert.issuer.to_string(),
+        "Set CA verification status for EK certificate",
     );
 
     Ok(true)

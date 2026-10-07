@@ -1,0 +1,26 @@
+version: "1.0"
+project: "infra-controller"
+last_updated: "2026-07-31T00:00:00Z"
+
+repository_exposure_classification:
+  visibility: "Public"
+  basis: >-
+    origin remote is github.com:NVIDIA/infra-controller.git and repository
+    metadata/public docs point to https://github.com/NVIDIA/infra-controller
+  confirmed_by: "drew"
+  date: "2026-07-31"
+
+service_exposure_classification:
+  tier: "External / Regulated"
+  confidence: "medium"
+  basis: >-
+    public preview infrastructure control-plane with REST/gRPC APIs, Helm
+    deployment artifacts, admin CLI workflows, privileged hardware lifecycle
+    control, and sensitive credential handling; deployments are site-local but
+    can serve operators, ISVs, and higher-level orchestration systems
+  confirmed_by: "drew"
+  date: "2026-07-31"
+
+false_positives: []
+accepted_risks: []
+suppressed_cves: []

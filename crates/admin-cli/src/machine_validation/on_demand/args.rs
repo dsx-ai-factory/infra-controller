@@ -30,29 +30,29 @@ Start with a restricted set of allowed tests, including unverified:
     --allowed-tests gpu_bandwidth --run-unverified-tests
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Start on demand machine validation")]
     Start(OnDemandOptions),
 }
 
 #[derive(Parser, Debug)]
 #[clap(disable_help_flag = true)]
-pub struct OnDemandOptions {
+pub(crate) struct OnDemandOptions {
     #[clap(long, action = clap::ArgAction::HelpLong)]
     help: Option<bool>,
 
     #[clap(short, long, help = "Machine id for start validation")]
-    pub machine: MachineId,
+    pub(super) machine: MachineId,
 
     #[clap(long, help = "Results history")]
-    pub tags: Option<Vec<String>>,
+    pub(super) tags: Option<Vec<String>>,
 
     #[clap(long, help = "Allowed tests")]
-    pub allowed_tests: Option<Vec<String>>,
+    pub(super) allowed_tests: Option<Vec<String>>,
 
     #[clap(long, default_value = "false", help = "Run unverified tests")]
-    pub run_unverified_tests: bool,
+    pub(super) run_unverified_tests: bool,
 
     #[clap(long, help = "Contexts")]
-    pub contexts: Option<Vec<String>>,
+    pub(super) contexts: Option<Vec<String>>,
 }

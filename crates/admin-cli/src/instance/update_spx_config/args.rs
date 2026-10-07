@@ -29,14 +29,14 @@ Update an instance's SPX configuration:
     --config '{\"partition_id\":\"abcdef01-2345-6789-abcd-ef0123456789\"}'
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long, required(true))]
-    pub instance: InstanceId,
+    pub(super) instance: InstanceId,
     #[clap(
         long,
         required(true),
         help = "SPX configuration in JSON format",
         value_name = "SPX_JSON"
     )]
-    pub config: InstanceSpxConfig,
+    pub(super) config: InstanceSpxConfig,
 }

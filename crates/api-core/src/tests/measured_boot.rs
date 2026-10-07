@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-pub mod tests {
+pub(in crate::tests) mod tests {
     use std::str::FromStr;
 
     use carbide_uuid::machine::MachineId;
@@ -97,7 +97,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Bind Key Error: TPM EK is not in RSA format"
+                    "attest bind key error: TPM EK is not in RSA format"
                 );
             }
         }
@@ -162,7 +162,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Bind Key Error: TPM EK is not in RSA format"
+                    "attest bind key error: TPM EK is not in RSA format"
                 );
             }
         }
@@ -197,7 +197,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: Could not form SQL query to fetch AK Pub"
+                    "attest quote error: could not form SQL query to fetch AK pub"
                 );
             }
         }
@@ -227,7 +227,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: Could not unmarshal AK Pub: response code not recognized"
+                    "attest quote error: could not unmarshal AK pub: response code not recognized"
                 );
             }
         }
@@ -260,7 +260,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: Could not unmarshall Attest struct: not currently used"
+                    "attest quote error: could not unmarshall attest struct: not currently used"
                 );
             }
         }
@@ -293,7 +293,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: Could not unmarshall Signature struct: response code not recognized"
+                    "attest quote error: could not unmarshall signature struct: response code not recognized"
                 );
             }
         }
@@ -334,7 +334,7 @@ pub mod tests {
             Ok(..) => panic!("Failed: should have returned an error"),
             Err(e) => {
                 assert_eq!(e.code(), Code::Internal);
-                assert_eq!(e.message(), "Attest Quote Error: unknown signature type");
+                assert_eq!(e.message(), "attest quote error: unknown signature type");
             }
         }
     }
@@ -365,7 +365,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: PCR signature invalid (see logs for full event log)"
+                    "attest quote error: PCR signature invalid (see logs for full event log)"
                 );
             }
         }
@@ -399,7 +399,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: PCR hash does not match (see logs for full event log)"
+                    "attest quote error: PCR hash does not match (see logs for full event log)"
                 );
             }
         }
@@ -433,7 +433,7 @@ pub mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "Attest Quote Error: PCR signature invalid and PCR hash mismatch (see logs for full event log)"
+                    "attest quote error: PCR signature invalid and PCR hash mismatch (see logs for full event log)"
                 );
             }
         }
@@ -482,7 +482,7 @@ pub mod tests {
             }
             Err(e) => match e {
                 AttestBindKeyError(d) => {
-                    assert_eq!(d, "Could not unmarshall EK: response code not recognized")
+                    assert_eq!(d, "could not unmarshall EK: response code not recognized")
                 }
                 _another_error => panic!("Failed: incorrect error type: {_another_error:?}"),
             },
@@ -506,7 +506,7 @@ pub mod tests {
             }
             Err(e) => match e {
                 AttestBindKeyError(d) => {
-                    assert_eq!(d, "EK Pub is not in RSA format")
+                    assert_eq!(d, "EK pub is not in RSA format")
                 }
                 _another_error => panic!("Failed: incorrect error type: {_another_error:?}"),
             },
@@ -559,7 +559,7 @@ pub mod tests {
                 AttestBindKeyError(d) => {
                     assert_eq!(
                         d,
-                        "Could not create RsaPublicKey from TPM's EK Pub: invalid modulus"
+                        "could not create RsaPublicKey from TPM's EK pub: invalid modulus"
                     )
                 }
                 _another_error => panic!("Failed: incorrect error type: {_another_error:?}"),
@@ -588,7 +588,7 @@ pub mod tests {
                 AttestBindKeyError(d) => {
                     assert_eq!(
                         d,
-                        "Could not unmarshall EK Cert: Parsing Error: NomError(Eof)"
+                        "could not unmarshall EK cert: Parsing Error: NomError(Eof)"
                     )
                 }
                 _another_error => panic!("Failed: incorrect error type: {_another_error:?}"),
@@ -706,7 +706,7 @@ pub mod tests {
             }
             Err(e) => match e {
                 AttestQuoteError(d) => {
-                    assert_eq!(d, "AK Pub is not an RSA key")
+                    assert_eq!(d, "AK pub is not an RSA key")
                 }
                 _another_error => panic!("Failed: incorrect error type: {_another_error:?}"),
             },
@@ -756,7 +756,7 @@ pub mod tests {
             }
             Err(e) => match e {
                 AttestQuoteError(d) => {
-                    assert_eq!(d, "Could not create RsaPublicKey: invalid modulus")
+                    assert_eq!(d, "could not create RsaPublicKey: invalid modulus")
                 }
                 _another_error => panic!("Failed: incorrect error type: {_another_error:?}"),
             },
@@ -937,7 +937,7 @@ pub mod tests {
         0x3f,
     ];
 
-    pub fn get_ext_rsa_pub() -> Public {
+    pub(in crate::tests) fn get_ext_rsa_pub() -> Public {
         use tss_esapi::attributes::ObjectAttributesBuilder;
         use tss_esapi::interface_types::algorithm::{PublicAlgorithm, RsaSchemeAlgorithm};
         use tss_esapi::interface_types::key_bits::RsaKeyBits;

@@ -19,7 +19,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ManageExpectedPowerShelf is an activity wrapper for managing ExpectedPowerShelf lifecycle that allows
@@ -38,7 +38,7 @@ type ManageExpectedPowerShelf struct {
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
 // - UUID existing in DB but not in NICo: delete record in DB
-func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.Context, siteID uuid.UUID, expectedPowerShelfInventory *cwssaws.ExpectedPowerShelfInventory) error {
+func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.Context, siteID uuid.UUID, expectedPowerShelfInventory *corev1.ExpectedPowerShelfInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedPowerShelvesInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -48,14 +48,14 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 		return errors.New("UpdateExpectedPowerShelvesInDB called with nil inventory")
 	}
 
-	if expectedPowerShelfInventory.InventoryStatus == cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if expectedPowerShelfInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mei.dbSession)
-	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -142,6 +142,15 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 			continue
 		}
 
+		// A row written since the Site collected this inventory holds changes the snapshot
+		// cannot know about, including any made through the API, so writing the reported values
+		// over them would lose those edits.
+		if site.IsTimeWithinStaleInventoryThreshold(cur.Updated) {
+			logger.Info().Str("ExpectedPowerShelfID", cur.ID.String()).Msg("not updating ExpectedPowerShelf yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		// update if any field differs
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ShelfSerialNumber != reported.ShelfSerialNumber ||
@@ -170,13 +179,13 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 	// Delete any Expected Power Shelf present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedIDs.
-	if expectedPowerShelfInventory.InventoryPage == nil || expectedPowerShelfInventory.InventoryPage.TotalPages == 0 || (expectedPowerShelfInventory.InventoryPage.CurrentPage == expectedPowerShelfInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
 		for _, eps := range existingExpectedPowerShelves {
 			if _, keep := reportedIDs[eps.ID]; keep {
 				continue
 			}
 			// Avoid destructive actions inside race-condition window
-			if util.IsTimeWithinStaleInventoryThreshold(eps.Updated) {
+			if site.IsTimeWithinStaleInventoryThreshold(eps.Updated) {
 				continue
 			}
 			logger.Info().Str("ExpectedPowerShelfID", eps.ID.String()).Msg("deleting ExpectedPowerShelf from DB since it was no longer reported in inventory from Site")

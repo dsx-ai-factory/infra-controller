@@ -19,7 +19,7 @@ use super::Args;
 use crate::rpc::ApiClient;
 
 /// delete deletes an expected rack by its rack_id.
-pub async fn delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
+pub(super) async fn delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
     api_client.0.delete_expected_rack(data).await?;
     Ok(())
 }

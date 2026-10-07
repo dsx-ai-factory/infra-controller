@@ -22,7 +22,7 @@ use super::super::add::cmd::add_individual;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn add_bulk(dirname: &str, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn add_bulk(dirname: &str, api_client: &ApiClient) -> CarbideCliResult<()> {
     let dirpath = Path::new(dirname);
 
     // read all files ending with .cer/.der

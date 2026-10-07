@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 
 // ! dangerous cert verifier that accepts any server certificate without validation.
 // ! only enable in test environments where you cannot replace NVOS self-signed certificates.
@@ -63,12 +63,7 @@ impl ServerCertVerifier for AcceptAnyCertVerifier {
     }
 }
 
-/// build a rustls ClientConfig that dangerously skips server certificate verification.
-pub fn self_signed_tls_config() -> ClientConfig {
-    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("default protocol versions are valid")
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyCertVerifier))
-        .with_no_client_auth()
+/// Dangerous rustls verifier that accepts any server certificate without validation
+pub(super) fn accept_any_cert_verifier() -> Arc<dyn ServerCertVerifier> {
+    Arc::new(AcceptAnyCertVerifier)
 }

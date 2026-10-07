@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use config_version::ConfigVersion;
 use model::network_security_group::{
@@ -518,11 +519,7 @@ impl TryFrom<NetworkSecurityGroup> for rpc::NetworkSecurityGroup {
                     .iter()
                     .map(|(key, value)| rpc::Label {
                         key: key.to_owned(),
-                        value: if value.is_empty() {
-                            None
-                        } else {
-                            Some(value.to_owned())
-                        },
+                        value: value.to_owned().none_if_empty(),
                     })
                     .collect(),
             }),

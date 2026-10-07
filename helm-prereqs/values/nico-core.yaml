@@ -52,11 +52,34 @@ nico-api:
   hostname: ""   # REQUIRED: external nico-api hostname (e.g. api-<site>.<domain>)
 
   ## Trust admin-CLI client certs minted from the site CA (CN=site-root) so admin-cli works
-  ## with NO manual ConfigMap edit. Pair with helm-prereqs vault.nicoCliClientRole (ou: "Invalid").
+  ## with NO manual ConfigMap edit. Pair with helm-prereqs vault.nicoCliClientRole.
   ## "site-root" is the CN of the cert-manager site root created by nico-prereqs — generic, keep as-is.
+  ## This issuer-CN entry is what authorizes admin-CLI certs; the cert's OU only names the group.
   auth:
     additionalIssuerCns:
       - "site-root"
+
+  ## Rack management — chart defaults enable both switches (RMS connectivity
+  ## and the component manager with rms backends). Override vendors or add
+  ## test profiles in siteConfig. Chart defaults cover standard mTLS (SPIFFE
+  ## auto-discovery — no extra mounts).
+  ##
+  ## Sites WITHOUT rack management (no RMS deployed, no DPF rack operations)
+  ## must opt out explicitly, otherwise carbide-api initializes the component
+  ## manager and RMS client against an unreachable endpoint:
+  # componentManager:
+  #   enabled: false
+  # rms:
+  #   enabled: false
+  ##
+  ## Sites WITH rack management that need non-standard vendors or a test
+  ## profile can override individual fields via siteConfig (Figment merges
+  ## per-key, so only changed values need to be restated):
+  # siteConfig:
+  #   nicoApiSiteConfig: |
+  #     [rack_profiles.NVL72.rack_capabilities.compute]
+  #     vendor = "Lenovo"   # override compute vendor only
+  #     count = 18          # required; override only if rack uses non-standard count
 
   ## MetalLB VIP for the nico-api LoadBalancer service.
   ## Must be an IP within your external IPAddressPool (values/metallb-config.yaml).
@@ -108,10 +131,26 @@ nico-api:
 
       # -----------------------------------------------------------------------
       # site_fabric_prefixes: prefixes that ARE part of the site fabric.
+      # site_fabric_null_routes: optional FNN blackholes; omitted means
+      # site_fabric_prefixes, all retained tenant SitePrefixes, and retiring
+      # operator roots with retained VpcPrefixes or VPC-attached direct prefixes.
+      # Inherited roots are collapsed. Explicit lists preserve distinct CIDRs.
+      # Under mutual isolation, they must cover every retained tenant root;
+      # [] is valid only without tenant roots. Open isolation does not install
+      # these routes or require coverage.
       # deny_prefixes: prefixes instances must NOT reach (OOB, ctrl-plane, underlay).
       # -----------------------------------------------------------------------
       site_fabric_prefixes = []                  # REQUIRED: your fabric CIDR(s)
+      # site_fabric_null_routes = []             # OPTIONAL: see coverage requirement above
       deny_prefixes = []                         # your OOB / control-plane / underlay CIDRs
+
+      # -----------------------------------------------------------------------
+      # FNN related configuration
+      # FNN support is mandatory for nico-api to function
+      # datacenter_asn is a root key and has to stay above the first [table].
+      # -----------------------------------------------------------------------
+      # Replace 4266030000 with the ASN for the physical datacenter itself
+      datacenter_asn = 4266030000
 
       # -----------------------------------------------------------------------
       # Site explorer — periodic background scan of site inventory
@@ -132,9 +171,13 @@ nico-api:
       # -----------------------------------------------------------------------
       # IP / integer pools — nico-api allocates from these ranges.
       # REQUIRED: set the loopback (lo-ip) range to your site's pool.
+      # A pool range is applied when nico-api first sees it. A later change
+      # logs a drift warning and is not applied. Grow an established pool with
+      # `nico-admin-cli resource-pool grow`.
       # -----------------------------------------------------------------------
       [pools.lo-ip]
       type = "ipv4"
+      # One address per machine, hosts and DPUs alike: size for hosts x (1 + DPUs per host).
       ranges = []                                # REQUIRED: e.g. [{ start = "...", end = "..." }]
 
       [pools.vlan-id]
@@ -147,7 +190,11 @@ nico-api:
 
       [pools.vpc-vni]
       type = "integer"
-      ranges = []                                # REQUIRED: your VPC VNI range, e.g. [{ start = "0", end = "100" }]
+      # REQUIRED: your VPC VNI range. FNN sites: use the range allocated by your network team —
+      # must match the config on your FNN gateways and must NOT be expanded without coordinating
+      # with your network team. The range must also NOT include the fixed admin_vpc vpc_vni
+      # value set in [fnn.admin_vpc] below. Example for non-FNN: [{ start = "0", end = "100" }]
+      ranges = []
 
       # -----------------------------------------------------------------------
       # Networks — named L3 segments visible to nico-api.
@@ -174,7 +221,7 @@ nico-api:
       [ib_config]
       enabled = false   # EXAMPLE - replace false with true to enable IB
 
-      # Then uncomment the following ib_fabrics.default lines,
+      # To enable InfiniBand, set enabled=true, then uncomment the following ib_fabrics.default lines,
       # replace the example endpoint with your UFM VIP address, and configure
       # a start-end PKey range. For sharded sites, ensure the range does not
       # overlap any other shard.
@@ -195,6 +242,134 @@ nico-api:
       [machine_state_controller]
       failure_retry_time = "90m"
 
+
+      [fnn.admin_vpc]
+      enabled = true # Set to true when FNN is enabled on site.
+      # vpc_vni
+      vpc_vni = 61325 # Replace 61325 with the VNI that will be used for the admin VPC
+
+      #
+      # There are several fnn.routing_profiles defined below.
+      # Replace 4266030000 with the datcenter_asn
+      #
+      # Also, in the import and export route-targets, replace the example VNIs with the actual VNIs that will be used at the site for those purposes and then uncomment.
+
+      # The routing profile assigned to a tenant controls which routes are imported into that tenant's VRF and how routes from that tenant are tagged on export.  The routing profiles are defined with some default route-target imports and exports, but these will likely need to be customized for each site based on the RTs that are used at that site.
+      [fnn.routing_profiles.INTERNAL]
+      internal = true
+      tenant_leak_communities_accepted = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 11 },    # Replace 11 with actual vni to import the default route for internal tenants
+        { asn = 4266030000, vni = 101 },   # Replace 101 with actual vni to import the RT for jump hosts
+        { asn = 4266030000, vni = 50100 }, # Replace 50100 with actual vni to import the RT for reaching FSC service VIPs
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50200 },  # Replace 50200 with actual vni to tag routes with the common internal RT
+      ]
+
+      [fnn.routing_profiles.MAINTENANCE]
+      internal = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 10 },    # Replace 10 with actual vni to import the default route for tenants
+        { asn = 4266030000, vni = 101 },   # Replace 101 with actual vni to import the RT for jump hosts
+        { asn = 4266030000, vni = 50100 }, # Replace 50100 with actual vni to import the RT for reaching FSC service VIPs
+        { asn = 4266030000, vni = 121 },   # Replace 121 with actual vni to import the RT for SCP/breakfix routes
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50300 }, # Tag routes with the common breakfix RT; replace 50300 with actual vni to use for this purpose
+      ]
+
+      [fnn.routing_profiles.EXTERNAL]
+      internal = false
+      route_target_imports = [
+        { asn = 4266030000, vni = 50100 }, # Import the RT for reaching FSC service VIPs; Replace 50100 with actual vni.
+
+        # Do NOT import a default route for profiles when internal = false.
+        # It needs to be auto-inserted because there will be a 1:1 mapping between
+        # the tenant VNI and the VRF on the GWs that handle external tenants.
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50500 }, # Tag routes with the common external RT; replace 50500 with actual vni to use for this purpose
+      ]
+
+      # The only use-case for this right now is DPS.
+      [fnn.routing_profiles.PRIVILEGED_INTERNAL]
+      internal = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 11 },    # Import the default route for internal tenants; Replace 11 with actual vni
+        { asn = 4266030000, vni = 101 },   # Import the RT for jump hosts; Replace 101 with actual vni
+        { asn = 4266030000, vni = 50100 }, # Import the RT for reaching FSC service VIPs; Replace 50100 with actual vni
+        { asn = 4266030000, vni = 900 },   # Import the RT for BMCs for forge managed nodes; Replace 900 with actual vni
+        { asn = 4266030000, vni = 1002 },   # Import the RT for NVLINK switches; Replace 1002 with actual vni
+        { asn = 4266030000, vni = 1003 },   # Import the RT for powershelves; Replace 1003 with actual vni
+      ]
+      route_targets_on_exports = [
+        # Tag routes with the common site-controller route tag.
+        # The other leg of the routing for the 901 route-target import above.
+        # This is a bit of a hack.  We'd use it until we either have a new RT
+        # registered for this or until the grpc calls that DPS would need exist in Carbid
+        { asn = 4266030000, vni = 50100 }, # Replace 50100 with actual vni to use for this purpose; this is the RT for reaching FSC service VIPs
+        { asn = 4266030000, vni = 50200 },  # Tag routes with the common internal RT
+      ]
+
+      [fnn.admin_vpc.routing_profile]
+      internal = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 10 }, # Import the default route for infra; Replace 10 with actual vni to import the default route for tenants
+        { asn = 4266030000, vni = 101 },   # Import the RT for jump hosts; Replace 101 with actual vni
+        { asn = 4266030000, vni = 50100 }, # Import the RT for reaching FSC service VIPs; Replace 50100 with actual vni to use for this purpose
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50400 },  # Tag routes with the common admin RT; replace 50400 with actual vni to use for this purpose
+      ]
+
+
+      [pools.fnn-asn]
+      type = "integer"
+      # Change 4268060405 and 4268060499 to the actual ASN values. Each DPU needs an ASN, so the range should be sufficient to cover all hosts.
+      # Size for hosts x DPUs per host. Like every pool, the range is not re-applied after a change.
+      ranges = [{ start = "4268060405", end = "4268060499" }]
+
+      [pools.vpc-dpu-lo]
+      type = "ipv4"
+      ranges = [
+        { start = "10.255.247.3", end = "10.255.247.255" },  # Default pool added from VpcVrfLoopbackPrefix 10.255.247.0/24
+      ]
+
+      # NOTE: [pools.vpc-vni] is defined in the required pools section above — set it there.
+      # It MUST NOT be expanded without coordinating with your network team and must match
+      # config on your FNN gateways.
+      #
+      [pools.external-vpc-vni]
+      type = "integer"
+      # Change 51008 and 51011 to the actual VNI values.
+      ranges = [
+        { start = "51008", end = "51011" },
+      ]
+
+      # -----------------------------------------------------------------------
+      # DPF — DPU provisioning via the DOCA Platform Framework.
+      # setup.sh uncomments this block automatically when installing DPF (the default; the
+      # '#dpf# ' prefixes are its marker). To enable manually: install the DPF
+      # stack (docs/manuals/dpf.md), remove every '#dpf# ' prefix, and restart
+      # carbide-api — [dpf] is read at startup only.
+      # docker_image_pull_secret is created by setup.sh phase 5b.
+      # -----------------------------------------------------------------------
+      #dpf# [dpf]
+      #dpf# enabled = true
+      #dpf# docker_image_pull_secret = "nico-pull-secret"
+
+      # BF3 deployment defaults, shown for reference — these match the built-in
+      # defaults and only need uncommenting to override (e.g. a different BFB).
+      # BF4 is opt-in via an additional [dpf.deployments.bf4_generic] table;
+      # see docs/manuals/dpf.md §3.5.
+      #
+      # [dpf.deployments.bf3]
+      # bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.2-125_26.02_ubuntu-24.04_64k_prod.bfb"
+      # flavor_name     = "carbide-dpu-flavor"
+      # deployment_name = "nico-deployment-v2"
+      # node_label_key  = "carbide.nvidia.com/controlled.node.v2"
+
 ## ---------------------------------------------------------------------------
 ## Service VIP assignments - MetalLB loadBalancerIPs
 ##
@@ -212,10 +387,27 @@ nico-api:
 ## ---------------------------------------------------------------------------
 
 nico-dhcp:
+  ## IPv6 is opt-in. Enable only after the pod network and relay IPv6 VIP are ready.
+  dhcp:
+    v6Enabled: false
+    v6ServerIdentifier: ""  # Required when enabled: stable, site-unique 12 hex digits.
+    v6DnsServers: ""
+    v6NtpServers: ""
+    v6ProvisioningServer: ""
+    v6RapidCommit: false
+  v6ExternalService:
+    enabled: false
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # Required only when this Service is enabled.
   externalService:
     enabled: true    # must be explicitly enabled - defaults to false in chart
     annotations:
-      metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: DHCP VIP (internal pool)
+      ## REQUIRED: DHCP VIP (internal pool). Besides pinning the LoadBalancer
+      ## IP, this VIP is also auto-advertised to DHCP clients as the server
+      ## identifier (option 54) so BMC unicast renewals survive nico-dhcp pod
+      ## replacement (issue #3663). Override the advertised identifier
+      ## independently via nico-dhcp.config.kea.serverIdentifier if needed.
+      metallb.universe.tf/loadBalancerIPs: ""
 
   ## DHCP hook libraries' advertised IPs.
   ##

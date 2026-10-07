@@ -48,19 +48,20 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
     let tokens: Vec<&str> = topic.split("/").collect();
     if tokens.len() < 3 {
         tracing::error!(
-            "handle_dpa_message: token len {} is unusable topic: {}",
-            tokens.len(),
-            topic
+            token_count = tokens.len(),
+            topic = %topic,
+            "DPA MQTT topic has too few path segments",
         );
         return;
     }
 
     let macaddr = match MacAddress::from_str(tokens[2]) {
         Ok(m) => m,
-        Err(_e) => {
+        Err(error) => {
             tracing::error!(
-                "handle_dpa_message: Unable to parse mac addr: {}",
-                tokens[2]
+                mac_address = tokens[2],
+                error = %error,
+                "Failed to parse DPA MAC address from MQTT topic",
             );
             return;
         }
@@ -68,8 +69,8 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
 
     if message.metadata.is_none() || message.pf_info.is_none() {
         tracing::error!(
-            "handle_dpa_message: message metadata or pf_info is empty: {:#?}",
-            message
+            dpa_message = ?message,
+            "DPA message is missing metadata or PF info",
         );
         return;
     }
@@ -79,7 +80,10 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
     let mut txn = match services.database_connection.begin().await {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!("handle_dpa_message: Unable to start txn: {:#?}", e);
+            tracing::error!(
+                error = ?e,
+                "Failed to start DPA message database transaction",
+            );
             return;
         }
     };
@@ -88,8 +92,9 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
         Ok(ifs) => ifs,
         Err(e) => {
             tracing::error!(
-                "handle_dpa_message: Error for mac {macaddr} from find_by_mac_addr {:#?}",
-                e
+                mac_address = %macaddr,
+                error = ?e,
+                "Failed to find DPA interface",
             );
             return;
         }
@@ -97,8 +102,9 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
 
     if dpa_ifs.len() != 1 {
         tracing::error!(
-            "handle_dpa_message: invalid dpa_ifs len from find_by_mac_addr maddr {macaddr} len {:#?}",
-            dpa_ifs.len()
+            mac_address = %macaddr,
+            dpa_interface_count = dpa_ifs.len(),
+            "Found an invalid DPA interface count",
         );
         return;
     }
@@ -110,9 +116,9 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
         Ok(ncv) => ncv,
         Err(e) => {
             tracing::error!(
-                "handle_dpa_message: Error parsing config version from DPA Ack msg {:#?} {:#?}",
-                message,
-                e
+                dpa_message = ?message,
+                error = ?e,
+                "Failed to parse DPA acknowledgment config version",
             );
             ConfigVersion::invalid()
         }
@@ -135,15 +141,25 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(
-                    "handle_dpa_message: Error for vni {vni} from find_by_vni {:#?}",
-                    e
+                    vni = vni,
+                    error = ?e,
+                    "Failed to find SPX partition",
                 );
                 return;
             }
         };
 
-        if partition.len() != 1 {
-            tracing::error!("handle_dpa_message: SPX partition with vni {vni} is not found");
+        if partition.is_empty() {
+            tracing::error!(vni, "SPX partition not found");
+            return;
+        }
+
+        if partition.len() > 1 {
+            tracing::error!(
+                vni,
+                spx_partition_count = partition.len(),
+                "Multiple SPX partitions found",
+            );
             return;
         }
 
@@ -151,13 +167,14 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
         spx_partition_id = spx_partition.id;
 
         tracing::debug!(
-            "handle_dpa_message: SPX partition with vni {vni} found: {:#?}",
-            spx_partition
+            vni = vni,
+            spx_partition = ?spx_partition,
+            "SPX partition found",
         );
     } else {
         tracing::debug!(
-            "handle_dpa_message: received vni 0 in DPA message {:#?}",
-            message
+            dpa_message = ?message,
+            "DPA message has zero VNI",
         );
     }
 
@@ -186,22 +203,26 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
     {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!("handle_dpa_message: Error for machine {:#?}", e);
+            tracing::error!(
+                machine_id = %dpa_if.machine_id,
+                dpa_interface_id = %dpa_if.id,
+                error = ?e,
+                "Failed to find machine",
+            );
             return;
         }
     };
 
-    if machine.is_none() {
+    let Some(machine) = machine else {
         tracing::error!(
-            "handle_dpa_message: Machine not found for DPA interface {:#?}",
-            dpa_if
+            machine_id = %dpa_if.machine_id,
+            dpa_interface_id = %dpa_if.id,
+            "Machine not found",
         );
         return;
-    }
+    };
 
-    let machine = machine.unwrap();
-
-    let cur_spx_status_observations = machine.spx_status_observation.unwrap_or_default();
+    let cur_spx_status_observations = machine.status.spx_status_observation.unwrap_or_default();
     let mut new_spx_status_observations = MachineSpxStatusObservation::default();
 
     let mut add_new_observation = true;
@@ -232,21 +253,27 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
     )
     .await
     {
-        Ok(_r) => {
-            let res = txn.commit().await;
-            if res.is_err() {
+        Ok(db::ConditionalWrite::Applied(())) => {
+            if let Err(error) = txn.commit().await {
                 tracing::error!(
-                    "handle_dpa_message: txn commit error for msg {:#?} res {:#?}",
-                    message,
-                    res
+                    dpa_message = ?message,
+                    error = ?error,
+                    "Failed to commit DPA message transaction",
                 );
             }
         }
+        Ok(db::ConditionalWrite::NotApplied(reason)) => {
+            tracing::error!(
+                dpa_message = ?message,
+                error = ?db::DatabaseError::from(reason),
+                "Failed to update DPA network observation",
+            );
+        }
         Err(e) => {
             tracing::error!(
-                "handle_dpa_message: update_network_observation error for msg {:#?} {:#?}",
-                message,
-                e
+                dpa_message = ?message,
+                error = ?e,
+                "Failed to update DPA network observation",
             );
         }
     }
@@ -254,7 +281,7 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
 
 // Create an MQTTEA client, and start up the thread that will do eventloop polling
 // by doing a connect.
-pub async fn start_dpa_handler(
+pub(crate) async fn start_svpc_handler(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
     cancel_token: CancellationToken,
@@ -265,9 +292,9 @@ pub async fn start_dpa_handler(
 
     let options = {
         let defaults = ClientOptions::default().with_qos(default_qos);
-        if let Some(ref dpa_config) = api_service.runtime_config.dpa_config
+        if let Some(ref dpa_config) = api_service.runtime_config.ewethers_config
             && let Some(provider) = crate::auth::mqtt_auth::build_credentials_provider(
-                &dpa_config.auth,
+                &dpa_config.svpc.auth,
                 carbide_secrets::credentials::CredentialKey::MqttAuth {
                     credential_type: carbide_secrets::credentials::MqttCredentialType::Dpa,
                 },
@@ -306,7 +333,10 @@ pub async fn start_dpa_handler(
                 })
                 .await
                 {
-                    tracing::error!("handle_dpa_message failed: {e}");
+                    tracing::error!(
+                        error = %e,
+                        "Failed to handle DPA message",
+                    );
                 }
             }
         })
@@ -329,11 +359,11 @@ pub async fn start_dpa_handler(
             if queue_stats.total_processed != last_processed
                 || publish_stats.total_published != last_sent
             {
-                println!(
-                    "Stats: {} received, {} sent, {} pending",
-                    queue_stats.total_processed,
-                    publish_stats.total_published,
-                    queue_stats.pending_messages
+                tracing::debug!(
+                    processed_message_count = queue_stats.total_processed,
+                    published_message_count = publish_stats.total_published,
+                    pending_message_count = queue_stats.pending_messages,
+                    "DPA MQTT client stats"
                 );
                 last_processed = queue_stats.total_processed;
                 last_sent = publish_stats.total_published;

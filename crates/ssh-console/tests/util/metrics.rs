@@ -20,8 +20,11 @@ use eyre::Context;
 use prometheus_text_parser::ParsedPrometheusMetrics;
 use ssh_console_mock_api_server::MockHost;
 
-pub async fn assert_metrics(metrics_str: String, mock_hosts: &[MockHost]) -> eyre::Result<()> {
-    let metrics: ParsedPrometheusMetrics = metrics_str.parse().context("Error parsing metrics")?;
+pub(super) async fn assert_metrics(
+    metrics_str: String,
+    mock_hosts: &[MockHost],
+) -> eyre::Result<()> {
+    let metrics: ParsedPrometheusMetrics = metrics_str.parse().context("error parsing metrics")?;
     let metrics = metrics.metrics;
 
     let expected_metrics = [
@@ -66,7 +69,7 @@ pub async fn assert_metrics(metrics_str: String, mock_hosts: &[MockHost]) -> eyr
             "ssh_console_client_auth_failures_total",
             vec![ExpectedObservation {
                 attribute_key_value: Some(("auth_type", Cow::Borrowed("public_key"))),
-                value: Some(3u64),
+                value: Some(mock_hosts.len() as u64),
             }],
         ),
         (

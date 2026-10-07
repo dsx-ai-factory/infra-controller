@@ -25,7 +25,7 @@ Replace all expected racks with the contents of a JSON file:
     $ nico-admin-cli expected-rack replace-all --filename ./racks.json
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(short, long)]
-    pub filename: String,
+    pub(super) filename: String,
 }

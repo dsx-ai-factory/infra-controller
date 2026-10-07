@@ -43,7 +43,7 @@ struct ExpectedRackRow {
 }
 
 /// Show all expected racks.
-pub async fn show_html(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_html(state: AxumState<Arc<Api>>) -> Response {
     let racks = match fetch_expected_racks(&state).await {
         Ok(racks) => racks,
         Err((code, msg)) => return (code, msg).into_response(),
@@ -53,7 +53,7 @@ pub async fn show_html(state: AxumState<Arc<Api>>) -> Response {
 }
 
 /// Show all expected racks as JSON.
-pub async fn show_json(state: AxumState<Arc<Api>>) -> Response {
+pub(super) async fn show_json(state: AxumState<Arc<Api>>) -> Response {
     let racks = match fetch_expected_racks(&state).await {
         Ok(racks) => racks,
         Err((code, msg)) => return (code, msg).into_response(),
@@ -67,7 +67,7 @@ async fn fetch_expected_racks(
     let expected_response = match api.get_all_expected_racks(tonic::Request::new(())).await {
         Ok(response) => response.into_inner(),
         Err(err) => {
-            tracing::error!(%err, "get_all_expected_racks");
+            tracing::error!(error = %err, "get_all_expected_racks");
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to list expected racks".to_string(),

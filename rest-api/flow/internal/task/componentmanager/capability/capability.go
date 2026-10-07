@@ -23,6 +23,8 @@ const (
 	CapabilityBringUpControl           Capability = "BringUpControl"
 	CapabilityBringUpStatus            Capability = "BringUpStatus"
 	CapabilityFirmwareConsistencyCheck Capability = "FirmwareConsistencyCheck"
+	CapabilityDecommissionControl      Capability = "DecommissionControl"
+	CapabilityDecommissionStatus       Capability = "DecommissionStatus"
 )
 
 var (
@@ -87,7 +89,9 @@ func (c Capability) Valid() bool {
 		CapabilityFirmwareStatus,
 		CapabilityBringUpControl,
 		CapabilityBringUpStatus,
-		CapabilityFirmwareConsistencyCheck:
+		CapabilityFirmwareConsistencyCheck,
+		CapabilityDecommissionControl,
+		CapabilityDecommissionStatus:
 		return true
 	default:
 		return false

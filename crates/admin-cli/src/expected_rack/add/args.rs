@@ -25,34 +25,30 @@ use crate::metadata::parse_rpc_labels;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Add an expected rack with its rack profile:
-    $ nico-admin-cli expected-rack add 12345678-1234-5678-90ab-cdef01234567 \
-    abcdef01-2345-6789-abcd-ef0123456789
+Add a rack already declared in an expected rack group:
+    $ nico-admin-cli expected-rack add rack-01
 
 Add an expected rack with a metadata name and a label:
-    $ nico-admin-cli expected-rack add 12345678-1234-5678-90ab-cdef01234567 \
-    abcdef01-2345-6789-abcd-ef0123456789 --meta-name rack-01 --label DATACENTER:XYZ
+    $ nico-admin-cli expected-rack add rack-01 --meta-name rack-01 --label DATACENTER:XYZ
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(help = "Rack ID of the expected rack")]
-    pub rack_id: RackId,
-    #[clap(help = "Rack profile ID of the expected rack")]
-    pub rack_profile_id: String,
+    rack_id: RackId,
 
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
         help = "The name that should be used as part of the Metadata for newly created Rack. If empty, the Rack Id will be used"
     )]
-    pub meta_name: Option<String>,
+    meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
         help = "The description that should be used as part of the Metadata for newly created Rack"
     )]
-    pub meta_description: Option<String>,
+    meta_description: Option<String>,
 
     #[clap(
         long = "label",
@@ -60,7 +56,7 @@ pub struct Args {
         help = "A label that will be added as metadata for the newly created Rack. The labels key and value must be separated by a : character. E.g. DATACENTER:XYZ",
         action = clap::ArgAction::Append
     )]
-    pub labels: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
 }
 
 impl From<Args> for rpc::forge::ExpectedRack {
@@ -72,8 +68,9 @@ impl From<Args> for rpc::forge::ExpectedRack {
             labels,
         };
         rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(value.rack_id),
-            rack_profile_id: Some(value.rack_profile_id.into()),
+            rack_profile_id: None,
             metadata: Some(metadata),
         }
     }

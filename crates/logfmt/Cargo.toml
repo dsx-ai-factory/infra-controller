@@ -20,6 +20,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -29,10 +30,21 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 tracing-subscriber = { features = [
   "env-filter",
   "local-time",
 ], workspace = true }
+
+[features]
+# Exposes selected internals to `benches/` so the benchmarks drive the real
+# code paths. Not part of the crate's API.
+bench-hooks = []
+
+[[bench]]
+name = "logfmt_layer"
+harness = false
+required-features = ["bench-hooks"]
 
 [lints]
 workspace = true

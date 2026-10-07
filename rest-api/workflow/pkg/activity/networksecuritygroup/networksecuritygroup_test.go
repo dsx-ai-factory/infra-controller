@@ -13,9 +13,10 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -91,7 +92,12 @@ func testNetworkSecurityGroupSetupSchema(t *testing.T, dbSession *cdb.Session) {
 func testNetworkSecurityGroupSiteBuildInfrastructureProvider(t *testing.T, dbSession *cdb.Session, name string, org string, user *cdbm.User) *cdbm.InfrastructureProvider {
 	ipDAO := cdbm.NewInfrastructureProviderDAO(dbSession)
 
-	ip, err := ipDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Provider"), org, nil, user)
+	ip, err := ipDAO.Create(context.Background(), nil, cdbm.InfrastructureProviderCreateInput{
+		Name:        name,
+		DisplayName: cutil.GetPtr("Test Provider"),
+		Org:         org,
+		CreatedBy:   user.ID,
+	})
 	assert.Nil(t, err)
 
 	return ip
@@ -205,17 +211,17 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 
 	networkSecurityGroup5 := testNetworkSecurityGroupBuildNetworkSecurityGroup(t, dbSession, "test-networkSecurityGroup-5", st, tn, tnu, cdbm.NetworkSecurityGroupStatusError)
 
-	_, err := dbSession.DB.Exec("UPDATE network_security_group SET deleted = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval*2)), networkSecurityGroup5.ID)
+	_, err := dbSession.DB.Exec("UPDATE network_security_group SET deleted = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)), networkSecurityGroup5.ID)
 	assert.NoError(t, err)
 
 	networkSecurityGroup6 := testNetworkSecurityGroupBuildNetworkSecurityGroup(t, dbSession, "test-networkSecurityGroup-6", st, tn, tnu, cdbm.NetworkSecurityGroupStatusError)
 
-	_, err = dbSession.DB.Exec("UPDATE network_security_group SET deleted = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval*2)), networkSecurityGroup6.ID)
+	_, err = dbSession.DB.Exec("UPDATE network_security_group SET deleted = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)), networkSecurityGroup6.ID)
 	assert.NoError(t, err)
 
 	networkSecurityGroup7 := testNetworkSecurityGroupBuildNetworkSecurityGroup(t, dbSession, "test-networkSecurityGroup-7", st, tn, tnu, cdbm.NetworkSecurityGroupStatusReady)
 	// Set created earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE network_security_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval*2)), networkSecurityGroup7.ID)
+	_, err = dbSession.DB.Exec("UPDATE network_security_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)), networkSecurityGroup7.ID)
 	assert.NoError(t, err)
 
 	networkSecurityGroup8 := testNetworkSecurityGroupBuildNetworkSecurityGroup(t, dbSession, "test-networkSecurityGroup-8", st, tn, tnu, cdbm.NetworkSecurityGroupStatusReady)
@@ -226,7 +232,7 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 
 	networkSecurityGroup11 := testNetworkSecurityGroupBuildNetworkSecurityGroup(t, dbSession, "test-networkSecurityGroup-11", st, tn, tnu, cdbm.NetworkSecurityGroupStatusReady)
 	// Set created earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE network_security_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), networkSecurityGroup11.ID)
+	_, err = dbSession.DB.Exec("UPDATE network_security_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), networkSecurityGroup11.ID)
 	assert.NoError(t, err)
 
 	networkSecurityGroupDAO := cdbm.NewNetworkSecurityGroupDAO(dbSession)
@@ -241,7 +247,7 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 	for i := 0; i < 38; i++ {
 		networkSecurityGroup := testNetworkSecurityGroupBuildNetworkSecurityGroup(t, dbSession, fmt.Sprintf("test-networkSecurityGroup-paged-%d", i), st3, tn, tnu, cdbm.NetworkSecurityGroupStatusReady)
 		// Update creation timestamp to be earlier than inventory processing interval
-		_, err = dbSession.DB.Exec("UPDATE network_security_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval*2)), networkSecurityGroup.ID)
+		_, err = dbSession.DB.Exec("UPDATE network_security_group SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)), networkSecurityGroup.ID)
 		assert.NoError(t, err)
 		pagedNetworkSecurityGroups = append(pagedNetworkSecurityGroups, networkSecurityGroup)
 		pagedInvIds = append(pagedInvIds, networkSecurityGroup.ID)
@@ -249,11 +255,11 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 
 	// We stop short by 4 records to similate records unknown to
 	// the controller.
-	pagedCtrlNetworkSecurityGroups := []*cwssaws.NetworkSecurityGroup{}
+	pagedCtrlNetworkSecurityGroups := []*corev1.NetworkSecurityGroup{}
 	for i := 0; i < 34; i++ {
-		ctrlNetworkSecurityGroup := &cwssaws.NetworkSecurityGroup{
+		ctrlNetworkSecurityGroup := &corev1.NetworkSecurityGroup{
 			Id: pagedNetworkSecurityGroups[i].ID,
-			Metadata: &cwssaws.Metadata{
+			Metadata: &corev1.Metadata{
 				Name: pagedNetworkSecurityGroups[i].Name,
 			},
 		}
@@ -271,10 +277,10 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 
 	idStr := "anything"
 
-	siteKnownGroup := &cwssaws.NetworkSecurityGroup{Id: cloudUnknownGroup.ID, Metadata: &cwssaws.Metadata{
+	siteKnownGroup := &corev1.NetworkSecurityGroup{Id: cloudUnknownGroup.ID, Metadata: &corev1.Metadata{
 		Name: cloudUnknownGroup.Name,
 	}, TenantOrganizationId: cloudUnknownGroup.TenantOrg,
-		Attributes: &cwssaws.NetworkSecurityGroupAttributes{StatefulEgress: true, Rules: []*cwssaws.NetworkSecurityGroupRuleAttributes{
+		Attributes: &corev1.NetworkSecurityGroupAttributes{StatefulEgress: true, Rules: []*corev1.NetworkSecurityGroupRuleAttributes{
 			{
 				Id: &idStr,
 			},
@@ -312,7 +318,7 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 	type args struct {
 		ctx                           context.Context
 		siteID                        uuid.UUID
-		networkSecurityGroupInventory *cwssaws.NetworkSecurityGroupInventory
+		networkSecurityGroupInventory *corev1.NetworkSecurityGroupInventory
 	}
 
 	tests := []struct {
@@ -321,7 +327,7 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 		args                         args
 		readyNetworkSecurityGroups   []*cdbm.NetworkSecurityGroup
 		deletedNetworkSecurityGroups []*cdbm.NetworkSecurityGroup
-		updatedNetworkSecurityGroups []*cwssaws.NetworkSecurityGroup
+		updatedNetworkSecurityGroups []*corev1.NetworkSecurityGroup
 		wantErr                      bool
 	}{
 		{
@@ -335,8 +341,8 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			args: args{
 				ctx:    ctx,
 				siteID: uuid.New(),
-				networkSecurityGroupInventory: &cwssaws.NetworkSecurityGroupInventory{
-					NetworkSecurityGroups: []*cwssaws.NetworkSecurityGroup{},
+				networkSecurityGroupInventory: &corev1.NetworkSecurityGroupInventory{
+					NetworkSecurityGroups: []*corev1.NetworkSecurityGroup{},
 				},
 			},
 			wantErr: true,
@@ -352,35 +358,35 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			args: args{
 				ctx:    ctx,
 				siteID: st.ID,
-				networkSecurityGroupInventory: &cwssaws.NetworkSecurityGroupInventory{
-					NetworkSecurityGroups: []*cwssaws.NetworkSecurityGroup{
+				networkSecurityGroupInventory: &corev1.NetworkSecurityGroupInventory{
+					NetworkSecurityGroups: []*corev1.NetworkSecurityGroup{
 						{
 							Id:       networkSecurityGroup1.ID,
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup1.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup1.ID},
 						},
 						{
 							Id:       networkSecurityGroup2.ID,
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup2.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup2.ID},
 						},
 						{
 							Id:       networkSecurityGroup3.ID,
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup3.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup3.ID},
 						},
 						{
 							Id:       networkSecurityGroup4.ID,
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup4.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup4.ID},
 						},
 						{
 							Id:       networkSecurityGroup8.ID,
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup8.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup8.ID},
 						},
 						{
 							Id:       uuid.NewString(),
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup9.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup9.ID},
 						},
 						{
 							Id:       uuid.NewString(),
-							Metadata: &cwssaws.Metadata{Name: networkSecurityGroup10.ID},
+							Metadata: &corev1.Metadata{Name: networkSecurityGroup10.ID},
 						},
 					},
 				},
@@ -399,11 +405,11 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			args: args{
 				ctx:    ctx,
 				siteID: st2.ID,
-				networkSecurityGroupInventory: &cwssaws.NetworkSecurityGroupInventory{
-					NetworkSecurityGroups: []*cwssaws.NetworkSecurityGroup{},
+				networkSecurityGroupInventory: &corev1.NetworkSecurityGroupInventory{
+					NetworkSecurityGroups: []*corev1.NetworkSecurityGroup{},
 					Timestamp:             timestamppb.Now(),
-					InventoryStatus:       cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryStatus:       corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  0,
 						PageSize:    25,
@@ -424,10 +430,10 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			args: args{
 				ctx:    ctx,
 				siteID: st3.ID,
-				networkSecurityGroupInventory: &cwssaws.NetworkSecurityGroupInventory{
+				networkSecurityGroupInventory: &corev1.NetworkSecurityGroupInventory{
 					NetworkSecurityGroups: pagedCtrlNetworkSecurityGroups[0:10],
 					Timestamp:             timestamppb.Now(),
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  4,
 						PageSize:    10,
@@ -449,10 +455,10 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			args: args{
 				ctx:    ctx,
 				siteID: st3.ID,
-				networkSecurityGroupInventory: &cwssaws.NetworkSecurityGroupInventory{
+				networkSecurityGroupInventory: &corev1.NetworkSecurityGroupInventory{
 					NetworkSecurityGroups: pagedCtrlNetworkSecurityGroups[30:34],
 					Timestamp:             timestamppb.Now(),
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 4,
 						TotalPages:  4,
 						PageSize:    10,
@@ -474,10 +480,10 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			args: args{
 				ctx:    ctx,
 				siteID: st3.ID,
-				networkSecurityGroupInventory: &cwssaws.NetworkSecurityGroupInventory{
+				networkSecurityGroupInventory: &corev1.NetworkSecurityGroupInventory{
 					NetworkSecurityGroups: pagedCtrlNetworkSecurityGroups[30:35],
 					Timestamp:             timestamppb.Now(),
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 4,
 						TotalPages:  4,
 						PageSize:    10,
@@ -489,7 +495,7 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			// Check that the type unknown to cloud has become known to cloud.  I.e.,
 			// it made it to the cloud DB.
 			readyNetworkSecurityGroups:   append(pagedNetworkSecurityGroups[30:34], cloudUnknownGroup),
-			updatedNetworkSecurityGroups: []*cwssaws.NetworkSecurityGroup{updatedGroup},
+			updatedNetworkSecurityGroups: []*corev1.NetworkSecurityGroup{updatedGroup},
 		},
 	}
 
@@ -501,6 +507,8 @@ func TestManageNetworkSecurityGroup_UpdateNetworkSecurityGroupsInDB(t *testing.T
 			}
 
 			mv.siteClientPool.IDClientMap[tt.args.siteID.String()] = tt.fields.clientPoolClient
+
+			cwu.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.NetworkSecurityGroup)(nil))
 
 			err := mv.UpdateNetworkSecurityGroupsInDB(tt.args.ctx, tt.args.siteID, tt.args.networkSecurityGroupInventory)
 			assert.Equal(t, tt.wantErr, err != nil)

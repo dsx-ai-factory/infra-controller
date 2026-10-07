@@ -32,7 +32,7 @@ Remove an external config:
     $ nico-admin-cli machine-validation external-config remove --name my-config
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "Show External config")]
     Show(ExternalConfigShowOptions),
 
@@ -44,23 +44,23 @@ pub enum Args {
 }
 
 #[derive(Parser, Debug)]
-pub struct ExternalConfigShowOptions {
+pub(crate) struct ExternalConfigShowOptions {
     #[clap(short, long, help = "Machine validation external config names")]
-    pub name: Vec<String>,
+    pub(super) name: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
-pub struct ExternalConfigAddOptions {
+pub(crate) struct ExternalConfigAddOptions {
     #[clap(short, long, help = "Name of the file to update")]
-    pub file_name: String,
+    pub(super) file_name: String,
     #[clap(short, long, help = "Name of the config")]
-    pub name: String,
+    pub(super) name: String,
     #[clap(short, long, help = "description of the file to update")]
-    pub description: String,
+    pub(super) description: String,
 }
 
 #[derive(Parser, Debug)]
-pub struct ExternalConfigRemoveOptions {
+pub(crate) struct ExternalConfigRemoveOptions {
     #[clap(short, long, help = "Machine validation external config name")]
-    pub name: String,
+    pub(super) name: String,
 }

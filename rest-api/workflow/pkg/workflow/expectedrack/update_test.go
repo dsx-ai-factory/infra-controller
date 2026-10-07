@@ -17,7 +17,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateExpectedRackTestSuite struct {
@@ -41,8 +41,8 @@ func (s *UpdateExpectedRackTestSuite) Test_UpdateExpectedRackInventory_Success()
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.ExpectedRackInventory{
-		ExpectedRacks: []*cwssaws.ExpectedRack{},
+	inv := &corev1.ExpectedRackInventory{
+		ExpectedRacks: []*corev1.ExpectedRack{},
 	}
 
 	s.env.RegisterActivity(expectedRackManager.UpdateExpectedRacksInDB)
@@ -60,8 +60,8 @@ func (s *UpdateExpectedRackTestSuite) Test_UpdateExpectedRackInventory_ActivityF
 
 	siteID := uuid.New()
 
-	inv := &cwssaws.ExpectedRackInventory{
-		ExpectedRacks: []*cwssaws.ExpectedRack{},
+	inv := &corev1.ExpectedRackInventory{
+		ExpectedRacks: []*corev1.ExpectedRack{},
 	}
 
 	s.env.RegisterActivity(expectedRackManager.UpdateExpectedRacksInDB)
@@ -78,8 +78,8 @@ func (s *UpdateExpectedRackTestSuite) Test_UpdateExpectedRackInventory_ActivityF
 }
 
 func (s *UpdateExpectedRackTestSuite) Test_UpdateExpectedRackInventory_InvalidSiteID() {
-	inv := &cwssaws.ExpectedRackInventory{
-		ExpectedRacks: []*cwssaws.ExpectedRack{},
+	inv := &corev1.ExpectedRackInventory{
+		ExpectedRacks: []*corev1.ExpectedRack{},
 	}
 
 	// No activities registered: workflow must reject before invoking any activity.

@@ -29,7 +29,7 @@ use tokio::time::sleep;
 
 use crate::command_line;
 
-pub async fn setup_and_run(
+pub(super) async fn setup_and_run(
     forge_client_config: Arc<ForgeClientConfig>,
     agent_config: AgentConfig,
     options: command_line::RunOptions,

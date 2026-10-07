@@ -30,7 +30,7 @@ Clear the last known error for a BMC in the latest report:
     $ nico-admin-cli site-explorer clear-error 192.0.2.10
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(flatten)]
-    pub inner: ExploreOptions,
+    pub(super) inner: ExploreOptions,
 }

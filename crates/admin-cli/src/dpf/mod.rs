@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
-pub mod common;
+mod common;
 mod disable;
 mod enable;
+mod service_sync;
 mod service_version;
 mod show;
 mod snapshot;
@@ -27,7 +28,7 @@ use clap::Parser;
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Enable DPF")]
     Enable(enable::Args),
     #[clap(about = "Disable DPF")]
@@ -41,4 +42,10 @@ pub enum Cmd {
         about = "Compare configured vs deployed DPF service versions"
     )]
     ServiceVersion(service_version::Args),
+    #[clap(
+        subcommand,
+        alias = "ss",
+        about = "Release DPF maintenance holds blocking a DPUService rollout"
+    )]
+    ServiceSync(service_sync::Args),
 }

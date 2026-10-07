@@ -49,14 +49,20 @@ pub fn run(mut interval: Interval, api_client: ApiClient) -> ApiThrottler {
                                 .into_iter()
                                 .collect::<Vec<_>>();
 
-                            // Max of 100 machine IDs at a time
+                            // Page the lookup so each reply stays well under tonic's
+                            // 4 MiB receive limit: a page of 100 machines has exceeded
+                            // it in the field at about 46 KB per machine.
+                            const MACHINES_PAGE_SIZE: usize = 25;
                             let mut machines_by_id = HashMap::new();
-                            for chunk in machine_ids.chunks(100) {
+                            for chunk in machine_ids.chunks(MACHINES_PAGE_SIZE) {
                                 let machines = api_client.get_machines(
                                     chunk.iter().map(|id| **id).collect(),
                                 )
                                 .await
-                                .inspect_err(|e| tracing::error!("API failure getting machines: {e}")).unwrap_or_default();
+                                .inspect_err(|e| tracing::error!(
+                                    error = %e,
+                                    "API failure getting machines",
+                                )).unwrap_or_default();
 
                                 // Index the result by ID
                                 for m in machines {
@@ -83,7 +89,10 @@ pub fn run(mut interval: Interval, api_client: ApiClient) -> ApiThrottler {
                             get_machine_callers = HashMap::new()
                         }
                     }
-                    Some(cmd) = control_rx.recv() => {
+                    cmd = control_rx.recv() => {
+                        let Some(cmd) = cmd else {
+                            return;
+                        };
                         match cmd {
                             ApiCommand::GetMachine(machine_id, reply) => get_machine_callers.entry(machine_id).or_default().push(reply),
                         };

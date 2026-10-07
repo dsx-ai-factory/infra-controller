@@ -6,6 +6,9 @@ package handler
 import (
 	"net/http"
 
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
@@ -13,21 +16,17 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
 )
 
 // GetCurrentServiceAccountHandler is the API Handler for getting the current Service Account
 type GetCurrentServiceAccountHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetCurrentServiceAccountHandler initializes and returns a new handler for getting the current Service Account
 func NewGetCurrentServiceAccountHandler(dbSession *cdb.Session) GetCurrentServiceAccountHandler {
 	return GetCurrentServiceAccountHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -42,7 +41,7 @@ func NewGetCurrentServiceAccountHandler(dbSession *cdb.Session) GetCurrentServic
 // @Success 200 {object} model.APIServiceAccount
 // @Router /v2/org/{org}/nico/service-account/current [get]
 func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ServiceAccount", "GetCurrent", c, gcsah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ServiceAccount", "GetCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -71,7 +70,12 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 	var serr error
 	if len(ips) == 0 {
 		// Create Infrastructure Provider
-		ip, serr = ipDAO.CreateFromParams(ctx, nil, org, nil, org, cutil.GetPtr(org), dbUser)
+		ip, serr = ipDAO.Create(ctx, nil, cdbm.InfrastructureProviderCreateInput{
+			Name:           org,
+			Org:            org,
+			OrgDisplayName: cutil.GetPtr(org),
+			CreatedBy:      dbUser.ID,
+		})
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error creating Infrastructure Provider DB entity")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Infrastructure Provider for org, DB error", nil)
@@ -85,23 +89,18 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 
 	var tn *cdbm.Tenant
 
-	tns, err := tnDAO.GetAllByOrg(ctx, nil, org, nil)
+	tns, _, err := tnDAO.GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant for org, DB error", nil)
 	}
 
 	if len(tns) == 0 {
-		// Create Tenant
-		tenantConfig := &cdbm.TenantConfig{
-			// Enable targeted instance creation for org
-			TargetedInstanceCreation: true,
-		}
+		// Create Tenant without legacy capability flags; capability is managed on TenantAccount.
 		tn, serr = tnDAO.Create(ctx, nil, cdbm.TenantCreateInput{
 			Name:           org,
 			Org:            org,
 			OrgDisplayName: cutil.GetPtr(org),
-			Config:         tenantConfig,
 			CreatedBy:      dbUser.ID,
 		})
 		if serr != nil {
@@ -110,22 +109,9 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 		}
 	} else {
 		tn = &tns[0]
-
-		// Check if Tenant has targeted instance creation enabled
-		if !tn.Config.TargetedInstanceCreation {
-			// Update Tenant to enable targeted instance creation
-			tenantConfig := tn.Config
-			tenantConfig.TargetedInstanceCreation = true
-			tn, serr = tnDAO.Update(ctx, nil, cdbm.TenantUpdateInput{
-				TenantID: tn.ID,
-				Config:   tenantConfig,
-			})
-			if serr != nil {
-				logger.Error().Err(serr).Msg("error updating Tenant DB entity")
-				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Tenant capabilities for org, DB error", nil)
-			}
-		}
 	}
+
+	accountConfig := &cdbm.TenantAccountConfig{TargetedInstanceCreation: true}
 
 	// Create Tenant Account if it doesn't exist
 	taDAO := cdbm.NewTenantAccountDAO(gcsah.dbSession)
@@ -148,6 +134,7 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 				InfrastructureProviderID:  ip.ID,
 				InfrastructureProviderOrg: ip.Org,
 				Status:                    cdbm.TenantAccountStatusReady,
+				Config:                    accountConfig,
 				CreatedBy:                 dbUser.ID,
 			})
 			if derr != nil {
@@ -155,8 +142,11 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Tenant Account for org's Tenant, DB error", nil)
 			}
 
-			_, derr = sdDAO.CreateFromParams(ctx, tx, ta.ID.String(), cdbm.TenantAccountStatusReady,
-				cutil.GetPtr("service account enabled, tenant account ready"))
+			_, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
+				EntityID: ta.ID.String(),
+				Status:   cdbm.TenantAccountStatusReady,
+				Message:  cutil.GetPtr("service account enabled, tenant account ready"),
+			})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error creating Status Detail for Tenant Account")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for org's Tenant Account, DB error", nil)
@@ -166,6 +156,39 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 		})
 		if serr != nil {
 			return common.HandleTxError(c, logger, serr, "Failed to create Tenant Account, DB transaction error")
+		}
+	} else if tas[0].Status != cdbm.TenantAccountStatusReady || !tas[0].Config.TargetedInstanceCreation {
+		statusChanged := tas[0].Status != cdbm.TenantAccountStatusReady
+		sdDAO := cdbm.NewStatusDetailDAO(gcsah.dbSession)
+		serr = cdb.WithTx(ctx, gcsah.dbSession, func(tx *cdb.Tx) error {
+			_, derr := taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
+				TenantAccountID: tas[0].ID,
+				Status:          cutil.GetPtr(cdbm.TenantAccountStatusReady),
+				Config: &cdbm.TenantAccountConfig{
+					TargetedInstanceCreation: true,
+				},
+			})
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error updating Tenant Account capabilities for org")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities for org, DB error", nil)
+			}
+
+			if statusChanged {
+				_, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
+					EntityID: tas[0].ID.String(),
+					Status:   cdbm.TenantAccountStatusReady,
+					Message:  cutil.GetPtr("service account enabled, tenant account ready"),
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error creating Status Detail for Tenant Account")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for org's Tenant Account, DB error", nil)
+				}
+			}
+
+			return nil
+		})
+		if serr != nil {
+			return common.HandleTxError(c, logger, serr, "Failed to update Tenant Account, DB transaction error")
 		}
 	}
 

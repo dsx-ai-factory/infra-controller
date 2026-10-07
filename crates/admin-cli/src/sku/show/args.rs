@@ -17,4 +17,4 @@
 
 use super::super::common::ShowSkuOptions;
 
-pub type Args = ShowSkuOptions;
+pub(in crate::sku) type Args = ShowSkuOptions;

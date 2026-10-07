@@ -26,12 +26,15 @@ use crate::address_selection_strategy::AddressSelectionStrategy;
 ///   or a DHCP service that integrates directly with carbide-api.
 /// - `Static`: These addresses are assigned and managed explicitly by
 ///   an operator or operator-provided configuration.
+/// - `Slaac`: These IPv6 addresses were inferred from a client MAC using
+///   modified EUI-64 during stateless DHCPv6 handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, Serialize, Deserialize)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum AllocationType {
     Dhcp,
     Static,
+    Slaac,
 }
 
 impl From<AddressSelectionStrategy> for AllocationType {
@@ -176,6 +179,10 @@ mod tests {
             "static" {
                 AllocationType::Static => r#""static""#.to_string(),
             }
+
+            "slaac" {
+                AllocationType::Slaac => r#""slaac""#.to_string(),
+            }
         );
     }
 
@@ -198,6 +205,10 @@ mod tests {
             "static" {
                 AllocationType::Static => Yields((r#""static""#.to_string(), AllocationType::Static)),
             }
+
+            "slaac" {
+                AllocationType::Slaac => Yields((r#""slaac""#.to_string(), AllocationType::Slaac)),
+            }
         );
     }
 
@@ -215,6 +226,10 @@ mod tests {
 
             "static" {
                 r#""static""# => Yields(AllocationType::Static),
+            }
+
+            "slaac" {
+                r#""slaac""# => Yields(AllocationType::Slaac),
             }
 
             "wrong case rejected" {
@@ -255,9 +270,7 @@ mod tests {
         );
     }
 
-    // Derived `PartialEq`/`Eq` over both `AllocationType` and `AssignStaticResult`:
-    // a variant equals only itself. `AssignStaticResult` has no other pure logic, so
-    // equality across its full variant set is its coverage.
+    // Derived `PartialEq`/`Eq` over `AllocationType`: a variant equals only itself.
     #[test]
     fn variants_compare_by_identity() {
         value_scenarios!(
@@ -270,50 +283,20 @@ mod tests {
                 (AllocationType::Static, AllocationType::Static) => true,
             }
 
+            "slaac == slaac" {
+                (AllocationType::Slaac, AllocationType::Slaac) => true,
+            }
+
             "dhcp != static" {
                 (AllocationType::Dhcp, AllocationType::Static) => false,
             }
-        );
 
-        value_scenarios!(
-            run = |(left, right)| left == right;
-            "assigned == assigned" {
-                (AssignStaticResult::Assigned, AssignStaticResult::Assigned) => true,
+            "dhcp != slaac" {
+                (AllocationType::Dhcp, AllocationType::Slaac) => false,
             }
 
-            "replaced static == replaced static" {
-                (
-                    AssignStaticResult::ReplacedStatic,
-                    AssignStaticResult::ReplacedStatic,
-                ) => true,
-            }
-
-            "replaced dhcp == replaced dhcp" {
-                (
-                    AssignStaticResult::ReplacedDhcp,
-                    AssignStaticResult::ReplacedDhcp,
-                ) => true,
-            }
-
-            "assigned != replaced static" {
-                (
-                    AssignStaticResult::Assigned,
-                    AssignStaticResult::ReplacedStatic,
-                ) => false,
-            }
-
-            "replaced static != replaced dhcp" {
-                (
-                    AssignStaticResult::ReplacedStatic,
-                    AssignStaticResult::ReplacedDhcp,
-                ) => false,
-            }
-
-            "assigned != replaced dhcp" {
-                (
-                    AssignStaticResult::Assigned,
-                    AssignStaticResult::ReplacedDhcp,
-                ) => false,
+            "static != slaac" {
+                (AllocationType::Static, AllocationType::Slaac) => false,
             }
         );
     }

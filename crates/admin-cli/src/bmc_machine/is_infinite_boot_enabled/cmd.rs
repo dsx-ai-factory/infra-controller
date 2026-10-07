@@ -19,7 +19,10 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn is_infinite_boot_enabled(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn is_infinite_boot_enabled(
+    args: Args,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
     let response = api_client.0.is_infinite_boot_enabled(args).await?;
     match response.is_enabled {
         Some(true) => println!("Enabled"),

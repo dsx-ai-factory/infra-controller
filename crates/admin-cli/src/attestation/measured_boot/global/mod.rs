@@ -19,4 +19,4 @@
 //! Measured Boot CLI-backing global/common functions used by other
 //! CLI subcommands.
 
-pub mod cmds;
+pub(super) mod cmds;

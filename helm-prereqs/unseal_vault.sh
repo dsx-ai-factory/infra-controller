@@ -27,12 +27,68 @@
 #   any pods that are sealed (e.g. after a node restart).
 #
 # Requires: kubectl, jq
+#
+# Tunables (env):
+#   VAULT_STATUS_RETRIES       — attempts to read a parseable `vault status`
+#                                per pod (default: 36)
+#   VAULT_STATUS_SLEEP_SECONDS — delay between status attempts (default: 5)
+#   VAULT_UNSEAL_ROUNDS        — full key-sequence retries per pod before
+#                                giving up (default: 3)
 # =============================================================================
 set -euo pipefail
 
 NAMESPACE="vault"
+VAULT_STATUS_RETRIES="${VAULT_STATUS_RETRIES:-36}"
+VAULT_STATUS_SLEEP_SECONDS="${VAULT_STATUS_SLEEP_SECONDS:-5}"
+VAULT_UNSEAL_ROUNDS="${VAULT_UNSEAL_ROUNDS:-3}"
 
-echo "Waiting for all 3 Vault pods to be Running..."
+if ! [[ "${VAULT_STATUS_RETRIES}" =~ ^[1-9][0-9]*$ ]] ||
+   ! [[ "${VAULT_UNSEAL_ROUNDS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: VAULT_STATUS_RETRIES and VAULT_UNSEAL_ROUNDS must be positive integers." >&2
+    exit 1
+fi
+
+_vault_status_json() {
+    local pod="$1"
+    local attempt output err_file err_output
+
+    err_file="$(mktemp)"
+    for attempt in $(seq 1 "${VAULT_STATUS_RETRIES}"); do
+        : > "${err_file}"
+        output="$(
+            kubectl exec -n "${NAMESPACE}" "${pod}" -c vault -- \
+                vault status -tls-skip-verify -format=json 2>"${err_file}" || true
+        )"
+
+        if [[ -n "${output}" ]] && \
+           echo "${output}" | jq -e '(.initialized | type == "boolean") and (.sealed | type == "boolean")' >/dev/null 2>&1; then
+            rm -f "${err_file}"
+            printf '%s\n' "${output}"
+            return 0
+        fi
+
+        if [[ "${attempt}" -lt "${VAULT_STATUS_RETRIES}" ]]; then
+            echo "  ${pod}: Vault status not ready (${attempt}/${VAULT_STATUS_RETRIES}); retrying in ${VAULT_STATUS_SLEEP_SECONDS}s..." >&2
+            sleep "${VAULT_STATUS_SLEEP_SECONDS}"
+        fi
+    done
+
+    err_output="$(cat "${err_file}" 2>/dev/null || true)"
+    rm -f "${err_file}"
+
+    echo "ERROR: Unable to retrieve parseable Vault status from ${pod} after ${VAULT_STATUS_RETRIES} attempts." >&2
+    if [[ -n "${output:-}" ]]; then
+        echo "Last stdout from vault status:" >&2
+        echo "${output}" >&2
+    fi
+    if [[ -n "${err_output}" ]]; then
+        echo "Last stderr from vault status:" >&2
+        echo "${err_output}" >&2
+    fi
+    return 1
+}
+
+echo "Waiting for all 3 Vault pods to be initialized..."
 # StatefulSets create pods sequentially — vault-1/vault-2 may not exist yet.
 # Poll until each pod exists, then wait for Initialized.
 for POD in vault-0 vault-1 vault-2; do
@@ -45,19 +101,10 @@ for POD in vault-0 vault-1 vault-2; do
         --for=condition=Initialized \
         --timeout=300s
 done
-echo "All Vault pods are Running"
+echo "All Vault pods are initialized"
 
 echo "Checking Vault status on vault-0..."
-VAULT_STATUS_JSON="$(
-    kubectl exec -n "${NAMESPACE}" vault-0 -c vault -- \
-        vault status -tls-skip-verify -format=json 2>/dev/null || true
-)"
-
-if [[ -z "${VAULT_STATUS_JSON}" ]]; then
-    echo "ERROR: Unable to retrieve Vault status from vault-0."
-    echo "Make sure the Vault pods are running and try again."
-    exit 1
-fi
+VAULT_STATUS_JSON="$(_vault_status_json vault-0)"
 
 INITIALIZED="$(echo "${VAULT_STATUS_JSON}" | jq -r '.initialized')"
 SEALED="$(echo "${VAULT_STATUS_JSON}" | jq -r '.sealed')"
@@ -99,26 +146,39 @@ KEY_3="$(kubectl -n "${NAMESPACE}" get secret vault-cluster-keys -o json \
 
 unseal_pod() {
     local POD="$1"
-    local POD_STATUS POD_SEALED
-    POD_STATUS="$(kubectl exec -n "${NAMESPACE}" "${POD}" -c vault -- \
-        vault status -tls-skip-verify -format=json 2>/dev/null)" || true
+    local POD_STATUS POD_SEALED ROUND KEY
+    POD_STATUS="$(_vault_status_json "${POD}")"
     POD_SEALED="$(echo "${POD_STATUS}" | jq -r '.sealed')"
 
-    if [[ "${POD_SEALED}" == "true" ]]; then
-        echo "Unsealing ${POD}..."
-        kubectl exec -n "${NAMESPACE}" "${POD}" -c vault -- \
-            vault operator unseal -tls-skip-verify "${KEY_1}"
-        sleep 5
-        kubectl exec -n "${NAMESPACE}" "${POD}" -c vault -- \
-            vault operator unseal -tls-skip-verify "${KEY_2}"
-        sleep 5
-        kubectl exec -n "${NAMESPACE}" "${POD}" -c vault -- \
-            vault operator unseal -tls-skip-verify "${KEY_3}"
-        sleep 5
-        echo "${POD} unsealed"
-    else
+    if [[ "${POD_SEALED}" != "true" ]]; then
         echo "${POD} is already unsealed. Skipping."
+        return 0
     fi
+
+    # The unseal nonce can reset mid-sequence (e.g. on a raft leadership
+    # change), discarding submitted key shares, so retry the full key
+    # sequence until the pod reports unsealed. A failed unseal exec (the
+    # same listener race the status retry covers) must not abort the
+    # script here — the status check below decides whether to retry.
+    for ROUND in $(seq 1 "${VAULT_UNSEAL_ROUNDS}"); do
+        echo "Unsealing ${POD} (round ${ROUND}/${VAULT_UNSEAL_ROUNDS})..."
+        for KEY in "${KEY_1}" "${KEY_2}" "${KEY_3}"; do
+            kubectl exec -n "${NAMESPACE}" "${POD}" -c vault -- \
+                vault operator unseal -tls-skip-verify "${KEY}" \
+                || echo "  ${POD}: unseal command failed; will re-check status" >&2
+            sleep 5
+        done
+        POD_STATUS="$(_vault_status_json "${POD}")"
+        POD_SEALED="$(echo "${POD_STATUS}" | jq -r '.sealed')"
+        if [[ "${POD_SEALED}" == "false" ]]; then
+            echo "${POD} unsealed"
+            return 0
+        fi
+        echo "${POD} is still sealed after round ${ROUND}/${VAULT_UNSEAL_ROUNDS}" >&2
+    done
+
+    echo "ERROR: ${POD} is still sealed after ${VAULT_UNSEAL_ROUNDS} unseal rounds" >&2
+    return 1
 }
 
 unseal_pod vault-0

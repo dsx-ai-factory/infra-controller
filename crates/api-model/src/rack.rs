@@ -17,9 +17,9 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -66,6 +66,8 @@ pub const LABEL_LOCATION_POSITION: &str = "location.position";
 pub struct Rack {
     pub id: RackId,
     pub rack_profile_id: Option<RackProfileId>,
+    /// External group identity copied from the expected rack at discovery.
+    pub rack_group_id: Option<RackGroupId>,
     pub config: RackConfig,
     pub controller_state: Versioned<RackState>,
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
@@ -84,7 +86,7 @@ pub struct FirmwareUpgradeJob {
     pub job_id: Option<String>,
     #[serde(default)]
     pub firmware_id: Option<String>,
-    pub status: Option<String>,
+    pub status: Option<FirmwareProgressState>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -145,7 +147,7 @@ pub struct ResolvedNvosArtifact {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NvosUpdateSwitchStatus {
     #[serde(default)]
     pub node_id: String,
@@ -157,6 +159,34 @@ pub struct NvosUpdateSwitchStatus {
     pub job_id: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+
+    /// Desired-password recovery after the image operation.
+    #[serde(default)]
+    pub password_update: NvosPasswordUpdateState,
+}
+
+/// Persisted desired-password recovery state for one switch in an NVOS update.
+///
+/// The state starts at [`Self::NotStarted`], advances to [`Self::InProgress`]
+/// after the backend accepts a recovery job, and reaches [`Self::Completed`]
+/// after the backend confirms the desired password. A backend-reported failure
+/// transitions the rack to [`RackState::Error`]. An unresolved job returns the
+/// state to [`Self::NotStarted`] so the same credentials can be resubmitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum NvosPasswordUpdateState {
+    /// No password recovery job has been submitted.
+    #[default]
+    NotStarted,
+
+    /// The backend accepted a password recovery job that has not completed.
+    InProgress {
+        /// Backend-owned job ID used to poll the recovery operation.
+        job_id: String,
+    },
+
+    /// RMS confirmed the desired password.
+    Completed,
 }
 
 /// Per-device input passed to RMS when starting a firmware upgrade.
@@ -172,6 +202,40 @@ pub struct FirmwareUpgradeDeviceInfo {
     pub os_ip: Option<String>,
     pub os_username: Option<String>,
     pub os_password: Option<String>,
+    pub os_hostname: Option<String>,
+}
+
+/// Progress of a firmware upgrade, per device and for the job as a whole.
+///
+/// `Unknown` keeps a value written by an older revision from failing the whole
+/// rack row: `FirmwareUpgradeJob` is persisted as `jsonb`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareProgressState {
+    /// The backend accepted the upgrade but has not started it.
+    Pending,
+
+    /// The backend is applying the upgrade.
+    InProgress,
+
+    /// The upgrade completed successfully.
+    Completed,
+
+    /// The upgrade completed unsuccessfully.
+    Failed,
+
+    /// A state written by a newer producer that this revision does not recognize.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl FirmwareProgressState {
+    /// Returns `true` once the upgrade has settled and will not advance again
+    /// without a new request. `Unknown` is not terminal: an unrecognized value
+    /// is treated as still in flight rather than silently completed.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
 }
 
 /// Per-device status tracked inside `FirmwareUpgradeJob`.
@@ -181,7 +245,7 @@ pub struct FirmwareUpgradeDeviceStatus {
     pub node_id: String,
     pub mac: String,
     pub bmc_ip: String,
-    pub status: String,
+    pub status: FirmwareProgressState,
     #[serde(default)]
     pub job_id: Option<String>,
     #[serde(default)]
@@ -271,6 +335,7 @@ pub enum SwitchNvosUpdateState {
 #[derive(Clone, Debug, Default)]
 pub struct RackSearchFilter {
     pub label: Option<crate::metadata::LabelFilter>,
+    pub deleted: crate::DeletedFilter,
 }
 
 pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_report::HealthReport {
@@ -314,6 +379,7 @@ impl<'r> FromRow<'r, PgRow> for Rack {
         Ok(Rack {
             id: row.try_get("id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             config: config.0,
             controller_state: Versioned {
                 value: controller_state.0,
@@ -335,6 +401,19 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 // ============================================================================
 // RACK STATES
 // ============================================================================
+
+/// Determines how a rack can leave [`RackState::Error`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RackErrorRecoveryPolicy {
+    /// The rack returns to Ready after all attached components become Ready.
+    /// Also applies when a persisted Error state has no recovery metadata.
+    #[default]
+    ComponentsReady,
+
+    /// The rack remains in Error until an operator requests rack maintenance.
+    MaintenanceRequestRequired,
+}
 
 /// State of a Rack as tracked by the controller.
 ///
@@ -396,7 +475,14 @@ pub enum RackState {
     },
 
     /// There is error in the Rack; Rack can not be used if it's in error.
-    Error { cause: String },
+    Error {
+        /// Description of the failure that moved the rack to Error.
+        cause: String,
+
+        /// Policy controlling when the rack may leave Error.
+        #[serde(default)]
+        recovery_policy: RackErrorRecoveryPolicy,
+    },
 
     /// Rack is in the process of deleting.
     Deleting,
@@ -456,17 +542,49 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` advances into the NMX cluster sequence. `DisableScaleUpFabricState`
-/// disables ScaleUpFabric state on all scoped switches before
-/// `ConfigureScaleUpFabricManager` selects, persists, and configures only the
-/// primary switch. `WaitForFabricStatus` polls
-/// `BatchGetScaleUpFabricServiceStatus` and persists the per-switch
-/// `fabric_manager_status` before advancing.
+/// `Start` rotates switch-local certificates before submitting the asynchronous
+/// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
+/// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
+/// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
+/// controller restarts.
+///
+/// `ConfigureCertificates`, `DisableScaleUpFabricState`,
+/// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
+/// a workflow this version does not run. A `controller_state` row can still
+/// hold one, so they are decoded to keep that row from failing the batch queries
+/// that load every rack. Maintenance cannot resume from them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
+
+    /// Waits for the RMS switch-certificate batch to complete.
+    WaitForSwitchCertificateJob {
+        /// Parent RMS job identifier returned by batch certificate configuration.
+        job_id: String,
+    },
+
+    WaitForScaleUpFabricManagerJob {
+        /// RMS job identifier returned by submission.
+        job_id: String,
+    },
+
+    /// Waits for the configured primary nmx-telemetry binding to complete.
+    WaitForPrimarySwitchCertificateJob {
+        /// Parent RMS job identifier returned by certificate configuration.
+        job_id: String,
+    },
+
+    /// Retired sub-state. The braces make this a struct variant, which absorbs
+    /// the payload the retired workflow wrote; a unit variant would reject it.
+    ConfigureCertificates {},
+
+    /// Retired sub-state.
     DisableScaleUpFabricState,
+
+    /// Retired sub-state.
     ConfigureScaleUpFabricManager,
+
+    /// Retired sub-state.
     WaitForFabricStatus,
 }
 
@@ -474,6 +592,18 @@ impl Display for ConfigureNmxClusterState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigureNmxClusterState::Start => write!(f, "Start"),
+            ConfigureNmxClusterState::WaitForSwitchCertificateJob { job_id } => {
+                write!(f, "WaitForSwitchCertificateJob({job_id})")
+            }
+            ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
+                write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
+            }
+            ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
+                write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
+            }
+            ConfigureNmxClusterState::ConfigureCertificates {} => {
+                write!(f, "ConfigureCertificates")
+            }
             ConfigureNmxClusterState::DisableScaleUpFabricState => {
                 write!(f, "DisableScaleUpFabricState")
             }
@@ -618,7 +748,7 @@ impl Display for RackState {
             RackState::Maintenance { maintenance_state } => {
                 write!(f, "Maintenance({})", maintenance_state)
             }
-            RackState::Error { cause } => write!(f, "Error({})", cause),
+            RackState::Error { cause, .. } => write!(f, "Error({})", cause),
             RackState::Deleting => write!(f, "Deleting"),
         }
     }
@@ -705,10 +835,10 @@ impl std::fmt::Display for MaintenanceActivity {
 /// Specifies which devices in the rack should be included in an on-demand
 /// maintenance cycle. When all three device-id lists are empty, the full rack
 /// is maintained.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MaintenanceScope {
     #[serde(default)]
-    pub machine_ids: Vec<MachineId>,
+    pub machine_ids: Vec<HostMachineId>,
     #[serde(default)]
     pub switch_ids: Vec<SwitchId>,
     #[serde(default)]
@@ -716,6 +846,12 @@ pub struct MaintenanceScope {
     /// Which maintenance activities to perform. Empty means all activities.
     #[serde(default)]
     pub activities: Vec<MaintenanceActivity>,
+    /// When this request was accepted, stamped by the server rather than
+    /// supplied by the caller. It marks the boundary of the current maintenance
+    /// cycle, so a persisted per-device status can be tested against it to tell
+    /// this request's result from a leftover of the previous one.
+    #[serde(default)]
+    pub requested_at: Option<DateTime<Utc>>,
 }
 
 impl MaintenanceScope {
@@ -727,6 +863,29 @@ impl MaintenanceScope {
 
     pub fn should_run(&self, activity: &MaintenanceActivity) -> bool {
         self.activities.is_empty() || self.activities.iter().any(|a| a.same_kind(activity))
+    }
+
+    /// Returns `true` when `other` selects the same devices and activities as
+    /// this scope, used to tell a resubmission of the pending request
+    /// (`AlreadyPending`) from a different one arriving while it is still in
+    /// flight (`Busy`).
+    ///
+    /// This deliberately ignores [`Self::requested_at`]. That field is stamped
+    /// on acceptance, so the pending scope always carries one and an incoming
+    /// scope never does; comparing it would make every resubmission look like a
+    /// different request and turn an idempotent retry into a spurious `Busy`.
+    pub fn same_request(&self, other: &Self) -> bool {
+        let Self {
+            machine_ids,
+            switch_ids,
+            power_shelf_ids,
+            activities,
+            requested_at: _,
+        } = self;
+        *machine_ids == other.machine_ids
+            && *switch_ids == other.switch_ids
+            && *power_shelf_ids == other.power_shelf_ids
+            && *activities == other.activities
     }
 }
 
@@ -747,6 +906,12 @@ pub struct RackConfig {
     /// selects full-rack vs partial-rack and which activities to run.
     #[serde(default)]
     pub maintenance_requested: Option<MaintenanceScope>,
+
+    /// Operator request to terminate the active rack maintenance cycle. The rack
+    /// state controller consumes this flag, performs device cleanup, and
+    /// transitions the rack to [`RackState::Error`].
+    #[serde(default)]
+    pub maintenance_termination_requested: bool,
 }
 
 /// Reason a rack will not accept a new on-demand maintenance request.
@@ -823,11 +988,96 @@ pub fn state_sla(state: &RackState, state_version: &ConfigVersion) -> StateSla {
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
-    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
     use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 
     use super::*;
+
+    // ConfigureNmxClusterState wire compatibility
+
+    /// Pins the shapes a `controller_state` row can hold for a rack that was
+    /// mid-maintenance under the retired synchronous workflow. Decoding these
+    /// keeps one such row from failing the batch queries that load every rack.
+    #[test]
+    fn configure_nmx_cluster_state_decodes_retired_sub_states() {
+        for (encoded, expected) in [
+            (
+                serde_json::json!("DisableScaleUpFabricState"),
+                ConfigureNmxClusterState::DisableScaleUpFabricState,
+            ),
+            (
+                serde_json::json!("ConfigureScaleUpFabricManager"),
+                ConfigureNmxClusterState::ConfigureScaleUpFabricManager,
+            ),
+            (
+                serde_json::json!("WaitForFabricStatus"),
+                ConfigureNmxClusterState::WaitForFabricStatus,
+            ),
+            (
+                serde_json::json!({"ConfigureCertificates": {"configure_certificate": "Start"}}),
+                ConfigureNmxClusterState::ConfigureCertificates {},
+            ),
+            (
+                serde_json::json!({
+                    "ConfigureCertificates": {
+                        "configure_certificate": {
+                            "WaitForComplete": {"jobs": [{"switch_id": "s", "job_id": "j"}]}
+                        }
+                    }
+                }),
+                ConfigureNmxClusterState::ConfigureCertificates {},
+            ),
+        ] {
+            let decoded: ConfigureNmxClusterState = serde_json::from_value(encoded.clone())
+                .unwrap_or_else(|error| panic!("{encoded} should decode: {error}"));
+
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn rack_state_decodes_retired_nmx_sub_state_without_failing_the_row() {
+        let persisted = serde_json::json!({
+            "state": "maintenance",
+            "maintenance_state": {
+                "ConfigureNmxCluster": {"configure_nmx_cluster": "WaitForFabricStatus"}
+            }
+        });
+
+        let state: RackState =
+            serde_json::from_value(persisted).expect("persisted rack state should decode");
+
+        assert_eq!(
+            state,
+            RackState::Maintenance {
+                maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                    configure_nmx_cluster: ConfigureNmxClusterState::WaitForFabricStatus,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn rack_error_recovery_policy_decodes_legacy_and_explicit_states() {
+        scenarios!(
+            run = |encoded| serde_json::from_str::<RackState>(encoded).map_err(|error| error.to_string());
+
+            "legacy error retains automatic component recovery" {
+                r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    cause: "switch failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                }),
+            }
+
+            "maintenance error requires a new request" {
+                r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    cause: "maintenance failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                }),
+            }
+        );
+    }
 
     // ── MaintenanceScope ────────────────────────────────────────────────
 
@@ -840,11 +1090,11 @@ mod tests {
     #[test]
     fn is_not_full_rack_with_machines() {
         let scope = MaintenanceScope {
-            machine_ids: vec![MachineId::new(
-                MachineIdSource::Tpm,
-                [0; 32],
-                MachineType::Host,
-            )],
+            machine_ids: vec![
+                MachineId::new(MachineIdSource::Tpm, [0; 32], MachineType::Host)
+                    .try_into()
+                    .unwrap(),
+            ],
             ..Default::default()
         };
         assert!(!scope.is_full_rack());
@@ -1005,12 +1255,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rack_config_defaults_missing_maintenance_termination_request_to_false() {
+        let config: RackConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.maintenance_termination_requested);
+
+        let config: RackConfig =
+            serde_json::from_str(r#"{"maintenance_termination_requested":true}"#).unwrap();
+        assert!(config.maintenance_termination_requested);
+    }
+
+    #[test]
+    fn nvos_switch_status_defaults_missing_password_update_state() {
+        let status: NvosUpdateSwitchStatus = serde_json::from_str(
+            r#"{"mac":"00:11:22:33:44:55","bmc_ip":"192.0.2.10","nvos_ip":"192.0.2.20","status":"completed"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(status.password_update, NvosPasswordUpdateState::NotStarted);
+    }
+
     // ── Rack::check_accepts_maintenance ─────────────────────────────────
 
     fn test_rack(state: RackState, maintenance_requested: Option<MaintenanceScope>) -> Rack {
         Rack {
             id: RackId::default(),
             rack_profile_id: None,
+            rack_group_id: None,
             config: RackConfig {
                 maintenance_requested,
                 ..Default::default()
@@ -1056,6 +1327,7 @@ mod tests {
                 (
                     RackState::Error {
                         cause: "something broke".into(),
+                        recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                     },
                     None,
                 ) => Yields(()),
@@ -1098,5 +1370,65 @@ mod tests {
         let rejection = RackMaintenanceRejection::AlreadyPending;
         let msg = rejection.to_string();
         assert!(msg.contains("already has a pending maintenance request"));
+    }
+
+    // ── FirmwareProgressState ───────────────────────────────────────────
+
+    #[test]
+    fn firmware_progress_state_round_trips_persisted_wire_values() {
+        let cases = [
+            (FirmwareProgressState::Pending, "\"pending\""),
+            (FirmwareProgressState::InProgress, "\"in_progress\""),
+            (FirmwareProgressState::Completed, "\"completed\""),
+            (FirmwareProgressState::Failed, "\"failed\""),
+            (
+                FirmwareProgressState::Unknown("verifying".into()),
+                "\"verifying\"",
+            ),
+        ];
+
+        for (state, wire) in cases {
+            assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<FirmwareProgressState>(wire).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_tolerates_an_unrecognized_device_status() {
+        let job: FirmwareUpgradeJob = serde_json::from_str(
+            r#"{
+                "job_id": "parent-job",
+                "firmware_id": "fw-1",
+                "status": "in_progress",
+                "started_at": null,
+                "completed_at": null,
+                "machines": [
+                    {
+                        "node_id": "node-1",
+                        "mac": "00:11:22:33:44:55",
+                        "bmc_ip": "192.0.2.10",
+                        "status": "in_progress"
+                    },
+                    {
+                        "node_id": "node-2",
+                        "mac": "00:11:22:33:44:56",
+                        "bmc_ip": "192.0.2.11",
+                        "status": "sideways"
+                    }
+                ]
+            }"#,
+        )
+        .expect("one unrecognized device status must not fail the whole rack row");
+
+        assert_eq!(job.status, Some(FirmwareProgressState::InProgress));
+        assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
+        assert_eq!(
+            job.machines[1].status,
+            FirmwareProgressState::Unknown("sideways".into())
+        );
+        assert!(!job.machines[1].status.is_terminal());
     }
 }

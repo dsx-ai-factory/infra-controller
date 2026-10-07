@@ -146,7 +146,10 @@ pub fn build(
 pub async fn validate() -> eyre::Result<bool> {
     let mut cmd = tokio::process::Command::new(OTEL_CONTRIB_VALIDATE_BIN);
     let cmd_str = super::super::pretty_cmd(cmd.as_std());
-    tracing::debug!("running otel validation commands: {cmd_str}");
+    tracing::debug!(
+        command = cmd_str.as_str(),
+        "running otel validation commands"
+    );
 
     // Invoke the validation command and allow a few seconds for completion.
     // The validation should be immediate (under a second), but a few seconds of buffer
@@ -159,12 +162,10 @@ pub async fn validate() -> eyre::Result<bool> {
 
     if !out.status.success() {
         tracing::error!(
-            " STDOUT {cmd_str}: {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        tracing::error!(
-            " STDERR {cmd_str}: {}",
-            String::from_utf8_lossy(&out.stderr)
+            command = cmd_str.as_str(),
+            stdout = %String::from_utf8_lossy(&out.stdout),
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "OTel validation command failed"
         );
 
         return Ok(false);

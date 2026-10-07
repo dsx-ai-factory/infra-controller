@@ -19,17 +19,13 @@ mod show;
 mod start_updates;
 
 // Cross-module re-export for managed_host
-pub use start_updates::start_updates;
-
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
+pub(crate) use start_updates::start_updates;
 
 use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Show available firmware")]
     Show(show::Args),
 }

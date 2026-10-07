@@ -50,7 +50,7 @@ pub(crate) async fn tpm_add_ca_cert(
         Some(cert) => cert,
         None => {
             return Err(CarbideError::internal(
-                "CA Cert not returned on successful insertion".to_string(),
+                "CA cert not returned on successful insertion".to_string(),
             )
             .into());
         }

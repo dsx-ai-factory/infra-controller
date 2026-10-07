@@ -22,7 +22,7 @@ use rpc::forge as forgerpc;
 /// Enable or disable maintenance mode on a managed host.
 /// To list machines in maintenance mode use `nico-admin-cli mh show --all --fix`
 #[derive(Parser, Debug)]
-pub enum Args {
+pub(crate) enum Args {
     /// Put this machine into maintenance mode. Prevents an instance being assigned to it.
     On(MaintenanceOn),
     /// Return this machine to normal operation.
@@ -38,9 +38,9 @@ Put a host into maintenance mode (prevents instance assignment):
     --reference https://tickets.example.com/MH-42
 
 ")]
-pub struct MaintenanceOn {
+pub(crate) struct MaintenanceOn {
     #[clap(long, required(true), help = "Managed Host ID")]
-    pub host: MachineId,
+    host: MachineId,
 
     #[clap(
         long,
@@ -48,7 +48,7 @@ pub struct MaintenanceOn {
         required(true),
         help = "URL of reference (ticket, issue, etc) for this machine's maintenance"
     )]
-    pub reference: String,
+    reference: String,
 }
 
 impl From<MaintenanceOn> for forgerpc::MaintenanceRequest {
@@ -69,9 +69,9 @@ Return a host to normal operation:
     $ nico-admin-cli managed-host maintenance off --host 12345678-1234-5678-90ab-cdef01234567
 
 ")]
-pub struct MaintenanceOff {
+pub(crate) struct MaintenanceOff {
     #[clap(long, required(true), help = "Managed Host ID")]
-    pub host: MachineId,
+    host: MachineId,
 }
 
 impl From<MaintenanceOff> for forgerpc::MaintenanceRequest {

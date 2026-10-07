@@ -16,8 +16,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestInfiniBandPartition_ToProto(t *testing.T) {
@@ -70,9 +69,9 @@ func TestInfiniBandPartition_FromProto(t *testing.T) {
 
 	t.Run("invalid id leaves ibp.ID unchanged", func(t *testing.T) {
 		ibp := &InfiniBandPartition{ID: id}
-		ibp.FromProto(&cwssaws.IBPartition{
-			Id:     &cwssaws.IBPartitionId{Value: "not-a-uuid"},
-			Config: &cwssaws.IBPartitionConfig{Name: "ibp-a", TenantOrganizationId: "org-1"},
+		ibp.FromProto(&corev1.IBPartition{
+			Id:     &corev1.IBPartitionId{Value: "not-a-uuid"},
+			Config: &corev1.IBPartitionConfig{Name: "ibp-a", TenantOrganizationId: "org-1"},
 		})
 		assert.Equal(t, id, ibp.ID)
 		assert.Equal(t, "ibp-a", ibp.Name)
@@ -81,13 +80,13 @@ func TestInfiniBandPartition_FromProto(t *testing.T) {
 
 	t.Run("populates fields from proto", func(t *testing.T) {
 		ibp := &InfiniBandPartition{}
-		ibp.FromProto(&cwssaws.IBPartition{
-			Id:     &cwssaws.IBPartitionId{Value: id.String()},
-			Config: &cwssaws.IBPartitionConfig{Name: "ibp-a", TenantOrganizationId: "org-1"},
-			Metadata: &cwssaws.Metadata{
+		ibp.FromProto(&corev1.IBPartition{
+			Id:     &corev1.IBPartitionId{Value: id.String()},
+			Config: &corev1.IBPartitionConfig{Name: "ibp-a", TenantOrganizationId: "org-1"},
+			Metadata: &corev1.Metadata{
 				Name:        "ibp-a",
 				Description: "primary",
-				Labels: []*cwssaws.Label{
+				Labels: []*corev1.Label{
 					{Key: "env", Value: cutil.GetPtr("prod")},
 				},
 			},
@@ -107,9 +106,9 @@ func TestInfiniBandPartition_FromProto(t *testing.T) {
 			Description: &stale,
 			Labels:      map[string]string{"old": "val"},
 		}
-		ibp.FromProto(&cwssaws.IBPartition{
-			Id:     &cwssaws.IBPartitionId{Value: id.String()},
-			Config: &cwssaws.IBPartitionConfig{Name: "ibp-a", TenantOrganizationId: "org-1"},
+		ibp.FromProto(&corev1.IBPartition{
+			Id:     &corev1.IBPartitionId{Value: id.String()},
+			Config: &corev1.IBPartitionConfig{Name: "ibp-a", TenantOrganizationId: "org-1"},
 		})
 		assert.Nil(t, ibp.Description)
 		assert.Nil(t, ibp.Labels)
@@ -117,20 +116,20 @@ func TestInfiniBandPartition_FromProto(t *testing.T) {
 
 	t.Run("prefers Metadata.Name over the Config.Name field", func(t *testing.T) {
 		ibp := &InfiniBandPartition{}
-		ibp.FromProto(&cwssaws.IBPartition{
-			Id:       &cwssaws.IBPartitionId{Value: id.String()},
-			Config:   &cwssaws.IBPartitionConfig{Name: "config-name", TenantOrganizationId: "org-1"},
-			Metadata: &cwssaws.Metadata{Name: "metadata-name"},
+		ibp.FromProto(&corev1.IBPartition{
+			Id:       &corev1.IBPartitionId{Value: id.String()},
+			Config:   &corev1.IBPartitionConfig{Name: "config-name", TenantOrganizationId: "org-1"},
+			Metadata: &corev1.Metadata{Name: "metadata-name"},
 		})
 		assert.Equal(t, "metadata-name", ibp.Name)
 	})
 
 	t.Run("falls back to Config.Name when Metadata.Name is empty", func(t *testing.T) {
 		ibp := &InfiniBandPartition{}
-		ibp.FromProto(&cwssaws.IBPartition{
-			Id:       &cwssaws.IBPartitionId{Value: id.String()},
-			Config:   &cwssaws.IBPartitionConfig{Name: "config-fallback", TenantOrganizationId: "org-1"},
-			Metadata: &cwssaws.Metadata{Name: ""},
+		ibp.FromProto(&corev1.IBPartition{
+			Id:       &corev1.IBPartitionId{Value: id.String()},
+			Config:   &corev1.IBPartitionConfig{Name: "config-fallback", TenantOrganizationId: "org-1"},
+			Metadata: &corev1.Metadata{Name: ""},
 		})
 		assert.Equal(t, "config-fallback", ibp.Name)
 	})
@@ -148,14 +147,14 @@ func TestInfiniBandPartition_ToDeletionRequestProto(t *testing.T) {
 func TestInfiniBandPartitionStatus_FromProto(t *testing.T) {
 	tests := []struct {
 		name       string
-		state      cwssaws.TenantState
+		state      corev1.TenantState
 		wantStatus InfiniBandPartitionStatus
 	}{
-		{name: "PROVISIONING maps to Provisioning", state: cwssaws.TenantState_PROVISIONING, wantStatus: InfiniBandPartitionStatusProvisioning},
-		{name: "CONFIGURING maps to Configuring", state: cwssaws.TenantState_CONFIGURING, wantStatus: InfiniBandPartitionStatusConfiguring},
-		{name: "READY maps to Ready", state: cwssaws.TenantState_READY, wantStatus: InfiniBandPartitionStatusReady},
-		{name: "FAILED maps to Error", state: cwssaws.TenantState_FAILED, wantStatus: InfiniBandPartitionStatusError},
-		{name: "unknown state yields empty", state: cwssaws.TenantState(9999), wantStatus: ""},
+		{name: "PROVISIONING maps to Provisioning", state: corev1.TenantState_PROVISIONING, wantStatus: InfiniBandPartitionStatusProvisioning},
+		{name: "CONFIGURING maps to Configuring", state: corev1.TenantState_CONFIGURING, wantStatus: InfiniBandPartitionStatusConfiguring},
+		{name: "READY maps to Ready", state: corev1.TenantState_READY, wantStatus: InfiniBandPartitionStatusReady},
+		{name: "FAILED maps to Error", state: corev1.TenantState_FAILED, wantStatus: InfiniBandPartitionStatusError},
+		{name: "unknown state yields empty", state: corev1.TenantState(9999), wantStatus: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -326,8 +325,6 @@ func TestInfiniBandPartitionSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -788,8 +785,6 @@ func TestInfiniBandPartition_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -933,8 +928,6 @@ func TestInfiniBandPartitionSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1069,8 +1062,6 @@ func TestInfiniBandPartitionSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1143,8 +1134,6 @@ func TestInfiniBandPartitionSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1173,8 +1162,7 @@ func TestInfiniBandPartitionSQLDAO_Clear(t *testing.T) {
 	_, _, ctx := testCommonTraceProviderSetup(t, context.Background())
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx                     context.Context
@@ -1208,8 +1196,7 @@ func TestInfiniBandPartitionSQLDAO_Clear(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ibpsd := InfiniBandPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := ibpsd.Clear(
 				tt.args.ctx,

@@ -15,17 +15,18 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
+use mac_address::MacAddress;
 
 const MAX_FAILURE_DETAILS: usize = 10;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
-pub enum NvSwitchComponentArg {
+pub(super) enum NvSwitchComponentArg {
     Bmc,
     Cpld,
     Bios,
@@ -45,7 +46,7 @@ impl From<NvSwitchComponentArg> for rpc::forge::NvSwitchComponent {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
-pub enum PowerShelfComponentArg {
+pub(super) enum PowerShelfComponentArg {
     Pmc,
     Psu,
 }
@@ -61,7 +62,7 @@ impl From<PowerShelfComponentArg> for rpc::forge::PowerShelfComponent {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
-pub enum ComputeTrayComponentArg {
+pub(super) enum ComputeTrayComponentArg {
     Bmc,
     Bios,
 }
@@ -75,8 +76,10 @@ impl From<ComputeTrayComponentArg> for rpc::forge::ComputeTrayComponent {
     }
 }
 
+/// Switch-id-only target for operations that have no pre-ingestion MAC path
+/// (e.g. `configure-switch-certificate`).
 #[derive(ClapArgs, Debug)]
-pub struct SwitchTargetArgs {
+pub(super) struct SwitchIdArgs {
     #[clap(
         long = "switch-id",
         required = true,
@@ -84,59 +87,142 @@ pub struct SwitchTargetArgs {
         value_delimiter = ',',
         help = "Switch IDs to target"
     )]
-    pub switch_ids: Vec<SwitchId>,
+    switch_ids: Vec<SwitchId>,
 }
 
-impl From<SwitchTargetArgs> for rpc::forge::SwitchIdList {
-    fn from(args: SwitchTargetArgs) -> Self {
+impl From<SwitchIdArgs> for rpc::forge::SwitchIdList {
+    fn from(args: SwitchIdArgs) -> Self {
         Self {
             ids: args.switch_ids,
         }
     }
 }
 
+/// Switch target: either switch ids or BMC MAC addresses, exactly one of which
+/// must be supplied. MACs let operators target switches before ingestion has
+/// assigned a switch id.
 #[derive(ClapArgs, Debug)]
-pub struct PowerShelfTargetArgs {
+#[clap(group(
+    clap::ArgGroup::new("switch_target")
+        .required(true)
+        .args(["switch_ids", "mac_addresses"])
+))]
+pub(super) struct SwitchTargetArgs {
+    #[clap(
+        long = "switch-id",
+        num_args = 1..,
+        value_delimiter = ',',
+        help = "Switch IDs to target"
+    )]
+    switch_ids: Vec<SwitchId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
+}
+
+/// The resolved switch selection, mapped by each command into the proto oneof
+/// variant for its request type.
+pub(super) enum SwitchSelection {
+    SwitchIds(rpc::forge::SwitchIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl SwitchTargetArgs {
+    pub(super) fn into_selection(self) -> SwitchSelection {
+        if !self.macs.is_present() {
+            SwitchSelection::SwitchIds(rpc::forge::SwitchIdList {
+                ids: self.switch_ids,
+            })
+        } else {
+            SwitchSelection::Macs(self.macs.into())
+        }
+    }
+}
+
+/// Power shelf target: either power shelf ids or PMC MAC addresses, exactly one
+/// of which must be supplied. MACs let operators target power shelves before
+/// ingestion has assigned a power shelf id.
+#[derive(ClapArgs, Debug)]
+#[clap(group(
+    clap::ArgGroup::new("power_shelf_target")
+        .required(true)
+        .args(["power_shelf_ids", "mac_addresses"])
+))]
+pub(super) struct PowerShelfTargetArgs {
     #[clap(
         long = "power-shelf-id",
-        required = true,
         num_args = 1..,
         value_delimiter = ',',
         help = "Power shelf IDs to target"
     )]
-    pub power_shelf_ids: Vec<PowerShelfId>,
+    power_shelf_ids: Vec<PowerShelfId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
 }
 
-impl From<PowerShelfTargetArgs> for rpc::forge::PowerShelfIdList {
-    fn from(args: PowerShelfTargetArgs) -> Self {
-        Self {
-            ids: args.power_shelf_ids,
+/// The resolved power-shelf selection, mapped by each command into the proto
+/// oneof variant for its request type.
+pub(super) enum PowerShelfSelection {
+    PowerShelfIds(rpc::forge::PowerShelfIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl PowerShelfTargetArgs {
+    pub(super) fn into_selection(self) -> PowerShelfSelection {
+        if !self.macs.is_present() {
+            PowerShelfSelection::PowerShelfIds(rpc::forge::PowerShelfIdList {
+                ids: self.power_shelf_ids,
+            })
+        } else {
+            PowerShelfSelection::Macs(self.macs.into())
         }
     }
 }
 
+/// Compute-tray target: either machine ids or BMC MAC addresses, exactly one of
+/// which must be supplied. MACs let operators target compute trays before
+/// ingestion has assigned a machine id.
 #[derive(ClapArgs, Debug)]
-pub struct MachineTargetArgs {
+#[clap(group(
+    clap::ArgGroup::new("compute_tray_target")
+        .required(true)
+        .args(["machine_ids", "mac_addresses"])
+))]
+pub(super) struct ComputeTrayTargetArgs {
     #[clap(
         long = "machine-id",
-        required = true,
         num_args = 1..,
         value_delimiter = ',',
         help = "Machine IDs to target"
     )]
-    pub machine_ids: Vec<MachineId>,
+    machine_ids: Vec<HostMachineId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
 }
 
-impl From<MachineTargetArgs> for rpc::common::MachineIdList {
-    fn from(args: MachineTargetArgs) -> Self {
-        Self {
-            machine_ids: args.machine_ids,
+/// The resolved compute-tray selection, mapped by each command into the proto
+/// oneof variant for its request type.
+pub(super) enum ComputeTraySelection {
+    MachineIds(rpc::common::HostMachineIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl ComputeTrayTargetArgs {
+    pub(super) fn into_selection(self) -> ComputeTraySelection {
+        if !self.macs.is_present() {
+            ComputeTraySelection::MachineIds(rpc::common::HostMachineIdList {
+                machine_ids: self.machine_ids,
+            })
+        } else {
+            ComputeTraySelection::Macs(self.macs.into())
         }
     }
 }
 
 #[derive(ClapArgs, Debug)]
-pub struct RackTargetArgs {
+pub(super) struct RackTargetArgs {
     #[clap(
         long = "rack-id",
         required = true,
@@ -144,7 +230,7 @@ pub struct RackTargetArgs {
         value_delimiter = ',',
         help = "Rack IDs to target"
     )]
-    pub rack_ids: Vec<RackId>,
+    rack_ids: Vec<RackId>,
 }
 
 impl From<RackTargetArgs> for rpc::forge::RackIdList {
@@ -155,8 +241,41 @@ impl From<RackTargetArgs> for rpc::forge::RackIdList {
     }
 }
 
+/// Shared `--mac-address` target option for component-manager commands.
+/// Operators must specify either the mac address or the device ID but not both.
+#[derive(ClapArgs, Debug)]
+pub(super) struct MacTargetArgs {
+    #[clap(
+        long = "mac-address",
+        num_args = 1..,
+        value_delimiter = ',',
+        help = "Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for power shelf)"
+    )]
+    mac_addresses: Vec<MacAddress>,
+}
+
+impl MacTargetArgs {
+    /// Whether the caller supplied any MAC addresses (used by per-type tracks
+    /// to pick the MAC branch of the id/MAC `ArgGroup`).
+    pub(super) fn is_present(&self) -> bool {
+        !self.mac_addresses.is_empty()
+    }
+}
+
+impl From<MacTargetArgs> for rpc::forge::MacAddressList {
+    fn from(args: MacTargetArgs) -> Self {
+        Self {
+            mac_addresses: args
+                .mac_addresses
+                .iter()
+                .map(MacAddress::to_string)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
-pub enum DeviceTargetArgs {
+pub(super) enum DeviceTargetArgs {
     #[clap(about = "Target NVLink switches")]
     Switch(SwitchTargetArgs),
 
@@ -164,7 +283,7 @@ pub enum DeviceTargetArgs {
     PowerShelf(PowerShelfTargetArgs),
 
     #[clap(about = "Target compute trays")]
-    ComputeTray(MachineTargetArgs),
+    ComputeTray(ComputeTrayTargetArgs),
 
     #[clap(about = "Target racks")]
     Rack(RackTargetArgs),
@@ -174,7 +293,7 @@ pub enum DeviceTargetArgs {
 /// `ComponentPowerControlRequest` only supports machines, switches and
 /// power shelves.
 #[derive(Subcommand, Debug)]
-pub enum PowerControlTargetArgs {
+pub(super) enum PowerControlTargetArgs {
     #[clap(about = "Target NVLink switches")]
     Switch(SwitchTargetArgs),
 
@@ -182,12 +301,12 @@ pub enum PowerControlTargetArgs {
     PowerShelf(PowerShelfTargetArgs),
 
     #[clap(about = "Target compute trays")]
-    ComputeTray(MachineTargetArgs),
+    ComputeTray(ComputeTrayTargetArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
-pub enum PowerActionArg {
+pub(super) enum PowerActionArg {
     On,
     GracefulShutdown,
     ForceOff,
@@ -209,7 +328,7 @@ impl From<PowerActionArg> for ::rpc::common::SystemPowerControl {
     }
 }
 
-pub fn component_result_status_name(status: i32) -> &'static str {
+fn component_result_status_name(status: i32) -> &'static str {
     match rpc::forge::ComponentManagerStatusCode::try_from(status) {
         Ok(rpc::forge::ComponentManagerStatusCode::Success) => "success",
         Ok(rpc::forge::ComponentManagerStatusCode::InvalidArgument) => "invalid-argument",
@@ -221,7 +340,7 @@ pub fn component_result_status_name(status: i32) -> &'static str {
     }
 }
 
-pub fn firmware_state_name(state: i32) -> &'static str {
+pub(super) fn firmware_state_name(state: i32) -> &'static str {
     match rpc::forge::FirmwareUpdateState::try_from(state) {
         Ok(rpc::forge::FirmwareUpdateState::FwStateUnknown) => "unknown",
         Ok(rpc::forge::FirmwareUpdateState::FwStateQueued) => "queued",
@@ -234,13 +353,13 @@ pub fn firmware_state_name(state: i32) -> &'static str {
     }
 }
 
-pub fn component_result_failed(result: Option<&rpc::forge::ComponentResult>) -> bool {
+fn component_result_failed(result: Option<&rpc::forge::ComponentResult>) -> bool {
     result
         .map(|r| r.status != rpc::forge::ComponentManagerStatusCode::Success as i32)
         .unwrap_or(true)
 }
 
-pub fn component_failure_count_and_summary<'a>(
+pub(super) fn component_failure_count_and_summary<'a>(
     results: impl IntoIterator<Item = Option<&'a rpc::forge::ComponentResult>>,
 ) -> (usize, String) {
     let mut failures = 0;
@@ -275,7 +394,7 @@ fn component_failure_detail(result: Option<&rpc::forge::ComponentResult>) -> Str
         return "unknown=missing-result".to_string();
     };
 
-    let component_id = display_or_dash(&result.component_id);
+    let component_id = display_or_dash(component_result_identifier(result));
     let status = component_result_status_name(result.status);
     if result.error.is_empty() {
         format!("{component_id}={status}({})", result.status)
@@ -287,12 +406,12 @@ fn component_failure_detail(result: Option<&rpc::forge::ComponentResult>) -> Str
     }
 }
 
-pub fn component_result_fields(
+pub(super) fn component_result_fields(
     result: Option<&rpc::forge::ComponentResult>,
 ) -> (String, String, String) {
     match result {
         Some(result) => (
-            display_or_dash(&result.component_id),
+            display_or_dash(component_result_identifier(result)),
             component_result_status_name(result.status).to_string(),
             display_or_dash(&result.error),
         ),
@@ -304,10 +423,13 @@ pub fn component_result_fields(
     }
 }
 
-pub fn component_result_json(result: Option<&rpc::forge::ComponentResult>) -> serde_json::Value {
+pub(super) fn component_result_json(
+    result: Option<&rpc::forge::ComponentResult>,
+) -> serde_json::Value {
     match result {
         Some(result) => serde_json::json!({
             "component_id": result.component_id,
+            "mac_address": result.mac_address,
             "status": component_result_status_name(result.status),
             "status_code": result.status,
             "error": result.error,
@@ -316,7 +438,7 @@ pub fn component_result_json(result: Option<&rpc::forge::ComponentResult>) -> se
     }
 }
 
-pub fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
+pub(super) fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
     let Some(timestamp) = timestamp else {
         return "-".to_string();
     };
@@ -329,7 +451,7 @@ pub fn timestamp_string(timestamp: Option<&rpc::Timestamp>) -> String {
         .unwrap_or_else(|| timestamp.seconds.to_string())
 }
 
-pub fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
+pub(super) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
     match timestamp {
         Some(timestamp) => serde_json::json!({
             "seconds": timestamp.seconds,
@@ -340,7 +462,7 @@ pub fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::Value {
     }
 }
 
-pub fn display_or_dash(value: &str) -> String {
+pub(super) fn display_or_dash(value: &str) -> String {
     if value.is_empty() {
         "-".to_string()
     } else {
@@ -348,7 +470,20 @@ pub fn display_or_dash(value: &str) -> String {
     }
 }
 
-pub fn join_or_dash(values: &[String]) -> String {
+/// The identifier to display for a component result: the component ID for an
+/// ingested component, or the echoed BMC/PMC MAC address for a MAC-targeted
+/// (possibly pre-ingestion) request, which carries no component ID. Empty when
+/// neither is known, so callers still render a dash.
+fn component_result_identifier(result: &rpc::forge::ComponentResult) -> &str {
+    result
+        .component_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .or(result.mac_address.as_deref())
+        .unwrap_or_default()
+}
+
+pub(super) fn join_or_dash(values: &[String]) -> String {
     if values.is_empty() {
         "-".to_string()
     } else {

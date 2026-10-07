@@ -30,52 +30,52 @@ Create a network security group for a tenant:
     $ nico-admin-cli network-security-group create --tenant-organization-id fds34511233a \
     --name web-tier
 
-Create one with stateful egress and labels:
+Create one with stateful egress and labels (requires site-level support):
     $ nico-admin-cli network-security-group create --tenant-organization-id fds34511233a \
     --name web-tier --stateful-egress --labels '{\"env\":\"prod\"}'
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(
         short = 'i',
         long,
         help = "Optional, unique ID to use when creating the network security group"
     )]
-    pub id: Option<String>,
+    id: Option<String>,
 
     #[clap(
         short = 't',
         long,
         help = "Tenant organization ID of the network security group"
     )]
-    pub tenant_organization_id: String,
+    tenant_organization_id: String,
 
     #[clap(short = 'n', long, help = "Name of the network security group")]
-    pub name: Option<String>,
+    name: Option<String>,
 
     #[clap(short = 'd', long, help = "Description of the network security group")]
-    pub description: Option<String>,
+    description: Option<String>,
 
     #[clap(
         short = 'l',
         long,
         help = "JSON map of simple key:value pairs to be applied as labels to the network security group"
     )]
-    pub labels: Option<String>,
+    labels: Option<String>,
 
     #[clap(
         short = 's',
         long,
-        help = "Optional, whether egress rules are stateful"
+        help = "Enable stateful egress. Default: false. Rejected when site-level stateful ACL support is disabled"
     )]
-    pub stateful_egress: bool,
+    stateful_egress: bool,
 
     #[clap(
         short = 'r',
         long,
         help = "Optional, JSON array containing a defined set of network security group rules"
     )]
-    pub rules: Option<String>,
+    rules: Option<String>,
 }
 
 impl TryFrom<Args> for CreateNetworkSecurityGroupRequest {

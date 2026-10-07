@@ -34,7 +34,8 @@ RUN --mount=type=cache,target=/var/cache/apt apt-get update && apt-get install -
   iproute2 \
   iputils-ping \
   kea-dev \
-  kea-dhcp4-server  \
+  kea-dhcp4-server \
+  kea-dhcp6-server \
   libssl-dev \
   libudev1 \
   ca-certificates \

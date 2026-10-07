@@ -52,7 +52,7 @@ impl<'a> CommandExecutor<'a> {
             println!("[EXEC] Executing command with timeout and retry: {command_spec}",);
             println!(
                 "[EXEC] Retry config: {} attempts, {:.1}x multiplier, {} initial delay, {} max delay",
-                self.options.retries + 1,
+                u64::from(self.options.retries) + 1,
                 self.options.retry_multiplier,
                 format_duration(self.options.retry_delay),
                 format_duration(self.options.max_retry_delay)
@@ -63,11 +63,7 @@ impl<'a> CommandExecutor<'a> {
         let backoff = ExponentialBuilder::default()
             .with_min_delay(self.options.retry_delay)
             .with_max_delay(self.options.max_retry_delay)
-            .with_max_times(if self.options.retries > 0 {
-                self.options.retries as usize
-            } else {
-                1
-            })
+            .with_max_times(self.options.retries as usize)
             .with_factor(self.options.retry_multiplier);
 
         // Create a closure that captures the command
@@ -305,11 +301,6 @@ impl<'a> CommandExecutor<'a> {
     // Returns whether the current executor run is configured for dry-run mode.
     pub fn is_dry_run(&self) -> bool {
         self.options.dry_run
-    }
-
-    // Returns whether the current executor run is configured with verbose logging.
-    pub fn is_verbose(&self) -> bool {
-        self.options.verbose
     }
 }
 

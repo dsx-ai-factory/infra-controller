@@ -40,6 +40,8 @@ struct State {
     subnets_to_ports: HashMap<u16, HashSet<String>>,
     /// The next LID that will be used
     next_lid: i32,
+    /// Whether unbind requests fail without changing fabric state.
+    fail_unbind: bool,
 }
 
 #[async_trait]
@@ -61,7 +63,9 @@ impl IBFabric for MockIBFabric {
         options: GetPartitionOptions,
     ) -> Result<HashMap<u16, IBNetwork>, IbError> {
         if options.include_guids_data && options.include_qos_conf {
-            return Err(IbError::internal("Returning qos_conf and guids_data is not supported: https://nvbugspro.nvidia.com/bug/5409095".to_string()));
+            return Err(IbError::internal(
+                "returning qos_conf and guids_data together is not supported by UFM".to_string(),
+            ));
         };
         assert!(
             options.include_qos_conf || options.include_guids_data,
@@ -228,6 +232,12 @@ impl IBFabric for MockIBFabric {
             .lock()
             .map_err(|_| IbError::IBFabricError("state lock".to_string()))?;
 
+        if state.fail_unbind {
+            return Err(IbError::IBFabricError(
+                "simulated UFM unbind failure".to_string(),
+            ));
+        }
+
         for id in &ids {
             if !state.ports.contains_key(id) {
                 return Err(IbError::IBFabricError(format!(
@@ -292,6 +302,7 @@ impl MockIBFabric {
                 ports: HashMap::new(),
                 subnets_to_ports: HashMap::new(),
                 next_lid: 1,
+                fail_unbind: false,
             })),
         }
     }
@@ -338,6 +349,11 @@ impl MockIBFabric {
         let mut state: std::sync::MutexGuard<'_, State> = self.state.lock().unwrap();
         let partition = state.subnets.get_mut(&DEFAULT_PARTITION_KEY).unwrap();
         partition.membership = Some(membership);
+    }
+
+    /// Configures whether unbind requests fail without changing fabric state.
+    pub fn set_unbind_failure(&self, fail: bool) {
+        self.state.lock().unwrap().fail_unbind = fail;
     }
 }
 

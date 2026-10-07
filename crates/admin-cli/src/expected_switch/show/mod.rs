@@ -15,10 +15,11 @@
  * limitations under the License.
  */
 
-pub mod args;
-pub mod cmd;
+mod args;
+mod cmd;
 
-pub use args::Args;
+pub(super) use args::Args;
+use rpc::forge::ExpectedSwitchRequest;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -26,7 +27,15 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::show(&self, &ctx.api_client, ctx.config.format).await?;
+        let request =
+            Option::<ExpectedSwitchRequest>::try_from(self).unwrap_or_else(|error| error.exit());
+        cmd::show(
+            request,
+            &ctx.api_client,
+            ctx.config.format,
+            &mut ctx.output_file,
+        )
+        .await?;
         Ok(())
     }
 }

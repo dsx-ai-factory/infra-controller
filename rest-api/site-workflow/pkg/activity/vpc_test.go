@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -102,7 +102,7 @@ func TestManageVPCInventory_DiscoverVPCInventory(t *testing.T) {
 				tc.AssertNumberOfCalls(t, "ExecuteWorkflow", totalPages)
 			}
 
-			inventory, ok := tc.Calls[0].Arguments[4].(*cwssaws.VPCInventory)
+			inventory, ok := tc.Calls[0].Arguments[4].(*corev1.VPCInventory)
 			assert.True(t, ok)
 
 			if tt.args.wantTotalItems == 0 {
@@ -111,12 +111,12 @@ func TestManageVPCInventory_DiscoverVPCInventory(t *testing.T) {
 				assert.Equal(t, tt.fields.cloudPageSize, len(inventory.Vpcs))
 			}
 
-			assert.Equal(t, cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
+			assert.Equal(t, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, inventory.InventoryStatus)
 			assert.Equal(t, totalPages, int(inventory.InventoryPage.TotalPages))
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }
@@ -135,7 +135,7 @@ func TestManageVpc_CreateVpcOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcCreationRequest
+		request *corev1.VpcCreationRequest
 	}
 	tests := []struct {
 		name    string
@@ -151,8 +151,8 @@ func TestManageVpc_CreateVpcOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcCreationRequest{
-					Id:                   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcCreationRequest{
+					Id:                   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 					Name:                 name,
 					TenantOrganizationId: org,
 				},
@@ -167,8 +167,8 @@ func TestManageVpc_CreateVpcOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcCreationRequest{
-					Id:                   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcCreationRequest{
+					Id:                   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 					Name:                 "",
 					TenantOrganizationId: org,
 				},
@@ -182,8 +182,8 @@ func TestManageVpc_CreateVpcOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcCreationRequest{
-					Id:                   &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcCreationRequest{
+					Id:                   &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 					Name:                 name,
 					TenantOrganizationId: "",
 				},
@@ -197,7 +197,7 @@ func TestManageVpc_CreateVpcOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcCreationRequest{
+				request: &corev1.VpcCreationRequest{
 					Id:                   nil,
 					Name:                 name,
 					TenantOrganizationId: org,
@@ -241,9 +241,9 @@ func TestManageInstance_UpdateVpcOnSiteOnSite(t *testing.T) {
 	coreGrpcAtomicClient := cClient.NewCoreGrpcAtomicClient(&cClient.CoreGrpcClientConfig{})
 	coreGrpcAtomicClient.SwapClient(mockCoreGrpcClient)
 
-	metedata := &cwssaws.Metadata{
+	metedata := &corev1.Metadata{
 		Name: "test-name",
-		Labels: []*cwssaws.Label{
+		Labels: []*corev1.Label{
 			{
 				Key:   "test-key",
 				Value: nil,
@@ -256,7 +256,7 @@ func TestManageInstance_UpdateVpcOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcUpdateRequest
+		request *corev1.VpcUpdateRequest
 	}
 	tests := []struct {
 		name    string
@@ -271,8 +271,8 @@ func TestManageInstance_UpdateVpcOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcUpdateRequest{
-					Id:       &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcUpdateRequest{
+					Id:       &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 					Metadata: metedata,
 				},
 			},
@@ -285,7 +285,7 @@ func TestManageInstance_UpdateVpcOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcUpdateRequest{
+				request: &corev1.VpcUpdateRequest{
 					Id: nil,
 				},
 			},
@@ -327,7 +327,7 @@ func TestManageInstance_DeleteVpcOnSiteOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcDeletionRequest
+		request *corev1.VpcDeletionRequest
 	}
 	tests := []struct {
 		name    string
@@ -342,8 +342,8 @@ func TestManageInstance_DeleteVpcOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcDeletionRequest{
-					Id: &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+				request: &corev1.VpcDeletionRequest{
+					Id: &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
 				},
 			},
 			wantErr: false,
@@ -355,8 +355,8 @@ func TestManageInstance_DeleteVpcOnSiteOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcDeletionRequest{
-					Id: &cwssaws.VpcId{Value: ""},
+				request: &corev1.VpcDeletionRequest{
+					Id: &corev1.VpcId{Value: ""},
 				},
 			},
 			wantErr: true,
@@ -397,7 +397,7 @@ func TestManageInstance_UpdateVpcVirtualizationOnSite(t *testing.T) {
 	}
 	type args struct {
 		ctx     context.Context
-		request *cwssaws.VpcUpdateVirtualizationRequest
+		request *corev1.VpcUpdateVirtualizationRequest
 	}
 	tests := []struct {
 		name    string
@@ -412,9 +412,9 @@ func TestManageInstance_UpdateVpcVirtualizationOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcUpdateVirtualizationRequest{
-					Id:                        &cwssaws.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					NetworkVirtualizationType: cwssaws.VpcVirtualizationType_FNN.Enum(),
+				request: &corev1.VpcUpdateVirtualizationRequest{
+					Id:                        &corev1.VpcId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+					NetworkVirtualizationType: corev1.VpcVirtualizationType_FNN.Enum(),
 				},
 			},
 			wantErr: false,
@@ -426,7 +426,7 @@ func TestManageInstance_UpdateVpcVirtualizationOnSite(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				request: &cwssaws.VpcUpdateVirtualizationRequest{
+				request: &corev1.VpcUpdateVirtualizationRequest{
 					Id: nil,
 				},
 			},

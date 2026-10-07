@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+agentgateway:
+  monitoring:
+    enabled: false
+
+gateway:
+  replicaCount: 1
+  ipv6:
+    enabled: false
+
+auth:
+  jwt:
+    providers:
+      nico-dev:
+        audiences:
+          - nico-api
+        jwksUrl: http://keycloak.nico-rest.svc.cluster.local:8082/realms/nico-dev/protocol/openid-connect/certs
+        tenantIdExpression: jwt.email
+  cel:
+    operatorTenantId: admin@example.com
+    unprivilegedTenantMCPs:
+      - nico-mcp
+
+rateLimit:
+  tenantRequestsPerSecond: 30
+  replicaCount: 1
+
+bridge:
+  enabled: false
+
+valkey:
+  replica:
+    enabled: false
+  primary:
+    persistence:
+      enabled: false
+  podDisruptionBudget:
+    enabled: false
+  metrics:
+    enabled: false
+
+observability:
+  alerts:
+    enabled: false
+  metrics:
+    enabled: false
+  tracing:
+    enabled: false

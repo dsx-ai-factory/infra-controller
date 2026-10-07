@@ -19,12 +19,12 @@ Change the NMX-C endpoint URL for a chassis serial:
     --endpoint https://192.0.2.20:50051
 
 ")]
-pub struct Args {
+pub(crate) struct Args {
     #[clap(long, value_name = "SERIAL")]
-    pub chassis_serial: String,
+    chassis_serial: String,
 
     #[clap(long)]
-    pub endpoint: String,
+    endpoint: String,
 }
 
 impl Run for Args {

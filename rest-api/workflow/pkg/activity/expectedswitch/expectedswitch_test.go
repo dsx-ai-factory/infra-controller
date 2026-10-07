@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -28,7 +27,7 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // testTemporalSiteClientPool Building site client pool
@@ -108,11 +107,17 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				"position": fmt.Sprintf("pos-%d", i),
 			}
 		}
+		// Give one switch NVOS MACs so the clear-on-reconcile path is exercised
+		var nvosMacs []string
+		if i == 4 {
+			nvosMacs = []string{"aa:bb:cc:dd:ee:04"}
+		}
 		es, cerr := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
 			ExpectedSwitchID:   esID,
 			SiteID:             st.ID,
 			BmcMacAddress:      fmt.Sprintf("00:11:22:33:44:%02d", i),
 			SwitchSerialNumber: fmt.Sprintf("SW-SN-%d", i),
+			NvosMacAddresses:   nvosMacs,
 			Labels:             labels,
 			CreatedBy:          ipu.ID,
 		})
@@ -120,8 +125,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_switch SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
 			es.ID.String())
 		assert.NoError(t, uerr)
 
@@ -130,19 +135,19 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 	}
 
 	expectedSwitchesToUpdate := []*cdbm.ExpectedSwitch{}
-	pagedCtrlExpectedSwitches := []*cwssaws.ExpectedSwitch{}
+	pagedCtrlExpectedSwitches := []*corev1.ExpectedSwitch{}
 
 	for i := 0; i < 34; i++ {
-		ctrlExpectedSwitch := &cwssaws.ExpectedSwitch{
-			ExpectedSwitchId:   &cwssaws.UUID{Value: pagedExpectedSwitches[i].ID.String()},
+		ctrlExpectedSwitch := &corev1.ExpectedSwitch{
+			ExpectedSwitchId:   &corev1.UUID{Value: pagedExpectedSwitches[i].ID.String()},
 			BmcMacAddress:      pagedExpectedSwitches[i].BmcMacAddress,
 			SwitchSerialNumber: pagedExpectedSwitches[i].SwitchSerialNumber,
 		}
 
 		// Add labels to controller expected switches
 		if i%5 == 0 {
-			ctrlExpectedSwitch.Metadata = &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{
+			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
+				Labels: []*corev1.Label{
 					{Key: "rack", Value: cutil.GetPtr(fmt.Sprintf("rack-%d", i/5))},
 					{Key: "position", Value: cutil.GetPtr(fmt.Sprintf("pos-%d", i))},
 				},
@@ -160,16 +165,23 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		// Test label updates: add/modify labels for some switches
 		if i == 1 {
 			// Add labels to a switch that didn't have them before
-			ctrlExpectedSwitch.Metadata = &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{
+			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
+				Labels: []*corev1.Label{
 					{Key: "new-label", Value: cutil.GetPtr("new-value")},
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
+		} else if i == 2 {
+			// Report NVOS MAC addresses for a switch that didn't have them before
+			ctrlExpectedSwitch.NvosMacAddresses = []string{"aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:03"}
+			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
+		} else if i == 4 {
+			// NVOS MACs cleared on the Site: reported without any, DB has one
+			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
 		} else if i == 5 {
 			// Modify existing labels
-			ctrlExpectedSwitch.Metadata = &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{
+			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
+				Labels: []*corev1.Label{
 					{Key: "rack", Value: cutil.GetPtr(fmt.Sprintf("rack-updated-%d", i/5))},
 					{Key: "position", Value: cutil.GetPtr(fmt.Sprintf("pos-%d", i))},
 					{Key: "status", Value: cutil.GetPtr("active")},
@@ -178,8 +190,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
 		} else if i == 10 {
 			// Remove labels (set to empty labels array)
-			ctrlExpectedSwitch.Metadata = &cwssaws.Metadata{
-				Labels: []*cwssaws.Label{},
+			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
+				Labels: []*corev1.Label{},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
 		} else if i == 15 {
@@ -208,7 +220,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 	type args struct {
 		ctx                     context.Context
 		siteID                  uuid.UUID
-		expectedSwitchInventory *cwssaws.ExpectedSwitchInventory
+		expectedSwitchInventory *corev1.ExpectedSwitchInventory
 	}
 
 	tests := []struct {
@@ -243,8 +255,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: uuid.New(),
-				expectedSwitchInventory: &cwssaws.ExpectedSwitchInventory{
-					ExpectedSwitches: []*cwssaws.ExpectedSwitch{},
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
+					ExpectedSwitches: []*corev1.ExpectedSwitch{},
 				},
 			},
 			wantErr: true,
@@ -259,10 +271,10 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st.ID,
-				expectedSwitchInventory: &cwssaws.ExpectedSwitchInventory{
-					ExpectedSwitches: []*cwssaws.ExpectedSwitch{},
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
+					ExpectedSwitches: []*corev1.ExpectedSwitch{},
 					Timestamp:        timestamppb.Now(),
-					InventoryStatus:  cwssaws.InventoryStatus_INVENTORY_STATUS_FAILED,
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 				},
 			},
 			wantErr: false,
@@ -277,11 +289,11 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st2.ID,
-				expectedSwitchInventory: &cwssaws.ExpectedSwitchInventory{
-					ExpectedSwitches: []*cwssaws.ExpectedSwitch{},
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
+					ExpectedSwitches: []*corev1.ExpectedSwitch{},
 					Timestamp:        timestamppb.Now(),
-					InventoryStatus:  cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  0,
 						PageSize:    25,
@@ -301,11 +313,11 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st.ID,
-				expectedSwitchInventory: &cwssaws.ExpectedSwitchInventory{
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
 					ExpectedSwitches: pagedCtrlExpectedSwitches[0:20],
 					Timestamp:        timestamppb.Now(),
-					InventoryStatus:  cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 1,
 						TotalPages:  2,
 						PageSize:    20,
@@ -327,11 +339,11 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st.ID,
-				expectedSwitchInventory: &cwssaws.ExpectedSwitchInventory{
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
 					ExpectedSwitches: pagedCtrlExpectedSwitches[20:34],
 					Timestamp:        timestamppb.Now(),
-					InventoryStatus:  cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-					InventoryPage: &cwssaws.InventoryPage{
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage: &corev1.InventoryPage{
 						CurrentPage: 2,
 						TotalPages:  2,
 						PageSize:    20,
@@ -353,14 +365,15 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			args: args{
 				ctx:    ctx,
 				siteID: st3.ID,
-				expectedSwitchInventory: &cwssaws.ExpectedSwitchInventory{
-					ExpectedSwitches: []*cwssaws.ExpectedSwitch{
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
+					ExpectedSwitches: []*corev1.ExpectedSwitch{
 						{
-							ExpectedSwitchId:   &cwssaws.UUID{Value: uuid.New().String()},
+							ExpectedSwitchId:   &corev1.UUID{Value: uuid.New().String()},
 							BmcMacAddress:      "00:11:22:33:44:FF",
 							SwitchSerialNumber: "SW-SN-NEW-1",
-							Metadata: &cwssaws.Metadata{
-								Labels: []*cwssaws.Label{
+							NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:f1"},
+							Metadata: &corev1.Metadata{
+								Labels: []*corev1.Label{
 									{Key: "environment", Value: cutil.GetPtr("test")},
 									{Key: "datacenter", Value: cutil.GetPtr("dc1")},
 								},
@@ -368,7 +381,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 						},
 					},
 					Timestamp:       timestamppb.Now(),
-					InventoryStatus: cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 				},
 			},
 			expectedSwitchesToUpdate: []*cdbm.ExpectedSwitch{},
@@ -406,7 +419,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				updated := switchesByID[es.ID]
 				assert.NotNil(t, updated, fmt.Sprintf("ExpectedSwitch %v should exist", es.ID))
 				// Find the corresponding controller switch
-				var ctrlES *cwssaws.ExpectedSwitch
+				var ctrlES *corev1.ExpectedSwitch
 				for _, ces := range tt.args.expectedSwitchInventory.ExpectedSwitches {
 					if ces.ExpectedSwitchId.Value == es.ID.String() {
 						ctrlES = ces
@@ -416,6 +429,11 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				if ctrlES != nil {
 					assert.Equal(t, ctrlES.BmcMacAddress, updated.BmcMacAddress,
 						fmt.Sprintf("ExpectedSwitch %v should have been updated", es.ID))
+					// Both nil and empty lists should be treated as equivalent (no NVOS MACs)
+					if len(ctrlES.NvosMacAddresses) != 0 || len(updated.NvosMacAddresses) != 0 {
+						assert.Equal(t, ctrlES.NvosMacAddresses, updated.NvosMacAddresses,
+							fmt.Sprintf("ExpectedSwitch %v NVOS MAC addresses should match", es.ID))
+					}
 
 					// Verify labels are updated correctly
 					var expectedLabels cdbm.Labels
@@ -436,12 +454,17 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				assert.Nil(t, deleted, fmt.Sprintf("ExpectedSwitch %v should have been deleted", es.ID))
 			}
 
-			// Verify newly created switches have correct labels
+			// Verify newly created switches have correct labels and NVOS MAC addresses
 			for _, ces := range tt.args.expectedSwitchInventory.ExpectedSwitches {
 				esID, perr := uuid.Parse(ces.ExpectedSwitchId.Value)
 				assert.NoError(t, perr)
 				created := switchesByID[esID]
 				if created != nil {
+					// Both nil and empty lists should be treated as equivalent (no NVOS MACs)
+					if len(ces.NvosMacAddresses) != 0 || len(created.NvosMacAddresses) != 0 {
+						assert.Equal(t, ces.NvosMacAddresses, created.NvosMacAddresses,
+							fmt.Sprintf("ExpectedSwitch %v NVOS MAC addresses should match", esID))
+					}
 					var expectedLabels cdbm.Labels
 					expectedLabels.FromProto(ces.Metadata.GetLabels())
 					// Both nil and empty maps should be treated as equivalent (no labels)
@@ -491,10 +514,10 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB_RaceCondition(t *testin
 	}
 
 	// Send inventory without this switch - it should NOT be deleted due to race condition
-	inventory := &cwssaws.ExpectedSwitchInventory{
-		ExpectedSwitches: []*cwssaws.ExpectedSwitch{},
+	inventory := &corev1.ExpectedSwitchInventory{
+		ExpectedSwitches: []*corev1.ExpectedSwitch{},
 		Timestamp:        timestamppb.Now(),
-		InventoryStatus:  cwssaws.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 	}
 
 	err = mei.UpdateExpectedSwitchesInDB(ctx, st.ID, inventory)
@@ -557,37 +580,6 @@ func TestNewManageExpectedSwitch(t *testing.T) {
 			got := NewManageExpectedSwitch(tt.args.dbSession, tt.args.siteClientPool)
 			assert.Equal(t, tt.want.dbSession, got.dbSession, "dbSession should match")
 			assert.Equal(t, tt.want.siteClientPool, got.siteClientPool, "siteClientPool should match")
-		})
-	}
-}
-
-func TestStaleInventoryThresholdCondition(t *testing.T) {
-	tests := []struct {
-		name       string
-		actionTime time.Time
-		want       bool
-	}{
-		{
-			name:       "recent action within stale inventory threshold",
-			actionTime: time.Now(),
-			want:       true,
-		},
-		{
-			name:       "action just outside stale inventory threshold",
-			actionTime: time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval + time.Second*15)),
-			want:       false,
-		},
-		{
-			name:       "old action well outside stale inventory threshold",
-			actionTime: time.Now().Add(-time.Hour),
-			want:       false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := util.IsTimeWithinStaleInventoryThreshold(tt.actionTime); got != tt.want {
-				t.Errorf("IsTimeWithinStaleInventoryThreshold() = %v, want %v", got, tt.want)
-			}
 		})
 	}
 }

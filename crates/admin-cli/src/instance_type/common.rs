@@ -25,7 +25,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 ///
 /// * `itypes`  - A reference to an active DB transaction
 /// * `verbose` - A bool to select more verbose output (e.g., include full rule details)
-pub fn convert_itypes_to_table(
+pub(super) fn convert_itypes_to_table(
     itypes: &[forgerpc::InstanceType],
     verbose: bool,
 ) -> CarbideCliResult<Box<Table>> {

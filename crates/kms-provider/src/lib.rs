@@ -81,6 +81,11 @@ pub trait KmsBackend: Send + Sync {
     /// can decrypt DEKs wrapped by the given kek_id.
     fn can_decrypt_kek(&self, kek_id: &str) -> bool;
 
+    /// kek_ids returns every kek_id this backend answers for. Startup
+    /// validation uses this to reject a kek_id configured in more than one
+    /// provider, which would make unwraps depend on provider order.
+    fn kek_ids(&self) -> Vec<String>;
+
     /// generate_and_wrap_dek generates a fresh DEK and
     /// wraps it in a single operation. The default
     /// generates locally and delegates to encrypt_dek.

@@ -19,7 +19,7 @@ use std::fmt::{Display, Formatter};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracing::log::trace;
+use tracing::trace;
 
 /// Represents the individual components of a container image name.
 /// e.g.
@@ -76,7 +76,7 @@ where
     let vec: Vec<String> = Vec::deserialize(deserializer)?;
     let initial: Vec<ImageNameComponent> = Vec::new();
 
-    trace!("Container name component: {vec:?}");
+    trace!(image_name_components = ?vec, "Container name component");
     vec.iter().try_fold(initial, |mut accum, value| {
         let re = Regex::new(r#"(.+)\/(.+):(.+)"#).unwrap();
         re.captures(value.as_str())
@@ -93,4 +93,56 @@ where
                 "Could not parse image name into components",
             ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    /// Builds the `ImageNameComponent` a well-formed `repository/name:version`
+    /// string should split into.
+    fn component(repository: &str, name: &str, version: &str) -> ImageNameComponent {
+        ImageNameComponent {
+            repository: repository.to_string(),
+            name: name.to_string(),
+            version: version.to_string(),
+        }
+    }
+
+    /// Splits the `repoTags` of an `Image` through `container_image_name_to_component`
+    /// by deserializing a minimal `Image` JSON, returning either the parsed
+    /// components or the deserialization error message.
+    fn split_repo_tags(repo_tags: &[&str]) -> Result<Vec<ImageNameComponent>, String> {
+        let json = serde_json::json!({ "id": "img-1", "repoTags": repo_tags });
+        serde_json::from_value::<Image>(json)
+            .map(|image| image.names)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn test_container_image_name_to_component() {
+        scenarios!(run = |tags: &[&str]| split_repo_tags(tags);
+            "well-formed names split into repository, name, and version" {
+                ["nvcr.io/nvidia/doca/doca_hbn:1.5.0-doca2.2.0"].as_slice()
+                    => Yields(vec![component("nvcr.io/nvidia/doca", "doca_hbn", "1.5.0-doca2.2.0")]),
+                // The repository greedily absorbs every leading path segment.
+                ["docker.io/library/busybox:latest"].as_slice()
+                    => Yields(vec![component("docker.io/library", "busybox", "latest")]),
+                ["a/b:c", "x/y/z:1"].as_slice()
+                    => Yields(vec![component("a", "b", "c"), component("x/y", "z", "1")]),
+                [].as_slice() => Yields(vec![]),
+            }
+
+            "names missing a component are rejected" {
+                // No version (no colon), and no repository (no slash).
+                ["nvcr.io/nvidia/doca_hbn"].as_slice() => Fails,
+                ["doca_hbn:1.5.0"].as_slice() => Fails,
+                // One bad entry fails the whole list.
+                ["a/b:c", "bogus"].as_slice() => Fails,
+            }
+        );
+    }
 }

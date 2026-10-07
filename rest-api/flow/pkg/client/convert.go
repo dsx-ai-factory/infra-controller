@@ -20,8 +20,10 @@ func rackFromProto(r *pb.Rack) *types.Rack {
 	}
 
 	rack := &types.Rack{
-		Info:     deviceInfoFromProto(r.GetInfo()),
-		Location: locationFromProto(r.GetLocation()),
+		Info:            deviceInfoFromProto(r.GetInfo()),
+		Location:        locationFromProto(r.GetLocation()),
+		NVLDomainIDs:    uuidsFromProto(r.GetNvlDomainIds()),
+		OperationStatus: phaseFromProto(r.GetOperationStatus()),
 	}
 
 	if len(r.GetComponents()) > 0 {
@@ -46,6 +48,7 @@ func componentFromProto(c *pb.Component) *types.Component {
 		Position:        positionFromProto(c.GetPosition()),
 		ComponentID:     c.GetComponentId(),
 		RackID:          uuidFromProto(c.GetRackId()),
+		NVLDomainID:     uuidFromProto(c.GetNvlDomainId()),
 		PowerState:      c.GetPowerState(),
 	}
 
@@ -266,6 +269,23 @@ func diffTypeFromProto(dt pb.DiffType) types.DiffType {
 	}
 }
 
+func phaseFromProto(phase pb.Phase) types.Phase {
+	switch phase {
+	case pb.Phase_PHASE_INITIALIZING:
+		return types.PhaseInitializing
+	case pb.Phase_PHASE_READY:
+		return types.PhaseReady
+	case pb.Phase_PHASE_IN_USE:
+		return types.PhaseInUse
+	case pb.Phase_PHASE_ERROR:
+		return types.PhaseError
+	case pb.Phase_PHASE_DELETING:
+		return types.PhaseDeleting
+	default:
+		return types.PhaseUnknown
+	}
+}
+
 // Types to proto conversions
 
 func rackToProto(r *types.Rack) *pb.Rack {
@@ -277,6 +297,9 @@ func rackToProto(r *types.Rack) *pb.Rack {
 		Info:     deviceInfoToProto(&r.Info),
 		Location: locationToProto(&r.Location),
 	}
+	// OperationStatus is deliberately omitted: this conversion builds a
+	// CreateExpectedRack request, while Flow owns the derived response field.
+	rack.NvlDomainIds = uuidsToProto(r.NVLDomainIDs)
 
 	if len(r.Components) > 0 {
 		rack.Components = make([]*pb.Component, 0, len(r.Components))
@@ -300,6 +323,7 @@ func componentToProto(c *types.Component) *pb.Component {
 		Position:        positionToProto(&c.Position),
 		ComponentId:     c.ComponentID,
 		RackId:          uuidToProto(c.RackID),
+		NvlDomainId:     uuidToProto(c.NVLDomainID),
 	}
 
 	if len(c.BMCs) > 0 {
@@ -379,6 +403,14 @@ func uuidToProto(id uuid.UUID) *pb.UUID {
 		return nil
 	}
 	return &pb.UUID{Id: id.String()}
+}
+
+func uuidsToProto(ids []uuid.UUID) []*pb.UUID {
+	result := make([]*pb.UUID, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, uuidToProto(id))
+	}
+	return result
 }
 
 func nvlDomainToProto(d *types.NVLDomain) *pb.NVLDomain {

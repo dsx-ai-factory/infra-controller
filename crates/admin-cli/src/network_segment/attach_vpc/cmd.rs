@@ -19,7 +19,10 @@ use super::args::Args;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
-pub async fn handle_attach_vpc(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+pub(super) async fn handle_attach_vpc(
+    args: Args,
+    ctx: &mut RuntimeContext,
+) -> CarbideCliResult<()> {
     ctx.assert_cloud_unsafe_op_message()?;
     ctx.api_client.0.attach_network_segment_to_vpc(args).await?;
     Ok(())

@@ -19,7 +19,7 @@ use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
-pub async fn delete_bmc(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+pub(super) async fn delete_bmc(data: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client.0.delete_credential(data).await?;
     Ok(())
 }

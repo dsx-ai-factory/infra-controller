@@ -14,9 +14,11 @@ This guide assumes you have completed the [Quick Start Guide](../getting-started
 - At least one site registered and in `Registered` status, with machines discovered and available for allocation.
 - `nicocli` installed (`make nico-cli` from the `rest-api/` directory of the `infra-controller` repo) and reachable on `$PATH`.
 
-If you plan to enable SPIFFE JWT-SVID **machine identity**, complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) before provisioning instances, then configure per-org identity after tenants exist — see [Machine Identity](machine_identity.md).
+If you plan to enable SPIFFE JWT-SVID **machine identity**, complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) before provisioning instances, then configure per-org identity after tenants exist. Refer to [Machine Identity](machine_identity.md).
 
-> **Note on CLI naming**: Older docs reference `carbidecli` (built via `make carbide-cli`). It's the same source under a previous name. This guide uses `nicocli` (built via `make nico-cli`) consistently.
+<Tip title="CLI naming">
+Older docs reference `carbidecli` (built via `make carbide-cli`). It's the same source under a previous name. This guide uses `nicocli` (built via `make nico-cli`) consistently.
+</Tip>
 
 For nicocli mechanics and conventions (flag ordering, `api.name` selection, `--data` vs flag forms, output formats, pagination, `--debug`), see the nicocli reference guide. The examples in this guide assume you've read it.
 
@@ -28,9 +30,11 @@ NICo's authorization model has three roles, all managed in the upstream identity
 |------|-------|-------------|
 | Provider Admin (`PROVIDER_ADMIN`) | Infrastructure provider org | Creating allocations, managing tenant accounts, managing sites and instance types |
 | Provider Viewer (`PROVIDER_VIEWER`) | Infrastructure provider org | Read-only access to provider-scoped resources |
-| Tenant Admin (`TENANT_ADMIN`) | Tenant org | Managing the tenant's instances, VPCs, subnets, SSH keys |
+| Tenant Admin (`TENANT_ADMIN`) | Tenant org | Managing the tenant's instances, VPCs, VPC Prefixes, Subnets, and SSH keys |
 
 A single user can hold roles in multiple orgs simultaneously. On dev/service-account orgs, one user typically holds both Provider Admin and Tenant Admin in the same org.
+
+These roles are not settable through NICo. They are assigned in the identity provider and read from each request's token, which makes them a Day 0 concern that has to be in place before any of the Day 1 steps below will work. [Authentication and Authorization](/rest-api-reference/authentication-and-authorization) is the authoritative reference for that configuration, covering both the `issuers` and `keycloak` modes, the four claim-mapping recipes, and the deployment surfaces where each value belongs.
 
 ### Authentication
 
@@ -40,7 +44,7 @@ The Quick Start covers `nicocli login` end-to-end for Keycloak-backed deployment
 
 Confirm that nicocli can reach the API and your credentials are valid:
 
-```
+```bash
 nicocli site list
 nicocli user get
 ```
@@ -53,8 +57,8 @@ nicocli user get
 
 NICo uses a lazy creation model for tenants. There is no explicit "create tenant" API call. Instead, a tenant record is automatically created the first time a Tenant Admin retrieves the current tenant for their organization:
 
-```
-nicocli tenant get-current-tenant
+```bash
+nicocli tenant current
 ```
 
 If no tenant exists for the configured org, NICo creates one and returns it. If a tenant already exists, the same command returns the existing record. The operation is idempotent.
@@ -63,7 +67,7 @@ Each tenant maps one-to-one to an organization in the configured identity provid
 
 In TUI mode:
 
-```
+```bash
 nicocli tui
 > tenant current
 ```
@@ -73,12 +77,14 @@ nicocli tui
 - The authenticated user must be a member of the organization specified in the nicocli config (`api.org`).
 - The user must hold the Tenant Admin role within that org.
 
-If either condition is not met, the API returns HTTP 403. NICo trusts whatever the IdP says in the token's claims, so getting these conditions met is an IdP administration task -- it is not done through nicocli or the NICo API. The [Quick Start Guide](../getting-started/quick-start.md) walks through the bundled Keycloak reference implementation (a dev Keycloak deployed by `setup.sh` with a pre-loaded realm), which is the simplest path for first-time setup. For production, point NICo at any OIDC-compatible IdP (Keycloak, Okta, Auth0, your existing enterprise IdP) by configuring the `issuers` block in `nico-rest-api`'s config -- see [`getting-started/installation-options/reference-install.md`](../getting-started/installation-options/reference-install.md) for the deployment-side wiring.
+If either condition is not met, the API returns HTTP 403. NICo trusts whatever the IdP says in the token's claims, so getting these conditions met is an IdP administration task. It is not done through nicocli or the NICo API. The [Quick Start Guide](../getting-started/quick-start.md) walks through the bundled Keycloak reference implementation (a dev Keycloak deployed by `setup.sh` with a pre-loaded realm), which is the simplest path for first-time setup. For production, point NICo at any OIDC-compatible IdP (Keycloak, Okta, Auth0, your existing enterprise IdP) by configuring the `issuers` block in `nico-rest-api`'s config. Refer to [Authentication and Authorization](/rest-api-reference/authentication-and-authorization) for the deployment-side wiring. Its "Provider with Multiple Tenant IdPs" example is the recipe for one provider org serving tenants that each authenticate through their own identity provider.
+
+For Keycloak deployments, [Tenant Management with Keycloak](tenant-management-keycloak.md) covers the realm-side steps in full: the realm role naming convention NICo reads as org membership, creating the Tenant's identity, and granting the privileged Tenant capability.
 
 ### Worked Example
 
-```
-$ nicocli tenant get-current-tenant
+```bash
+$ nicocli tenant current
 {
   "capabilities": {
     "targetedInstanceCreation": true
@@ -96,14 +102,14 @@ $ nicocli tenant get-current-tenant
 | `id` | UUID identifier for the tenant, used in all subsequent API calls |
 | `org` | Organization name (matches your config `api.org`) |
 | `orgDisplayName` | Human-readable name pulled from the IdP's org metadata |
-| `capabilities.targetedInstanceCreation` | Whether this tenant can specify a particular machine ID when creating instances. Set during initial tenant creation: lazy-create via `tenant get-current-tenant` typically leaves it `false`; the service-account bootstrap path (`service-account get`) sets it `true` for self-tenants. |
+| `capabilities.targetedInstanceCreation` | **Deprecated, removal scheduled for October 1, 2026.** A read-only aggregate across the tenant's `Ready` tenant accounts, not a setting on the tenant. It is `true` only when every such account enables the capability and no site override disables it, and it is absent rather than `false` when disabled: the field is omitted, and on the `tenantSummary` objects embedded in other resources `capabilities` is always `{}`. A Provider Admin configures the capability per tenant account, and optionally per site. See [Granting Targeted Instance Creation](#granting-targeted-instance-creation). |
 
 ### Verifying the Tenant
 
 Check tenant health with the stats endpoint:
 
-```
-nicocli tenant get-current-tenant-stats
+```bash
+nicocli tenant stats
 ```
 
 Example response for a tenant in active use:
@@ -136,20 +142,20 @@ A tenant alone cannot consume infrastructure -- it needs a tenant account that l
 
 ### Creating the Link
 
-```
+```bash
 nicocli tui
 > tenant-account create
 ```
 
 The TUI prompts for the infrastructure provider ID and the tenant org name. Non-interactive (using individual flags):
 
-```
+```bash
 nicocli tenant-account create --infrastructure-provider-id <provider-uuid> --tenant-org acme-corp
 ```
 
 The tenant account starts in `Invited` status. Listing tenant accounts requires a filter flag -- the bare `nicocli tenant-account list` returns HTTP 400:
 
-```
+```bash
 nicocli tenant-account list --tenant-id <tenant-uuid>
 nicocli tenant-account list --infrastructure-provider-id <provider-uuid>
 ```
@@ -178,23 +184,88 @@ Example tenant account detail (Ready, with active allocations):
 
 The tenant admin must accept the invitation to transition the account to `Ready`. The non-interactive form sends an empty PATCH body -- note the flag-first ordering:
 
-```
+```bash
 nicocli tenant-account update --data '{}' <account-id>
 ```
 
 TUI:
 
-```
+```bash
 nicocli tui
 > tenant-account update
 ```
 
 Only accounts in `Invited` status can be accepted. Attempting to update a `Ready` account returns the verified error:
 
-```
+```bash
 $ nicocli tenant-account update --data '{}' <account-id>
 Error: API error 400: Tenant Account status is not Invited
 ```
+
+### Granting Targeted Instance Creation
+
+`targetedInstanceCreation` is the privileged tenant capability. A tenant that has it can:
+
+- Create an instance against a specific machine ID, or narrow placement with a machine label selector.
+- Set `isRepairTenant: true` when releasing an instance, which is what the repair tenant workflow requires.
+- Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
+- Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
+
+A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
+the only supported way to grant it, and it applies to regular tenants as well as
+service-account orgs:
+
+```bash
+nicocli tenant-account update \
+  --data '{"siteCapabilities":[{"siteIds":[],"targetedInstanceCreation":true}]}' \
+  <account-id>
+```
+
+#### Payload rules
+
+- Exactly one entry must have an empty or omitted `siteIds`. That entry sets the account-level default.
+- Any further entry lists site IDs that override the default. Each site must already be associated with the tenant, which happens when the tenant's first allocation at that site is created.
+- No site ID may appear in more than one entry.
+- `targetedInstanceCreation` is required on every entry.
+- The request must not also carry `tenantContactId`, which is the invitation-acceptance field. Sending both returns HTTP 400.
+
+Updates use replace semantics. A per-site override whose site ID is omitted from a later
+payload is cleared. To leave the capability on everywhere except one site, send both
+entries together:
+
+```json
+{
+  "siteCapabilities": [
+    {"siteIds": [], "targetedInstanceCreation": true},
+    {"siteIds": ["<site-uuid>"], "targetedInstanceCreation": false}
+  ]
+}
+```
+
+#### How the effective value resolves
+
+Three inputs decide whether the capability is in force for a tenant at a given site:
+
+1. The tenant account must be `Ready`. Setting the capability on an `Invited` account grants nothing until the tenant accepts.
+2. The account-level default applies where no site override exists.
+3. A site override, when present, wins over the account default.
+
+Because the account is per provider, a tenant with accounts at two providers can be
+privileged at one and not the other.
+
+#### Reading the current value
+
+`nicocli tenant-account list` returns `siteCapabilities` and is the source of truth:
+
+```bash
+nicocli tenant-account list --tenant-id <tenant-uuid>
+```
+
+<Warning title="Deprecation">
+Do not read `capabilities.targetedInstanceCreation` from `nicocli tenant current`. It is a deprecated read-only aggregate, scheduled for removal on **October 1, 2026**. It reports `true` only when every `Ready` tenant account enables the capability and no site override disables it, and it is omitted rather than returned as `false` otherwise, so a client cannot branch on a boolean here. On the `tenantSummary` objects embedded in other resources it is always omitted, leaving `"capabilities": {}`.
+
+Use `nicocli tenant-account list` instead.
+</Warning>
 
 ## Instance Types
 
@@ -212,13 +283,13 @@ The site administrator defines instance types during Day Zero. NICo validates th
 
 ### Viewing Instance Types
 
-```
+```bash
 nicocli instance-type list --output table
 ```
 
 The TUI provides richer detail:
 
-```
+```bash
 nicocli tui
 > instance-type list
 > instance-type get
@@ -230,16 +301,16 @@ The detail view for an instance type includes an `allocationStats` section showi
 
 Instance type creation is a gRPC operation via nico-admin-cli:
 
-```
-nico-admin-cli -c <core-api-url> instance-type create --name "GB200-NVL72" --gpu-count 72
-nico-admin-cli -c <core-api-url> instance-type associate --instance-type-id <id> --machine-id <machine-id>
+```bash
+nico-admin-cli -a <core-api-url> instance-type create --name "GB200-NVL72" --gpu-count 72
+nico-admin-cli -a <core-api-url> instance-type associate --instance-type-id <id> --machine-id <machine-id>
 ```
 
 See the Quick Start Guide, Step 7 for nico-admin-cli access patterns. The REST API exposes instance type CRUD endpoints, but machine association management is currently gRPC-only.
 
 ## Assigning Resources with Allocations
 
-An allocation grants a tenant access to infrastructure at a specific site. Without at least one allocation, a tenant cannot create instances, VPCs, or subnets. Allocations are provider-side operations requiring the Provider Admin role.
+An allocation grants a tenant access to infrastructure at a specific site. Without at least one allocation, a tenant cannot create instances, VPCs, VPC Prefixes, or Subnets. Allocations are provider-side operations requiring the Provider Admin role.
 
 ### Allocation Model
 
@@ -258,7 +329,7 @@ An allocation starts in `Pending` status, transitions to `Registered` once proce
 
 Using the TUI (recommended):
 
-```
+```bash
 nicocli tui
 > allocation create
 ```
@@ -276,7 +347,7 @@ The TUI prompts in this order:
 
 Non-interactive:
 
-```
+```bash
 nicocli allocation create --data-file - <<'EOF'
 {
   "name": "acme-gpu-pool",
@@ -299,7 +370,7 @@ The system validates that enough machines of the specified instance type are ava
 
 ### Creating a Network Allocation
 
-```
+```bash
 nicocli allocation create --data-file - <<'EOF'
 {
   "name": "acme-network",
@@ -321,14 +392,14 @@ A `constraintValue` of 24 allocates a /24 sub-block (256 addresses). The value m
 
 ### Listing and Inspecting Allocations
 
-```
+```bash
 nicocli allocation list --output table
 nicocli allocation get <allocation-id>
 ```
 
 `allocation list` supports rich filter flags (verified via `--help`): `--site-id`, `--tenant-id`, `--infrastructure-provider-id`, `--resource-type` (`InstanceType` or `IPBlock`), `--resource-type-id`, `--status`, `--constraint-type`, `--constraint-value`. The `--query` flag is a free-text search over name/description/status, NOT a key-value filter -- use the dedicated flags instead.
 
-```
+```bash
 nicocli allocation list --resource-type InstanceType
 nicocli allocation list --site-id <site-uuid> --tenant-id <tenant-uuid>
 nicocli allocation list --status Registered --output table
@@ -372,13 +443,13 @@ Example allocation detail (IPBlock allocation, /28 reservation against a /16 poo
 
 Adjust an existing constraint value (e.g., increase a machine quota). Note the flag-first ordering with two positionals:
 
-```
+```bash
 nicocli allocation constraint update --constraint-value 12 <allocation-id> <constraint-id>
 ```
 
 Or with `--data`:
 
-```
+```bash
 nicocli allocation constraint update --data '{"constraintValue": 12}' <allocation-id> <constraint-id>
 ```
 
@@ -389,11 +460,11 @@ The system validates:
 
 ### Deleting an Allocation
 
-```
+```bash
 nicocli allocation delete <allocation-id>
 ```
 
-Deletion is blocked if the tenant has active instances or subnets consuming resources from the allocation. Terminate dependent resources first.
+Deletion is blocked if the tenant has active instances, VPC Prefixes, or Subnets consuming resources from the allocation. Terminate dependent resources first.
 
 ### Multiple Allocations per Tenant
 
@@ -401,20 +472,25 @@ A tenant can have multiple allocations at the same site with different resource 
 
 ### Allocation Workflow Summary
 
-1. **Provision the tenant** -- `nicocli tenant get-current-tenant`
+1. **Provision the tenant** -- `nicocli tenant current`
 2. **Establish a tenant account** -- Provider admin links provider to tenant org
 3. **Discover available resources** -- List sites, instance types, and IP blocks
 4. **Create compute allocation(s)** -- One per instance type the tenant needs
 5. **Create network allocation(s)** -- One per IP block the tenant needs
 6. **Verify** -- List allocations and confirm they reach `Registered` status
 
-## Creating VPCs and Subnets
+## Creating VPCs and Tenant Networks
 
-After allocations are in place, the tenant can create VPCs and subnets within their allocated resource boundaries.
+After allocations are in place, the tenant can create VPCs and their tenant
+network resources within the allocated boundaries. The VPC's
+`networkVirtualizationType` determines the resource: `FNN` VPCs use VPC
+Prefixes, while `ETHERNET_VIRTUALIZER` VPCs use IPv4 Subnets.
 
 ### VPC Creation
 
-A VPC is the logical network container for tenant workloads. It defines the tenant boundary for networking and provides the parent context for subnets and instances.
+A VPC is the logical network container for tenant workloads. It defines the
+tenant boundary for networking and provides the parent context for VPC
+Prefixes or Subnets and instances.
 
 `nicocli vpc create --help` shows these flags:
 
@@ -423,14 +499,14 @@ A VPC is the logical network container for tenant workloads. It defines the tena
 | `--name` | yes | Unique within the tenant |
 | `--site-id` | yes | The site this VPC belongs to |
 | `--routing-profile` | no | One of `external`, `internal`, `privileged-internal` (REST API mapping); see core docs for semantics |
-| `--network-virtualization-type` | no | `FNN` (production) or `ETHERNET_VIRTUALIZER` (legacy) |
+| `--network-virtualization-type` | no | `FNN` for VPC Prefixes, `ETHERNET_VIRTUALIZER` for IPv4 Subnets, or `FLAT` for zero-DPU and NIC-mode hosts |
 | `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200) |
 | `--vni` | no | Pin a specific VXLAN Network Identifier |
 | `--description` | no | |
 
 Realistic non-interactive form:
 
-```
+```bash
 nicocli vpc create \
   --name acme-prod \
   --site-id <site-uuid> \
@@ -438,9 +514,14 @@ nicocli vpc create \
   --network-virtualization-type FNN
 ```
 
+`FNN` is the supported target for production deployments with DPUs. See
+[VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md) for the support
+boundary and [Flat VPCs for Zero-DPU and NIC-Mode Hosts](../manuals/vpc/flat_vpcs_zero_dpu.md)
+for the `FLAT` workflow.
+
 TUI flow (prompts in order):
 
-```
+```bash
 nicocli tui
 > vpc create
 ```
@@ -449,32 +530,56 @@ nicocli tui
 2. **VPC name** -- unique name
 3. **Description** -- optional
 
+The specialized TUI does not prompt for `networkVirtualizationType`; it uses
+the Site default. Use the non-interactive command when the VPC type must be
+selected explicitly.
+
 Verify the VPC reaches `Ready` status:
 
-```
+```bash
 nicocli vpc list --output table
 ```
 
 > **Routing profiles** govern which VPCs can exchange routes with which others. The REST API accepts `external`, `internal`, and `privileged-internal`; the underlying gRPC API supports any profile defined under `fnn.routing_profiles` in the API server config. For details, see [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md). For the full networking architecture (VRFs, VNI pools, BGP, deny prefixes), see [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md).
 
-### Subnet Creation
+### VPC Prefix Creation for FNN
 
-A subnet is an IP address range within a VPC, carved from an allocated IP block.
+An `FNN` VPC uses a VPC Prefix carved from a tenant IP Block. Create the VPC
+Prefix after the parent VPC reaches `Ready`:
 
-`nicocli subnet create --help` shows these flags. Note the flag name `--ipv4block-id` (no separator between `v4` and `block`) and the IPv6 counterpart:
+```bash
+nicocli vpc-prefix create \
+  --name acme-prefix-1 \
+  --vpc-id <fnn-vpc-uuid> \
+  --ip-block-id <ip-block-uuid> \
+  --prefix-length 28
+```
+
+For the supported IPv4 creation path, `--prefix-length` accepts 8 through 31
+and must be greater than the selected parent IP Block's prefix length. REST
+support for creating IPv6 FNN VPC Prefixes is tracked by
+[#5407](https://github.com/NVIDIA/infra-controller/issues/5407).
+
+### IPv4 Subnet Creation for ETHERNET_VIRTUALIZER
+
+A Subnet is an IPv4 range within an `ETHERNET_VIRTUALIZER` VPC, carved from a
+Ready tenant IPv4 IP Block at the same Site. Subnets do not support IPv6; FNN
+VPCs use VPC Prefixes instead.
+
+`nicocli subnet create --help` shows these flags. Note the flag name
+`--ipv4block-id`, with no separator between `v4` and `block`:
 
 | Flag | Required | Notes |
 |------|----------|-------|
 | `--name` | yes | |
-| `--vpc-id` | yes | Parent VPC |
-| `--prefix-length` | yes | 1-32 |
-| `--ipv4block-id` | one of v4/v6 required | IP block to carve from |
-| `--ipv6block-id` | one of v4/v6 required | IPv6 block to carve from |
+| `--vpc-id` | yes | Ready `ETHERNET_VIRTUALIZER` VPC |
+| `--prefix-length` | yes | IPv4 prefix length from 8 through 30 |
+| `--ipv4block-id` | yes | Ready tenant IPv4 IP Block at the VPC's Site |
 | `--description` | no | |
 
-Non-interactive (IPv4):
+Non-interactive:
 
-```
+```bash
 nicocli subnet create \
   --name acme-subnet-1 \
   --vpc-id <vpc-uuid> \
@@ -484,26 +589,26 @@ nicocli subnet create \
 
 Or via `--data` (the JSON body uses camelCase even though the flag is single-word):
 
-```
+```bash
 nicocli subnet create --data '{"name": "acme-subnet-1", "vpcId": "<vpc-uuid>", "ipv4BlockId": "<ip-block-uuid>", "prefixLength": 28}'
 ```
 
 TUI flow:
 
-```
+```bash
 nicocli tui
 > subnet create
 ```
 
-1. **VPC** -- select the parent VPC
+1. **Ready Ethernet virtualizer VPC** -- select the parent VPC
 2. **Subnet name** -- unique name
 3. **Description** -- optional
-4. **Prefix length** -- 1-32
-5. **IPv4 Block** -- scoped to the VPC's site
+4. **IPv4 prefix length** -- 8 through 30
+5. **Tenant IPv4 Block** -- select a Ready tenant IPv4 IP Block at the VPC's Site
 
 Verify:
 
-```
+```bash
 nicocli subnet list --output table
 ```
 
@@ -518,9 +623,9 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--name` | yes | |
 | `--tenant-id` | yes | Owning tenant -- often missed in older docs |
 | `--vpc-id` | yes | Parent VPC |
-| `--machine-id` | no | Pin to a specific machine (requires `targetedInstanceCreation: true` on the tenant) |
+| `--machine-id` | no | Pin to a specific machine (requires [targeted instance creation](#granting-targeted-instance-creation) on the tenant's account for that site) |
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
-| `--operating-system-id` | no | OS for PXE provisioning |
+| `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
 | `--ipxe-script` | no | Custom iPXE script |
 | `--user-data` | no | cloud-init style user data |
@@ -529,9 +634,10 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 
 `interfaces[]` and `sshKeyGroupIds[]` are array-typed and must go through `--data` / `--data-file`.
 
-Non-interactive form (with one interface and one SSH key group):
+Non-interactive form for an `FNN` VPC (with one interface and one SSH key
+group):
 
-```
+```bash
 nicocli instance create --data-file - <<'EOF'
 {
   "name": "acme-worker-01",
@@ -546,11 +652,11 @@ nicocli instance create --data-file - <<'EOF'
 EOF
 ```
 
-If you want to target a specific machine instead, replace `instanceTypeId` with `machineId`. Machine targeting requires the tenant to have `capabilities.targetedInstanceCreation: true`.
+If you want to target a specific machine instead, replace `instanceTypeId` with `machineId`. Machine targeting requires the tenant's account with the site's provider to be `Ready` and to have the capability enabled for that site. Refer to [Granting Targeted Instance Creation](#granting-targeted-instance-creation).
 
 TUI flow:
 
-```
+```bash
 nicocli tui
 > instance create
 ```
@@ -559,14 +665,18 @@ nicocli tui
 2. **Machine** -- select from machines in `Ready` state at the VPC's site
 3. **Instance name** -- unique name
 4. **Operating system** -- optional
-5. **VPC prefix** -- network prefix for each interface (loops, can add more)
+5. **Network resource** -- select a VPC Prefix for `FNN` or a Subnet for
+   `ETHERNET_VIRTUALIZER` (loops, can add more). `FLAT` VPCs attach the network
+   automatically and skip this prompt.
 6. **SSH key groups** -- optional, attaches SSH keys for serial-console access
+
+For an image-based operating system, review [Image-Based Operating Systems](image-based-operating-systems.md) before making the definition available to tenants. Its disk selector applies to every eligible target and the selected whole disk is overwritten during installation.
 
 ### Verifying an Instance Is Running
 
 After creation, the instance goes through these states:
 
-```
+```text
 Pending -> Ready -> BootCompleted          (initial provisioning, OS up + phone-home)
 Pending -> Ready                            (initial provisioning, no phone-home)
 Ready -> Configuring -> Ready               (in-place reconfigure: NSG, SSH keys, OS, iPXE, user-data)
@@ -581,13 +691,79 @@ Two states are easy to miss:
 
 Monitor progress:
 
-```
+```bash
 nicocli instance list --output table
 nicocli instance get <instance-id>
 nicocli instance status-history <instance-id>
 ```
 
 The instance detail response is rich -- it includes `interfaces[]` with assigned IP addresses and VPC prefix info, `ipxeScript` showing the live boot script, `serialConsoleUrl` for console access, full machine and SKU metadata, and any active `deprecations[]` warnings. The API uses inline `deprecations[]` arrays to flag fields scheduled for removal -- watch for these in your responses.
+
+### Phone-home
+
+`phoneHomeEnabled` (`--phone-home-enabled`) controls whether NICo waits for the booted operating system to call back -- to "phone home" -- before it reports the instance as ready. It is a property of the operating-system definition (`operating-system create` / `operating-system update`) and can also be set per instance (`instance create` / `instance update`).
+
+**What it does.** When phone-home is enabled, NICo does not consider the instance fully provisioned until the booted OS contacts NICo's metadata service from inside the guest. The instance is held in a provisioning state -- the transition to `Ready` is gated -- until that callback arrives. When it is disabled, NICo reports the instance ready as soon as provisioning and config sync finish, without waiting for any signal from the OS.
+
+**What NICo injects.** When phone-home is enabled, NICo edits your `userData`. You do not add the callback yourself. NICo parses your cloud-init YAML, removes the existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) blocks that it can edit, and inserts one that sends a POST request to the site's metadata endpoint:
+
+```yaml
+#cloud-config
+# ... your first-boot setup (SSH keys, passwords, packages, ...) ...
+phone_home:
+  post: all
+  url: http://169.254.169.254/latest/meta-data/phone_home
+```
+
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator can override this endpoint for each deployment. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+
+When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
+
+**Which user data NICo can edit.** When phone-home is enabled, the `userData` you provide must be one of these formats:
+
+- A `#cloud-config` mapping.
+- A `#cloud-config-archive` sequence.
+
+The API rejects these inputs:
+
+- A `#!` script.
+- A `## template: jinja` document, because NICo cannot render the template back to text.
+- Another cloud-init format, including `#cloud-boothook` or `#cloud-config-jsonp`.
+- More than one YAML document.
+- Text that is not YAML.
+
+NICo treats user data without a format marker as `#cloud-config`, including user data with only a comment above the keys. Enabling phone-home writes the marker at the top so that cloud-init reads the document. When you disable phone-home for user data that NICo cannot edit, NICo leaves the document unchanged instead of rejecting the request. Any `phone_home` block in that document remains.
+
+**Where the block lands.** In a `#cloud-config` document, NICo adds the block at the top level. If the document contains an `autoinstall` section, NICo adds the block under `autoinstall.user-data`. This placement makes the callback come from the installed system instead of the installer.
+
+In a `#cloud-config-archive`, NICo adds the block to the part that installs a target system, again under `autoinstall.user-data`. Cloud-init determines a part's format from its `type` without reading the content. If `type` is absent, cloud-init uses the content's first line. If neither value identifies a format, cloud-init treats the part as `cloud-config`. The first-line rule above therefore applies to the document you send, not to the parts inside it.
+
+NICo leaves a part whose content is a `## template: jinja` document unchanged because it cannot render the template back to text. If no part installs a target system, NICo appends a `#cloud-config` part that contains only the block. NICo does the same when the installation part is a template that it leaves unchanged. In both cases, NICo leaves your parts unchanged:
+
+```yaml
+#cloud-config-archive
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    # ... your part, untouched ...
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      post: all
+      url: http://169.254.169.254/latest/meta-data/phone_home
+```
+
+cloud-init runs the `phone_home` module in its final stage, after the rest of your configuration has been applied, so the callback fires only after your setup has completed. When NICo receives the POST, it records the contact and releases the readiness gate, allowing the instance to become `Ready`.
+
+**When to use it.** Enable phone-home when "ready" must mean "the guest has finished its own first-boot setup" -- for example, to delay readiness until cloud-init has applied SSH keys and passwords, so that automation watching for `Ready` does not connect before the host is fully configured. Leave phone-home disabled when NICo finishing provisioning is a sufficient ready signal and you do not need a callback from inside the guest.
+
+**Notes and caveats.**
+
+- Phone-home only gates *status reporting*. It does not change how the host is provisioned or booted -- the reboot into the provisioned OS happens identically whether or not phone-home is enabled.
+- If phone-home is enabled but the booted OS never runs cloud-init, or the guest cannot reach the metadata endpoint, the callback never arrives and the instance stays in its provisioning state, never reporting ready.
+- The metadata endpoint (by default, `169.254.169.254`) is not a tenant-facing API, and is reachable only from the provisioned host over its link-local metadata link.
+- Rebooting the instance with a one-time custom iPXE override (`instance update --reboot-with-custom-ipxe=true`) re-arms the gate when phone-home is enabled: NICo clears the recorded contact, so the OS must phone home again before the instance is reported ready.
 
 ### Batch Instance Creation
 
@@ -606,7 +782,7 @@ For creating multiple identical instances at once, use `instance batch-create`. 
 
 Non-interactive form:
 
-```
+```bash
 nicocli instance batch-create \
   --tenant-id <tenant-uuid> \
   --vpc-id <vpc-uuid> \
@@ -644,19 +820,19 @@ NICo provides instance-level power management through the REST API. These operat
 
 Reboot:
 
-```
+```bash
 nicocli instance update --trigger-reboot=true <instance-id>
 ```
 
 Reboot with re-provisioning iPXE and pending updates:
 
-```
+```bash
 nicocli instance update --trigger-reboot=true --reboot-with-custom-ipxe=true --apply-updates-on-reboot=true <instance-id>
 ```
 
 TUI:
 
-```
+```bash
 nicocli tui
 > instance reboot
 ```
@@ -665,20 +841,20 @@ The TUI prompts for instance, custom-iPXE flag, apply-updates flag, and a confir
 
 ### Renaming or Updating an Instance
 
-```
+```bash
 nicocli instance update --name acme-worker-01-renamed <instance-id>
 nicocli instance update --description "production worker" <instance-id>
 ```
 
 `sshKeyGroupIds[]` is an array, so changes go through the body:
 
-```
+```bash
 nicocli instance update --data '{"sshKeyGroupIds": ["<group-uuid-1>", "<group-uuid-2>"]}' <instance-id>
 ```
 
 ### Deleting (Terminating) an Instance
 
-```
+```bash
 nicocli instance delete <instance-id>
 ```
 
@@ -688,12 +864,12 @@ In TUI mode, `instance delete` prompts for confirmation before proceeding. Delet
 
 For stuck or unresponsive machines that cannot be managed through the instance API, nico-admin-cli provides direct BMC operations:
 
-```
+```bash
 # Force-reboot via BMC
-nico-admin-cli -c <core-api-url> machine reboot --machine-id="<machine-id>"
+nico-admin-cli -a <core-api-url> machine reboot --machine-id="<machine-id>"
 
 # Force-delete a stuck machine (destructive -- wipes machine state)
-nico-admin-cli -c <core-api-url> machine force-delete --machine="<machine-id>"
+nico-admin-cli -a <core-api-url> machine force-delete --machine="<machine-id>"
 ```
 
 See the [Machine Reboot](../playbooks/machine_reboot.md) and [Force Delete](../playbooks/force_delete.md) playbooks in the core documentation for detailed procedures.
@@ -702,31 +878,31 @@ See the [Machine Reboot](../playbooks/machine_reboot.md) and [Force Delete](../p
 
 ### Viewing the Current Tenant
 
-```
-nicocli tenant get-current-tenant
+```bash
+nicocli tenant current
 ```
 
 For provider admins needing visibility across tenants, list tenant accounts (a filter flag is required):
 
-```
+```bash
 nicocli tenant-account list --infrastructure-provider-id <provider-uuid> --output table
 ```
 
 ### Monitoring Tenant Health
 
-```
-nicocli tenant get-current-tenant-stats
+```bash
+nicocli tenant stats
 ```
 
 Non-zero `error` counts warrant investigation:
 
-```
+```bash
 nicocli instance list --status error --output table
 ```
 
 Provider admins can get cross-tenant compute allocation stats at a site. `instance-type-stats` is a sub-resource of `tenant`, with a `stats` leaf action -- the full command has three tokens:
 
-```
+```bash
 nicocli tenant instance-type-stats stats --site-id <site-uuid>
 ```
 
@@ -745,7 +921,8 @@ NICo has no first-class "disable" operation. Options:
 There is no `DELETE /tenant` endpoint -- tenant records are permanent. To fully decommission:
 
 1. **Terminate all instances** -- delete every instance; each must reach `Terminated` status.
-2. **Delete all subnets** -- remove subnets from every VPC.
+2. **Delete all tenant network resources** -- remove VPC Prefixes or Subnets
+   from every VPC, according to its `networkVirtualizationType`.
 3. **Delete all VPCs** -- remove the tenant's VPCs.
 4. **Delete all allocations** -- provider admin removes compute and network allocations.
 5. **Delete the tenant account** -- provider admin severs the link.
@@ -761,15 +938,15 @@ This section ties together the full Day One workflow. The TUI flow is the recomm
 
 ### Step 1: Provision the Tenant (Tenant Admin)
 
-```
-nicocli tenant get-current-tenant
+```bash
+nicocli tenant current
 ```
 
 Idempotent -- creates the tenant lazily on first call.
 
 ### Step 2: Establish Tenant Account (Provider Admin)
 
-```
+```bash
 nicocli tenant-account create --infrastructure-provider-id <provider-uuid> --tenant-org <tenant-org>
 ```
 
@@ -777,7 +954,7 @@ Or via TUI: `tenant-account create`.
 
 ### Step 3: Accept Tenant Account (Tenant Admin)
 
-```
+```bash
 # Find the invitation
 nicocli tenant-account list --tenant-id <tenant-uuid>
 
@@ -789,7 +966,7 @@ nicocli tenant-account update --data '{}' <account-id>
 
 Use the TUI for the first one -- it filters instance types by the selected site and validates capacity:
 
-```
+```bash
 nicocli tui
 > allocation create
 # Site -> name -> tenant -> InstanceType -> select type -> Reserved -> machine count
@@ -797,7 +974,7 @@ nicocli tui
 
 ### Step 5: Create Network Allocation (Provider Admin)
 
-```
+```bash
 nicocli tui
 > allocation create
 # Same site -> name -> tenant -> IPBlock -> select block -> Reserved -> prefix length
@@ -805,29 +982,29 @@ nicocli tui
 
 ### Step 6: Verify Allocations
 
-```
+```bash
 nicocli allocation list --output table --tenant-id <tenant-uuid>
 ```
 
 All allocations should show `Registered` status.
 
-### Step 7: Create a VPC (Tenant Admin)
+### Step 7: Create an FNN VPC (Tenant Admin)
 
-```
-nicocli vpc create --name <n> --site-id <site-uuid> --routing-profile internal
+```bash
+nicocli vpc create --name <n> --site-id <site-uuid> --routing-profile internal --network-virtualization-type FNN
 ```
 
-### Step 8: Create a Subnet (Tenant Admin)
+### Step 8: Create a VPC Prefix (Tenant Admin)
 
-```
-nicocli subnet create --name <n> --vpc-id <vpc-uuid> --ipv4block-id <ip-block-uuid> --prefix-length 28
+```bash
+nicocli vpc-prefix create --name <n> --vpc-id <vpc-uuid> --ip-block-id <ip-block-uuid> --prefix-length 28
 ```
 
 ### Step 9: Launch an Instance (Tenant Admin)
 
 The first instance is easiest via TUI because `interfaces[]` is array-typed:
 
-```
+```bash
 nicocli tui
 > instance create
 # VPC -> Machine -> name -> OS (optional) -> VPC prefix -> SSH key groups (optional)
@@ -837,13 +1014,13 @@ For automation, use `--data-file` -- see the Launching an Instance section above
 
 ### Step 10: Verify
 
-```
-nicocli tenant get-current-tenant-stats
+```bash
+nicocli tenant stats
 nicocli instance list --output table
 nicocli instance status-history <instance-id>
 ```
 
-The instance should reach `Ready` (or `BootCompleted` if `phoneHomeEnabled: true`). Tenant stats should now show non-zero counts for `instance`, `vpc`, and `subnet`.
+The instance should reach `Ready` (or `BootCompleted` if `phoneHomeEnabled: true`). Tenant stats should now show non-zero counts for `instance` and `vpc`.
 
 ## Troubleshooting
 
@@ -868,8 +1045,8 @@ The instance should reach `Ready` (or `BootCompleted` if `phoneHomeEnabled: true
 
 Use `--debug` on any command to see the full HTTP request and response. The token is redacted in the log; the path-rewriting from `nico` to whatever `api.name` is set to is visible. Real output:
 
-```
-$ nicocli --debug tenant get-current-tenant
+```bash
+$ nicocli --debug tenant current
 time=... msg="API request: GET http://<api>/v2/org/<org>/<api-name>/tenant/current"
 time=... msg="Request headers: {\"Accept\":[\"application/json\"],\"Authorization\":[\"Bearer <redacted>\"]}"
 time=... msg="API response: ... -> 200 OK"
@@ -884,7 +1061,7 @@ The CLI version and the API server version are independent. CLI is generated fro
 
 The list view is intentionally lightweight -- each entry has `id`, `endpoint`, `method`, `statusCode`, `userId`, `clientIP`, `apiVersion`, and `timestamp`. To see the full request, including the request body and the resolved user object, fetch a single entry:
 
-```
+```bash
 nicocli audit list --output json --page-size 5      # find entries of interest
 nicocli audit get <audit-id>                         # fetch full detail
 ```
@@ -895,7 +1072,7 @@ nicocli audit get <audit-id>                         # fetch full detail
 
 The TUI is the recommended tool for exploratory work. It handles config selection, authentication, and provides tab-complete interactive commands:
 
-```
+```bash
 nicocli tui
 ```
 
@@ -908,9 +1085,9 @@ Flag-first ordering -- always put flags before positional args.
 | Operation | Command | Role Required |
 |-----------|---------|--------------|
 | View current user | `nicocli user get` | Any authenticated user |
-| View current tenant | `nicocli tenant get-current-tenant` | Tenant Admin |
-| View tenant stats | `nicocli tenant get-current-tenant-stats` | Tenant Admin |
-| Service-account status | `nicocli service-account get` | Any authenticated user |
+| View current tenant | `nicocli tenant current` | Tenant Admin |
+| View tenant stats | `nicocli tenant stats` | Tenant Admin |
+| Service-account status | `nicocli service-account current` | Any authenticated user |
 | List tenant accounts | `nicocli tenant-account list --tenant-id <id>` (or `--infrastructure-provider-id`) | Provider or Tenant Admin |
 | Create tenant account | `nicocli tenant-account create --infrastructure-provider-id <id> --tenant-org <org>` | Provider Admin |
 | Accept tenant account | `nicocli tenant-account update --data '{}' <account-id>` | Tenant Admin |
@@ -921,8 +1098,9 @@ Flag-first ordering -- always put flags before positional args.
 | Update constraint | `nicocli allocation constraint update --constraint-value N <alloc-id> <constraint-id>` | Provider Admin |
 | Delete allocation | `nicocli allocation delete <alloc-id>` | Provider Admin |
 | List instance types | `nicocli instance-type list` | Provider or Tenant Admin |
-| Create VPC | `nicocli vpc create --name <n> --site-id <id> --routing-profile internal` | Tenant Admin |
-| Create subnet | `nicocli subnet create --name <n> --vpc-id <id> --ipv4block-id <id> --prefix-length 28` | Tenant Admin |
+| Create FNN VPC | `nicocli vpc create --name <n> --site-id <id> --routing-profile internal --network-virtualization-type FNN` | Tenant Admin |
+| Create FNN VPC Prefix | `nicocli vpc-prefix create --name <n> --vpc-id <id> --ip-block-id <id> --prefix-length 28` | Tenant Admin |
+| Create Ethernet virtualizer IPv4 Subnet | `nicocli subnet create --name <n> --vpc-id <id> --ipv4block-id <id> --prefix-length 28` | Tenant Admin |
 | Create instance | `nicocli instance create --data-file <file>` (interfaces are array-typed) | Tenant Admin |
 | Reboot instance | `nicocli instance update --trigger-reboot=true <instance-id>` | Tenant Admin |
 | Rename instance | `nicocli instance update --name <new> <instance-id>` | Tenant Admin |
@@ -931,13 +1109,16 @@ Flag-first ordering -- always put flags before positional args.
 
 ## Related Documentation
 
-- [Network Isolation](network-isolation.md) -- Per-plane tenant isolation (Ethernet, InfiniBand, NVLink)
-- [Organization & Permissions](org-permissions.md) -- IdP-managed roles and user setup
-- [Quick Start Guide](../getting-started/quick-start.md) -- NICo deployment and Day Zero walkthrough
-- [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md) -- Profile configuration and behavior
-- [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md) -- Full networking architecture
-- [VPC Peering](../manuals/vpc/vpc_peering_management.md) -- Connecting VPCs (gRPC only)
-- [NVLink Partitioning](../manuals/nvlink_partitioning.md) -- NVLink domain management
-- [Machine Reboot Playbook](../playbooks/machine_reboot.md) -- Emergency BMC reboot procedures
-- [Force Delete Playbook](../playbooks/force_delete.md) -- Removing stuck machines
-- [Day 0/1/2 Lifecycle](../overview/lifecycle.md) -- NICo lifecycle model overview
+- [Authentication and Authorization](/rest-api-reference/authentication-and-authorization), Day 0 auth configuration: `issuers` and `keycloak` modes, claim mappings, validation rules
+- [Tenant Management with Keycloak](tenant-management-keycloak.md), realm-side steps for onboarding a tenant on Keycloak deployments
+- [Network Isolation](network-isolation.md), per-plane tenant isolation (Ethernet, InfiniBand, NVLink)
+- [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md), reusable template-based boot definitions and Site synchronization
+- [Organization & Permissions](org-permissions.md), IdP-managed roles and user setup
+- [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
+- [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior
+- [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
+- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs (gRPC only)
+- [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
+- [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
+- [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines
+- [Day 0/1/2 Lifecycle](../overview/lifecycle.md), NICo lifecycle model overview

@@ -47,11 +47,15 @@ macro_rules! test_assert {
     };
 }
 
+mod conditional_write;
+pub use conditional_write::CheckApplied;
+
 pub mod config;
 pub mod controller;
 pub mod db_write_batch;
 pub mod io;
 pub mod metrics;
+pub mod per_object;
 pub mod state_change_emitter;
 pub mod state_handler;
 

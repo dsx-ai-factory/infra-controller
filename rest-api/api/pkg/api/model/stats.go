@@ -22,40 +22,6 @@ type APIMachineGPUStats struct {
 	Machines int `json:"machines"`
 }
 
-// NewAPIMachineGPUStatsList aggregates GPU capabilities into per-GPU-name summary stats
-func NewAPIMachineGPUStatsList(capabilities []cdbm.MachineCapability) []APIMachineGPUStats {
-	type gpuAgg struct {
-		gpus     int
-		machines map[string]bool
-	}
-	gpuMap := make(map[string]*gpuAgg)
-
-	for _, cap := range capabilities {
-		name := cap.Name
-		agg, exists := gpuMap[name]
-		if !exists {
-			agg = &gpuAgg{machines: make(map[string]bool)}
-			gpuMap[name] = agg
-		}
-		if cap.Count != nil {
-			agg.gpus += *cap.Count
-		} else {
-			agg.gpus++
-		}
-		if cap.MachineID != nil {
-			agg.machines[*cap.MachineID] = true
-		}
-	}
-
-	return lo.MapToSlice(gpuMap, func(name string, agg *gpuAgg) APIMachineGPUStats {
-		return APIMachineGPUStats{
-			Name:     name,
-			GPUs:     agg.gpus,
-			Machines: len(agg.machines),
-		}
-	})
-}
-
 // ~~~~~ Tenant Instance Type Stats ~~~~~ //
 
 // APITenantInstanceTypeStats represents per-tenant instance type allocation stats

@@ -66,11 +66,11 @@ macro_rules! async_operation {
 }
 
 #[derive(Clone)]
-pub struct NmxmApi {
-    pub client: NmxmApiClient,
+pub(super) struct NmxmApi {
+    client: NmxmApiClient,
 }
 impl NmxmApi {
-    pub fn new(client: &NmxmApiClient) -> Self {
+    pub(super) fn new(client: &NmxmApiClient) -> Self {
         Self {
             client: client.clone(),
         }

@@ -24,7 +24,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::operating_system::common::{SerializableArtifact, str_to_os_id};
 use crate::rpc::ApiClient;
 
-pub async fn set_cached_url(
+pub(super) async fn set_cached_url(
     opts: Args,
     format: OutputFormat,
     api_client: &ApiClient,

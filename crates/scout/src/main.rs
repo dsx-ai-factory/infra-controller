@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -22,6 +23,7 @@ use std::time::Duration;
 
 use carbide_host_support::dpa_cmds::{DpaCommand, OpCode};
 use carbide_host_support::registration;
+use carbide_instrument::emit;
 use carbide_uuid::machine::MachineId;
 use cfg::{AutoDetect, Command, MlxAction, Mode, Options};
 use chrono::{DateTime, Days, TimeDelta, Utc};
@@ -41,8 +43,10 @@ use rpc::{
     ForgeScoutErrorReport, forge as rpc_forge, forge_agent_control_response as fac,
     scout_firmware_upgrade as sfu,
 };
-pub use scout::{CarbideClientError, CarbideClientResult};
+use scout::{CarbideClientError, CarbideClientResult};
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tryhard::{RetryFutureConfig, RetryPolicy};
 use x509_parser::pem::parse_x509_pem;
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -53,8 +57,11 @@ mod client;
 mod deprovision;
 mod discovery;
 mod firmware_upgrade;
+mod lldp_report;
 mod machine_validation;
+mod metrics;
 mod mlx_device;
+mod platform;
 mod register;
 mod stream;
 mod tpm;
@@ -64,8 +71,20 @@ struct DevEnv {
 }
 static IN_QEMU_VM: Lazy<RwLock<DevEnv>> = Lazy::new(|| RwLock::new(DevEnv { in_qemu: false }));
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
-pub const REBOOT_COMPLETED_PATH: &str = "/tmp/reboot_completed";
+const LLDP_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
+const REBOOT_COMPLETED_PATH: &str = "/tmp/reboot_completed";
 const MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE: usize = 1500;
+const CLOUD_INIT_OUTPUT_LOG: &str = "/var/log/cloud-init-output.log";
+
+/// Listed explicitly so that a value we do not recognize is treated as unknown
+/// rather than as a failure; cloud-init offers no stability guarantee here.
+const CLOUD_INIT_STATUS_NOT_CLEAN: &[&str] =
+    &["not run", "not started", "running", "error", "disabled"];
+
+/// Backstop against `--wait` never returning, which would strand the machine in
+/// discovery. The real bound on customization is cloud-init's own unit timeout,
+/// so this is set well above any legitimate run rather than tuned to one.
+const CLOUD_INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 async fn check_if_running_in_qemu() {
     use tokio::process::Command;
@@ -93,11 +112,22 @@ async fn main() -> Result<(), eyre::Report> {
         return Ok(());
     }
 
+    // Purely local interrogation for troubleshooting.
+    if matches!(config.subcmd, Some(Command::LldpNeighbors)) {
+        let neighbors = carbide_host_support::lldp_collector::collect_lldp_neighbors().await?;
+        println!("{neighbors:#?}");
+        return Ok(());
+    }
+
     check_if_running_in_qemu().await;
 
     carbide_host_support::init_logging("nico-scout")?;
 
-    tracing::info!("Running as {}...{}", config.mode, config.version);
+    tracing::info!(
+        mode = %config.mode,
+        version_requested = config.version,
+        "Running scout",
+    );
 
     match config.mode {
         Mode::Service => run_as_service(&config).await?,
@@ -128,12 +158,16 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
     .custom_backoff(|_attempt, error: &CarbideClientError| {
         // we only want to retry if attestation has failed. In all other cases
         // just preserve the old behaviour by breaking from the retry loop
-        tracing::error!("Failed to register machine with error {}", error);
-        if !error.to_string().contains("Attestation failed") {
+        tracing::error!(error = %error, "Failed to register machine");
+        if !error
+            .to_string()
+            .to_lowercase()
+            .contains("attestation failed")
+        {
             tracing::info!("Not retrying registration as it is not an attestation error");
             RetryPolicy::Break
         } else {
-            tracing::info!("Retrying registration again in {} seconds", retry.secs);
+            tracing::info!(retry_delay_seconds = retry.secs, "Retrying registration",);
             RetryPolicy::Delay(Duration::from_secs(retry.secs))
         }
     })
@@ -158,7 +192,7 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
         interface_id
     } else {
         return Err(eyre::eyre!(
-            "machine_interface_id is unknown. Can't continue."
+            "machine_interface_id is unknown. can't continue"
         ));
     };
 
@@ -166,6 +200,42 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
 }
 
 async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
+    // Stand up the metrics/scrape endpoint when it is configured. The meter
+    // provider must stay alive for the lifetime of the service: dropping it
+    // shuts down the Prometheus exporter. The endpoint is opt-in -- without
+    // --metrics-listen-addr scout installs no meter and the counters below are
+    // no-ops.
+    let _metrics_guard = match config.metrics_listen_addr {
+        Some(address) => {
+            let metrics_setup =
+                metrics_endpoint::new_metrics_setup("nico-scout", "forge-system", true)?;
+            carbide_instrument::log_events::register(&metrics_setup.meter);
+            let metrics_config = metrics_endpoint::MetricsEndpointConfig {
+                address,
+                registry: metrics_setup.registry,
+                health_controller: Some(metrics_setup.health_controller),
+                additional_prefix: None,
+            };
+            // The endpoint's /health and /ready report process liveness (the
+            // default HealthController state), not scout readiness.
+            tokio::spawn(async move {
+                tracing::info!("Spawning metrics endpoint on {}", metrics_config.address);
+                if let Err(e) = metrics_endpoint::run_metrics_endpoint(&metrics_config).await {
+                    tracing::error!("Metrics endpoint error: {e}");
+                }
+            });
+            Some(metrics_setup.meter_provider)
+        }
+        None => None,
+    };
+
+    // Blocks: scout must not describe a machine that is still being set up.
+    // Ahead of registration so that a customization failure bad enough to break
+    // registration is still reported; that is why ReportForgeScoutError permits
+    // the Anonymous principal, since the client cert arrives in the
+    // DiscoverMachine response.
+    report_cloud_init_outcome(config).await;
+
     // Implement the logic to run as a service here
     let (machine_interface_id, machine_id) = initial_setup(config).await?;
 
@@ -184,50 +254,99 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
     // initial_setup (and after registration is complete).
     match mlx_device::create_device_report_request(machine_id) {
         Ok(request) => match mlx_device::publish_mlx_device_report(config, request).await {
-            Ok(response) => tracing::info!("recevied PublishMlxDeviceReportResponse: {response:?}"),
-            Err(e) => tracing::warn!("failed to publish PublishMlxDeviceReportRequest: {e:?}"),
+            Ok(response) => tracing::info!(?response, "received PublishMlxDeviceReportResponse",),
+            Err(e) => emit(metrics::ScoutMlxOperationFailed::DeviceReportPublish {
+                error: format!("{e:?}"),
+            }),
         },
-        Err(e) => tracing::warn!("failed to create PublishMlxDeviceReportRequest: {e:?}"),
+        Err(e) => emit(metrics::ScoutMlxOperationFailed::DeviceReportCreate {
+            error: format!("{e:?}"),
+        }),
     };
 
+    // Report LLDP neighbors on each poll, re-sending only when the snapshot
+    // changes. The reporter's cache must live across loop iterations.
+    let mut lldp_reporter = lldp_report::LldpReporter::new(
+        machine_id,
+        config.api.clone(),
+        client::forge_client_config(config),
+    );
+
+    // Spawn any further background task into this set and give it a clone of
+    // this token, so one cancel and one join below shut them all down.
+    let mut background_tasks = JoinSet::new();
+    let cancel_token = CancellationToken::new();
+
+    let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
+        carbide_host_support::lldp_collector::collect_lldp_neighbors,
+        LLDP_COLLECTION_INTERVAL,
+        &mut background_tasks,
+        cancel_token.clone(),
+    );
+
     let mut scout_stream_started = false;
-    loop {
-        if is_time_to_check_certs_expiry(next_certs_check_time) {
-            next_certs_check_time = get_next_certs_check_datetime()?;
-            tracing::info!("Renewed next certs check time to {}", next_certs_check_time);
+    let outcome: Result<(), eyre::Report> = async {
+        loop {
+            if is_time_to_check_certs_expiry(next_certs_check_time) {
+                next_certs_check_time = get_next_certs_check_datetime()?;
+                tracing::info!(
+                    %next_certs_check_time,
+                    "Renewed next certificate check time",
+                );
 
-            if check_certs_validity(&client_cert)? {
-                initial_setup(config).await?;
+                if check_certs_validity(&client_cert)? {
+                    initial_setup(config).await?;
+                }
             }
-        }
-        let controller_response = match query_api_with_retries(config, &machine_id).await {
-            Ok(action) => action,
-            Err(e) => {
-                report_scout_error(config, None, Some(machine_interface_id), &e).await?;
-                rpc_forge::ForgeAgentControlResponse::noop()
+            if let Some(collected) = latest_lldp.latest() {
+                lldp_report::report_lldp_neighbors(&mut lldp_reporter, collected).await;
             }
-        };
-        if let Some(action) = controller_response.action {
-            let action_str = action.as_str_name().to_owned();
-            match handle_action(action, &machine_id, machine_interface_id, config).await {
-                Ok(_) => tracing::info!("Successfully served {}", action_str),
-                Err(e) => tracing::info!("Failed to serve {}: Err {}", action_str, e),
+
+            let controller_response = match query_api_with_retries(config, &machine_id).await {
+                Ok(action) => action,
+                Err(e) => {
+                    report_scout_error(config, None, Some(machine_interface_id), &e).await?;
+                    rpc_forge::ForgeAgentControlResponse::noop()
+                }
             };
-        } else {
-            tracing::warn!("API response did not contain an action, skipping.");
-        }
+            if let Some(action) = controller_response.action {
+                let action_name = action.as_str_name();
+                // Capture the action label before handle_action consumes `action`.
+                let scout_action = metrics::ScoutAction::from(&action);
+                let result = handle_action(action, &machine_id, machine_interface_id, config).await;
+                emit(match result {
+                    Ok(()) => metrics::ScoutActionHandled::Ok {
+                        action: scout_action,
+                        action_name,
+                    },
+                    Err(error) => metrics::ScoutActionHandled::Error {
+                        action: scout_action,
+                        action_name,
+                        error: error.to_string(),
+                    },
+                });
+            } else {
+                tracing::warn!("API response did not contain an action, skipping.");
+            }
 
-        // Ensure the first scout API query has run before we establish
-        // a Scout stream connection. There's no technical reason requiring
-        // this, other than it seemed to make sense to do 1 control
-        // request/response action flow before setting up any additional
-        // scaffolding.
-        if !scout_stream_started {
-            scout_stream_started = true;
-            stream::start_scout_stream(machine_id, config);
+            // Ensure the first scout API query has run before we establish
+            // a Scout stream connection. There's no technical reason requiring
+            // this, other than it seemed to make sense to do 1 control
+            // request/response action flow before setting up any additional
+            // scaffolding.
+            if !scout_stream_started {
+                scout_stream_started = true;
+                stream::start_scout_stream(machine_id, config);
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
     }
+    .await;
+
+    cancel_token.cancel();
+    background_tasks.join_all().await;
+
+    outcome
 }
 
 async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
@@ -307,6 +426,8 @@ async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
         // sure we match everything. Maybe this could
         // log something.
         Command::Mlx(_) => return Ok(()),
+        // Handled in main() before logging/API setup; kept for exhaustiveness.
+        Command::LldpNeighbors => return Ok(()),
     };
 
     handle_action(action, &machine_id, machine_interface_id, config).await?;
@@ -347,10 +468,13 @@ async fn handle_action(
             unimplemented!("Rebuild not written yet");
         }
         fac::Action::Noop(_) => {}
-        fac::Action::LogError(_) => match logerror_to_carbide(config, machine_interface_id).await {
-            Ok(()) => (),
-            Err(e) => tracing::info!("Forge Scout logerror_to_carbide error: {}", e),
-        },
+        fac::Action::LogError(_) => logerror_to_carbide(config, machine_interface_id, None)
+            .await
+            // Propagate the failure so `carbide_scout_actions_total` records this
+            // as `outcome = error`, not a silent success.
+            .map_err(|e| {
+                CarbideClientError::GenericError(format!("logerror_to_carbide failed: {e}"))
+            })?,
         fac::Action::Retry(_) => {
             panic!(
                 "Retrieved Retry action, which should be handled internally by query_api_with_retries"
@@ -423,19 +547,19 @@ async fn handle_firmware_upgrade_action(
     })?;
 
     tracing::info!(
-        "[firmware_upgrade] received upgrade task for component={} version={}",
-        task.component_type,
-        task.target_version,
+        component_type = %task.component_type,
+        target_version = %task.target_version,
+        "[firmware_upgrade] received upgrade task",
     );
 
     let result = firmware_upgrade::handle_firmware_upgrade(&http_client, &task).await;
 
     tracing::info!(
-        "[firmware_upgrade] upgrade finished: success={} component={} version={} exit_code={}",
-        result.success,
-        task.component_type,
-        task.target_version,
-        result.exit_code,
+        success = result.success,
+        component_type = %task.component_type,
+        target_version = %task.target_version,
+        exit_code = result.exit_code,
+        "[firmware_upgrade] upgrade finished",
     );
 
     report_firmware_upgrade_status(config, machine_id, task.upgrade_task_id, &result).await?;
@@ -457,7 +581,7 @@ async fn report_firmware_upgrade_status(
 ) -> Result<(), CarbideClientError> {
     let mut client = client::create_forge_client(config).await?;
     let request = tonic::Request::new(rpc_forge::ScoutFirmwareUpgradeStatusRequest {
-        machine_id: Some(*machine_id),
+        machine_id: Some(machine_id.try_into()?),
         success: result.success,
         exit_code: result.exit_code,
         stdout: truncate(&result.stdout, MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE),
@@ -508,10 +632,10 @@ async fn handle_mlxreport_action(
         .filter_map(|device_action| match DpaCommand::try_from(device_action) {
             Ok(command) => Some((device_action.pci_name.clone(), command)),
             Err(e) => {
-                tracing::error!(
-                    "handle_mlxreport_action error decoding command {e} for dev: {:#?}",
-                    device_action.pci_name
-                );
+                emit(metrics::ScoutMlxReconciliationFailed::Decode {
+                    pci_name: device_action.pci_name.clone(),
+                    error: e,
+                });
                 None
             }
         })
@@ -533,17 +657,17 @@ async fn handle_mlxreport_commands(
 
     for (dev_pci_name, dpa_cmd) in commands {
         if dev_pci_name.is_empty() {
-            tracing::error!("handle_mlxreport_action dev_pci_name empty");
+            emit(metrics::ScoutMlxRequestRejected::Reconciliation {});
             continue;
         }
 
         let dev = match discover_device(&dev_pci_name) {
             Ok(d) => d,
             Err(s) => {
-                tracing::error!(
-                    "handle_mlxreport_action Error from discover_device::from_str {s} for dev: {:#?}",
-                    dev_pci_name
-                );
+                emit(metrics::ScoutMlxReconciliationFailed::Discover {
+                    pci_name: dev_pci_name,
+                    error: s,
+                });
                 continue;
             }
         };
@@ -562,10 +686,10 @@ async fn handle_mlxreport_commands(
                     report.observations.push(obs);
                 }
                 Err(e) => {
-                    tracing::info!(
-                        "handle_mlxreport_action Error from lock_device: {e} for dev: {:#?}",
-                        dev_pci_name
-                    );
+                    emit(metrics::ScoutMlxReconciliationFailed::Lock {
+                        pci_name: dev_pci_name,
+                        error: mlx_device::lockdown_error_context(&e, &key),
+                    });
                 }
             },
             // ApplyFirmware attempts to apply the provided FirmwareFlasherProfile
@@ -638,10 +762,10 @@ async fn handle_mlxreport_commands(
                     report.observations.push(obs);
                 }
                 Err(e) => {
-                    tracing::info!(
-                        "handle_mlxreport_action Error from unlock_device: {e} for dev: {:#?}",
-                        dev_pci_name
-                    );
+                    emit(metrics::ScoutMlxReconciliationFailed::Unlock {
+                        pci_name: dev_pci_name,
+                        error: mlx_device::lockdown_error_context(&e, &key),
+                    });
                 }
             },
         };
@@ -655,26 +779,189 @@ async fn handle_mlxreport_commands(
     match mlx_device::publish_mlx_observation_report(config, req).await {
         Ok(_resp) => (),
         Err(e) => {
-            tracing::error!("Error from publish_mlx_observation_report {e}");
+            emit(metrics::ScoutMlxOperationFailed::ObservationReportPublish {
+                error: e.to_string(),
+            });
         }
     }
 }
 
-// Return the last 1500 bytes of the cloud-init-output.log file as a String
-fn get_log_str() -> eyre::Result<String> {
+// Return the tail of the cloud-init output log, up to max_bytes.
+//
+// A missing or empty log becomes the message rather than an error, because it
+// is itself the thing worth reporting: cloud-init never ran.
+fn get_log_str(max_bytes: usize) -> String {
+    let text = match std::fs::read_to_string(CLOUD_INIT_OUTPUT_LOG) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                path = CLOUD_INIT_OUTPUT_LOG,
+                %error,
+                "could not read the cloud-init output log"
+            );
+            return format!("no {CLOUD_INIT_OUTPUT_LOG} present, did cloud-init run?");
+        }
+    };
+
     let mut ret_str = String::new();
-
-    let text = std::fs::read_to_string("/var/log/cloud-init-output.log")?;
-
     for line in text.lines().rev() {
         let line_str = format!("{line}\n");
         ret_str.insert_str(0, &line_str);
-        if ret_str.len() > ::rpc::MAX_ERR_MSG_SIZE as usize {
+        if ret_str.len() > max_bytes {
             break;
         }
     }
 
-    Ok(ret_str)
+    if ret_str.is_empty() {
+        return format!("{CLOUD_INIT_OUTPUT_LOG} is present but empty");
+    }
+
+    ret_str
+}
+
+/// How this boot's cloud-init customization went, as far as `cloud-init
+/// status` will say. The failure cases are kept apart because they have
+/// different owners: a bad site snippet, an image missing cloud-init, and a
+/// wedged cloud-init are not diagnosed the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudInitOutcome {
+    Clean,
+    NotClean,
+    /// `cloud-init` could not be run at all.
+    Unavailable,
+    /// `cloud-init status --wait` did not return within [`CLOUD_INIT_WAIT_TIMEOUT`].
+    TimedOut,
+    /// A status value we do not recognize. Not treated as a failure: snippets
+    /// are site-wide, so misreading one new string would have every machine in
+    /// discovery report an error at once.
+    Unknown,
+}
+
+/// Classifies `cloud-init status` from the exit code and the bare status value,
+/// reading none of the fields cloud-init documents as unstable.
+///
+/// The exit code is primary (0 success, 1 crashed, 2 recoverable errors); the
+/// status string catches the quiet cases, since `disabled` and `not run` both
+/// exit 0 while meaning the snippets never applied.
+fn classify_cloud_init_status(exit_code: Option<i32>, status_output: &str) -> CloudInitOutcome {
+    // `--wait` writes progress dots as it blocks, so a real reply looks like
+    // "..status: done". The prefix test stays anchored after stripping them so
+    // that "extended_status:" cannot be mistaken for "status:".
+    let status = status_output
+        .lines()
+        .find_map(|line| line.trim_start_matches(['.', ' ']).strip_prefix("status:"))
+        .map(str::trim);
+
+    match (exit_code, status) {
+        (Some(0), Some("done")) => CloudInitOutcome::Clean,
+        (Some(0), Some(status)) if CLOUD_INIT_STATUS_NOT_CLEAN.contains(&status) => {
+            CloudInitOutcome::NotClean
+        }
+        // A non-zero exit is unambiguous whatever the status string says.
+        (Some(code), _) if code != 0 => CloudInitOutcome::NotClean,
+        // Exit 0 with a status we do not know, no status line at all, or a
+        // `cloud-init status` killed by a signal.
+        _ => CloudInitOutcome::Unknown,
+    }
+}
+
+/// Asks cloud-init how this boot's site customization went, logging its full
+/// answer locally and returning only a bounded verdict.
+async fn get_cloud_init_outcome() -> CloudInitOutcome {
+    use std::process::Stdio;
+
+    use tokio::process::Command;
+
+    // `--wait` is what orders scout after site customization. It cannot be done
+    // with a systemd After=: cloud-final.service is ordered after
+    // multi-user.target, so a unit in multi-user ordering after it forms a cycle
+    // that systemd breaks by deleting scout's start job.
+    //
+    // kill_on_drop reaps the child when the timeout below drops the future.
+    let child = Command::new("cloud-init")
+        .args(["status", "--wait", "--long"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+
+    let child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::error!(%error, "could not run cloud-init status");
+            return CloudInitOutcome::Unavailable;
+        }
+    };
+
+    let output = match tokio::time::timeout(CLOUD_INIT_WAIT_TIMEOUT, child.wait_with_output()).await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "cloud-init status did not run to completion");
+            return CloudInitOutcome::Unavailable;
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                timeout_seconds = CLOUD_INIT_WAIT_TIMEOUT.as_secs(),
+                "cloud-init did not finish within the wait backstop; continuing without it"
+            );
+            return CloudInitOutcome::TimedOut;
+        }
+    };
+
+    let status_output = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    tracing::info!(
+        exit_code = ?output.status.code(),
+        status_output = %status_output.trim(),
+        stderr = %stderr.trim(),
+        "cloud-init status",
+    );
+
+    classify_cloud_init_status(output.status.code(), &status_output)
+}
+
+/// Reports a cloud-init outcome that was not clean, so an ineffective snippet
+/// is visible centrally rather than only on this host's console. Must never
+/// fail the boot, so everything here is logged and swallowed.
+async fn report_cloud_init_outcome(config: &Options) {
+    match get_cloud_init_outcome().await {
+        CloudInitOutcome::Clean => {
+            tracing::info!("cloud-init reported a clean boot");
+        }
+        CloudInitOutcome::Unknown => {
+            tracing::warn!(
+                "cloud-init reported a status we do not recognize; treating it as unknown \
+                 rather than as a failure and not reporting it"
+            );
+        }
+        outcome @ (CloudInitOutcome::NotClean
+        | CloudInitOutcome::Unavailable
+        | CloudInitOutcome::TimedOut) => {
+            let detail = match outcome {
+                CloudInitOutcome::Unavailable => {
+                    "cloud-init could not be run at all; this image may not have it installed"
+                }
+                CloudInitOutcome::TimedOut => {
+                    "cloud-init did not finish within the wait backstop and may be wedged"
+                }
+                _ => "cloud-init did not complete cleanly",
+            };
+            let Some(machine_interface_id) = config.machine_interface_id else {
+                tracing::error!(
+                    detail,
+                    "no machine interface ID to report the failure against"
+                );
+                return;
+            };
+            tracing::error!(detail, "reporting the cloud-init failure to the API");
+            if let Err(error) =
+                logerror_to_carbide(config, machine_interface_id, Some(detail)).await
+            {
+                tracing::error!(%error, "could not report the cloud-init failure to the API");
+            }
+        }
+    }
 }
 
 // Send error string to carbide api to log, indicating that the cloud-init script failed.
@@ -682,8 +969,18 @@ fn get_log_str() -> eyre::Result<String> {
 async fn logerror_to_carbide(
     config: &Options,
     machine_interface_id: uuid::Uuid,
+    detail: Option<&str>,
 ) -> eyre::Result<()> {
-    let err_str = get_log_str()?;
+    // The log tail alone cannot tell a missing cloud-init from a wedged one --
+    // both yield the same "no log present" fallback -- so the caller's detail
+    // leads. Its length comes out of MAX_ERR_MSG_SIZE, not on top of it.
+    let err_str = match detail {
+        Some(detail) => {
+            let budget = (::rpc::MAX_ERR_MSG_SIZE as usize).saturating_sub(detail.len() + 1);
+            format!("{detail}\n{}", get_log_str(budget))
+        }
+        None => get_log_str(::rpc::MAX_ERR_MSG_SIZE as usize),
+    };
     let request: tonic::Request<ForgeScoutErrorReport> =
         tonic::Request::new(ForgeScoutErrorReport {
             machine_id: None,
@@ -723,9 +1020,9 @@ async fn query_api(
     query_attempt: u64,
 ) -> CarbideClientResult<rpc_forge::ForgeAgentControlResponse> {
     tracing::info!(
-        "Sending ForgeAgentControlRequest (attempt:{}.{})",
         action_attempt,
         query_attempt,
+        "Sending ForgeAgentControlRequest",
     );
     let query = rpc_forge::ForgeAgentControlRequest {
         machine_id: Some(*machine_id),
@@ -740,10 +1037,10 @@ async fn query_api(
         .unwrap_or_default();
 
     tracing::info!(
-        "Received ForgeAgentControlResponse (attempt:{}.{}, action:{})",
         action_attempt,
         query_attempt,
-        action_str,
+        action = %action_str,
+        "Received ForgeAgentControlResponse",
     );
     Ok(response)
 }
@@ -767,7 +1064,7 @@ async fn query_api_with_retries(
         .on_retry(|_attempt, _next_delay, error: &CarbideClientError| {
             // We can't move the error, but CarbideClientError contains some results that are not clonable, so just do the format here
             let error = format!("{error}");
-            async move { tracing::info!("ForgeAgentControlRequest failed: {error}") }
+            async move { tracing::info!(error = %error, "ForgeAgentControlRequest failed") }
         });
 
     // State machine handler needs 1-2 cycles to update host_adminIP to leaf.
@@ -824,9 +1121,9 @@ fn is_time_to_check_certs_expiry(next_check_time: DateTime<Utc>) -> bool {
     let diff = next_check_time - now;
     if diff < TimeDelta::minutes(2) {
         tracing::info!(
-            "Time to check certs expiry: time now is {}, certs check time is {}",
-            now,
-            next_check_time
+            %now,
+            %next_check_time,
+            "Time to check certificate expiry",
         );
         return true;
     }
@@ -875,16 +1172,16 @@ fn check_certs_validity(client_cert_path: &str) -> CarbideClientResult<bool> {
         let diff = not_after_datetime - now;
         if diff < TimeDelta::days(2) {
             tracing::info!(
-                "Now timestamp is {}, NotAfter is {}, triggering certs regen",
-                now,
-                not_after_datetime
+                %now,
+                %not_after_datetime,
+                "Certificate expires soon; triggering regeneration",
             );
             Ok(true)
         } else {
             tracing::info!(
-                "Now timestamp is {}, NotAfter is {}, NOT triggering certs regen",
-                now,
-                not_after_datetime
+                %now,
+                %not_after_datetime,
+                "Certificate does not expire soon; skipping regeneration",
             );
             Ok(false)
         }
@@ -898,6 +1195,110 @@ fn check_certs_validity(client_cert_path: &str) -> CarbideClientResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit code decides, the status string catches the exit-0 cases that
+    /// still mean nothing applied, and anything unfamiliar is unknown rather
+    /// than a failure.
+    #[test]
+    fn cloud_init_status_is_classified_conservatively() {
+        struct Case {
+            scenario: &'static str,
+            exit_code: Option<i32>,
+            output: &'static str,
+            expect: CloudInitOutcome,
+        }
+
+        let cases = [
+            Case {
+                scenario: "clean run",
+                exit_code: Some(0),
+                output: "status: done\nextended_status: done\nboot_status_code: enabled-by-kernel-cmdline\n",
+                expect: CloudInitOutcome::Clean,
+            },
+            // Verbatim shape of a real reply: `--wait` prints a dot per poll,
+            // so the first line does not begin with "status:".
+            Case {
+                scenario: "clean run behind the progress dots --wait prints",
+                exit_code: Some(0),
+                output: "..status: done\nextended_status: done\nboot_status_code: enabled-by-generator\nerrors: []\nrecoverable_errors: {}\n",
+                expect: CloudInitOutcome::Clean,
+            },
+            Case {
+                scenario: "dots on their own line",
+                exit_code: Some(0),
+                output: "....\nstatus: done\n",
+                expect: CloudInitOutcome::Clean,
+            },
+            Case {
+                scenario: "extended_status must never be read as status",
+                exit_code: Some(0),
+                output: "extended_status: degraded done\n",
+                expect: CloudInitOutcome::Unknown,
+            },
+            Case {
+                scenario: "degraded still reads done, and the exit code is what flags it",
+                exit_code: Some(2),
+                output: "status: done\nextended_status: degraded done\n",
+                expect: CloudInitOutcome::NotClean,
+            },
+            Case {
+                scenario: "crashed",
+                exit_code: Some(1),
+                output: "status: error\n",
+                expect: CloudInitOutcome::NotClean,
+            },
+            Case {
+                scenario: "disabled exits 0, so the status string is load-bearing",
+                exit_code: Some(0),
+                output: "status: disabled\n",
+                expect: CloudInitOutcome::NotClean,
+            },
+            Case {
+                scenario: "never ran",
+                exit_code: Some(0),
+                output: "status: not run\n",
+                expect: CloudInitOutcome::NotClean,
+            },
+            Case {
+                scenario: "a status value we have never seen is not a failure",
+                exit_code: Some(0),
+                output: "status: reticulating\n",
+                expect: CloudInitOutcome::Unknown,
+            },
+            Case {
+                scenario: "output with no status line at all",
+                exit_code: Some(0),
+                output: "something entirely different\n",
+                expect: CloudInitOutcome::Unknown,
+            },
+            Case {
+                scenario: "killed by a signal tells us nothing about cloud-init",
+                exit_code: None,
+                output: "",
+                expect: CloudInitOutcome::Unknown,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                classify_cloud_init_status(case.exit_code, case.output),
+                case.expect,
+                "case '{}' failed",
+                case.scenario,
+            );
+        }
+    }
+
+    /// A missing log is reported as a message, not raised as an error.
+    #[test]
+    fn missing_cloud_init_log_becomes_the_message() {
+        if !std::path::Path::new(CLOUD_INIT_OUTPUT_LOG).exists() {
+            assert_eq!(
+                get_log_str(::rpc::MAX_ERR_MSG_SIZE as usize),
+                format!("no {CLOUD_INIT_OUTPUT_LOG} present, did cloud-init run?"),
+            );
+        }
+    }
 
     #[test]
     fn truncate_handles_short_long_and_utf8_values() {

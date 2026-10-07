@@ -20,14 +20,23 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+test-support = []
 
 [dependencies]
 async-trait = { workspace = true }
+bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model" }
+carbide-instrument = { path = "../instrument" }
+carbide-rack = { path = "../rack", default-features = false }
 carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets" }
 carbide-uuid = { path = "../uuid" }
+trace-propagation = { path = "../trace-propagation" }
 chrono = { workspace = true }
 libredfish = { workspace = true }
 librms = { workspace = true }
@@ -40,12 +49,17 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 carbide-api-test-helper = { path = "../api-test-helper" }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
+carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
+carbide-test-support = { path = "../test-support" }
+toml = { workspace = true }
 uuid = { workspace = true }
 
 [build-dependencies]

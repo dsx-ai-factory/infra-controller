@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM build-container-localdev AS builder
+
+ENV CARGO_HOME=/cargo-home
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CARGO_TARGET_DIR=/cargo-target
+
+WORKDIR /workspace
+
+COPY . .
+
+RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=locked \
+  --mount=type=cache,id=nico-devspace-cargo-target,target=/cargo-target,sharing=locked \
+  cargo build --locked \
+    -p carbide-api --bin carbide-api \
+    -p nico-admin-cli --bin nico-admin-cli \
+    -p carbide-bmc-proxy --bin carbide-bmc-proxy \
+    -p carbide-dhcp --lib \
+    -p carbide-ssh-console --bin ssh-console \
+    -p carbide-machine-a-tron --bin machine-a-tron && \
+  mkdir -p /artifacts && \
+  cp \
+    /cargo-target/debug/carbide-api \
+    /cargo-target/debug/nico-admin-cli \
+    /cargo-target/debug/carbide-bmc-proxy \
+    /cargo-target/debug/libdhcp.so \
+    /cargo-target/debug/ssh-console \
+    /cargo-target/debug/machine-a-tron \
+    /artifacts/
+
+FROM scratch
+
+COPY --from=builder /artifacts /artifacts

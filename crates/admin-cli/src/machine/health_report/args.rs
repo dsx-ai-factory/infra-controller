@@ -37,7 +37,7 @@ Print an empty health report template:
     $ nico-admin-cli machine health-report print-empty-template
 
 ")]
-pub enum Args {
+pub(crate) enum Args {
     #[clap(about = "List the health report entries")]
     Show { machine_id: MachineId },
     #[clap(about = "Insert a health report entry")]
@@ -53,25 +53,25 @@ pub enum Args {
 
 #[derive(Parser, Debug)]
 #[clap(group(ArgGroup::new("health_report_source").required(true).args(&["health_report", "template"])))]
-pub struct HealthAddOptions {
-    pub machine_id: MachineId,
+pub(crate) struct HealthAddOptions {
+    pub(super) machine_id: MachineId,
     #[clap(long, help = "New health report as json")]
-    pub health_report: Option<String>,
+    pub(super) health_report: Option<String>,
     #[clap(
         long,
         help = "Predefined Template name. Use host-update for DPU Reprovision"
     )]
-    pub template: Option<HealthReportTemplates>,
+    pub(super) template: Option<HealthReportTemplates>,
     #[clap(long, help = "Message to be filled in template.")]
-    pub message: Option<String>,
+    pub(super) message: Option<String>,
     #[clap(long, help = "Replace all other health reports with this source")]
-    pub replace: bool,
+    pub(super) replace: bool,
     #[clap(long, help = "Print the template that is going to be send to carbide")]
-    pub print_only: bool,
+    pub(super) print_only: bool,
 }
 
 #[derive(ValueEnum, Parser, Debug, Clone)]
-pub enum HealthReportTemplates {
+pub(crate) enum HealthReportTemplates {
     HostUpdate,
     InternalMaintenance,
     OutForRepair,

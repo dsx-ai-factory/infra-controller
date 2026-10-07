@@ -11,7 +11,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // APIInstanceTypeCreateRequest is the data structure to capture user request to create a new InstanceType
@@ -57,9 +57,9 @@ func (itcr *APIInstanceTypeCreateRequest) Validate() error {
 // per-capability wire rules (device type / InactiveDevices / numeric
 // bounds) are enforced by `Validate` so this method stays a pure
 // mapper.
-func (itcr *APIInstanceTypeCreateRequest) ToProto(it *cdbm.InstanceType) *cwssaws.CreateInstanceTypeRequest {
+func (itcr *APIInstanceTypeCreateRequest) ToProto(it *cdbm.InstanceType) *corev1.CreateInstanceTypeRequest {
 	itProto := it.ToProto()
-	return &cwssaws.CreateInstanceTypeRequest{
+	return &corev1.CreateInstanceTypeRequest{
 		Id:                     &itProto.Id,
 		Metadata:               itProto.Metadata,
 		InstanceTypeAttributes: itProto.Attributes,
@@ -99,9 +99,9 @@ func (itur *APIInstanceTypeUpdateRequest) Validate() error {
 // unchanged fields stay populated.
 //
 // The method trusts that the request has already been Validated.
-func (itur *APIInstanceTypeUpdateRequest) ToProto(it *cdbm.InstanceType) *cwssaws.UpdateInstanceTypeRequest {
+func (itur *APIInstanceTypeUpdateRequest) ToProto(it *cdbm.InstanceType) *corev1.UpdateInstanceTypeRequest {
 	itProto := it.ToProto()
-	return &cwssaws.UpdateInstanceTypeRequest{
+	return &corev1.UpdateInstanceTypeRequest{
 		Id:                     itProto.Id,
 		Metadata:               itProto.Metadata,
 		InstanceTypeAttributes: itProto.Attributes,
@@ -127,7 +127,7 @@ type APIInstanceType struct {
 	// Site is the summary of the Site
 	Site *APISiteSummary `json:"site,omitempty"`
 	// Labels is the labels of the Instance Type
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// MachineCapabilities is the list of capabilities that are supported by the Machine's of this Instance Type
 	MachineCapabilities []APIMachineCapability `json:"machineCapabilities"`
 	// MachineInstanceTypes is the list of machines that are associated to this Instance Type
@@ -159,7 +159,7 @@ func NewAPIInstanceType(dbit *cdbm.InstanceType, dbsds []cdbm.StatusDetail, mcs 
 		ControllerMachineType:    dbit.ControllerMachineType,
 		InfrastructureProviderID: dbit.InfrastructureProviderID.String(),
 		SiteID:                   dbit.SiteID.String(),
-		Labels:                   dbit.Labels,
+		Labels:                   APILabels(dbit.Labels),
 		Status:                   dbit.Status,
 		Created:                  dbit.Created,
 		Updated:                  dbit.Updated,

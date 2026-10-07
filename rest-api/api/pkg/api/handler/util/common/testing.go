@@ -5,20 +5,31 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -107,6 +118,12 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create Operating System Site Association table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.OperatingSystemSiteAssociation)(nil))
 	assert.Nil(t, err)
+	// create iPXE Template table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.IpxeTemplate)(nil))
+	assert.Nil(t, err)
+	// create iPXE Template Site Association table (must be after IpxeTemplate due to foreign key)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.IpxeTemplateSiteAssociation)(nil))
+	assert.Nil(t, err)
 	// create Machine table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Machine)(nil))
 	assert.Nil(t, err)
@@ -149,6 +166,12 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create InfiniBandPartition table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.InfiniBandInterface)(nil))
 	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXAttachment)(nil))
+	assert.Nil(t, err)
 	// create NVLinkInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkInterface)(nil))
 	assert.Nil(t, err)
@@ -175,11 +198,118 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 
 }
 
+type TestSetupProviderMachineHandlerFixture struct {
+	Org            string
+	SiteID         string
+	MachineID      string
+	User           interface{}
+	DBSession      *cdb.Session
+	SiteClientPool *sc.ClientPool
+	Config         *config.Config
+	ProxiedReq     *grpcproxy.Request
+}
+
+func NewTestSetupProviderMachineHandlerFixture(t *testing.T, response proto.Message) TestSetupProviderMachineHandlerFixture {
+	t.Helper()
+
+	dbSession := TestInitDB(t)
+	t.Cleanup(dbSession.Close)
+	TestSetupSchema(t, dbSession)
+
+	org := "test-org"
+	user := TestBuildUser(t, dbSession, "test-starfleet-id", org, []string{authz.ProviderAdminRole})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "Test Infrastructure Provider", org, user)
+	site := TestBuildSite(t, dbSession, ip, "Test Site", user)
+	sDAO := cdbm.NewSiteDAO(dbSession)
+	_, err := sDAO.Update(context.Background(), nil, cdbm.SiteUpdateInput{
+		SiteID: site.ID,
+		Status: cutil.GetPtr(cdbm.SiteStatusRegistered),
+	})
+	require.NoError(t, err)
+	it := TestBuildInstanceType(t, dbSession, "test-instance-type", cutil.GetPtr(site.ID), site, nil, user)
+	machine := TestBuildMachine(t, dbSession, ip, site, &it.ID, cutil.GetPtr("test-controller-machine-type"), cdbm.MachineStatusReady)
+
+	proxiedReq := &grpcproxy.Request{}
+	wrun := &tmocks.WorkflowRun{}
+	wrun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		if response == nil {
+			return
+		}
+		out := args.Get(1).(*grpcproxy.Response)
+		respJSON, err := protojson.Marshal(response)
+		require.NoError(t, err)
+		out.ResponseJSON = respJSON
+	}).Return(nil)
+
+	tsc := &tmocks.Client{}
+	tsc.On(
+		"ExecuteWorkflow",
+		mock.Anything,
+		mock.Anything,
+		grpcproxy.Core.WorkflowName,
+		mock.MatchedBy(func(req grpcproxy.Request) bool {
+			*proxiedReq = req
+			return true
+		}),
+	).Return(wrun, nil)
+
+	scp := sc.NewClientPool(nil)
+	scp.IDClientMap[site.ID.String()] = tsc
+
+	return TestSetupProviderMachineHandlerFixture{
+		Org:            org,
+		SiteID:         site.ID.String(),
+		MachineID:      machine.ID,
+		User:           user,
+		DBSession:      dbSession,
+		SiteClientPool: scp,
+		Config:         GetTestConfig(),
+		ProxiedReq:     proxiedReq,
+	}
+}
+
+func (f TestSetupProviderMachineHandlerFixture) Request(t *testing.T, handler echo.HandlerFunc, method, target string, body any, source string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var reqBody string
+	if body != nil {
+		bodyBytes, err := json.Marshal(body)
+		require.NoError(t, err)
+		reqBody = string(bodyBytes)
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(method, target, strings.NewReader(reqBody))
+	if body != nil {
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	}
+	rec := httptest.NewRecorder()
+	ec := e.NewContext(req, rec)
+	names := []string{"orgName", "id"}
+	values := []string{f.Org, f.MachineID}
+	if source != "" {
+		names = append(names, "source")
+		values = append(values, source)
+	}
+	ec.SetParamNames(names...)
+	ec.SetParamValues(values...)
+	ec.Set("user", f.User)
+
+	require.NoError(t, handler(ec))
+	return rec
+}
+
 // TestBuildInfrastructureProvider creates a test Infrastructure Provider
 func TestBuildInfrastructureProvider(t *testing.T, dbSession *cdb.Session, name string, org string, user *cdbm.User) *cdbm.InfrastructureProvider {
 	ipDAO := cdbm.NewInfrastructureProviderDAO(dbSession)
 
-	ip, err := ipDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Infrastructure Provider"), org, cutil.GetPtr(name), user)
+	ip, err := ipDAO.Create(context.Background(), nil, cdbm.InfrastructureProviderCreateInput{
+		Name:           name,
+		DisplayName:    cutil.GetPtr("Test Infrastructure Provider"),
+		Org:            org,
+		OrgDisplayName: cutil.GetPtr(name),
+		CreatedBy:      user.ID,
+	})
 	assert.Nil(t, err)
 
 	return ip
@@ -217,6 +347,28 @@ func TestBuildTenantAccount(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infra
 		CreatedBy:                user.ID,
 	})
 	assert.Nil(t, err)
+
+	return ta
+}
+
+// TestBuildTenantAccountWithTargetedInstanceCreation creates a test TenantAccount
+// with the TargetedInstanceCreation capability enabled in its config. Privilege is
+// resolved from a Ready TenantAccount config (see TenantHasTargetedInstanceCreation),
+// so tests that exercise privileged Tenant paths must enable it on the account rather
+// than only on the legacy Tenant config.
+func TestBuildTenantAccountWithTargetedInstanceCreation(t *testing.T, dbSession *cdb.Session, ip *cdbm.InfrastructureProvider, tenantID *uuid.UUID, tenantOrg string, status string, user *cdbm.User) *cdbm.TenantAccount {
+	taDAO := cdbm.NewTenantAccountDAO(dbSession)
+
+	ta, err := taDAO.Create(context.Background(), nil, cdbm.TenantAccountCreateInput{
+		AccountNumber:            GenerateAccountNumber(),
+		TenantID:                 tenantID,
+		TenantOrg:                tenantOrg,
+		InfrastructureProviderID: ip.ID,
+		Status:                   status,
+		Config:                   &cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
+		CreatedBy:                user.ID,
+	})
+	require.NoError(t, err)
 
 	return ta
 }
@@ -408,7 +560,10 @@ func TestBuildMachine(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infrastruct
 func TestBuildMachineInstanceType(t *testing.T, dbSession *cdb.Session, m *cdbm.Machine, it *cdbm.InstanceType) *cdbm.MachineInstanceType {
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
 
-	mit, err := mitDAO.CreateFromParams(context.Background(), nil, m.ID, it.ID)
+	mit, err := mitDAO.Create(context.Background(), nil, cdbm.MachineInstanceTypeCreateInput{
+		MachineID:      m.ID,
+		InstanceTypeID: it.ID,
+	})
 	assert.Nil(t, err)
 
 	return mit
@@ -564,7 +719,7 @@ func TestCommonBuildMachineCapability(t *testing.T, dbSession *cdb.Session, mach
 // TestBuildStatusDetail creates a test status detail
 func TestBuildStatusDetail(t *testing.T, dbSession *cdb.Session, entityID string, status string, message *string) {
 	sdDAO := cdbm.NewStatusDetailDAO(dbSession)
-	ssd, err := sdDAO.CreateFromParams(context.Background(), nil, entityID, status, message)
+	ssd, err := sdDAO.Create(context.Background(), nil, cdbm.StatusDetailCreateInput{EntityID: entityID, Status: status, Message: message})
 	assert.Nil(t, err)
 	assert.NotNil(t, ssd)
 	assert.Equal(t, entityID, ssd.EntityID)
@@ -587,22 +742,15 @@ func TestBuildVpcPeering(t *testing.T, dbSession *cdb.Session, vpc1ID, vpc2ID uu
 	return vp
 }
 
-// TestCommonTraceProviderSetup creates a test provider and spanner
-func TestCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Tracer, trace.SpanContext, context.Context) {
-	// OTEL spanner configuration
-	provider := trace.NewNoopTracerProvider()
+// TestCommonTraceProviderSetup returns ctx carrying a remote parent span context
+func TestCommonTraceProviderSetup(t *testing.T, ctx context.Context) context.Context {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID: trace.TraceID{0x01},
 		SpanID:  trace.SpanID{0x01},
 	})
 
-	// Start echo test parent tracer/spanner
-	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-	tracer := provider.Tracer(otelecho.TracerName)
-	tracer.Start(ctx, "Test-Echo-Spanner")
-
-	return tracer, sc, ctx
+	return trace.ContextWithRemoteSpanContext(ctx, sc)
 }
 
 func TestBuildAuditEntry(t *testing.T, dbSession *cdb.Session, orgName string, userID *uuid.UUID, statusCode int) *cdbm.AuditEntry {
@@ -665,11 +813,16 @@ func TestBuildVPCPrefix(t *testing.T, dbSession *cdb.Session, name string, st *c
 
 func TestBuildDpuExtensionService(t *testing.T, dbSession *cdb.Session, name string, serviceType string, tenant *cdbm.Tenant, site *cdbm.Site, version string, status string, user *cdbm.User) *cdbm.DpuExtensionService {
 	desDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
+	var dpuTarget *string
+	if serviceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+		dpuTarget = cutil.GetPtr(cdbm.DpuExtensionServiceDpuTargetAllActive)
+	}
 
 	des, err := desDAO.Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
 		Name:        name,
 		Description: cutil.GetPtr("Test DPU Extension Service"),
 		ServiceType: serviceType,
+		DpuTarget:   dpuTarget,
 		SiteID:      site.ID,
 		TenantID:    tenant.ID,
 		Version:     cutil.GetPtr(version),

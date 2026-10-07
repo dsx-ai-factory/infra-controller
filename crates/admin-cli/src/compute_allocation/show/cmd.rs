@@ -26,7 +26,7 @@ use crate::rpc::ApiClient;
 /// Show one or more compute allocations.
 /// If only a single allocation is found, verbose output is used
 /// automatically.
-pub async fn show(
+pub(crate) async fn show(
     args: Args,
     output_format: OutputFormat,
     api_client: &ApiClient,

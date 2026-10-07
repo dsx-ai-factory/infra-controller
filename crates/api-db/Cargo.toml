@@ -21,15 +21,20 @@ edition.workspace = true
 description = "Database functions for carbide-api"
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "db"
+
+[features]
+test-support = []
 
 [dependencies]
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 config-version = { path = "../config-version", features = ["sqlx"] }
 carbide-libmlx-model = { path = "../libmlx-model" }
+carbide-instrument = { path = "../instrument" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
@@ -44,6 +49,7 @@ carbide-ipxe-renderer = { path = "../ipxe-renderer" }
 #these are alphabetized
 async-trait = { workspace = true }
 chrono = { workspace = true }
+const_format = { workspace = true }
 domain = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
@@ -86,6 +92,10 @@ carbide-version = { path = "../version" }
 
 [dev-dependencies]
 base64 = { workspace = true }
+carbide-api-model = { path = "../api-model", default-features = false, features = [
+  "test-support",
+] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }
 lazy_static = { workspace = true }

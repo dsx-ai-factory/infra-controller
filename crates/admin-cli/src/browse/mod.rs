@@ -34,7 +34,7 @@ use crate::cfg::dispatch::Dispatch;
 use crate::errors::CarbideCliResult;
 
 #[derive(Parser, Debug, Dispatch)]
-pub enum Cmd {
+pub(crate) enum Cmd {
     #[clap(about = "Browse a Redfish resource tree via the API server")]
     Redfish(redfish::Args),
     #[clap(about = "Browse a UFM fabric via the API server")]
@@ -86,19 +86,16 @@ pub(crate) fn print_http_response(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::Cmd;
+    use crate::test_support::{parse_leaf, raw_value};
 
     // `browse redfish` parses with a --uri and, unlike the `redfish`
     // subcommands, requires no BMC --address.
     #[test]
     fn parse_browse_redfish() {
-        let cmd = Cmd::try_parse_from(["browse", "redfish", "--uri", "/redfish/v1"])
-            .expect("should parse browse redfish");
-        let Cmd::Redfish(args) = cmd else {
-            panic!("expected Redfish variant");
-        };
-        assert_eq!(args.uri, "/redfish/v1");
+        let matches =
+            parse_leaf::<Cmd>(&["browse", "redfish", "--uri", "/redfish/v1"], &["redfish"])
+                .expect("should parse browse redfish");
+        assert_eq!(raw_value(&matches, "uri").as_deref(), Some("/redfish/v1"));
     }
 }

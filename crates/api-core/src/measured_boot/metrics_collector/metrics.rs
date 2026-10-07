@@ -29,24 +29,27 @@ use opentelemetry::metrics::Meter;
 /// one a single `MeasuredBootMetricsCollector` run. These metrics are then
 /// emitted into opentelemetry.
 #[derive(Clone, Debug)]
-pub struct MeasuredBootMetricsCollectorMetrics {
+pub(in crate::measured_boot) struct MeasuredBootMetricsCollectorMetrics {
     // When we finished recording the metrics.
-    pub recording_finished_at: std::time::Instant,
+    pub(in crate::measured_boot) recording_finished_at: std::time::Instant,
     // The number of measured boot profiles.
-    pub num_profiles: usize,
+    pub(in crate::measured_boot) num_profiles: usize,
     // The number of measured boot bundles.
-    pub num_bundles: usize,
+    pub(in crate::measured_boot) num_bundles: usize,
     // The number of machines which have reported measurements,
     // which should be <= the number of machines in the site.
-    pub num_machines: usize,
+    pub(in crate::measured_boot) num_machines: usize,
     // The number of machines per profile.
-    pub num_machines_per_profile: HashMap<MeasurementSystemProfileId, usize>,
+    pub(in crate::measured_boot) num_machines_per_profile:
+        HashMap<MeasurementSystemProfileId, usize>,
     // The number of machines per bundle.
-    pub num_machines_per_bundle: HashMap<MeasurementBundleId, usize>,
+    pub(in crate::measured_boot) num_machines_per_bundle: HashMap<MeasurementBundleId, usize>,
     // The number of machines per bundle state.
-    pub num_machines_per_bundle_state: HashMap<MeasurementBundleState, usize>,
+    pub(in crate::measured_boot) num_machines_per_bundle_state:
+        HashMap<MeasurementBundleState, usize>,
     // The number of machines per machine state.
-    pub num_machines_per_machine_state: HashMap<MeasurementMachineState, usize>,
+    pub(in crate::measured_boot) num_machines_per_machine_state:
+        HashMap<MeasurementMachineState, usize>,
     // The number of machines per a given PCR index value (e.g. the
     // number of machines whose pcr_index=1 is pcr_value=xxx).
     //
@@ -55,11 +58,11 @@ pub struct MeasuredBootMetricsCollectorMetrics {
     // in a report -- we'd have really high cardinality in that case. This
     // is intended to focus on PCR indexes we have identified as [should be]
     // stable/low cardinality for a given hardware profile.
-    pub num_machines_per_pcr_value: HashMap<PcrRegisterValue, usize>,
+    pub(in crate::measured_boot) num_machines_per_pcr_value: HashMap<PcrRegisterValue, usize>,
 }
 
 impl MeasuredBootMetricsCollectorMetrics {
-    pub fn new() -> Self {
+    pub(in crate::measured_boot) fn new() -> Self {
         Self {
             recording_finished_at: Instant::now(),
             num_profiles: 0,
@@ -82,7 +85,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_profiles_total")
-            .with_description("The total number of measured boot profiles.")
+            .with_description("Number of measured boot profiles.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.num_profiles as u64, attrs);
@@ -95,7 +98,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_bundles_total")
-            .with_description("The total number of measured boot bundles.")
+            .with_description("Number of measured boot bundles.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.num_bundles as u64, attrs);
@@ -108,7 +111,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_machines_total")
-            .with_description("The total number of machines reporting measurements.")
+            .with_description("Number of machines reporting measurements.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.num_machines as u64, attrs);
@@ -121,7 +124,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_machines_per_profile_total")
-            .with_description("The total number of machines per measured boot system profile.")
+            .with_description("Number of machines per measured boot system profile.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     for (profile_id, total) in metrics.num_machines_per_profile.iter() {
@@ -143,7 +146,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_machines_per_bundle_total")
-            .with_description("The total number of machines per measured boot bundle.")
+            .with_description("Number of machines per measured boot bundle.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     for (bundle_id, total) in metrics.num_machines_per_bundle.iter() {
@@ -161,9 +164,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_machines_per_bundle_state_total")
-            .with_description(
-                "The total number of machines per a given measured boot bundle state.",
-            )
+            .with_description("Number of machines per measured boot bundle state.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     for (bundle_state, total) in metrics.num_machines_per_bundle_state.iter() {
@@ -185,9 +186,7 @@ fn hydrate_meter(
         let metrics = shared_metrics.clone();
         meter
             .u64_observable_gauge("carbide_measured_boot_machines_per_machine_state_total")
-            .with_description(
-                "The total number of machines per a given measured boot machine state.",
-            )
+            .with_description("Number of machines per measured boot machine state.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     for (machine_state, total) in metrics.num_machines_per_machine_state.iter() {
@@ -209,9 +208,7 @@ fn hydrate_meter(
         let metrics = shared_metrics;
         meter
             .u64_observable_gauge("carbide_measured_boot_machines_per_pcr_value_total")
-            .with_description(
-                "The total number of machines with a given PCR value at a given PCR index.",
-            )
+            .with_description("Number of machines with a given PCR value at a given PCR index.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     for (pcr_register, total) in metrics.num_machines_per_pcr_value.iter() {
@@ -237,12 +234,12 @@ fn hydrate_meter(
 }
 
 /// Stores Metric data shared between the Fabric Monitor and the OpenTelemetry background task
-pub struct MetricHolder {
+pub(in crate::measured_boot) struct MetricHolder {
     last_iteration_metrics: SharedMetricsHolder<MeasuredBootMetricsCollectorMetrics>,
 }
 
 impl MetricHolder {
-    pub fn new(meter: Meter, hold_period: std::time::Duration) -> Self {
+    pub(in crate::measured_boot) fn new(meter: Meter, hold_period: std::time::Duration) -> Self {
         let last_iteration_metrics = SharedMetricsHolder::with_hold_period(hold_period);
         hydrate_meter(meter, last_iteration_metrics.clone());
         Self {
@@ -251,7 +248,10 @@ impl MetricHolder {
     }
 
     /// Updates the most recent metrics
-    pub fn update_metrics(&self, mut metrics: MeasuredBootMetricsCollectorMetrics) {
+    pub(in crate::measured_boot) fn update_metrics(
+        &self,
+        mut metrics: MeasuredBootMetricsCollectorMetrics,
+    ) {
         metrics.recording_finished_at = Instant::now();
         self.last_iteration_metrics.update(metrics)
     }

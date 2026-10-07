@@ -11,7 +11,7 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -518,7 +518,7 @@ func TestAPIInstanceTypeCreateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, "prod", *req.Metadata.Labels[0].Value)
 		require.NotNil(t, req.InstanceTypeAttributes)
 		require.Len(t, req.InstanceTypeAttributes.DesiredCapabilities, 1)
-		assert.Equal(t, cwssaws.MachineCapabilityType_CAP_TYPE_CPU,
+		assert.Equal(t, corev1.MachineCapabilityType_CAP_TYPE_CPU,
 			req.InstanceTypeAttributes.DesiredCapabilities[0].CapabilityType)
 	})
 
@@ -567,7 +567,7 @@ func TestAPIInstanceTypeUpdateRequest_ToProto(t *testing.T) {
 		req := itur.ToProto(it)
 		require.NotNil(t, req.InstanceTypeAttributes)
 		require.Len(t, req.InstanceTypeAttributes.DesiredCapabilities, 1)
-		assert.Equal(t, cwssaws.MachineCapabilityType_CAP_TYPE_CPU,
+		assert.Equal(t, corev1.MachineCapabilityType_CAP_TYPE_CPU,
 			req.InstanceTypeAttributes.DesiredCapabilities[0].CapabilityType)
 	})
 }

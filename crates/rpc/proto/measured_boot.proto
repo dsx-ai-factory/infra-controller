@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package measured_boot;
 
+import "codegen/v1/extern_path.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
@@ -1134,29 +1135,38 @@ message KvPair {
 // Placeholder ID types: These are not code-generated, but overridden by our own type-safe UUID wrappers. They are
 // identical to common.UUID over the wire, for backwards compatibility.
 message MeasurementSystemProfileId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementSystemProfileId";
   string value = 1;
 }
 message MeasurementSystemProfileAttrId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementSystemProfileAttrId";
   string value = 1;
 }
 message MeasurementBundleId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementBundleId";
   string value = 1;
 }
 message MeasurementBundleValueId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementBundleValueId";
   string value = 1;
 }
 message MeasurementReportId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementReportId";
   string value = 1;
 }
 message MeasurementReportValueId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementReportValueId";
   string value = 1;
 }
 message MeasurementJournalId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementJournalId";
   string value = 1;
 }
 message MeasurementApprovedMachineId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementApprovedMachineId";
   string value = 1;
 }
 message MeasurementApprovedProfileId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::measured_boot::MeasurementApprovedProfileId";
   string value = 1;
 }

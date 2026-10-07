@@ -18,15 +18,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Copy, Clone, Debug)]
-pub struct IbGuidPoolConfig {
+struct IbGuidPoolConfig {
     /// The first GUID in the pool as a byte array
-    pub start: [u8; 8],
+    start: [u8; 8],
     /// The amount of GUIDs in the pool
-    pub length: usize,
+    length: usize,
 }
 
 #[derive(Debug)]
-pub struct IbGuidPool {
+pub(crate) struct IbGuidPool {
     /// Defines which GUIDs are available in the pool
     config: IbGuidPoolConfig,
     /// How many GUIDs have already been allocated
@@ -34,7 +34,7 @@ pub struct IbGuidPool {
 }
 
 impl IbGuidPool {
-    pub fn new(config: IbGuidPoolConfig) -> Self {
+    fn new(config: IbGuidPoolConfig) -> Self {
         Self {
             config,
             used: AtomicUsize::new(0),
@@ -44,7 +44,7 @@ impl IbGuidPool {
     /// Allocates a unique GUID from the pool
     ///
     /// Will panic once the pool is depleted
-    pub fn allocate(&self) -> String {
+    pub(crate) fn allocate(&self) -> String {
         let offset = self.used.fetch_add(1, Ordering::SeqCst);
         if offset >= self.config.length {
             panic!("GUID pool with config {:?} is depleted", self.config);
@@ -58,7 +58,7 @@ impl IbGuidPool {
 
 lazy_static::lazy_static! {
     /// Pool of IB GUIDs
-    pub static ref IB_GUID_POOL: IbGuidPool =
+    pub(crate) static ref IB_GUID_POOL: IbGuidPool =
         IbGuidPool::new(IbGuidPoolConfig {
             start: [0xa, 0xb, 0xc, 0x0, 0x0, 0x0, 0x0, 0x0],
             length: 65536,

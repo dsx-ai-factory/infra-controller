@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+version: v1
+plugins:
+  - name: go
+    out: gen/v1
+    opt: paths=source_relative
+  - name: go-grpc
+    out: gen/v1
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=false
