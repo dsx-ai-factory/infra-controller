@@ -283,7 +283,7 @@ pub(crate) async fn admin_force_delete_power_shelf(
                 .await
                 .map_err(CarbideError::from)?;
         for interface_id in &interface_ids {
-            db::machine_interface::delete(interface_id, &mut txn)
+            db::machine_interface::delete(interface_id, &mut txn, false)
                 .await
                 .map_err(CarbideError::from)?;
         }
@@ -363,7 +363,12 @@ pub(crate) async fn set_power_shelf_maintenance(
             model::power_shelf::PowerShelfMaintenanceOperation::PowerOn
         }
         rpc::PowerShelfMaintenanceOperation::PowerOff => {
-            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff
+            // `graceful` is opt-in: an absent flag (or an older client that
+            // predates it) defaults to a forced power-off, matching the default
+            // for operator-initiated power actions.
+            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff {
+                graceful: req.graceful.unwrap_or(false),
+            }
         }
         rpc::PowerShelfMaintenanceOperation::Unspecified => {
             return Err(CarbideError::InvalidArgument(

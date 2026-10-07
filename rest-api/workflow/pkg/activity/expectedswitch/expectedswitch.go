@@ -17,6 +17,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -185,7 +186,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// Delete any Expected Switch present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedIDs.
-	if expectedSwitchInventory.InventoryPage == nil || expectedSwitchInventory.InventoryPage.TotalPages == 0 || (expectedSwitchInventory.InventoryPage.CurrentPage == expectedSwitchInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
 		for _, es := range existingExpectedSwitches {
 			if _, keep := reportedIDs[es.ID]; keep {
 				continue

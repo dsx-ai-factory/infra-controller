@@ -49,7 +49,9 @@ const (
 )
 
 var (
-	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-]+`)
+	// Allow bracketed IPv6 and dotted hosts; exclude quotes and whitespace from single-quoted YAML targets.
+	// Keep in sync with crates/rpc/src/model/extension_service.rs.
+	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-.\[\]]+`)
 	dpuExtensionServiceObservabilityLogPathBadRE      = regexp.MustCompile(`[^a-zA-Z0-9\-_\/\.\@]+`)
 )
 
@@ -74,13 +76,23 @@ func ValidatePodYaml(yamlData []byte) error {
 
 // dpfHelmChartData defines a DPF Helm extension service's Data field
 type dpfHelmChartData struct {
-	RepoURL            string                        `json:"repoURL"`
-	ChartName          string                        `json:"chartName"`
-	ChartVersion       string                        `json:"chartVersion"`
-	SecurityPrivileged *bool                         `json:"security.privileged"`
-	Values             map[string]any                `json:"values,omitempty"`
-	ServiceDaemonSet   *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
+	RepoURL          string                        `json:"repoURL"`
+	ChartName        string                        `json:"chartName"`
+	ChartVersion     string                        `json:"chartVersion"`
+	ServiceID        *string                       `json:"serviceID,omitempty"`
+	DeployInCluster  *bool                         `json:"deployInCluster,omitempty"`
+	Security         *dpfHelmChartSecurity         `json:"security"`
+	Values           map[string]any                `json:"values,omitempty"`
+	ServiceDaemonSet *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
 }
+
+// dpfHelmChartSecurity defines DPF workload security settings
+type dpfHelmChartSecurity struct {
+	Privileged *bool                       `json:"privileged"`
+	Spiffe     *dpfHelmChartSecuritySpiffe `json:"spiffe,omitempty"`
+}
+
+type dpfHelmChartSecuritySpiffe struct{}
 
 // dpfHelmChartServiceDaemonSet defines the supported DaemonSet settings while
 // excluding placement fields such as nodeSelector, which NICo owns in Core.
@@ -102,7 +114,7 @@ type dpfDaemonSetRollingUpdate struct {
 }
 
 // ValidateDpfHelmChartData checks the REST-facing shape of a DPF Helm chart
-// definition and rejects the known NICo-owned placement override. Kubernetes
+// data and rejects the known NICo-owned placement override. Kubernetes
 // and DPF semantic validation is canonical in Core before persistence.
 func ValidateDpfHelmChartData(jsonData []byte) error {
 	var chart dpfHelmChartData
@@ -126,7 +138,15 @@ func ValidateDpfHelmChartData(jsonData []byte) error {
 		return errors.New("chartVersion must not be empty")
 	}
 
-	if chart.SecurityPrivileged == nil {
+	if chart.ServiceID == nil || *chart.ServiceID == "" {
+		return errors.New("serviceID must not be empty")
+	}
+
+	if chart.DeployInCluster == nil || *chart.DeployInCluster {
+		return errors.New("deployInCluster must be explicitly set to false for DpfHelmChart services")
+	}
+
+	if chart.Security == nil || chart.Security.Privileged == nil {
 		return errors.New("security.privileged must be specified")
 	}
 

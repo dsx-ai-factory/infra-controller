@@ -202,6 +202,8 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 delete_retained_boot_interfaces: false,
                 allow_delete_with_instance_type: false,
                 allow_delete_with_instance: false,
+                release_preserved_addresses: false,
+                wait_for_instance_dpu: false,
             },
         ))
         .await

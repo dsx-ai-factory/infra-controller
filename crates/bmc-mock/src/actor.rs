@@ -75,6 +75,17 @@ impl<Message> Clone for ActorMailbox<Message> {
 }
 
 impl<Message> ActorMailbox<Message> {
+    /// A mailbox with no actor behind it; sends fail and alarms never fire.
+    /// For handles that tests build without running the actor.
+    pub fn detached() -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            next_alarm_id: Arc::new(AtomicU64::new(0)),
+            cancelled_alarms: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
     /// Enqueues a message without waiting for its processing; fails if the actor has stopped.
     pub fn send(&self, message: Message) -> Result<(), ActorMailboxClosed> {
         self.tx
@@ -135,8 +146,7 @@ pub trait ActorCallbacks<Message> {
 }
 
 /// Sequential executor for a state object's messages and alarms.
-pub struct Actor<State, Message> {
-    state: State,
+pub struct Actor<Message> {
     mailbox: ActorMailbox<Message>,
     mailbox_rx: mpsc::UnboundedReceiver<MailboxCommand<Message>>,
     alarms: BinaryHeap<Reverse<(Instant, AlarmId)>>,
@@ -144,12 +154,9 @@ pub struct Actor<State, Message> {
     cancelled_alarms: Arc<Mutex<HashSet<AlarmId>>>,
 }
 
-impl<State, Message> Actor<State, Message>
-where
-    State: ActorCallbacks<Message>,
-{
-    /// Creates an actor with its first message queued; the owner must run and supervise it.
-    pub fn new(state: State, initial_message: Message) -> (Self, ActorMailbox<Message>) {
+impl<Message> Actor<Message> {
+    /// Creates an actor; the owner must run and supervise it.
+    pub fn new() -> (Self, ActorMailbox<Message>) {
         let (tx, mailbox_rx) = mpsc::unbounded_channel();
         let cancelled_alarms = Arc::new(Mutex::new(HashSet::new()));
         let mailbox = ActorMailbox {
@@ -157,12 +164,8 @@ where
             next_alarm_id: Arc::new(AtomicU64::new(0)),
             cancelled_alarms: cancelled_alarms.clone(),
         };
-        mailbox
-            .send(initial_message)
-            .expect("new actor mailbox must be open");
         (
             Self {
-                state,
                 mailbox: mailbox.clone(),
                 mailbox_rx,
                 alarms: BinaryHeap::new(),
@@ -175,7 +178,7 @@ where
 
     /// Processes messages until the handler returns `Stop` or the owner cancels this future.
     /// The actor retains a mailbox for self-messages, so dropping external mailboxes does not stop it.
-    pub async fn run(mut self) {
+    pub async fn run(mut self, mut state: impl ActorCallbacks<Message>) {
         loop {
             while self
                 .alarms
@@ -233,7 +236,7 @@ where
                 ActorInput::Command(None) => break,
             };
 
-            if self.state.message(&self.mailbox, message).await == ActorResult::Stop {
+            if state.message(&self.mailbox, message).await == ActorResult::Stop {
                 break;
             }
         }

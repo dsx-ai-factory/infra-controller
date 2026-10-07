@@ -99,10 +99,8 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 		validation.Field(&escr.BmcMacAddress,
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.MAC),
-		validation.Field(&escr.DefaultBmcUsername,
-			validation.Length(0, 16).Error("BMC username must be 16 characters or less")),
 		validation.Field(&escr.DefaultBmcPassword,
-			validation.Length(0, 20).Error("BMC password must be 20 characters or less")),
+			validation.Length(0, 255).Error("BMC password must be 255 characters or less")),
 		validation.Field(&escr.SwitchSerialNumber,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Switch serial number consists only of whitespace"),
@@ -113,7 +111,7 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 		validation.Field(&escr.BmcIpAddress,
 			validation.NilOrNotEmpty.Error("BmcIpAddress cannot be empty"),
 			validation.When(escr.BmcIpAddress != nil && *escr.BmcIpAddress != "",
-				validationis.IP.Error("BmcIpAddress must be a valid IPv4 or IPv6 address"))),
+				validation.By(util.ValidateExpectedBmcIPAddress))),
 		validation.Field(&escr.Name,
 			validation.NilOrNotEmpty.Error("Name cannot be empty")),
 		validation.Field(&escr.Manufacturer,
@@ -137,7 +135,8 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 
 // APIExpectedSwitchUpdateRequest is the data structure to capture user request to update an ExpectedSwitch
 type APIExpectedSwitchUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// BmcMacAddress is the MAC address of the expected switch's BMC
 	BmcMacAddress *string `json:"bmcMacAddress"`
@@ -177,15 +176,6 @@ type APIExpectedSwitchUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
-	credentialErr := util.ValidateExpectedComponentCredentialPair(esur.DefaultBmcUsername, esur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
-	if credentialErr != nil {
-		return credentialErr
-	}
-	credentialErr = util.ValidateExpectedComponentCredentialPair(esur.NvOsUsername, esur.NvOsPassword, "nvOsUsername", "nvOsPassword")
-	if credentialErr != nil {
-		return credentialErr
-	}
-
 	if esur.ID != nil {
 		if *esur.ID == "" {
 			return validation.Errors{
@@ -203,13 +193,12 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 		validation.Field(&esur.DefaultBmcUsername,
 			validation.NilOrNotEmpty.Error("BMC Username cannot be empty"),
 			validation.When(esur.DefaultBmcUsername != nil && *esur.DefaultBmcUsername != "",
-				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Username consists only of whitespace")),
-			validation.Length(1, 16).Error("BMC Username must be 1-16 characters")),
+				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Username consists only of whitespace"))),
 		validation.Field(&esur.DefaultBmcPassword,
 			validation.NilOrNotEmpty.Error("BMC Password cannot be empty"),
 			validation.When(esur.DefaultBmcPassword != nil && *esur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
-			validation.Length(1, 20).Error("BMC Password must be 1-20 characters")),
+			validation.Length(1, 255).Error("BMC Password must be 1-255 characters")),
 		validation.Field(&esur.NvOsUsername,
 			validation.NilOrNotEmpty.Error("NVOS Username cannot be empty")),
 		validation.Field(&esur.NvOsPassword,
@@ -223,9 +212,8 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 		validation.Field(&esur.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&esur.BmcIpAddress,
-			validation.NilOrNotEmpty.Error("BmcIpAddress cannot be empty"),
 			validation.When(esur.BmcIpAddress != nil && *esur.BmcIpAddress != "",
-				validationis.IP.Error("BmcIpAddress must be a valid IPv4 or IPv6 address"))),
+				validation.By(util.ValidateExpectedBmcIPAddress))),
 		validation.Field(&esur.Name,
 			validation.NilOrNotEmpty.Error("Name cannot be empty")),
 		validation.Field(&esur.Manufacturer,

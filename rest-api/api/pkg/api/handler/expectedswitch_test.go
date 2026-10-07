@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -22,6 +23,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // testExpectedSwitchInitDB initializes a test database session
@@ -160,12 +164,12 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name: "successful creation",
+			name: "successful creation with a 256-character BMC username and 255-character password",
 			requestBody: model.APIExpectedSwitchCreateRequest{
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr("admin"),
-				DefaultBmcPassword: cutil.GetPtr("password"),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("u", 256)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				SwitchSerialNumber: "SWITCH123",
 				NvOsUsername:       cutil.GetPtr("nvos-admin"),
 				NvOsPassword:       cutil.GetPtr("nvos-password"),
@@ -765,7 +769,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
+	workflowResult := mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
 	var capturedPatch *corev1.PatchExpectedSwitchRequest
 	var capturedProxy grpcproxy.Request
 	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
@@ -799,6 +803,9 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 		name                 string
 		id                   string
 		requestBody          model.APIExpectedSwitchUpdateRequest
+		rawRequestBody       string
+		initialBmcIPAddress  *string
+		expectedBmcIPAddress *string
 		setupContext         func(c echo.Context)
 		expectedStatus       int
 		expectedBmcMac       string
@@ -807,6 +814,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 		expectNoWorkflow     bool
 		expectedPaths        []string
 		rejectsCredentials   bool
+		coreError            error
 	}{
 		{
 			name: "metadata update excludes null BMC and NVOS credentials",
@@ -820,15 +828,16 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testES.ID.String())
 			},
-			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"metadata.labels", "switch_serial_number"},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"metadata.labels", "switch_serial_number"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
 		},
 		{
-			name: "BMC pair is encrypted independently of NVOS credentials",
+			name: "255-character BMC password is encrypted without resubmitting its username",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr("bmc-admin"),
-				DefaultBmcPassword: cutil.GetPtr("bmc-patch-secret"),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("b", 255)),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -836,13 +845,26 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testES.ID.String())
 			},
 			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"bmc_username", "bmc_password"},
+			expectedPaths:  []string{"bmc_password"},
 		},
 		{
-			name: "NVOS pair is encrypted independently of BMC credentials",
+			name: "512-character BMC username is encrypted without resubmitting its password",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				NvOsUsername: cutil.GetPtr("nvos-admin"),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("v", 512)),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"bmc_username"},
+		},
+		{
+			name: "NVOS password is encrypted without resubmitting its username",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
 				NvOsPassword: cutil.GetPtr("nvos-patch-secret"),
 			},
 			setupContext: func(c echo.Context) {
@@ -851,13 +873,27 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testES.ID.String())
 			},
 			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"nvos_username", "nvos_password"},
+			expectedPaths:  []string{"nvos_password"},
 		},
 		{
-			name: "partial NVOS pair rejects accompanying metadata before dispatch",
+			name: "NVOS username is encrypted without resubmitting its password",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				NvOsUsername: cutil.GetPtr("incomplete"),
+				NvOsUsername: cutil.GetPtr("nvos-patch-admin"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"nvos_username"},
+		},
+		{
+			name: "Core credential rejection rolls back metadata",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
+				NvOsPassword: cutil.GetPtr("nvos-patch-secret"),
 				Labels:       map[string]string{"env": "must-not-change"},
 			},
 			setupContext: func(c echo.Context) {
@@ -866,7 +902,25 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testES.ID.String())
 			},
 			expectedStatus:     http.StatusBadRequest,
-			expectedErrorMsg:   "nvOsPassword",
+			expectedErrorMsg:   "nvos_username and nvos_password must be set together",
+			expectedPaths:      []string{"metadata.labels", "nvos_password"},
+			rejectsCredentials: true,
+			coreError:          swe.WrapErr(status.Error(codes.InvalidArgument, "nvos_username and nvos_password must be set together")),
+		},
+		{
+			name: "empty NVOS username rejects accompanying metadata before dispatch",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
+				NvOsUsername: cutil.GetPtr(""),
+				Labels:       map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:     http.StatusBadRequest,
+			expectedErrorMsg:   "nvOsUsername",
 			expectNoWorkflow:   true,
 			rejectsCredentials: true,
 		},
@@ -912,8 +966,57 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testES.ID.String())
 			},
-			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"bmc_ip_address"},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"bmc_ip_address"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.42"),
+		},
+		{
+			name:           "omitted BMC IP address preserves the stored address",
+			id:             testES.ID.String(),
+			rawRequestBody: `{"labels":{"env":"omitted-bmc-ip"}}`,
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"metadata.labels"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "empty BMC IP address clears the stored address",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
+				BmcIpAddress: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:      http.StatusOK,
+			expectedPaths:       []string{"bmc_ip_address"},
+			initialBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "Core rejection rolls back clearing the BMC IP address",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
+				BmcIpAddress: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:       http.StatusBadRequest,
+			expectedPaths:        []string{"bmc_ip_address"},
+			expectedErrorMsg:     "BMC IP update rejected",
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+			coreError:            swe.WrapErr(status.Error(codes.InvalidArgument, "BMC IP update rejected")),
 		},
 		{
 			name: "successful update with NvosMacAddresses",
@@ -1004,7 +1107,17 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.initialBmcIPAddress != nil {
+				_, err := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
+					ExpectedSwitchID: testES.ID,
+					BmcIpAddress:     tt.initialBmcIPAddress,
+				})
+				require.NoError(t, err)
+			}
 			reqBody, _ := json.Marshal(tt.requestBody)
+			if tt.rawRequestBody != "" {
+				reqBody = []byte(tt.rawRequestBody)
+			}
 			url := "/v2/org/" + org + "/nico/expected-switch/" + tt.id
 			req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader(reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -1014,6 +1127,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			c := e.NewContext(req, rec)
 
 			tt.setupContext(c)
+			workflowResult.Return(tt.coreError)
 
 			workflowCallsBefore := len(mockTemporalClient.Calls)
 			var before *cdbm.ExpectedSwitch
@@ -1050,38 +1164,52 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				require.NoError(t, readErr)
 				assert.Equal(t, before, after, "invalid credentials must not mutate the cloud row")
 			}
-			if rec.Code == http.StatusOK {
+			if rec.Code == http.StatusOK || tt.coreError != nil {
 				require.Len(t, mockTemporalClient.Calls, workflowCallsBefore+1)
 				require.NotNil(t, capturedPatch)
 				require.NotNil(t, capturedPatch.UpdateMask)
 				assert.Equal(t, tt.expectedPaths, capturedPatch.UpdateMask.Paths)
-				if tt.requestBody.DefaultBmcPassword != nil {
+				if tt.requestBody.BmcIpAddress != nil {
+					assert.Equal(t, *tt.requestBody.BmcIpAddress, capturedPatch.ExpectedSwitch.BmcIpAddress)
+				}
+				if tt.requestBody.DefaultBmcUsername != nil {
 					assert.Equal(t, *tt.requestBody.DefaultBmcUsername, capturedPatch.ExpectedSwitch.BmcUsername)
+					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcUsername)
+					assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcUsername)
+				} else {
+					assert.Empty(t, capturedPatch.ExpectedSwitch.BmcUsername)
+				}
+				if tt.requestBody.DefaultBmcPassword != nil {
 					assert.Equal(t, *tt.requestBody.DefaultBmcPassword, capturedPatch.ExpectedSwitch.BmcPassword)
 					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcPassword)
 					assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcPassword)
 				} else {
-					assert.Empty(t, capturedPatch.ExpectedSwitch.BmcUsername)
 					assert.Empty(t, capturedPatch.ExpectedSwitch.BmcPassword)
 				}
+				assert.Equal(t, tt.requestBody.NvOsUsername, capturedPatch.ExpectedSwitch.NvosUsername)
+				assert.Equal(t, tt.requestBody.NvOsPassword, capturedPatch.ExpectedSwitch.NvosPassword)
+				if tt.requestBody.NvOsUsername != nil {
+					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.NvOsUsername)
+					assert.NotContains(t, rec.Body.String(), *tt.requestBody.NvOsUsername)
+				}
 				if tt.requestBody.NvOsPassword != nil {
-					assert.Equal(t, *tt.requestBody.NvOsUsername, capturedPatch.ExpectedSwitch.GetNvosUsername())
-					assert.Equal(t, *tt.requestBody.NvOsPassword, capturedPatch.ExpectedSwitch.GetNvosPassword())
 					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.NvOsPassword)
 					assert.NotContains(t, rec.Body.String(), *tt.requestBody.NvOsPassword)
-				} else {
-					assert.Empty(t, capturedPatch.ExpectedSwitch.GetNvosUsername())
-					assert.Empty(t, capturedPatch.ExpectedSwitch.GetNvosPassword())
 				}
 			}
 
-			// Verify BmcIpAddress round-trips through the update response when set
-			if tt.expectedStatus == http.StatusOK && tt.requestBody.BmcIpAddress != nil {
-				var response model.APIExpectedSwitch
-				err := json.Unmarshal(rec.Body.Bytes(), &response)
-				assert.Nil(t, err)
-				if assert.NotNil(t, response.BmcIpAddress, "BmcIpAddress should not be nil in response") {
-					assert.Equal(t, *tt.requestBody.BmcIpAddress, *response.BmcIpAddress, "BmcIpAddress in response should match request")
+			if tt.initialBmcIPAddress != nil {
+				stored, err := esDAO.Get(ctx, nil, testES.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedBmcIPAddress, stored.BmcIpAddress)
+				if rec.Code == http.StatusOK {
+					var response map[string]json.RawMessage
+					err = json.Unmarshal(rec.Body.Bytes(), &response)
+					require.NoError(t, err)
+					require.Contains(t, response, "bmcIpAddress")
+					expectedJSON, err := json.Marshal(tt.expectedBmcIPAddress)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(expectedJSON), string(response["bmcIpAddress"]))
 				}
 			}
 

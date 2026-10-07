@@ -417,7 +417,28 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 		fields       fields
 		phoneHomeUrl *string
 		wantErr      bool
+		wantDetail   string
 	}{
+		{
+			name: "reject scalar autoinstall with mapping detail",
+			fields: fields{
+				UserData:         cutil.GetPtr("#cloud-config\nautoinstall: private-value\n"),
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+			wantErr:      true,
+			wantDetail:   "autoinstall must be a mapping to insert phone-home",
+		},
+		{
+			name: "reject scalar autoinstall user-data with mapping detail",
+			fields: fields{
+				UserData:         cutil.GetPtr("#cloud-config\nautoinstall:\n  user-data: private-value\n"),
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+			wantErr:      true,
+			wantDetail:   "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name: "test valid Operating System PhoneHome enabled create request when userData is nil",
 			fields: fields{
@@ -553,6 +574,13 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				t.Errorf("APIOperatingSystemCreateRequest.ValidateAndSetUserData() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
 			}
 
+			if tt.wantDetail != "" {
+				require.Error(t, err)
+				encoded, marshalErr := json.Marshal(err)
+				require.NoError(t, marshalErr)
+				assert.JSONEq(t, `{"userData":"`+tt.wantDetail+`"}`, string(encoded))
+				assert.Equal(t, tt.fields.UserData, icr.UserData)
+			}
 			if err != nil {
 				return
 			}
@@ -567,6 +595,137 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData_Archive(t *testing.T) {
+	const phoneHomeURL = "http://localhost/phone-home"
+
+	const archive = `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+`
+
+	t.Run("appends phone-home as a new entry in a cloud-config-archive", func(t *testing.T) {
+		req := APIOperatingSystemCreateRequest{
+			Name:             "test-name",
+			TenantID:         cutil.GetPtr(uuid.NewString()),
+			UserData:         cutil.GetPtr(archive),
+			PhoneHomeEnabled: cutil.GetPtr(true),
+		}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL))
+		require.NotNil(t, req.UserData)
+		assert.True(t, strings.HasPrefix(*req.UserData, "#cloud-config-archive\n"),
+			"archive header must be preserved: %s", *req.UserData)
+		assert.Contains(t, *req.UserData, phoneHomeURL)
+	})
+
+	t.Run("replaces a standalone phone-home entry rather than duplicating it", func(t *testing.T) {
+		withPhoneHome := archive + `- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://existing
+`
+		req := APIOperatingSystemCreateRequest{
+			Name:             "test-name",
+			TenantID:         cutil.GetPtr(uuid.NewString()),
+			UserData:         cutil.GetPtr(withPhoneHome),
+			PhoneHomeEnabled: cutil.GetPtr(true),
+		}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL))
+		require.NotNil(t, req.UserData)
+		assert.Contains(t, *req.UserData, phoneHomeURL)
+		assert.NotContains(t, *req.UserData, "http://existing")
+		assert.Equal(t, 1, strings.Count(*req.UserData, "phone_home:"))
+	})
+}
+
+func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData_JinjaTemplate(t *testing.T) {
+	const phoneHomeURL = "http://localhost/phone-home"
+
+	// A template is not a document to render back - yaml reads `{{ x }}` as a
+	// mapping - so disabling leaves the stored blob alone rather than rewriting
+	// it. Enabling reports it, which the create table already covers for
+	// user-data phone-home cannot be edited into.
+	t.Run("disabling phone-home leaves a template alone", func(t *testing.T) {
+		existing := &cdbm.OperatingSystem{
+			ID:   uuid.New(),
+			Name: "ab",
+			UserData: cutil.GetPtr(`## template: jinja
+#cloud-config
+phone_home:
+  url: ` + phoneHomeURL + `
+hostname: "{{ v1.local_hostname }}"
+`),
+			PhoneHomeEnabled: true,
+			Status:           cdbm.OperatingSystemStatusReady,
+			Type:             cdbm.OperatingSystemTypeIPXE,
+			CreatedBy:        uuid.New(),
+		}
+
+		req := APIOperatingSystemUpdateRequest{PhoneHomeEnabled: cutil.GetPtr(false)}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL, existing))
+		assert.Nil(t, req.UserData,
+			"the stored template must be left untouched, the block it holds included")
+	})
+
+	t.Run("renaming an operating system whose blob is a template", func(t *testing.T) {
+		// The request names neither user-data nor phone-home, so the stored blob is
+		// not one it is asking to rewrite - enabling over it would report it.
+		existing := &cdbm.OperatingSystem{
+			ID:   uuid.New(),
+			Name: "ab",
+			UserData: cutil.GetPtr(`## template: jinja
+#cloud-config
+hostname: "{{ v1.local_hostname }}"
+`),
+			PhoneHomeEnabled: true,
+			Status:           cdbm.OperatingSystemStatusReady,
+			Type:             cdbm.OperatingSystemTypeIPXE,
+			CreatedBy:        uuid.New(),
+		}
+
+		req := APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("renamed")}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL, existing))
+		assert.Nil(t, req.UserData)
+	})
+}
+
+func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData_EmptiedArchiveKeepsHeader(t *testing.T) {
+	const phoneHomeURL = "http://localhost/phone-home"
+
+	// Disabling phone-home on an archive whose only entry was phone-home must
+	// leave a valid (empty) #cloud-config-archive, not blank the field.
+	existing := &cdbm.OperatingSystem{
+		ID:   uuid.New(),
+		Name: "ab",
+		UserData: cutil.GetPtr(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: ` + phoneHomeURL + `
+`),
+		PhoneHomeEnabled: true,
+		Status:           cdbm.OperatingSystemStatusReady,
+		Type:             cdbm.OperatingSystemTypeIPXE,
+		CreatedBy:        uuid.New(),
+	}
+
+	req := APIOperatingSystemUpdateRequest{PhoneHomeEnabled: cutil.GetPtr(false)}
+
+	require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL, existing))
+	require.NotNil(t, req.UserData)
+	assert.True(t, strings.HasPrefix(*req.UserData, "#cloud-config-archive"),
+		"emptied archive must keep its header, got: %q", *req.UserData)
+	assert.NotContains(t, *req.UserData, "phone_home")
 }
 
 func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
@@ -690,8 +849,33 @@ phone_home:
 		userDataSearches         []string
 		userDataNegativeSearches []string
 		wantErr                  bool
+		wantDetail               string
 		existingOS               *cdbm.OperatingSystem
 	}{
+		{
+			name: "reject stored scalar autoinstall with mapping detail",
+			fields: fields{
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				UserData: cutil.GetPtr("#cloud-config\nautoinstall: private-value\n"),
+			},
+			wantErr:    true,
+			wantDetail: "autoinstall must be a mapping to insert phone-home",
+		},
+		{
+			name: "reject supplied scalar autoinstall user-data with mapping detail",
+			fields: fields{
+				UserData: cutil.GetPtr("#cloud-config\nautoinstall:\n  user-data: private-value\n"),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				PhoneHomeEnabled: true,
+			},
+			wantErr:    true,
+			wantDetail: "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name: "test valid Operating System PhoneHome disabled update request when userData is nil and existing OS has enabled",
 			fields: fields{
@@ -1002,6 +1186,12 @@ phone_home:
 			err := osur.ValidateAndSetUserData(tt.phoneHomeUrl, tt.existingOS)
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantDetail != "" {
+					encoded, marshalErr := json.Marshal(err)
+					require.NoError(t, marshalErr)
+					assert.JSONEq(t, `{"userData":"`+tt.wantDetail+`"}`, string(encoded))
+					assert.Equal(t, tt.fields.UserData, osur.UserData)
+				}
 				return
 			} else {
 				require.NoError(t, err)

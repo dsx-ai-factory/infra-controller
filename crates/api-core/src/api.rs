@@ -110,20 +110,40 @@ pub struct Api {
     /// `[node_auth] enabled`; installed into the authn middleware by the
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
+    pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
 }
 
 pub(crate) type ScoutStreamType =
     Pin<Box<dyn Stream<Item = Result<rpc::ScoutStreamScoutBoundMessage, Status>> + Send>>;
+pub(crate) type ConsoleLogStreamType = crate::console_logs::ConsoleLogStream;
 
 #[tonic::async_trait]
 impl Forge for Api {
     type ScoutStreamStream = ScoutStreamType;
+    type StreamConsoleLogsStream = ConsoleLogStreamType;
+
+    async fn stream_console_logs(
+        &self,
+        request: Request<::rpc::protos::console_log::StreamConsoleLogsRequest>,
+    ) -> Result<Response<Self::StreamConsoleLogsStream>, Status> {
+        self.console_log_source
+            .stream(request.into_inner())
+            .await
+            .map(Response::new)
+    }
 
     async fn version(
         &self,
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
         crate::handlers::api::version(self, request).await
+    }
+
+    async fn get_rms_version(
+        &self,
+        request: Request<rpc::GetRmsVersionRequest>,
+    ) -> Result<Response<rpc::GetRmsVersionResponse>, Status> {
+        crate::handlers::rms::get_rms_version(self, request).await
     }
 
     async fn create_domain(
@@ -1292,6 +1312,32 @@ impl Forge for Api {
         crate::handlers::machine::admin_force_delete_machine(self, request).await
     }
 
+    async fn admin_find_reserved_address_ids(
+        &self,
+        request: Request<rpc::AdminFindReservedAddressesRequest>,
+    ) -> Result<Response<rpc::AdminReservedAddressIdList>, Status> {
+        crate::handlers::machine_interface_address::admin_find_reserved_address_ids(self, request)
+            .await
+    }
+
+    async fn admin_find_reserved_addresses_by_ids(
+        &self,
+        request: Request<rpc::AdminReservedAddressesByIdsRequest>,
+    ) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
+        crate::handlers::machine_interface_address::admin_find_reserved_addresses_by_ids(
+            self, request,
+        )
+        .await
+    }
+
+    async fn admin_release_reserved_addresses(
+        &self,
+        request: Request<rpc::AdminReleaseReservedAddressesRequest>,
+    ) -> Result<Response<rpc::AdminReleaseReservedAddressesResponse>, Status> {
+        crate::handlers::machine_interface_address::admin_release_reserved_addresses(self, request)
+            .await
+    }
+
     async fn decommission_managed_host(
         &self,
         request: Request<rpc::DecommissionManagedHostRequest>,
@@ -2070,6 +2116,13 @@ impl Forge for Api {
         crate::handlers::expected_rack_group::get_expected_rack_group(self, request).await
     }
 
+    async fn get_all_expected_rack_groups(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+        crate::handlers::expected_rack_group::get_all_expected_rack_groups(self, request).await
+    }
+
     async fn find_expected_rack_group_ids(
         &self,
         request: Request<rpc::ExpectedRackGroupSearchFilter>,
@@ -2627,6 +2680,13 @@ impl Forge for Api {
         crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
     }
 
+    async fn find_machine_validation_attempts(
+        &self,
+        request: Request<rpc::MachineValidationAttemptSearchFilter>,
+    ) -> Result<Response<rpc::MachineValidationAttemptList>, Status> {
+        crate::handlers::machine_validation::find_machine_validation_attempts(self, request).await
+    }
+
     async fn append_machine_validation_attempt_log(
         &self,
         request: Request<rpc::MachineValidationAttemptLogAppendRequest>,
@@ -2971,6 +3031,41 @@ impl Forge for Api {
         request: Request<rpc::DeleteHostFirmwareConfigRequest>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::firmware::delete_host_firmware_config(self, request).await
+    }
+
+    async fn create_nic_firmware_profile(
+        &self,
+        request: Request<rpc::CreateNicFirmwareProfileRequest>,
+    ) -> Result<Response<rpc::NicFirmwareProfileResponse>, Status> {
+        crate::handlers::nic_firmware::create(self, request).await
+    }
+
+    async fn find_nic_firmware_profile_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareProfileIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareProfileIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_ids(self, request).await
+    }
+
+    async fn find_nic_firmware_profiles_by_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareProfilesByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareProfilesByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_by_ids(self, request).await
+    }
+
+    async fn update_nic_firmware_profile(
+        &self,
+        request: Request<rpc::UpdateNicFirmwareProfileRequest>,
+    ) -> Result<Response<rpc::NicFirmwareProfileResponse>, Status> {
+        crate::handlers::nic_firmware::update(self, request).await
+    }
+
+    async fn delete_nic_firmware_profile(
+        &self,
+        request: Request<rpc::DeleteNicFirmwareProfileRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_firmware::delete(self, request).await
     }
 
     async fn create_sku(
@@ -3447,6 +3542,48 @@ impl Forge for Api {
         crate::handlers::attestation::get_attestation_machine(self, request).await
     }
 
+    async fn create_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::CreateAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::create(self, request).await
+    }
+
+    async fn update_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::UpdateAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::update(self, request).await
+    }
+
+    async fn delete_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::DeleteAttestationProfileRequest>,
+    ) -> Result<Response<rpc::DeleteAttestationProfileResponse>, Status> {
+        crate::handlers::attestation_profile::delete(self, request).await
+    }
+
+    async fn get_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::GetAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::get(self, request).await
+    }
+
+    async fn list_attestation_profiles(
+        &self,
+        _request: tonic::Request<()>,
+    ) -> Result<Response<rpc::ListAttestationProfilesResponse>, Status> {
+        crate::handlers::attestation_profile::list(self).await
+    }
+
+    async fn get_attestation_coverage(
+        &self,
+        _request: tonic::Request<()>,
+    ) -> Result<Response<rpc::GetAttestationCoverageResponse>, Status> {
+        crate::handlers::attestation_profile::coverage(self).await
+    }
+
     async fn sign_machine_identity(
         &self,
         request: tonic::Request<rpc::MachineIdentityRequest>,
@@ -3676,6 +3813,13 @@ impl Forge for Api {
         request: Request<mlx_device_pb::MlxAdminDeviceReportRequest>,
     ) -> Result<Response<mlx_device_pb::MlxAdminDeviceReportResponse>, Status> {
         crate::handlers::mlx_admin::show_device_report(self, request).await
+    }
+
+    async fn mlx_admin_show_device_identities(
+        &self,
+        request: Request<mlx_device_pb::MlxAdminDeviceIdentitiesRequest>,
+    ) -> Result<Response<mlx_device_pb::MlxAdminDeviceIdentitiesResponse>, Status> {
+        crate::handlers::mlx_device_identity::show(self, request).await
     }
 
     async fn mlx_admin_registry_list(

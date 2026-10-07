@@ -1,9 +1,10 @@
 {{- if .Values.externalService.enabled }}
 {{- /*
 External LoadBalancer exposure for unbound (bare-metal / MetalLB). DPUs and bare-metal
-hosts use this VIP as their DHCP-advertised resolver to reach the .forge zone. Two Services
-(UDP + TCP on 53) share one VIP via metallb.universe.tf/allow-shared-ip. Set the VIP with:
-  externalService.annotations: { metallb.universe.tf/loadBalancerIPs: "10.x.x.x" }
+hosts use these VIPs as their resolver to reach the .forge zone. Two Services
+(UDP + TCP on 53) share the configured VIPs via metallb.universe.tf/allow-shared-ip.
+Set one address per family with externalService.annotations, for example:
+  metallb.io/loadBalancerIPs: "192.0.2.53,2001:db8::53"
 */}}
 ---
 apiVersion: v1
@@ -19,8 +20,9 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  ipFamilyPolicy: SingleStack
-  ipFamilies: [IPv4]
+  ipFamilyPolicy: {{ .Values.externalService.ipFamilyPolicy | default "SingleStack" }}
+  ipFamilies:
+    {{- .Values.externalService.ipFamilies | default (list "IPv4") | toYaml | nindent 4 }}
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ . }}
@@ -46,8 +48,9 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  ipFamilyPolicy: SingleStack
-  ipFamilies: [IPv4]
+  ipFamilyPolicy: {{ .Values.externalService.ipFamilyPolicy | default "SingleStack" }}
+  ipFamilies:
+    {{- .Values.externalService.ipFamilies | default (list "IPv4") | toYaml | nindent 4 }}
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ . }}

@@ -17,7 +17,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -343,8 +342,6 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -500,8 +497,6 @@ func TestDpuExtensionServiceSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -688,11 +683,40 @@ func TestDpuExtensionServiceSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("include deleted returns a soft-deleted object", func(t *testing.T) {
+		err := dessd.Delete(ctx, nil, created[0].ID)
+		require.NoError(t, err)
+
+		active, _, err := dessd.GetAll(
+			ctx,
+			nil,
+			DpuExtensionServiceFilterInput{DpuExtensionServiceIDs: []uuid.UUID{created[0].ID}},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+
+		withDeleted, _, err := dessd.GetAll(
+			ctx,
+			nil,
+			DpuExtensionServiceFilterInput{
+				DpuExtensionServiceIDs: []uuid.UUID{created[0].ID},
+				IncludeDeleted:         true,
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, withDeleted, 1) {
+			assert.NotNil(t, withDeleted[0].Deleted)
+		}
+	})
 }
 
 func TestDpuExtensionServiceSQLDAO_GetAll_includeRelations(t *testing.T) {
@@ -870,8 +894,6 @@ func TestDpuExtensionServiceSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -962,11 +984,24 @@ func TestDpuExtensionServiceSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		err := dessd.Delete(ctx, nil, dessExp[2].ID)
+		require.NoError(t, err)
+
+		restored, err := dessd.Clear(ctx, nil, DpuExtensionServiceClearInput{
+			DpuExtensionServiceID: dessExp[2].ID,
+			Deleted:               true,
+		})
+		require.NoError(t, err)
+
+		if assert.NotNil(t, restored) {
+			assert.Nil(t, restored.Deleted)
+		}
+	})
 }
 
 func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
@@ -1018,15 +1053,13 @@ func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
 
 			if tc.checkSoftDelete {
 				err = dbSession.DB.NewSelect().Model(&res).Where("des.id = ?", tc.desID).WhereAllWithDeleted().Scan(ctx)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.NotNil(t, res.Deleted)
 			}
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

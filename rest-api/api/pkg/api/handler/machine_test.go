@@ -20,7 +20,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
@@ -427,7 +426,7 @@ func TestMachineHandler_Get(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -633,7 +632,6 @@ func TestMachineHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetMachineHandler{
@@ -950,7 +948,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1554,7 +1552,6 @@ func TestMachineHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gamh := GetAllMachineHandler{
@@ -1928,7 +1925,7 @@ func TestMachineHandler_Update(t *testing.T) {
 	scp.IDClientMap[site3.ID.String()] = tsc1
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2735,7 +2732,6 @@ func TestMachineHandler_Update(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqMachine.ID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if tt.args.beforeHandle != nil {
@@ -2938,7 +2934,7 @@ func TestMachineHandler_GetStatusDetails(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name         string
@@ -3013,7 +3009,6 @@ func TestMachineHandler_GetStatusDetails(t *testing.T) {
 			ec.SetParamValues(tc.reqOrg, tc.reqMachineID)
 			ec.Set("user", tc.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			assert.NoError(t, handler.Handle(ec))
@@ -3156,7 +3151,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 	assert.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -3241,12 +3236,10 @@ func TestMachineHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := DeleteMachineHandler{
-				dbSession:  dbSession,
-				tracerSpan: cutil.NewTracerSpan(),
+				dbSession: dbSession,
 			}
 			err := mh.Handle(ec)
 			assert.Nil(t, err)
@@ -3772,7 +3765,7 @@ func TestMachineHandler_GetDpuMachines(t *testing.T) {
 	scpTimeout := sc.NewClientPool(tcfg)
 	scpTimeout.IDClientMap[site.ID.String()] = tscTimeout
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -3913,13 +3906,11 @@ func TestMachineHandler_GetDpuMachines(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gadmh := GetAllDpuMachineHandler{
-				dbSession:  dbSession,
-				scp:        tc.scp,
-				tracerSpan: cutil.NewTracerSpan(),
+				dbSession: dbSession,
+				scp:       tc.scp,
 			}
 			err := gadmh.Handle(ec)
 			assert.Nil(t, err)

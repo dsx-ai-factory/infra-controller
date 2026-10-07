@@ -22,6 +22,13 @@ nico-admin-cli operating-system create <-n|--name>
 
 Create a new operating system definition.
 
+Specify exactly one OS variant: either --ipxe-script or
+--ipxe-template-id.
+
+For templated iPXE requirements, artifact configuration, and
+synchronization rules, refer to
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
+
 ## OPTIONS
 
 `-n, --name <NAME>`
@@ -60,7 +67,8 @@ script; does not affect templated definitions or user data.
 `--phone-home-enabled`
 
 Whether instances using this OS definition wait for a guest phone-home
-callback before reporting ready. If the callback never arrives, the
+callback before reporting ready (user-data must use `#`cloud-config or
+`#`cloud-config-archive format). If the callback never arrives, the
 instance remains in a provisioning state. REST workflows inject the
 cloud-init phone_home block and require valid cloud-init YAML; callers
 using Core directly must arrange the callback. See
@@ -107,8 +115,9 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a
-nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a --description "Ubuntu 22.04 base" --is-active false
+nico-admin-cli operating-system create --name provider-ubuntu-22.04 --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli operating-system create --name tenant-ubuntu-22.04 --org fds34511233a --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli operating-system create --name tenant-custom-ipxe --org fds34511233a --description "Custom tenant boot script" --is-active false --allow-override --ipxe-script "#!ipxe …"
 ```
 
 ---

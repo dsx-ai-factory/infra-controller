@@ -27,14 +27,22 @@ pub async fn list(
     tenant_organization_id: Option<TenantOrganizationId>,
 ) -> Result<Vec<OsImage>, DatabaseError> {
     if let Some(tenant_organization_id) = tenant_organization_id {
-        let query = "SELECT * from os_images l WHERE l.organization_id=$1";
+        let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
+                l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
+                l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
+                l.created_at, l.modified_at
+            from os_images l WHERE l.organization_id=$1";
         sqlx::query_as(query)
             .bind(tenant_organization_id.to_string())
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
     } else {
-        let query = "SELECT * from os_images l";
+        let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
+                l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
+                l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
+                l.created_at, l.modified_at
+            from os_images l";
         sqlx::query_as(query)
             .fetch_all(txn)
             .await
@@ -43,7 +51,11 @@ pub async fn list(
 }
 
 pub async fn get(txn: &mut PgConnection, os_image_id: Uuid) -> Result<OsImage, DatabaseError> {
-    let query = "SELECT * from os_images l WHERE l.id = $1";
+    let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
+            l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
+            l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
+            l.created_at, l.modified_at
+        from os_images l WHERE l.id = $1";
     sqlx::query_as(query)
         .bind(os_image_id)
         .fetch_one(txn)
@@ -99,7 +111,10 @@ async fn persist(
     update: bool,
 ) -> Result<OsImage, DatabaseError> {
     let os_image = if update {
-        let query = "UPDATE os_images SET name = $1, description = $2, auth_type = $3, auth_token = $4, rootfs_id = $5, rootfs_label = $6, boot_disk = $7, bootfs_id = $8, efifs_id = $9, modified_at = $10, status = $11, status_message = $12 WHERE id = $13 RETURNING *";
+        let query = "UPDATE os_images SET name = $1, description = $2, auth_type = $3, auth_token = $4, rootfs_id = $5, rootfs_label = $6, boot_disk = $7, bootfs_id = $8, efifs_id = $9, modified_at = $10, status = $11, status_message = $12 WHERE id = $13
+            RETURNING id, name, description, source_url, digest, organization_id,
+                auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id,
+                efifs_id, capacity, status, status_message, created_at, modified_at";
         sqlx::query_as(query)
             .bind(&value.attributes.name)
             .bind(&value.attributes.description)
@@ -122,7 +137,10 @@ async fn persist(
             Some(x) => x as i64,
             None => 0,
         };
-        let query = "INSERT INTO os_images(id, name, description, source_url, digest, organization_id, auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id, efifs_id, capacity, status, status_message, created_at, modified_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *";
+        let query = "INSERT INTO os_images(id, name, description, source_url, digest, organization_id, auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id, efifs_id, capacity, status, status_message, created_at, modified_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            RETURNING id, name, description, source_url, digest, organization_id,
+                auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id,
+                efifs_id, capacity, status, status_message, created_at, modified_at";
         sqlx::query_as(query)
             .bind(value.attributes.id)
             .bind(&value.attributes.name)
@@ -151,11 +169,105 @@ async fn persist(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::PgPool;
+    use sqlx::{Connection, PgPool};
     use uuid::Uuid;
+
+    use super::*;
 
     const EXPAND_BOOT_DISK_MIGRATION: &str =
         include_str!("../migrations/20260828202227_expand_os_image_boot_disk.sql");
+
+    #[crate::sqlx_test]
+    async fn os_image_queries_survive_added_columns(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        exercise_os_image_queries(&mut api_connection).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the API connection and its prepared statements while another
+        // connection applies the schema change, just as a migration would.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE os_images ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_os_image_queries(&mut api_connection).await?;
+        Ok(())
+    }
+
+    async fn exercise_os_image_queries(
+        connection: &mut PgConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        let mut expected = OsImage {
+            attributes: OsImageAttributes {
+                id: Uuid::new_v4(),
+                source_url: "https://example.invalid/projection-image".to_string(),
+                digest: "sha256:projection-image".to_string(),
+                tenant_organization_id: "projection-tenant".parse()?,
+                create_volume: false,
+                name: Some("projection image".to_string()),
+                description: Some("image description".to_string()),
+                auth_type: Some("bearer".to_string()),
+                auth_token: Some("test-token".to_string()),
+                rootfs_id: Some("root-partition".to_string()),
+                rootfs_label: Some("root-label".to_string()),
+                boot_disk: Some("/dev/disk/by-id/projection-disk".to_string()),
+                capacity: Some(8192),
+                bootfs_id: Some("boot-partition".to_string()),
+                efifs_id: Some("efi-partition".to_string()),
+            },
+            status: OsImageStatus::Disabled,
+            status_message: Some("image disabled".to_string()),
+            created_at: Some("2026-09-28T10:00:00Z".to_string()),
+            modified_at: Some("2026-09-28T11:00:00Z".to_string()),
+        };
+        let created = persist(expected.clone(), &mut txn, false).await?;
+        assert_eq!(
+            serde_json::to_value(created)?,
+            serde_json::to_value(&expected)?
+        );
+
+        expected.attributes.name = Some("renamed image".to_string());
+        expected.status = OsImageStatus::Ready;
+        expected.status_message = Some("image ready".to_string());
+        expected.modified_at = Some("2026-09-28T12:00:00Z".to_string());
+        let updated = persist(expected.clone(), &mut txn, true).await?;
+        assert_eq!(
+            serde_json::to_value(updated)?,
+            serde_json::to_value(&expected)?
+        );
+
+        for (operation, images) in [
+            ("get", vec![get(&mut txn, expected.attributes.id).await?]),
+            (
+                "list for tenant",
+                list(
+                    &mut txn,
+                    Some(expected.attributes.tenant_organization_id.clone()),
+                )
+                .await?,
+            ),
+            ("list all tenants", list(&mut txn, None).await?),
+        ] {
+            assert_eq!(images.len(), 1, "{operation}");
+            assert_eq!(
+                serde_json::to_value(&images[0])?,
+                serde_json::to_value(&expected)?,
+                "{operation}"
+            );
+        }
+
+        // Roll back the fixture so both passes decode an inserted row.
+        // The connection retains its prepared statements after the rollback.
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn boot_disk_migration_preserves_existing_value_and_accepts_long_path(pool: PgPool) {

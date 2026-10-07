@@ -6,17 +6,20 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -290,10 +293,16 @@ func (es *ExpectedSwitch) BeforeCreateTable(ctx context.Context, query *bun.Crea
 type ExpectedSwitchDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (*ExpectedSwitch, error)
+	// CreateMultiple creates multiple rows in input order
+	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error)
 	// Update used to update row
 	Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (*ExpectedSwitch, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) error
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
 	// GetAll returns all the rows based on the filter and page inputs
@@ -304,8 +313,7 @@ type ExpectedSwitchDAO interface {
 
 // ExpectedSwitchSQLDAO is an implementation of the ExpectedSwitchDAO interface
 type ExpectedSwitchSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 
 	ExpectedSwitchDAO
 }
@@ -314,12 +322,10 @@ type ExpectedSwitchSQLDAO struct {
 // The returned ExpectedSwitch will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Create")
-	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
-	}
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Create")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
 
 	es := ExpectedSwitch{
 		ID:                 input.ExpectedSwitchID,
@@ -339,11 +345,8 @@ func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ex
 		Labels:             input.Labels,
 		CreatedBy:          input.CreatedBy,
 	}
-
 	// Add tracing attributes
-	if expectedSwitchDAOSpan != nil {
-		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", es.ID.String())
-	}
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", es.ID.String()))
 
 	_, err := db.GetIDB(tx, essd.dbSession).NewInsert().Model(&es).Exec(ctx)
 	if err != nil {
@@ -360,16 +363,65 @@ func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ex
 	return &result, nil
 }
 
+// CreateMultiple creates ExpectedSwitches in input order in the caller's
+// transaction.
+func (essd ExpectedSwitchSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedSwitchCreateInput) (_ []ExpectedSwitch, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedSwitchDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	if len(inputs) == 0 {
+		return []ExpectedSwitch{}, nil
+	}
+
+	expectedSwitches := make([]ExpectedSwitch, 0, len(inputs))
+	ids := make([]uuid.UUID, 0, len(inputs))
+	for _, input := range inputs {
+		expectedSwitches = append(expectedSwitches, ExpectedSwitch{
+			ID: input.ExpectedSwitchID, SiteID: input.SiteID, BmcMacAddress: input.BmcMacAddress,
+			SwitchSerialNumber: input.SwitchSerialNumber, BmcIpAddress: input.BmcIpAddress,
+			NvosMacAddresses: input.NvosMacAddresses, RackID: input.RackID, Name: input.Name,
+			Manufacturer: input.Manufacturer, Model: input.Model, Description: input.Description,
+			SlotID: input.SlotID, TrayIdx: input.TrayIdx, HostID: input.HostID,
+			Labels: input.Labels, CreatedBy: input.CreatedBy,
+		})
+		ids = append(ids, input.ExpectedSwitchID)
+	}
+	_, err := db.GetIDB(tx, essd.dbSession).NewInsert().Model(&expectedSwitches).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []ExpectedSwitch
+	err = db.GetIDB(tx, essd.dbSession).NewSelect().Model(&result).Where("es.id IN (?)", bun.In(ids)).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(ids) {
+		return nil, fmt.Errorf("unexpected result count: got %d, expected %d", len(result), len(ids))
+	}
+	idToIndex := make(map[uuid.UUID]int, len(ids))
+	for i, id := range ids {
+		idToIndex[id] = i
+	}
+	sorted := make([]ExpectedSwitch, len(result))
+	for _, item := range result {
+		index, ok := idToIndex[item.ID]
+		if !ok {
+			return nil, fmt.Errorf("unexpected ExpectedSwitch ID returned: %s", item.ID)
+		}
+		sorted[index] = item
+	}
+	return sorted, nil
+}
+
 // Get returns an ExpectedSwitch by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (essd ExpectedSwitchSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Get")
-	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
-
-		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", expectedSwitchID.String())
-	}
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Get")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", expectedSwitchID.String()))
 
 	es := &ExpectedSwitch{}
 
@@ -395,33 +447,21 @@ func (essd ExpectedSwitchSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedSwi
 }
 
 // setQueryWithFilter populates the lookup query based on specified filter
-func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterInput, query *bun.SelectQuery, expectedSwitchDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterInput, query *bun.SelectQuery, expectedSwitchDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.SiteIDs != nil {
 		query = query.Where("es.site_id IN (?)", bun.In(filter.SiteIDs))
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.ExpectedSwitchIDs != nil {
 		query = query.Where("es.id IN (?)", bun.In(filter.ExpectedSwitchIDs))
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "expected_switch_ids", filter.ExpectedSwitchIDs)
-		}
 	}
 
 	if len(filter.ExcludeExpectedSwitchIDs) > 0 {
 		query = query.Where("es.id NOT IN (?)", bun.In(filter.ExcludeExpectedSwitchIDs))
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "exclude_expected_switch_ids", filter.ExcludeExpectedSwitchIDs)
-		}
 	}
 
 	if filter.BmcMacAddresses != nil {
 		query = query.Where("es.bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "bmc_mac_addresses", filter.BmcMacAddresses)
-		}
 	}
 
 	if len(filter.NvosMacAddresses) > 0 {
@@ -430,16 +470,10 @@ func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterI
 			normalized = append(normalized, NormalizeMacAddress(mac))
 		}
 		query = query.Where("EXISTS (SELECT 1 FROM unnest(es.nvos_mac_addresses) AS m(mac) WHERE lower(replace(m.mac, '-', ':')) IN (?))", bun.In(normalized))
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "nvos_mac_addresses", filter.NvosMacAddresses)
-		}
 	}
 
 	if filter.SwitchSerialNumbers != nil {
 		query = query.Where("es.switch_serial_number IN (?)", bun.In(filter.SwitchSerialNumbers))
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "switch_serial_numbers", filter.SwitchSerialNumbers)
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -453,9 +487,7 @@ func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterI
 				WhereOr("es.id::text ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("es.site_id::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		if expectedSwitchDAOSpan != nil {
-			essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	return query, nil
@@ -465,12 +497,10 @@ func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterI
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedSwitchOrderByDefault in ascending order
-func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error) {
+func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedSwitch, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.GetAll")
-	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
-	}
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAll")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
 
 	var expectedSwitches []ExpectedSwitch
 
@@ -513,14 +543,11 @@ func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter E
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Update")
-	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
-
-		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", input.ExpectedSwitchID.String())
-	}
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Update")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", input.ExpectedSwitchID.String()))
 
 	es := &ExpectedSwitch{
 		ID: input.ExpectedSwitchID,
@@ -587,11 +614,8 @@ func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ex
 		columns = append(columns, col)
 	}
 	columns = append(columns, "updated")
-
 	// Add tracing attributes
-	if expectedSwitchDAOSpan != nil {
-		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "columns_updated", strings.Join(columns, ","))
-	}
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("columns_updated", strings.Join(columns, ",")))
 
 	// Execute update
 	_, err := db.GetIDB(tx, essd.dbSession).NewUpdate().
@@ -614,12 +638,10 @@ func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ex
 }
 
 // Clear sets parameters of an existing ExpectedSwitch to null values in db
-func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Clear")
-	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
-	}
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Clear")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
 
 	es := &ExpectedSwitch{
 		ID: input.ExpectedSwitchID,
@@ -689,14 +711,11 @@ func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Exp
 
 // Delete deletes an ExpectedSwitch by ID
 // Error is returned only if there is a db error
-func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) error {
+func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Delete")
-	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
-
-		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", expectedSwitchID.String())
-	}
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Delete")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", expectedSwitchID.String()))
 
 	es := &ExpectedSwitch{
 		ID: expectedSwitchID,
@@ -712,10 +731,58 @@ func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expected
 	return nil
 }
 
+// DeleteAll deletes all ExpectedSwitches matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (essd ExpectedSwitchSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedSwitchDAO.DeleteAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+
+	query := db.GetIDB(tx, essd.dbSession).NewDelete().Model((*ExpectedSwitch)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedSwitchIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedSwitchIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.SwitchSerialNumbers != nil {
+		query = query.Where("switch_serial_number IN (?)", bun.In(filter.SwitchSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedSwitches and creates the
+// supplied replacement set in the caller's transaction.
+func (essd ExpectedSwitchSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, inputs []ExpectedSwitchCreateInput) (_ []ExpectedSwitch, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedSwitchDAO.ReplaceAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	err := essd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedSwitch{}, nil
+	}
+	return essd.CreateMultiple(ctx, tx, inputs)
+}
+
 // NewExpectedSwitchDAO returns a new ExpectedSwitchDAO
 func NewExpectedSwitchDAO(dbSession *db.Session) ExpectedSwitchDAO {
 	return &ExpectedSwitchSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

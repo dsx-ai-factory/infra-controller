@@ -18,6 +18,7 @@
 use std::str::FromStr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_libmlx_model::firmware::FirmwareSpec;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -25,7 +26,8 @@ use mac_address::MacAddress;
 
 use crate::forge::DpuNvConfigProfile as DpuNvConfigProfilePb;
 use crate::protos::mlx_device::{
-    FirmwareFlashReport as FirmwareFlashReportPb, MlxDeviceInfo as MlxDeviceInfoPb,
+    FirmwareFlashReport as FirmwareFlashReportPb, FirmwareSpec as FirmwareSpecPb,
+    MlxDeviceInfo as MlxDeviceInfoPb,
 };
 
 impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
@@ -55,6 +57,7 @@ impl From<MlxDeviceInfo> for MlxDeviceInfoPb {
                 .uefi_version_virtio_net_current
                 .unwrap_or_default(),
             base_mac: info.base_mac.map(|mac| mac.to_string()).unwrap_or_default(),
+            base_guid: info.base_guid,
             status: info.status.unwrap_or_default(),
         }
     }
@@ -87,7 +90,28 @@ impl TryFrom<MlxDeviceInfoPb> for MlxDeviceInfo {
             uefi_version_virtio_net_current: proto.uefi_version_virtio_net_current.none_if_empty(),
             status: proto.status.none_if_empty(),
             base_mac,
+            base_guid: proto.base_guid,
         })
+    }
+}
+
+impl From<FirmwareSpec> for FirmwareSpecPb {
+    fn from(spec: FirmwareSpec) -> Self {
+        FirmwareSpecPb {
+            part_number: spec.part_number,
+            psid: spec.psid,
+            version: spec.version,
+        }
+    }
+}
+
+impl From<FirmwareSpecPb> for FirmwareSpec {
+    fn from(proto: FirmwareSpecPb) -> Self {
+        FirmwareSpec {
+            part_number: proto.part_number,
+            psid: proto.psid,
+            version: proto.version,
+        }
     }
 }
 
@@ -126,6 +150,18 @@ mod test {
 
     use super::*;
 
+    #[test]
+    fn test_firmware_spec_roundtrip() {
+        let original = FirmwareSpec {
+            part_number: "900-9D3B4-00CV-TA0".to_string(),
+            psid: "MT_0000000884".to_string(),
+            version: "32.43.1014".to_string(),
+        };
+        let proto: FirmwareSpecPb = original.clone().into();
+        let converted: FirmwareSpec = proto.into();
+        assert_eq!(original, converted);
+    }
+
     // Proto -> model `TryFrom`: every input proto should convert back to the
     // expected `MlxDeviceInfo`, with empty proto strings (and an empty MAC)
     // becoming `None`. The roundtrip rows feed a model through its own
@@ -155,6 +191,7 @@ mod test {
                     uefi_version_virtio_blk_current: "".to_string(),
                     uefi_version_virtio_net_current: "".to_string(),
                     base_mac: "".to_string(), // Empty MAC becomes None
+                    base_guid: None,
                     status: "".to_string(),
                 } => Yields(MlxDeviceInfo {
                     pci_name: "01:00.0".to_string(),
@@ -168,6 +205,7 @@ mod test {
                     uefi_version_virtio_blk_current: None,
                     uefi_version_virtio_net_current: None,
                     base_mac: None,
+                    base_guid: None,
                     status: None,
                 }),
             }

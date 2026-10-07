@@ -53,6 +53,7 @@ nv-redfish = { workspace = true, features = [
   "pcie-devices",
   "ports",
   "power-supplies",
+  "processors",
   "update-service",
   "secure-boot",
   "oem-nvidia",
@@ -67,6 +68,7 @@ nv-redfish = { workspace = true, features = [
 ] }
 regex = { workspace = true }
 lazy_static = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

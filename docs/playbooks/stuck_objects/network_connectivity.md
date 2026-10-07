@@ -114,6 +114,10 @@ kubectl -n <nico-namespace> logs deploy/nico-pxe --tail=500 | grep <mac-or-ip>
 
 If there are no PXE or HTTP requests, inspect the serial console and boot order.
 If requests exist but the host does not advance, inspect scout or DPU agent logs.
+For a tenant OS image download that times out across VPCs, use
+[Troubleshoot an Instance Boot Connection Timeout](instance_boot_connection_timeout.md).
+To enter Scout outside the normal boot workflow, use
+[Force a Managed Host to Boot into Linux Scout](../debugging_machine/force_linux_scout_boot.md).
 
 ## DPU Agent Cannot Reach `nico-api`
 

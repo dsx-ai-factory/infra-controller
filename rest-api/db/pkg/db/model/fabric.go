@@ -8,11 +8,14 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 const (
@@ -142,18 +145,14 @@ type FabricDAO interface {
 type FabricSQLDAO struct {
 	dbSession *db.Session
 	FabricDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new Fabric from the given input
-func (fbsd FabricSQLDAO) Create(ctx context.Context, tx *db.Tx, input FabricCreateInput) (*Fabric, error) {
+func (fbsd FabricSQLDAO) Create(ctx context.Context, tx *db.Tx, input FabricCreateInput) (_ *Fabric, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.Create")
-	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
-
-		fbsd.tracerSpan.SetAttribute(FabricDAOSpan, "id", input.FabricID)
-	}
+	ctx, FabricDAOSpan := cotel.StartSpan(ctx, "FabricDAO.Create")
+	defer func() { cotel.EndSpan(FabricDAOSpan, retErr) }()
+	cotel.SetAttribute(FabricDAOSpan, attribute.String("id", input.FabricID))
 
 	fb := &Fabric{
 		ID:                       input.FabricID,
@@ -178,14 +177,11 @@ func (fbsd FabricSQLDAO) Create(ctx context.Context, tx *db.Tx, input FabricCrea
 
 // GetByID returns a Fabric by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (fbsd FabricSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID, includeRelations []string) (*Fabric, error) {
+func (fbsd FabricSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID, includeRelations []string) (_ *Fabric, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.GetByID")
-	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
-
-		fbsd.tracerSpan.SetAttribute(FabricDAOSpan, "id", id)
-	}
+	ctx, FabricDAOSpan := cotel.StartSpan(ctx, "FabricDAO.GetByID")
+	defer func() { cotel.EndSpan(FabricDAOSpan, retErr) }()
+	cotel.SetAttribute(FabricDAOSpan, attribute.String("id", id))
 
 	fb := &Fabric{}
 
@@ -206,42 +202,27 @@ func (fbsd FabricSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, site
 	return fb, nil
 }
 
-func (fbsd FabricSQLDAO) setQueryWithFilter(filter FabricFilterInput, query *bun.SelectQuery, fabricDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (fbsd FabricSQLDAO) setQueryWithFilter(filter FabricFilterInput, query *bun.SelectQuery, fabricDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.Org != nil {
 		query = query.Where("fb.org = ?", *filter.Org)
-		fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "org", *filter.Org)
+		cotel.SetAttribute(fabricDAOSpan, attribute.String("org", *filter.Org))
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("fb.site_id IN (?)", bun.In(filter.SiteIDs))
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.InfrastructureProviderID != nil {
 		query = query.Where("fb.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderID.String())
-		}
+		cotel.SetAttribute(fabricDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderID.String()))
 	}
 
 	if filter.Statuses != nil {
 		query = query.Where("fb.status IN (?)", bun.In(filter.Statuses))
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "statuses", filter.Statuses)
-		}
 	}
 
 	if filter.FabricIDs != nil {
 		query = query.Where("fb.id IN (?)", bun.In(filter.FabricIDs))
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "fabric_ids", filter.FabricIDs)
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -252,10 +233,7 @@ func (fbsd FabricSQLDAO) setQueryWithFilter(filter FabricFilterInput, query *bun
 				WhereOr("fb.id ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("fb.status ILIKE ?", "%"+searchQuery+"%")
 		})
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(fabricDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	return query, nil
@@ -265,12 +243,10 @@ func (fbsd FabricSQLDAO) setQueryWithFilter(filter FabricFilterInput, query *bun
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in FabricOrderByDefault in ascending order
-func (fbsd FabricSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter FabricFilterInput, page paginator.PageInput, includeRelations []string) ([]Fabric, int, error) {
+func (fbsd FabricSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter FabricFilterInput, page paginator.PageInput, includeRelations []string) (_ []Fabric, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, fabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.GetAll")
-	if fabricDAOSpan != nil {
-		defer fabricDAOSpan.End()
-	}
+	ctx, fabricDAOSpan := cotel.StartSpan(ctx, "FabricDAO.GetAll")
+	defer func() { cotel.EndSpan(fabricDAOSpan, retErr) }()
 
 	fbs := []Fabric{}
 	if filter.FabricIDs != nil && len(filter.FabricIDs) == 0 {
@@ -310,12 +286,10 @@ func (fbsd FabricSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter FabricFil
 // Update updates specified fields of an existing Fabric.
 // The updated fields are assumed to be set to non-null values.
 // Since there are 2 operations (UPDATE, SELECT), this call must happen within a transaction.
-func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpdateInput) (*Fabric, error) {
+func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpdateInput) (_ *Fabric, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, fabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.Update")
-	if fabricDAOSpan != nil {
-		defer fabricDAOSpan.End()
-	}
+	ctx, fabricDAOSpan := cotel.StartSpan(ctx, "FabricDAO.Update")
+	defer func() { cotel.EndSpan(fabricDAOSpan, retErr) }()
 
 	fb := &Fabric{
 		ID:     input.FabricID,
@@ -326,23 +300,16 @@ func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpda
 	if input.InfrastructureProviderID != nil {
 		fb.InfrastructureProviderID = *input.InfrastructureProviderID
 		updatedFields = append(updatedFields, "infrastructure_provider_id")
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "infrastructure_provider_id", input.InfrastructureProviderID.String())
-		}
+		cotel.SetAttribute(fabricDAOSpan, attribute.String("infrastructure_provider_id", input.InfrastructureProviderID.String()))
 	}
 	if input.Status != nil {
 		fb.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-
-		if fabricDAOSpan != nil {
-			fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "status", *input.Status)
-		}
+		cotel.SetAttribute(fabricDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IsMissingOnSite != nil {
 		fb.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		fbsd.tracerSpan.SetAttribute(fabricDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
@@ -364,14 +331,12 @@ func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpda
 // Delete soft-deletes a Fabric by ID and SiteID.
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (fbsd FabricSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID) error {
+func (fbsd FabricSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.Delete")
-	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
+	ctx, FabricDAOSpan := cotel.StartSpan(ctx, "FabricDAO.Delete")
+	defer func() { cotel.EndSpan(FabricDAOSpan, retErr) }()
+	cotel.SetAttribute(FabricDAOSpan, attribute.String("id", id))
 
-		fbsd.tracerSpan.SetAttribute(FabricDAOSpan, "id", id)
-	}
 	fb := &Fabric{
 		ID:     id,
 		SiteID: siteID,
@@ -388,12 +353,10 @@ func (fbsd FabricSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string, siteI
 // DeleteAll deletes an Fabric by ID or Site ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (fbsd FabricSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, ids []string, siteID *uuid.UUID) error {
+func (fbsd FabricSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, ids []string, siteID *uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricSQLDAO.DeleteAll")
-	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
-	}
+	ctx, FabricDAOSpan := cotel.StartSpan(ctx, "FabricSQLDAO.DeleteAll")
+	defer func() { cotel.EndSpan(FabricDAOSpan, retErr) }()
 
 	fb := &Fabric{}
 	query := db.GetIDB(tx, fbsd.dbSession).NewDelete().Model(fb)
@@ -421,7 +384,6 @@ func (fbsd FabricSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, ids []string,
 // NewFabricDAO returns a new FabricDAO
 func NewFabricDAO(dbSession *db.Session) FabricDAO {
 	return &FabricSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

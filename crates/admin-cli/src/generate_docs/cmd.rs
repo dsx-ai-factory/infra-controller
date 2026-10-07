@@ -128,6 +128,12 @@ fn render_node(
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
     let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
     let body = clean_pandoc_markdown(&format_markdown_links(&body));
+    let body = if is_machine_validation_log_command(&path) {
+        let usage = cmd.clone().render_usage().to_string();
+        replace_synopsis(&body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
+    } else {
+        body
+    };
 
     let children: Vec<&Command> = cmd
         .get_subcommands()
@@ -271,11 +277,15 @@ fn strip_sections(md: &str, names: &[&str]) -> String {
     out
 }
 
-/// Turns bare URLs used in terminal help into links that render correctly in
-/// generated command-reference pages. Terminal help keeps the plain URL, while
-/// the Markdown reference gains a reader-friendly label.
+/// Turns documentation references used in terminal help into links that render
+/// correctly in generated command-reference pages. Terminal help keeps the
+/// plain reference, while the Markdown reference gains a reader-friendly label.
 fn format_markdown_links(md: &str) -> String {
     md.replace(
+        "docs/configuration/templated-ipxe-operating-systems.md",
+        "[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)",
+    )
+    .replace(
         "https://docs.rs/duration-str/latest/duration_str/",
         "[duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)",
     )
@@ -290,6 +300,14 @@ fn format_markdown_links(md: &str) -> String {
     .replace(
         "https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home",
         "[Phone-home](../../../../configuration/tenant_management.md#phone-home)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/3706",
+        "[PR #3706](https://github.com/dsx-ai-factory/infra-controller/pull/3706)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/6359",
+        "[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)",
     )
     .replace(
         "https://host:50051",
@@ -375,6 +393,35 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\>", ">")
         .replace("\\|", "|")
         .replace("\\`", "`")
+}
+
+/// `clap_mangen` does not preserve the explicit usage for the Machine
+/// Validation log commands. Render their synopsis from clap's runtime command
+/// tree so required values and paired selectors remain visible in the generated
+/// reference.
+fn is_machine_validation_log_command(path: &[String]) -> bool {
+    path.get(1).is_some_and(|part| part == "machine-validation")
+        && path.get(2).is_some_and(|part| part == "logs")
+}
+
+fn replace_synopsis(markdown: &str, usage: &str) -> String {
+    const SYNOPSIS: &str = "## SYNOPSIS\n\n";
+    let Some(start) = markdown.find(SYNOPSIS) else {
+        return markdown.to_owned();
+    };
+    let content_start = start + SYNOPSIS.len();
+    let Some(next_section) = markdown[content_start..].find("\n## ") else {
+        return markdown.to_owned();
+    };
+    let content_end = content_start + next_section;
+    format!(
+        "{}{}{}{}\n```\n{}",
+        &markdown[..start],
+        SYNOPSIS,
+        "```text\n",
+        usage,
+        &markdown[content_end..]
+    )
 }
 
 /// Removes Pandoc escapes that are unnecessary in normal prose. Escaped angle
@@ -516,7 +563,16 @@ fn intro(d: CliDomain) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_pandoc_markdown, format_markdown_links};
+    use super::{clean_pandoc_markdown, format_markdown_links, replace_synopsis};
+
+    #[test]
+    fn repository_doc_paths_become_links_in_generated_markdown() {
+        let markdown = "See docs/configuration/templated-ipxe-operating-systems.md.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)."
+        );
+    }
 
     #[test]
     fn bare_urls_become_valid_markdown_links() {
@@ -569,6 +625,17 @@ Name containing `<VALUE>`.
 
 An inline `HostInband` value and `mac=<mac>` selector.
 "#
+        );
+    }
+
+    #[test]
+    fn explicit_usage_replaces_the_man_page_synopsis() {
+        let markdown =
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nold usage\n```\n\n## DESCRIPTION\n\ntext\n";
+
+        assert_eq!(
+            replace_synopsis(markdown, "nico-admin-cli logs --id <ID>"),
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nnico-admin-cli logs --id <ID>\n```\n\n## DESCRIPTION\n\ntext\n"
         );
     }
 }

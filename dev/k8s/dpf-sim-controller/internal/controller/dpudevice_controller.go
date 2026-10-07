@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"net/netip"
+	"strings"
 	"time"
 
 	provisioningv1 "github.com/nvidia/doca-platform/api/provisioning/v1alpha1"
@@ -42,6 +44,12 @@ type DPUDeviceReconciler struct {
 	Namespace string
 	// PhaseDwell is how long each dwell-gated phase lingers before advancing.
 	PhaseDwell time.Duration
+	// OSInstallDwell is how long a DPU lingers in OS Installing. Zero means
+	// "same as PhaseDwell". A real BFB install takes minutes while the config
+	// phases take seconds, and NICo waits in its DPF provisioning state for the
+	// whole install; a longer value here exercises that wait without slowing
+	// every other phase.
+	OSInstallDwell time.Duration
 	// Concurrency is the number of parallel reconciles. Reconciles are
 	// per-DPUDevice and independent; the only shared writes are the
 	// node-level reboot/hold patches, which are idempotent (same-key merge
@@ -157,11 +165,9 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 	case simulator.GateDwell:
-		// TODO(#3323): per-phase dwell durations (OS Installing should linger
-		// longer than the config phases); today every dwell phase uses the one
-		// configured PhaseDwell.
+		dwell := r.dwellFor(dpu.Status.Phase)
 		if entered, err := time.Parse(time.RFC3339, dpu.Annotations[carbide.AnnSimPhaseEnteredAt]); err == nil {
-			if remain := r.PhaseDwell - time.Since(entered); remain > 0 {
+			if remain := dwell - time.Since(entered); remain > 0 {
 				return ctrl.Result{RequeueAfter: remain}, nil
 			}
 		} else {
@@ -170,7 +176,7 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if err := r.setDPUAnnotation(ctx, dpu, carbide.AnnSimPhaseEnteredAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{RequeueAfter: r.PhaseDwell}, nil
+			return ctrl.Result{RequeueAfter: dwell}, nil
 		}
 	}
 
@@ -450,11 +456,33 @@ func (r *DPUDeviceReconciler) bfbFileFor(bfb string) string {
 // next reconcile recreates it.
 var errDPURecreating = errors.New("DPU deleted for recreation under its DPUDeployment")
 
+// dwellFor returns how long a dwell-gated phase lingers: OSInstallDwell for
+// OS Installing when set, PhaseDwell for everything else.
+func (r *DPUDeviceReconciler) dwellFor(phase provisioningv1.DPUPhase) time.Duration {
+	if phase == provisioningv1.DPUOSInstalling && r.OSInstallDwell > 0 {
+		return r.OSInstallDwell
+	}
+	return r.PhaseDwell
+}
+
 func (r *DPUDeviceReconciler) ensureDPU(
 	ctx context.Context, device *provisioningv1.DPUDevice, dpuName, nodeName string,
 ) (*provisioningv1.DPU, error) {
 	var dpu provisioningv1.DPU
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dpuName}, &dpu)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	var hostBMCIP netip.Addr
+	if label := device.Labels[carbide.LabelHostBMCIP]; label != "" {
+		// NICo writes IPv6 as eight hexadecimal groups separated by hyphens so
+		// the address is a valid Kubernetes label. IPv4 labels are unchanged.
+		parsed, parseErr := netip.ParseAddr(strings.ReplaceAll(label, "-", ":"))
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid %s label on %s: %w", carbide.LabelHostBMCIP, device.Name, parseErr)
+		}
+		hostBMCIP = parsed
+	}
 	if err == nil {
 		dep, ok, derr := r.selectDeployment(ctx, nodeName)
 		if derr != nil {
@@ -491,10 +519,14 @@ func (r *DPUDeviceReconciler) ensureDPU(
 				}
 			}
 		}
+		if hostBMCIP.IsValid() && dpu.Spec.BMCIP != hostBMCIP.String() {
+			patch := client.MergeFrom(dpu.DeepCopy())
+			dpu.Spec.BMCIP = hostBMCIP.String()
+			if err := r.Patch(ctx, &dpu, patch); err != nil {
+				return nil, err
+			}
+		}
 		return &dpu, nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return nil, err
 	}
 
 	// NICo maps DPU events back to a machine by the machine-id label, and its
@@ -509,7 +541,6 @@ func (r *DPUDeviceReconciler) ensureDPU(
 	if device.Labels[carbide.LabelHostBMCIP] == "" {
 		return nil, fmt.Errorf("%w: label %s is empty on %s", errDeviceNotReady, carbide.LabelHostBMCIP, device.Name)
 	}
-
 	// Fallback when no usable deployment selects the node: the CRD requires
 	// dpuFlavor and exactly one of bfb/blueFieldSoftware, none of which mean
 	// anything to the simulator, so placeholder values keep the create accepted.
@@ -548,7 +579,7 @@ func (r *DPUDeviceReconciler) ensureDPU(
 			// this into the RebootRequiredEvent that enqueues the host state
 			// machine when the DPU reaches Rebooting. NOT the DPU's own BMC
 			// (DPUDevice.spec.bmcIp) — NICo publishes the host's on this label.
-			BMCIP: device.Labels[carbide.LabelHostBMCIP],
+			BMCIP: hostBMCIP.String(),
 			// Inherited from the selecting deployment (see selectedDeployment)
 			// or the fallback above. The pinned doca-platform DPUSpec has no
 			// omitempty on bfb, so a blueFieldSoftware-only DPU is created

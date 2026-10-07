@@ -20,26 +20,28 @@ import (
 // checks if the ExpectedMachineUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedMachineUpdateRequest{}
 
-// ExpectedMachineUpdateRequest Request data to update an existing Expected Machine.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.  For single updates (PATCH /expected-machine/{id}), the id field is optional in body and will be ignored if provided (the ID from the URL path is used).  For batch updates (PATCH /expected-machine/batch), the id field is required to identify which Expected Machine to update.
+// ExpectedMachineUpdateRequest Request data to update an existing Expected Machine.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.  For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  For batch updates (`PATCH /expected-machine/batch`), each item must include a non-null `id` to identify which Expected Machine to update.
 type ExpectedMachineUpdateRequest struct {
-	// ID of the Expected Machine to update.  Optional for individual Expected Machine update (ignored if provided, ID from URL path is used).  Required for batch update operations.
+	// ID of the Expected Machine to update.  For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  Required and non-null in every batch update item.
 	Id NullableString `json:"id,omitempty"`
 	// The Expected Machine's BMC MAC address is immutable after creation. Omit this field, or provide another case/separator spelling of the current MAC as a compatibility no-op.
 	// Deprecated
 	BmcMacAddress NullableString `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Username for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
+	// Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
 	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
-	// Password for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
+	// Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Machine's chassis
 	ChassisSerialNumber NullableString `json:"chassisSerialNumber,omitempty"`
 	// Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
+	// Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
 	// Optional ID of the SKU to associate with this Expected Machine
 	SkuId NullableString `json:"skuId,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
-	// Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+	// Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
 	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
 	// Display name for this component
 	Name NullableString `json:"name,omitempty"`
@@ -309,7 +311,6 @@ func (o *ExpectedMachineUpdateRequest) GetFallbackDPUSerialNumbers() []string {
 
 // GetFallbackDPUSerialNumbersOk returns a tuple with the FallbackDPUSerialNumbers field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetFallbackDPUSerialNumbersOk() ([]string, bool) {
 	if o == nil || IsNil(o.FallbackDPUSerialNumbers) {
 		return nil, false
@@ -329,6 +330,38 @@ func (o *ExpectedMachineUpdateRequest) HasFallbackDPUSerialNumbers() bool {
 // SetFallbackDPUSerialNumbers gets a reference to the given []string and assigns it to the FallbackDPUSerialNumbers field.
 func (o *ExpectedMachineUpdateRequest) SetFallbackDPUSerialNumbers(v []string) {
 	o.FallbackDPUSerialNumbers = v
+}
+
+// GetInterfaces returns the Interfaces field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineUpdateRequest) GetInterfaces() []ExpectedMachineInterface {
+	if o == nil {
+		var ret []ExpectedMachineInterface
+		return ret
+	}
+	return o.Interfaces
+}
+
+// GetInterfacesOk returns a tuple with the Interfaces field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *ExpectedMachineUpdateRequest) GetInterfacesOk() ([]ExpectedMachineInterface, bool) {
+	if o == nil || IsNil(o.Interfaces) {
+		return nil, false
+	}
+	return o.Interfaces, true
+}
+
+// HasInterfaces returns a boolean if a field has been set.
+func (o *ExpectedMachineUpdateRequest) HasInterfaces() bool {
+	if o != nil && !IsNil(o.Interfaces) {
+		return true
+	}
+
+	return false
+}
+
+// SetInterfaces gets a reference to the given []ExpectedMachineInterface and assigns it to the Interfaces field.
+func (o *ExpectedMachineUpdateRequest) SetInterfaces(v []ExpectedMachineInterface) {
+	o.Interfaces = v
 }
 
 // GetSkuId returns the SkuId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -813,7 +846,7 @@ func (o *ExpectedMachineUpdateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachineUpdateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {
@@ -895,6 +928,9 @@ func (o ExpectedMachineUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.FallbackDPUSerialNumbers != nil {
 		toSerialize["fallbackDPUSerialNumbers"] = o.FallbackDPUSerialNumbers
+	}
+	if o.Interfaces != nil {
+		toSerialize["interfaces"] = o.Interfaces
 	}
 	if o.SkuId.IsSet() {
 		toSerialize["skuId"] = o.SkuId.Get()

@@ -185,8 +185,10 @@ FNN installs the routes with administrative distance 250 in each VPC VRF. An aut
 
 ### DHCP, route servers, and BGP
 
-`dhcp_servers`, `route_servers`, `enable_route_servers`,
+`dhcp_servers`, `dhcpv6_server_preference`, `route_servers`, `enable_route_servers`,
 `bgp_leaf_session_password`, `common_tenant_host_asn`.
+
+`dhcpv6_server_preference` accepts `0` through `255`. It is omitted by default, which leaves the option absent and uses the protocol preference of zero. The canonical option-emission and rolling-upgrade contract is in the [Core configuration reference](../../../crates/api-core/src/cfg/README.md).
 
 ### Optional capability toggles
 
@@ -376,6 +378,13 @@ and `failure_retry_time` knobs:
 Defaults are reasonable; touch these only when you have a specific timing
 constraint.
 
+`[machine_state_controller.controller] max_concurrency` (default 10) caps how
+many machine handlers run at the same time. Raise it for large sites, since time
+to `ready` scales with hosts divided by this value. Values of 80 to 120 suited a
+250-rack site, and higher values slowed ingestion because the handlers contend
+for the admin network segment lock. The nico-api chart exposes it as
+`machineStateController.maxConcurrency`.
+
 ### Host health thresholds
 
 `[host_health]` — `hardware_health_reports = "MonitorOnly"` or `"Enforce"`,
@@ -484,7 +493,12 @@ for the complete Helm guidance.
 (used by `nico-bmc-proxy` and other authenticating proxies). The example
 ACL set in
 [`helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml`](../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml)
-is the reference.
+is the reference. `nico-bmc-proxy` also takes `[[class]]` tables that group
+requests by method, path, and caller, and set how long it waits on a BMC for
+each group and how many it sends at a time, and an `[admission]` table that
+limits the requests it sends to each BMC; see
+[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class)
+and [`admission`](../../../crates/bmc-proxy/README.md#admission).
 
 ### DPU configuration — `[dpu_config]`
 
@@ -725,7 +739,7 @@ These don't fit any sub-section but show up in production tuning:
 | Field | Default | When to touch |
 |-------|---------|---------------|
 | `max_database_connections` | `1000` | Drop when running multiple `nico-api` replicas to avoid saturating Postgres `max_connections`. |
-| [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. See the dedicated section for configuration and service overrides. |
+| [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. The nico-api chart exposes `enabled` as `apiAdmissionControl.enabled`. See the dedicated section for configuration and service overrides. |
 | `max_find_by_ids` | `100` | Increase if scripts paginate batch lookups; raise the API-side limit to match the client. |
 | `compute_allocation_enforcement` | `WarnOnly` | Switch to `Enforce` once tenant compute pools are sized correctly — flips over-allocation from a warning to a refusal. |
 | `bmc_session_lockout_threshold` | `3` | Number of consecutive 401/403s from a BMC before NICo stops session-token logins for that BMC. Raise on environments with flaky BMC firmware. |
@@ -769,7 +783,9 @@ Service overrides are keyed by the exact SPIFFE service identifier (for
 example, `scout`), and may give trusted internal services a different share
 without exceeding the global bounds. Tune the global and per-client limits
 after scale testing. Set `enabled = false` only as a rollback escape hatch.
-For field-level defaults and validation rules, see
+The nico-api chart exposes it as `apiAdmissionControl.enabled` (default
+`true`). A site config overlay that sets the same key takes precedence over
+the chart value. For field-level defaults and validation rules, see
 [`ApiAdmissionControlConfig`](../../../crates/api-core/src/cfg/README.md#apiadmissioncontrolconfig).
 
 ### FNN routing profiles and prefix filters

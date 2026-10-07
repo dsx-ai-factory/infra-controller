@@ -26,19 +26,26 @@ use uuid::Uuid;
 
 use crate::expected_machines::common::HostDpuPolicy;
 
-/// Patch expected machine (partial update, preserves unprovided fields).
+/// Patch an expected machine.
 ///
-/// Only the fields provided in the command will be updated. All other fields remain unchanged.
-/// When `--bmc-ip-address` is used, the merged RPC update runs the same static BMC interface logic
-/// as a full `update_expected_machine` call.
+/// Select the machine by either BMC MAC address or ID. Supplied fields replace their stored values;
+/// omitted fields remain unchanged. Supplied labels replace the whole label collection. An empty
+/// metadata name or description clears that field. An empty interfaces array clears the stored list.
+/// BMC address and interface updates also reconcile the associated static interface configuration.
 ///
-/// Examples:
-///   # Update only SKU, preserve all other fields including metadata
-///   nico-admin-cli expected-machine patch --bmc-mac-address 1a:1b:1c:1d:1e:1f --sku-id new_sku
+/// Supply a BMC username, password, or both. Each omitted credential field keeps its stored value.
+/// Core PATCH rejects empty selected credentials. A selected chassis serial must contain 4-32
+/// ASCII letters, digits, hyphens, or underscores. Legacy fallback uses the validation rules on the older server.
 ///
-///   # Update only labels, preserve name and description
-///   nico-admin-cli expected-machine patch --bmc-mac-address 1a:1b:1c:1d:1e:1f \
-///     --sku-id sku123 --label env:prod --label team:platform
+/// Supply at least one update field.
+///
+/// The command first tries Core PATCH, which merges selected fields atomically. It falls back to
+/// the legacy update on `Unimplemented` or `PermissionDenied`, or when a MAC lookup returns no ID.
+/// The legacy machine update reads the record, merges changes locally, and replaces it. Concurrent
+/// changes can be overwritten on that path. The legacy request still requires authorization.
+/// Other PATCH errors and failed legacy updates remain errors.
+///
+/// https://github.com/dsx-ai-factory/infra-controller/pull/6359
 #[derive(Parser, Debug, Serialize, Deserialize)]
 #[clap(verbatim_doc_comment)]
 #[clap(group(ArgGroup::new("group").required(true).multiple(true).args(&[
@@ -70,9 +77,17 @@ Patch a machine selected by id:
     $ nico-admin-cli expected-machine patch --id 12345678-1234-5678-90ab-cdef01234567 \
     --sku-id DGX-H100-640GB
 
-Rotate the BMC credentials (username and password must be set together):
+Replace labels and clear the description while setting the SKU:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
-    --bmc-username admin --bmc-password mynewpassword
+    --sku-id DGX-H100-640GB --label env:prod --label team:platform --meta-description \"\"
+
+Correct the BMC password while preserving the username:
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-password mynewpassword
+
+Correct the BMC username while preserving the password:
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin
 
 Change the per-host DPU policy:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
@@ -118,7 +133,7 @@ pub(crate) struct Args {
         short = 's',
         long,
         group = "group",
-        help = "Chassis serial number of the expected machine"
+        help = "Replace the chassis serial number. Core PATCH requires 4-32 ASCII letters, digits, hyphens, or underscores"
     )]
     pub(super) chassis_serial_number: Option<String>,
     #[clap(
@@ -134,21 +149,21 @@ pub(crate) struct Args {
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
-        help = "The name that should be used as part of the Metadata for newly created Machines. If empty, the MachineId will be used"
+        help = "Replace the metadata name (Core PATCH: ASCII, at most 256 characters). An empty value clears it; omission preserves it"
     )]
     pub(super) meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
-        help = "The description that should be used as part of the Metadata for newly created Machines"
+        help = "Replace the metadata description (Core PATCH: at most 1024 bytes). An empty value clears it; omission preserves it"
     )]
     pub(super) meta_description: Option<String>,
 
     #[clap(
         long = "label",
         value_name = "LABEL",
-        help = "A label that will be added as metadata for the newly created Machine. The labels key and value must be separated by a : character",
+        help = "Replace all metadata labels with the supplied key or key:value entries. Repeat for each label. Duplicate keys are rejected; label order is not preserved. Core PATCH allows up to 16 keys. Keys must be nonempty ASCII and at most 255 characters; values allow at most 255 bytes. Whitespace around each key and value is trimmed. Omission preserves labels",
         action = clap::ArgAction::Append
     )]
     pub(super) labels: Option<Vec<String>>,
@@ -157,7 +172,7 @@ pub(crate) struct Args {
         long,
         value_name = "SKU_ID",
         group = "group",
-        help = "A SKU ID that will be added for the newly created Machine."
+        help = "Replace the expected machine SKU ID. Omission preserves it"
     )]
     pub(super) sku_id: Option<String>,
 
@@ -165,7 +180,7 @@ pub(crate) struct Args {
         long,
         value_name = "RACK_ID",
         group = "group",
-        help = "A RACK ID that will be added for the newly created Machine."
+        help = "Replace the expected machine rack ID. Omission preserves it"
     )]
     pub(super) rack_id: Option<RackId>,
 
@@ -230,7 +245,7 @@ pub(crate) struct Args {
     #[clap(
         long = "disable-lockdown",
         value_name = "DISABLE_LOCKDOWN",
-        help = "If true, do not lock down the server as part of lifecycle management within the state machine. If unset or false, preserve the default behavior of locking down the server after configuring the BIOS."
+        help = "Set true to skip server lockdown during lifecycle management, or false to lock down after BIOS configuration. Omission preserves the stored setting"
     )]
     pub(super) disable_lockdown: Option<bool>,
 }

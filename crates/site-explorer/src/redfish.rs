@@ -38,10 +38,11 @@ use mac_address::MacAddress;
 use model::errors::{ErrorCode, ErrorSubsystem, OperatorError, OperatorErrorSchema};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
-    BootOption, BootOrder, Chassis, ComputerSystem, ComputerSystemAttributes,
-    EndpointExplorationError, EndpointExplorationReport, EndpointType, EthernetInterface,
-    InternalLockdownStatus, Inventory, LockdownStatus, MachineSetupDiff, MachineSetupStatus,
-    Manager, NetworkAdapter, PCIeDevice, SecureBootStatus, Service, UefiDevicePath,
+    BootOption, BootOrder, Chassis, ComponentIntegrityEntry, ComputerSystem,
+    ComputerSystemAttributes, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    EthernetInterface, InternalLockdownStatus, Inventory, LockdownStatus, MachineSetupDiff,
+    MachineSetupStatus, Manager, NetworkAdapter, PCIeDevice, SecureBootStatus, Service,
+    UefiDevicePath, derive_hardware_class,
 };
 use regex::Regex;
 
@@ -228,12 +229,6 @@ impl RedfishClient {
         match service_root.vendor() {
             Some(vendor) if vendor != RedfishVendor::Unknown => Ok(vendor),
             _ => {
-                // Capture the raw vendor string the ServiceRoot actually reported
-                // (the `Vendor` field, falling back to the first `Oem` key) so the
-                // recorded exploration error says *what* we read and *where* from.
-                // `None` here means the BMC reported neither — usually transient
-                // while it is still initializing; `Some(_)` means a vendor we don't
-                // recognize yet. See NVBug 6036327.
                 let observed = service_root.vendor_string();
                 Err(EndpointExplorationError::MissingVendor { observed })
             }
@@ -376,7 +371,8 @@ impl RedfishClient {
             is_dpu,
             is_host,
             linked_chassis_ids,
-        } = fetch_system(client.as_ref()).await?;
+            vera_rubin_machine_position,
+        } = fetch_system(client.as_ref(), service_root.is_vera_rubin()).await?;
 
         let fetch_network_adapter_ports = should_fetch_network_adapter_ports(
             supports_adapter_port_mac_inventory,
@@ -454,6 +450,33 @@ impl RedfishClient {
             })
             .ok();
 
+        let component_integrities =
+            fetch_component_integrities(client.as_ref(), &service_root).await;
+
+        // `Vendor` rather than `vendor_string()`, which falls back to an
+        // arbitrary key of an unordered `Oem` map. A class has to derive the
+        // same way on every exploration, or the profile keyed to it stops
+        // applying.
+        let hardware_class = derive_hardware_class(
+            Some(&system),
+            service_root.vendor.as_deref(),
+            service_root.product.as_deref(),
+        );
+        let physical_slot_number = vera_rubin_machine_position
+            .filter(|_| {
+                chassis
+                    .iter()
+                    .all(|chassis| chassis.physical_slot_number.is_none())
+            })
+            .and_then(|position| position.physical_slot_number);
+        let compute_tray_index = vera_rubin_machine_position
+            .filter(|_| {
+                chassis
+                    .iter()
+                    .all(|chassis| chassis.compute_tray_index.is_none())
+            })
+            .and_then(|position| position.compute_tray_index);
+
         Ok(EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -463,7 +486,10 @@ impl RedfishClient {
             systems: vec![system],
             chassis,
             service,
+            component_integrities: component_integrities.entries,
+            component_integrity_unavailable: component_integrities.unavailable,
             vendor,
+            hardware_class: Some(hardware_class),
             versions: HashMap::default(),
             model: None,
             power_shelf_id: None,
@@ -471,8 +497,8 @@ impl RedfishClient {
             machine_setup_status,
             secure_boot_status,
             lockdown_status,
-            physical_slot_number: None,
-            compute_tray_index: None,
+            physical_slot_number,
+            compute_tray_index,
             topology_id: None,
             revision_id: None,
             remediation_error,
@@ -508,8 +534,8 @@ impl RedfishClient {
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
-        let service_root = nv_pool
-            .service_root_with_cache_predicate(bmc_ip_address, credentials, |root| {
+        let (service_root, bmc) = nv_pool
+            .service_root_and_bmc(bmc_ip_address, credentials, |root| {
                 let complete = root.root.chassis.is_some() && root.root.managers.is_some();
                 if !complete {
                     tracing::warn!(
@@ -527,6 +553,7 @@ impl RedfishClient {
             })?;
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
+            bmc.as_ref(),
             service_root,
             &nv_bmc_explore_config(boot_interface),
         )
@@ -930,10 +957,19 @@ struct FetchedSystem {
     is_dpu: bool,
     is_host: bool,
     linked_chassis_ids: Vec<String>,
+    vera_rubin_machine_position: Option<bmc_explorer::VeraRubinMachinePosition>,
 }
 
-async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExplorationError> {
+async fn fetch_system(
+    client: &dyn Redfish,
+    fetch_vera_rubin_machine_position: bool,
+) -> Result<FetchedSystem, EndpointExplorationError> {
     let mut system = client.get_system().await.map_err(map_redfish_error)?;
+    let vera_rubin_machine_position = if fetch_vera_rubin_machine_position {
+        fetch_vera_rubin_machine_position_from_gpu(client).await
+    } else {
+        None
+    };
     let linked_chassis_ids = system
         .links
         .as_ref()
@@ -1080,7 +1116,36 @@ async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExp
         is_dpu,
         is_host: !(is_dpu || is_switch || is_powershelf),
         linked_chassis_ids,
+        vera_rubin_machine_position,
     })
+}
+
+async fn fetch_vera_rubin_machine_position_from_gpu(
+    client: &dyn Redfish,
+) -> Option<bmc_explorer::VeraRubinMachinePosition> {
+    let processor_path = "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0";
+    let resource = match client.get_resource(processor_path.into()).await {
+        Ok(resource) => resource,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %processor_path,
+                "Failed to fetch Vera Rubin GPU for machine position"
+            );
+            return None;
+        }
+    };
+    match bmc_explorer::parse_vera_rubin_machine_position(resource.raw.get()) {
+        Ok(position) => position,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %processor_path,
+                "Failed to parse Vera Rubin GPU for machine position"
+            );
+            None
+        }
+    }
 }
 
 async fn fetch_ethernet_interfaces(
@@ -1586,6 +1651,64 @@ async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStat
     let is_enabled = secure_boot_enable && secure_boot_current_boot.is_enabled();
 
     Ok(SecureBootStatus { is_enabled })
+}
+
+/// What an exploration learned about the BMC's `ComponentIntegrity`
+/// collection.
+///
+/// A BMC that advertises no collection and one whose collection could not be
+/// read both leave `entries` absent, but only the second is a missing answer:
+/// the first is the BMC saying it has nothing to attest. Coverage reads the
+/// two differently, so they are kept apart here rather than merged into one
+/// absence.
+#[derive(Default)]
+struct ComponentIntegrityObservation {
+    /// The members the collection listed, unfiltered.
+    entries: Option<Vec<ComponentIntegrityEntry>>,
+    /// Set when the collection was advertised but fetching it failed.
+    unavailable: bool,
+}
+
+/// What the BMC says it can attest, unfiltered.
+///
+/// A failed fetch is reported rather than raised: the list drives attestation
+/// coverage, while scheduling reads the collection live from the BMC, so
+/// losing it must not fail an exploration that otherwise succeeded.
+async fn fetch_component_integrities(
+    client: &dyn Redfish,
+    service_root: &libredfish::model::service_root::ServiceRoot,
+) -> ComponentIntegrityObservation {
+    // A BMC without the collection has nothing to list, and asking anyway only
+    // buys a 404.
+    if service_root.component_integrity.is_none() {
+        return ComponentIntegrityObservation::default();
+    }
+
+    let collection = match client.get_component_integrities().await {
+        Ok(collection) => collection,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to fetch the ComponentIntegrity collection.");
+            return ComponentIntegrityObservation {
+                entries: None,
+                unavailable: true,
+            };
+        }
+    };
+
+    ComponentIntegrityObservation {
+        entries: Some(
+            collection
+                .members
+                .iter()
+                .map(|member| ComponentIntegrityEntry {
+                    id: member.id.clone(),
+                    component_integrity_type: member.component_integrity_type.clone(),
+                    component_integrity_enabled: member.component_integrity_enabled,
+                })
+                .collect(),
+        ),
+        unavailable: false,
+    }
 }
 
 async fn fetch_lockdown_status(client: &dyn Redfish) -> Result<LockdownStatus, RedfishError> {

@@ -122,6 +122,8 @@ navigation:
       contents:
         - page: IP and Network Configuration
           path: provisioning/ip-and-network-configuration.md
+        - page: Deploy DHCPv6
+          path: provisioning/dhcpv6-deployment.md
         - page: Ingesting Hosts
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
@@ -157,6 +159,8 @@ navigation:
           path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems
           path: configuration/image-based-operating-systems.md
+        - page: Templated iPXE Operating Systems
+          path: configuration/templated-ipxe-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity
@@ -227,6 +231,16 @@ navigation:
           path: operations/nico-mcp.md
         - page: Tenant Lifecycle Cleanup
           path: operations/tenant-lifecycle-cleanup.md
+        - section: Decommissioning
+          contents:
+            - page: Overview
+              path: decommissioning/index.md
+            - page: Decommission Managed Hosts and DPUs
+              path: decommissioning/hosts.md
+            - page: Decommission Managed Switches
+              path: decommissioning/switches.md
+            - page: Decommission Managed Power Shelves
+              path: decommissioning/power-shelves.md
         - page: Network Isolation
           path: manuals/network_isolation.md
         - page: Network Security Groups
@@ -305,32 +319,46 @@ navigation:
               contents:
                 - page: Overview and General Troubleshooting
                   path: playbooks/stuck_objects/stuck_objects.md
-                - page: Common Mitigations
-                  path: playbooks/stuck_objects/common_mitigations.md
-                - page: Stuck in WaitingForNetworkConfig and DPU Health
-                  path: playbooks/stuck_objects/waiting_for_network_config.md
-                - page: Adding New Machines to an Existing Site
-                  path: playbooks/stuck_objects/adding_new_machines.md
-                - page: State Machine Debugging
-                  path: playbooks/stuck_objects/state_machine_debugging.md
                 - page: Diagnostic Tools
                   path: playbooks/stuck_objects/diagnostic_tools.md
+                - page: State Machine Debugging
+                  path: playbooks/stuck_objects/state_machine_debugging.md
+                - page: Common Mitigations
+                  path: playbooks/stuck_objects/common_mitigations.md
+                - page: Adding New Machines to an Existing Site
+                  path: playbooks/stuck_objects/adding_new_machines.md
+                - page: Dell PowerEdge Missing DPU Boot Device
+                  path: playbooks/stuck_objects/dell_poweredge_boot_issues.md
                 - page: DPU Provisioning Failures
                   path: playbooks/stuck_objects/dpu_provisioning_failures.md
-                - page: Host Ingestion Failures
-                  path: playbooks/stuck_objects/host_ingestion_failures.md
                 - page: Health Alerts and Overrides
                   path: playbooks/stuck_objects/health_alerts.md
-                - page: Network Connectivity Issues
-                  path: playbooks/stuck_objects/network_connectivity.md
+                - page: Host Ingestion Failures
+                  path: playbooks/stuck_objects/host_ingestion_failures.md
+                - page: Instance Boot Connection Timeout
+                  path: playbooks/stuck_objects/instance_boot_connection_timeout.md
                 - page: Instance and Fabric Issues
                   path: playbooks/stuck_objects/instance_and_fabric_issues.md
+                - page: Lenovo SR675 V3 Stuck Polling BIOS Setup
+                  path: playbooks/stuck_objects/lenovo_sr675_v3_polling_bios_setup.md
+                - page: Machine Stuck in DPUInitializing/Init During Ingestion
+                  path: playbooks/stuck_objects/dpu_initializing_init.md
+                - page: Managed Host Stuck in UEFI Setup
+                  path: playbooks/stuck_objects/host_initializing_uefi_setup.md
+                - page: Network Connectivity Issues
+                  path: playbooks/stuck_objects/network_connectivity.md
                 - page: Site Controller Health
                   path: playbooks/stuck_objects/site_controller_health.md
+                - page: Stuck in WaitingForNetworkConfig and DPU Health
+                  path: playbooks/stuck_objects/waiting_for_network_config.md
+                - page: Troubleshooting BgpPeeringTor Alerts
+                  path: playbooks/stuck_objects/bgp_peering_tor_alert.md
                 - page: Troubleshooting noDpuLogsWarning Alerts
                   path: playbooks/troubleshooting_noDpuLogsWarning_alerts.md
             - section: Debugging Machine
               contents:
+                - page: Booting into Linux Scout
+                  path: playbooks/debugging_machine/force_linux_scout_boot.md
                 - page: Collecting Debug Bundles
                   path: playbooks/debugging_machine/debug_bundle.md
         - page: NVLink Domain Health Reports
@@ -340,8 +368,11 @@ navigation:
       contents:
         - page: Hardware Compatibility List
           path: hcl.md
-        - page: Release and QA Process
-          path: development/release_and_qa_process.md
+        - page: Release Policy
+          path: ../RELEASE.md
+        - page: QA Process
+          path: development/qa_process.md
+          slug: qa-process
         - page: FAQs
           path: faq.md
         - section: Development
@@ -368,6 +399,8 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: NICo mTLS and Authorization
+              path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev
               path: development/issuer_ca_recreate.md
             - page: Visual Studio Code Remote Development
@@ -378,12 +411,20 @@ navigation:
                   path: development/schema.md
             - page: Adding Support for New Hardware
               path: development/new_hardware_support.md
+            - page: Testing with the Sushy Emulator
+              path: development/sushy_bmc_emulator.md
             - page: Build Guide
               path: development/build-guide.md
             - page: Machine-a-tron Deployment
               path: development/machine-a-tron-deployment.md
             - page: Machine-a-tron RMS Mock
               path: development/machine-a-tron-rms-mock.md
+            - page: Machine-a-tron NMX-C Mock
+              path: development/machine-a-tron-nmxc-mock.md
+            - page: Machine-a-tron Scale Testing
+              path: development/machine-a-tron-scale-testing.md
+            - page: Large Site Sizing and Settings
+              path: development/large-site-sizing-and-settings.md
         - page: Glossary
           path: glossary.md
 
@@ -406,3 +447,93 @@ navigation:
       icon: bell
     - api: API Reference
       tag-description-pages: true
+      layout:
+        - serviceAccount
+        - infrastructureProvider
+        - tenant
+        - tenantAccount
+        - site
+        - bmcCredential
+        - uefiCredential
+        - measuredBootTrustedMachine
+        - measuredBootTrustedProfile
+        - credentialRotation
+        - siteExplorer
+        - allocation
+        - ipBlock
+        - vpc
+        - vpcPeering
+        - vpcPrefix
+        - subnet
+        - expectedMachine
+        - expectedPowerShelf
+        - expectedRack
+        - expectedRackGroup
+        - expectedSwitch
+        - sku
+        - infiniBandPartition
+        - spectrumXPartition
+        - nvLinkLogicalPartition
+        - instanceType
+        - instance
+        - operatingSystem
+        - machine:
+            contents:
+              - section: Inventory
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine
+                  - GET /v2/org/{org}/nico/machine/label/key
+                  - GET /v2/org/{org}/nico/machine/label/key/{key}/value
+                  - GET /v2/org/{org}/nico/machine/{machineId}
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}
+                  - GET /v2/org/{org}/nico/machine-capability
+              - section: Power and Lifecycle
+                skip-slug: true
+                contents:
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/power
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/bmc/reset
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/chassis/{chassisId}/reset
+                  - POST /v2/org/{org}/nico/machine/{machineId}/decommission
+              - section: DPU
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/dpu
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/dpu/reprovision
+              - section: Health and Status
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/health-report
+                  - PUT /v2/org/{org}/nico/machine/{machineId}/health-report
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}/health-report/{source}
+                  - GET /v2/org/{org}/nico/machine/{machineId}/status-history
+              - section: Validation
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/validation/run
+                  - POST /v2/org/{org}/nico/machine/{machineId}/validation/run
+                  - GET /v2/org/{org}/nico/machine/{machineId}/validation/result
+              - section: Statistics
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/gpu/stats
+                  - GET /v2/org/{org}/nico/machine/instance-type/stats/summary
+                  - GET /v2/org/{org}/nico/machine/instance-type/stats
+        - dpuMachine
+        - domain
+        - rack
+        - tray
+        - rule
+        - task
+        - taskRun
+        - iPxeTemplate
+        - networkSecurityGroup
+        - dpuExtensionService
+        - sshKeyGroup
+        - sshKey
+        - user
+        - metadata
+        - audit
+        - hostFirmwareConfig
+        - tenantIdentity

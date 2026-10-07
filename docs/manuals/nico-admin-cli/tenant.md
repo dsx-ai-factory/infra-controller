@@ -10,6 +10,7 @@ For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admi
 | [`expected-machine`](./commands/expected-machine/expected-machine.md) | Expected machine handling. |
 | [`expected-power-shelf`](./commands/expected-power-shelf/expected-power-shelf.md) | Expected power shelf handling. |
 | [`expected-rack`](./commands/expected-rack/expected-rack.md) | Expected rack handling. |
+| [`expected-rack-group`](./commands/expected-rack-group/expected-rack-group.md) | Expected rack group handling. |
 | [`expected-switch`](./commands/expected-switch/expected-switch.md) | Expected switch handling. |
 | [`extension-service`](./commands/extension-service/extension-service.md) | Extension service management. |
 | [`instance`](./commands/instance/instance.md) | Instance related handling. |

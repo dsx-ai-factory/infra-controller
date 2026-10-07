@@ -20,6 +20,33 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
+func TestAPIDpuExtensionServiceObservabilityConfigPrometheus_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		wantErr  bool
+	}{
+		{name: "IPv6", endpoint: "[::1]:9090"},
+		{name: "IPv4", endpoint: "192.0.2.10:9090"},
+		{name: "fully qualified hostname", endpoint: "metrics.example.com:9090"},
+		{name: "hostname", endpoint: "localhost:9090"},
+		{name: "quoted target", endpoint: "[::1]:9090'", wantErr: true},
+		{name: "newline", endpoint: "[::1]:9090\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := APIDpuExtensionServiceObservabilityConfigPrometheus{
+				Endpoint: tc.endpoint, ScrapeIntervalSeconds: 30,
+			}
+			err := config.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 	validUUID := uuid.New().String()
 
@@ -72,15 +99,63 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc: "ok when DPF Helm chart data is a chart definition",
+			desc: "ok when DPF Helm chart data is valid",
 			obj: APIDpuExtensionServiceCreateRequest{
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false,"spiffe":{}}}`,
 			},
 			expectErr: false,
+		},
+		// Omitting the service ID is rejected before the request reaches Core.
+		{
+			desc: "error when DPF Helm chart service ID is omitted",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","deployInCluster":false,"security":{"privileged":false}}`,
+			},
+			expectErr: true,
+		},
+		// An explicitly empty service ID is rejected.
+		{
+			desc: "error when DPF Helm chart service ID is empty",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"","deployInCluster":false,"security":{"privileged":false}}`,
+			},
+			expectErr: true,
+		},
+		// The deployment location must be explicit even though DPF treats omission as false.
+		{
+			desc: "error when DPF Helm chart omits deployInCluster",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","security":{"privileged":false}}`,
+			},
+			expectErr: true,
+		},
+		// Host-cluster deployment is outside the NICo extension-service contract.
+		{
+			desc: "error when DPF Helm chart deploys in the host cluster",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":true,"security":{"privileged":false}}`,
+			},
+			expectErr: true,
 		},
 		// A fully populated object proves REST accepts DPF's integer resource form alongside string quantities.
 		{
@@ -90,7 +165,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}}`,
 			},
 			expectErr: false,
 		},
@@ -102,7 +177,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":[]}}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false},"serviceDaemonSet":{"labels":[]}}`,
 			},
 			expectErr: true,
 		},
@@ -113,7 +188,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
 			},
 			expectErr:               true,
 			expectedValidationField: "dpuTarget",
@@ -127,7 +202,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				DpuTarget:   cutil.GetPtr(""),
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
 			},
 			expectErr:               true,
 			expectedValidationField: "dpuTarget",
@@ -141,7 +216,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				DpuTarget:   cutil.GetPtr("invalid"),
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
 			},
 			expectErr:               true,
 			expectedValidationField: "dpuTarget",
@@ -162,7 +237,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			expectedValidationError: "cannot be specified for `KubernetesPod` services",
 		},
 		{
-			desc: "error when DPF Helm chart data is not a chart definition",
+			desc: "error when DPF Helm chart data is not a chart object",
 			obj: APIDpuExtensionServiceCreateRequest{
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
@@ -177,7 +252,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"http://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"http://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
 			},
 			expectErr: true,
 		},
@@ -187,9 +262,20 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0"}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false}`,
 			},
 			expectErr: true,
+		},
+		{
+			desc: "ok when DPF Helm chart SPIFFE configuration is present",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false,"spiffe":{}}}`,
+			},
+			expectErr: false,
 		},
 		{
 			desc: "error when DPF Helm chart values set the reserved node selector",
@@ -197,7 +283,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":true,"values":{"serviceDaemonSet":{"nodeSelector":{}}}}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":true},"values":{"serviceDaemonSet":{"nodeSelector":{}}}}`,
 			},
 			expectErr: true,
 		},
@@ -207,7 +293,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
 				Credentials: &APIDpuExtensionServiceCredentials{
 					RegistryURL: "https://registry.hub.docker.com",
 					Username:    cutil.GetPtr("testuser"),
@@ -222,7 +308,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","serviceID":"chart-v1","deployInCluster":false,"security":{"privileged":false}}`,
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{},
 				},
@@ -1003,11 +1089,12 @@ func TestAPIDpuExtensionServiceCreateRequest_ToProto(t *testing.T) {
 			ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 			DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 			SiteID:      uuid.NewString(),
-			Data:        `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false}`,
+			Data:        `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","serviceID":"firewall-v1","deployInCluster":false,"security":{"privileged":false,"spiffe":{}}}`,
 		}
 		require.NoError(t, descr.Validate())
 		req := descr.ToProto("svc-id-5", "org-1")
 		assert.Equal(t, corev1.DpuExtensionServiceType_DPF_HELM_CHART, req.ServiceType)
+		assert.Equal(t, descr.Data, req.Data)
 		require.NotNil(t, req.DpuTarget)
 		assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *req.DpuTarget)
 	})

@@ -10,7 +10,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -161,6 +160,13 @@ func TestInterface_EthernetKey(t *testing.T) {
 	invalidAddress.RequestedIpAddress = cutil.GetPtr("invalid-address")
 	otherInvalidAddress := prefixInterface
 	otherInvalidAddress.RequestedIpAddress = cutil.GetPtr("other-invalid-address")
+	withPrefixes := func(prefixes ...string) Interface {
+		ifc := base
+		ifc.InlineRoutingProfile = &InterfaceInlineRoutingProfile{AllowedAnycastPrefixes: prefixes}
+		return ifc
+	}
+	anycast := withPrefixes("192.0.2.0/24", "2001:db8::/64")
+	expandedAnycast := withPrefixes("192.0.2.0/24", "2001:0DB8:0000:0000::/64")
 
 	tests := []struct {
 		name  string
@@ -178,6 +184,12 @@ func TestInterface_EthernetKey(t *testing.T) {
 		{name: "different IPv6 addresses", left: ipv6, right: differentIPv6},
 		{name: "requested address differs from absent", left: ipv6, right: prefixInterface},
 		{name: "invalid address strings remain distinct", left: invalidAddress, right: otherInvalidAddress},
+		{name: "equivalent IPv6 anycast prefixes", left: anycast, right: expandedAnycast, equal: true},
+		{name: "anycast prefix length differs", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/65")},
+		{name: "anycast prefix host bits remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::1/64")},
+		{name: "anycast prefix order remains distinct", left: anycast, right: withPrefixes("2001:db8::/64", "192.0.2.0/24")},
+		{name: "duplicate anycast prefixes remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/64", "2001:db8::/64")},
+		{name: "invalid anycast prefixes remain distinct", left: withPrefixes("invalid-prefix"), right: withPrefixes("other-invalid-prefix")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,6 +201,7 @@ func TestInterface_EthernetKey(t *testing.T) {
 		})
 	}
 	assert.Equal(t, "2001:0DB8:0:0:0:0:0:1", *expandedIPv6.RequestedIpAddress)
+	assert.Equal(t, []string{"192.0.2.0/24", "2001:0DB8:0000:0000::/64"}, expandedAnycast.InlineRoutingProfile.AllowedAnycastPrefixes)
 }
 
 func TestInterfaceSQLDAO_Create(t *testing.T) {
@@ -455,8 +468,6 @@ func TestInterfaceSQLDAO_Create(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -669,8 +680,6 @@ func TestInterfaceSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1065,8 +1074,6 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1252,8 +1259,6 @@ func TestInterfaceSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1645,12 +1650,43 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
-
+	prefixTests := []struct {
+		name     string
+		prefixes []string
+		want     []string
+		wantErr  string
+	}{
+		{name: "replace", prefixes: []string{"192.0.2.0/24", "2001:db8::/64"}, want: []string{"192.0.2.0/24", "2001:db8::/64"}},
+		{name: "omit", want: []string{"2001:db8:1::/64"}},
+		{name: "clear", prefixes: []string{}, want: []string{}},
+		{name: "reject malformed prefix", prefixes: []string{"2001:db8:2::/64", "not-a-prefix"}, want: []string{"2001:db8:1::/64"}, wantErr: "invalid Interface IP prefix"},
+	}
+	for _, tt := range prefixTests {
+		t.Run("IP prefixes/"+tt.name, func(t *testing.T) {
+			_, err := ifcd.Update(ctx, nil, InterfaceUpdateInput{
+				InterfaceID: ifc.ID,
+				IPPrefixes:  []string{"2001:db8:1::/64"},
+			})
+			require.NoError(t, err)
+			// Updating `Status` forces a write even when prefixes are omitted.
+			_, err = ifcd.Update(ctx, nil, InterfaceUpdateInput{
+				InterfaceID: ifc.ID,
+				IPPrefixes:  tt.prefixes,
+				Status:      cutil.GetPtr(InterfaceStatusReady),
+			})
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			persisted, err := ifcd.GetByID(ctx, nil, ifc.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, persisted.IPPrefixes)
+		})
+	}
 }
 
 func TestInterfaceSQLDAO_Delete(t *testing.T) {
@@ -1772,8 +1808,6 @@ func TestInterfaceSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1922,8 +1956,6 @@ func TestInterfaceSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2071,6 +2103,4 @@ func TestInterfaceSQLDAO_DeleteAllByInstanceIDs(t *testing.T) {
 	// Verify the active span is propagated through the call.
 	span := otrace.SpanFromContext(ctx)
 	assert.True(t, span.SpanContext().IsValid())
-	_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-	assert.True(t, ok)
 }

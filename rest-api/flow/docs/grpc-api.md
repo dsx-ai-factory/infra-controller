@@ -4,6 +4,7 @@
 ## Table of Contents
 
 - [flow.proto](#flow-proto)
+    - [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest)
     - [AddComponentRequest](#v1-AddComponentRequest)
     - [AddComponentResponse](#v1-AddComponentResponse)
     - [AddTaskScheduleScopeRequest](#v1-AddTaskScheduleScopeRequest)
@@ -81,8 +82,12 @@
     - [GetEventRuleRequest](#v1-GetEventRuleRequest)
     - [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest)
     - [GetListOfNVLDomainsResponse](#v1-GetListOfNVLDomainsResponse)
+    - [GetListOfNVLinkDomainsRequest](#v1-GetListOfNVLinkDomainsRequest)
+    - [GetListOfNVLinkDomainsResponse](#v1-GetListOfNVLinkDomainsResponse)
     - [GetListOfRacksRequest](#v1-GetListOfRacksRequest)
     - [GetListOfRacksResponse](#v1-GetListOfRacksResponse)
+    - [GetNVLinkDomainRequest](#v1-GetNVLinkDomainRequest)
+    - [GetNVLinkDomainResponse](#v1-GetNVLinkDomainResponse)
     - [GetOperationRuleRequest](#v1-GetOperationRuleRequest)
     - [GetOperationRunRequest](#v1-GetOperationRunRequest)
     - [GetOperationRunResponse](#v1-GetOperationRunResponse)
@@ -96,6 +101,9 @@
     - [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest)
     - [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest)
     - [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse)
+    - [HealthProbeAlert](#v1-HealthProbeAlert)
+    - [HealthProbeSuccess](#v1-HealthProbeSuccess)
+    - [HealthReport](#v1-HealthReport)
     - [Identifier](#v1-Identifier)
     - [IngestRackRequest](#v1-IngestRackRequest)
     - [ListEventRulesRequest](#v1-ListEventRulesRequest)
@@ -118,6 +126,7 @@
     - [NVLDomain](#v1-NVLDomain)
     - [NVLDomainTarget](#v1-NVLDomainTarget)
     - [NVLDomainTargets](#v1-NVLDomainTargets)
+    - [NVLinkDomain](#v1-NVLinkDomain)
     - [OperationKind](#v1-OperationKind)
     - [OperationRule](#v1-OperationRule)
     - [OperationRun](#v1-OperationRun)
@@ -239,6 +248,25 @@
 <p align="right"><a href="#top">Top</a></p>
 
 ## flow.proto
+
+
+
+<a name="v1-ACPowerCycleRackRequest"></a>
+
+### ACPowerCycleRackRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  | Target racks or NVLink domains with an optional type filter, or specific components |
+| description | [string](#string) |  | optional task description |
+| queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
+| rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+
+
+
 
 
 
@@ -527,6 +555,8 @@ An empty list means no conflicts were detected.
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
 | rack_external_id | [string](#string) |  |  |
 | leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
+| health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
+| nvl_domain_external_id | [string](#string) | optional | Owning rack&#39;s domain external ID (rack group ID). |
 
 
 
@@ -1426,7 +1456,7 @@ GetComponents - retrieves components from local database
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) | optional | Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components. |
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Component UUID ascending breaks equal-field ties. |
 
 
 
@@ -1506,7 +1536,7 @@ GetComponents - retrieves components from local database
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
-| pagination | [Pagination](#v1-Pagination) | optional |  |
+| pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by name ascending, then UUID ascending. |
 
 
 
@@ -1529,6 +1559,40 @@ GetComponents - retrieves components from local database
 
 
 
+<a name="v1-GetListOfNVLinkDomainsRequest"></a>
+
+### GetListOfNVLinkDomainsRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
+| with_components | [bool](#bool) |  |  |
+| pagination | [Pagination](#v1-Pagination) | optional |  |
+| order_by | [string](#string) |  | NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order. |
+
+
+
+
+
+
+<a name="v1-GetListOfNVLinkDomainsResponse"></a>
+
+### GetListOfNVLinkDomainsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| domains | [NVLinkDomain](#v1-NVLinkDomain) | repeated |  |
+| total | [int32](#int32) |  |  |
+
+
+
+
+
+
 <a name="v1-GetListOfRacksRequest"></a>
 
 ### GetListOfRacksRequest
@@ -1540,7 +1604,8 @@ GetComponents - retrieves components from local database
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for rack queries |
 | with_components | [bool](#bool) |  |  |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Rack UUID ascending breaks equal-field ties. |
+| with_external_id_only | [bool](#bool) |  |  |
 
 
 
@@ -1557,6 +1622,37 @@ GetComponents - retrieves components from local database
 | ----- | ---- | ----- | ----------- |
 | racks | [Rack](#v1-Rack) | repeated |  |
 | total | [int32](#int32) |  |  |
+
+
+
+
+
+
+<a name="v1-GetNVLinkDomainRequest"></a>
+
+### GetNVLinkDomainRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| with_components | [bool](#bool) |  |  |
+
+
+
+
+
+
+<a name="v1-GetNVLinkDomainResponse"></a>
+
+### GetNVLinkDomainResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| domain | [NVLinkDomain](#v1-NVLinkDomain) |  |  |
 
 
 
@@ -1763,6 +1859,61 @@ GetComponents - retrieves components from local database
 
 
 
+<a name="v1-HealthProbeAlert"></a>
+
+### HealthProbeAlert
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| target | [string](#string) | optional |  |
+| in_alert_since | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
+| message | [string](#string) |  |  |
+| tenant_message | [string](#string) | optional |  |
+| classifications | [string](#string) | repeated |  |
+
+
+
+
+
+
+<a name="v1-HealthProbeSuccess"></a>
+
+### HealthProbeSuccess
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| target | [string](#string) | optional |  |
+
+
+
+
+
+
+<a name="v1-HealthReport"></a>
+
+### HealthReport
+HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| source | [string](#string) |  |  |
+| triggered_by | [string](#string) | optional |  |
+| observed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
+| successes | [HealthProbeSuccess](#v1-HealthProbeSuccess) | repeated |  |
+| alerts | [HealthProbeAlert](#v1-HealthProbeAlert) | repeated |  |
+
+
+
+
+
+
 <a name="v1-Identifier"></a>
 
 ### Identifier
@@ -1807,7 +1958,7 @@ GetComponents - retrieves components from local database
 | ----- | ---- | ----- | ----------- |
 | event_type | [string](#string) | optional | Optional. When set, must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. Omit to return every supported event type. |
 | enabled | [bool](#bool) | optional |  |
-| pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. |
+| pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. Results are ordered by UUID ascending. |
 
 
 
@@ -1833,7 +1984,7 @@ GetComponents - retrieves components from local database
 <a name="v1-ListOperationRulesRequest"></a>
 
 ### ListOperationRulesRequest
-
+Results are ordered by creation time descending, then UUID descending.
 
 
 | Field | Type | Label | Description |
@@ -1870,6 +2021,7 @@ GetComponents - retrieves components from local database
 ListOperationRunTargetsRequest lists materialized rack execution targets for
 one operation run. status UNKNOWN means no target-status filter is applied.
 phase_scope UNKNOWN defaults to CURRENT_PHASE.
+Results are ordered by phase index, then the unique sequence index.
 
 
 | Field | Type | Label | Description |
@@ -1903,7 +2055,8 @@ phase_scope UNKNOWN defaults to CURRENT_PHASE.
 <a name="v1-ListOperationRunsRequest"></a>
 
 ### ListOperationRunsRequest
-ListOperationRunsRequest lists operation runs, newest first by default.
+ListOperationRunsRequest lists operation runs by creation time descending,
+then UUID descending.
 
 
 | Field | Type | Label | Description |
@@ -1996,7 +2149,7 @@ ListTaskScheduleScopesRequest returns all scope entries for a given schedule.
 
 ### ListTaskSchedulesRequest
 ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-Results are ordered by creation time ascending.
+Results are ordered by creation time ascending, then UUID ascending.
 
 
 | Field | Type | Label | Description |
@@ -2040,7 +2193,7 @@ every Task is returned subject to pagination.
 | ----- | ---- | ----- | ----------- |
 | rack_id | [UUID](#v1-UUID) | optional | Restrict by rack identifier. |
 | active_only | [bool](#bool) |  | Restrict to non-terminal Tasks (Waiting, Pending, Running). |
-| pagination | [Pagination](#v1-Pagination) | optional |  |
+| pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by creation time descending, then UUID descending. |
 | component_id | [UUID](#v1-UUID) | optional | Restrict to Tasks that target this component identifier, regardless of component type. A rack_id plus component_id combination that references a component not on the given rack is not an error; it yields an empty result. |
 | with_report | [bool](#bool) |  | When true, populate Task.report on each returned task. Defaults to false because report bodies can be several KB and would otherwise be persisted in every Temporal activity / workflow result payload along the caller&#39;s path even when the caller never reads them. GetTasksByIDs and CancelTask always return the report and do not accept this flag. |
 
@@ -2092,6 +2245,8 @@ every Task is returned subject to pagination.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | identifier | [Identifier](#v1-Identifier) |  |  |
+| external_id | [string](#string) | optional |  |
+| nmxc_cluster_id | [string](#string) | optional |  |
 
 
 
@@ -2109,6 +2264,7 @@ components selected from every rack currently belonging to that domain.
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | NVLink domain UUID |
 | name | [string](#string) |  | NVLink domain name |
+| external_id | [string](#string) |  |  |
 | component_types | [ComponentType](#v1-ComponentType) | repeated | Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain. |
 
 
@@ -2125,6 +2281,27 @@ NVLDomainTargets contains one or more NVLink domain targets.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [NVLDomainTarget](#v1-NVLDomainTarget) | repeated |  |
+
+
+
+
+
+
+<a name="v1-NVLinkDomain"></a>
+
+### NVLinkDomain
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| name | [string](#string) |  |  |
+| topology | [string](#string) | optional |  |
+| operation_status | [Phase](#v1-Phase) |  |  |
+| components | [Component](#v1-Component) | repeated |  |
+| nmxc_cluster_id | [string](#string) | optional |  |
+| rack_group_id | [string](#string) |  | Same value as id: the domain&#39;s external ID. |
 
 
 
@@ -2985,6 +3162,9 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | task_stats | [TaskStats](#v1-TaskStats) |  | All active Tasks on this rack, including component-scoped Tasks. |
 | external_id | [string](#string) |  |  |
 | operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
+| health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
+| rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
+| nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
 
 
 
@@ -3502,7 +3682,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) | optional | Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs. |
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending for targeted components. Stable component and drift identities break equal-field ties before drift pagination. |
 
 
 
@@ -4021,6 +4201,7 @@ RackOrderByField represents the supported order by field types for rack queries
 | PowerOnRack | [PowerOnRackRequest](#v1-PowerOnRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |
@@ -4034,6 +4215,8 @@ RackOrderByField represents the supported order by field types for rack queries
 | DetachRacksFromNVLDomain | [DetachRacksFromNVLDomainRequest](#v1-DetachRacksFromNVLDomainRequest) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |
 | GetListOfNVLDomains | [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest) | [GetListOfNVLDomainsResponse](#v1-GetListOfNVLDomainsResponse) |  |
 | GetRacksForNVLDomain | [GetRacksForNVLDomainRequest](#v1-GetRacksForNVLDomainRequest) | [GetRacksForNVLDomainResponse](#v1-GetRacksForNVLDomainResponse) |  |
+| GetNVLinkDomain | [GetNVLinkDomainRequest](#v1-GetNVLinkDomainRequest) | [GetNVLinkDomainResponse](#v1-GetNVLinkDomainResponse) |  |
+| GetListOfNVLinkDomains | [GetListOfNVLinkDomainsRequest](#v1-GetListOfNVLinkDomainsRequest) | [GetListOfNVLinkDomainsResponse](#v1-GetListOfNVLinkDomainsResponse) |  |
 | ListTasks | [ListTasksRequest](#v1-ListTasksRequest) | [ListTasksResponse](#v1-ListTasksResponse) | Tasks |
 | GetTasksByIDs | [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest) | [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse) |  |
 | CancelTask | [CancelTaskRequest](#v1-CancelTaskRequest) | [CancelTaskResponse](#v1-CancelTaskResponse) |  |

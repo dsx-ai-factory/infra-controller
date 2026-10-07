@@ -36,3 +36,5 @@ data:
   TEMPORAL_CERT_PATH: "/etc/temporal-certs"
   # Name of Temporal certificate secret
   TEMPORAL_CERT: "temporal-client-site-agent-certs"
+  # Name of the registration secret mounted at /etc/sitereg
+  BOOTSTRAP_SECRET_NAME: "site-registration"

@@ -1203,11 +1203,24 @@ pub(super) async fn resolve_bmc_interface(
     Ok((bmc_addr, bmc_mac_address))
 }
 
+// Never Debug-format this request: it contains a plaintext BMC account password.
+// Record only fixed, non-content-bearing targeting metadata in the request span.
+fn record_create_bmc_user_request(request: &Request<rpc::CreateBmcUserRequest>) {
+    let req = request.get_ref();
+    log_request_data_redacted(format!(
+        "CreateBmcUserRequest {{ bmc_endpoint_request_present: {}, machine_id_present: {}, create_username_present: {}, create_password: <redacted>, create_role_id_present: {} }}",
+        req.bmc_endpoint_request.is_some(),
+        req.machine_id.is_some(),
+        !req.create_username.is_empty(),
+        req.create_role_id.is_some(),
+    ));
+}
+
 pub(crate) async fn create_bmc_user(
     api: &Api,
     request: Request<rpc::CreateBmcUserRequest>,
 ) -> Result<Response<rpc::CreateBmcUserResponse>, Status> {
-    log_request_data(&request);
+    record_create_bmc_user_request(&request);
     let req = request.into_inner();
 
     // Note: CreateBmcUserRequest uses a string for machine_id instead of a real MachineId, which is wrong.
@@ -1520,6 +1533,44 @@ mod tests {
     use model::network_segment::NetworkSegmentType;
 
     use super::*;
+
+    #[test]
+    fn create_bmc_user_request_redaction() {
+        use tracing_subscriber::prelude::*;
+
+        use crate::logging::stream::{LogStream, LogStreamLayer};
+
+        // The actual span recorder is exercised without invoking the handler,
+        // which would access the database and BMC. No real credentials are used.
+        const CANARY: &str = "nico-test-canary-6358-not-a-secret";
+        let request = Request::new(rpc::CreateBmcUserRequest {
+            bmc_endpoint_request: None,
+            machine_id: Some(CANARY.to_string()),
+            create_username: CANARY.to_string(),
+            create_password: CANARY.to_string(),
+            create_role_id: Some(CANARY.to_string()),
+        });
+        let stream = LogStream::new(16, 64 * 1024);
+        let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                tracing::info_span!("create_bmc_user_request", request = tracing::field::Empty);
+            let _entered = span.enter();
+            record_create_bmc_user_request(&request);
+        });
+        let summaries = stream.latest(10);
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.level, "SPAN");
+        let recorded = summary
+            .fields
+            .get("request")
+            .expect("request field recorded");
+        assert!(recorded.contains("create_password: <redacted>"));
+        assert!(recorded.contains("machine_id_present: true"));
+        assert!(recorded.contains("bmc_endpoint_request_present: false"));
+        assert!(!recorded.contains(CANARY));
+    }
 
     fn row(mac: &str, primary: bool, boot_interface_id: Option<&str>) -> MachineInterfaceSnapshot {
         let mut row = MachineInterfaceSnapshot::mock_with_mac(mac.parse().unwrap());

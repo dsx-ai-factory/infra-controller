@@ -17,19 +17,17 @@ import (
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
-	"go.opentelemetry.io/otel"
 	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
 // Orchestrator - Workflow Orchestrator
 func Orchestrator() {
-	defer computils.UpdateState(ManagerAccess.Data.EB)
 	log := ManagerAccess.Data.EB.Log
 	state := ManagerAccess.Data.EB.Managers.Workflow.State
 
@@ -72,17 +70,18 @@ func workflowOrchestrator() error {
 	// Initialize Temporal client
 	log.Info().Msg("Workflow: Creating Elektra site agent Temporal workflow orchestrator")
 
+	// The shared interceptor also implements the worker interface, so the
+	// worker built from the subscriber client inherits it and must not
+	// register it again.
 	var clientInterceptors []interceptor.ClientInterceptor
-	var workerInterceptors []interceptor.WorkerInterceptor
-
 	// otelErr, not err: `var err error` is declared further down.
-	otelInterceptor, otelErr := opentelemetry.NewTracingInterceptor(
-		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
+	otelInterceptor, otelErr := ctemporal.TracingInterceptor()
 	if otelErr != nil {
 		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
 	}
-	clientInterceptors = append(clientInterceptors, otelInterceptor)
-	workerInterceptors = append(workerInterceptors, otelInterceptor)
+	if otelInterceptor != nil {
+		clientInterceptors = append(clientInterceptors, otelInterceptor)
+	}
 
 	// Create logger for temporal using
 	// zero logger
@@ -213,7 +212,6 @@ func workflowOrchestrator() error {
 		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber,
 		ManagerAccess.Conf.EB.Temporal.TemporalSubscribeQueue,
 		worker.Options{
-			Interceptors:        workerInterceptors,
 			WorkflowPanicPolicy: worker.FailWorkflow,
 		})
 	log.Info().Msg("Workflow: Registering orchestrator workflows and activities for elektra cluster ")
@@ -289,6 +287,10 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.ExpectedRack.RegisterSubscriber()
 	ManagerAccess.API.ExpectedRack.RegisterPublisher()
+	err = ManagerAccess.API.ExpectedRackGroup.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("ExpectedRackGroup: failed to register publisher")
+	}
 
 	ManagerAccess.API.ExpectedSwitch.RegisterSubscriber()
 	ManagerAccess.API.ExpectedSwitch.RegisterPublisher()

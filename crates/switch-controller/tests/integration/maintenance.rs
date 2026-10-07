@@ -56,7 +56,10 @@ use crate::state_controller::{
 fn cm_power_action(operation: SwitchMaintenanceOperation) -> SystemPowerControl {
     match operation {
         SwitchMaintenanceOperation::PowerOn => SystemPowerControl::On,
-        SwitchMaintenanceOperation::PowerOff => SystemPowerControl::ForceOff,
+        SwitchMaintenanceOperation::PowerOff { graceful: true } => {
+            SystemPowerControl::GracefulShutdown
+        }
+        SwitchMaintenanceOperation::PowerOff { graceful: false } => SystemPowerControl::ForceOff,
         SwitchMaintenanceOperation::Reset => SystemPowerControl::ForceRestart,
         SwitchMaintenanceOperation::ReconfigureCertificate => SystemPowerControl::On,
     }
@@ -180,7 +183,12 @@ async fn ready_transitions_to_maintenance_when_request_is_set(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    request_switch_maintenance_via_cm(&env, &switch_id, SwitchMaintenanceOperation::PowerOff).await;
+    request_switch_maintenance_via_cm(
+        &env,
+        &switch_id,
+        SwitchMaintenanceOperation::PowerOff { graceful: false },
+    )
+    .await;
 
     {
         let mut txn = pool.acquire().await?;
@@ -195,7 +203,7 @@ async fn ready_transitions_to_maintenance_when_request_is_set(
         outcome,
         StateHandlerOutcome::Transition {
             next_state: SwitchControllerState::Maintenance {
-                operation: SwitchMaintenanceOperation::PowerOff,
+                operation: SwitchMaintenanceOperation::PowerOff { graceful: false },
                 configure_certificate: None,
                 ..
             },
@@ -300,7 +308,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: sqlx::Pg
                 request_switch_maintenance_via_cm(
                     &env,
                     &switch_id,
-                    SwitchMaintenanceOperation::PowerOff,
+                    SwitchMaintenanceOperation::PowerOff { graceful: true },
                 )
                 .await;
                 release.send(()).unwrap();
@@ -316,7 +324,10 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: sqlx::Pg
         ));
         let replacement = completed.switch_maintenance_requested.unwrap();
         assert_ne!(original, replacement);
-        assert_eq!(replacement.operation, SwitchMaintenanceOperation::PowerOff);
+        assert_eq!(
+            replacement.operation,
+            SwitchMaintenanceOperation::PowerOff { graceful: true }
+        );
 
         env.run_switch_controller_iteration().await;
         assert_eq!(
@@ -435,8 +446,12 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
             .await
             .unwrap();
         }
-        request_switch_maintenance_via_cm(&env, &switch_id, SwitchMaintenanceOperation::PowerOff)
-            .await;
+        request_switch_maintenance_via_cm(
+            &env,
+            &switch_id,
+            SwitchMaintenanceOperation::PowerOff { graceful: true },
+        )
+        .await;
         let replacement = load_switch(&env, &switch_id)
             .await
             .switch_maintenance_requested

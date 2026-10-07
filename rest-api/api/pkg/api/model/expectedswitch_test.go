@@ -94,46 +94,36 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username exceeds 255 characters",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: false,
 		},
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
-			obj: APIExpectedSwitchCreateRequest{
-				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 17)),
-				DefaultBmcPassword: &validPassword,
-				SwitchSerialNumber: validSwitchSerial,
-			},
-			expectErr: true,
-		},
-		// Boundary tests for BMC password (max 20 characters)
-		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: true,
@@ -217,6 +207,16 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchCreateRequest{
@@ -441,26 +441,6 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			desc:      "error when only DefaultBmcUsername is provided",
-			obj:       APIExpectedSwitchUpdateRequest{DefaultBmcUsername: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
-			desc:      "error when only DefaultBmcPassword is provided",
-			obj:       APIExpectedSwitchUpdateRequest{DefaultBmcPassword: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
-			desc:      "NVOS username without password",
-			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr("admin")},
-			expectErr: true,
-		},
-		{
-			desc:      "NVOS password without username",
-			obj:       APIExpectedSwitchUpdateRequest{NvOsPassword: cutil.GetPtr("secret")},
-			expectErr: true,
-		},
-		{
 			desc:      "empty NVOS pair",
 			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr(""), NvOsPassword: cutil.GetPtr("")},
 			expectErr: true,
@@ -539,44 +519,33 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username exceeds 255 characters",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword: &validPassword,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
-			obj: APIExpectedSwitchUpdateRequest{
-				SwitchSerialNumber: &validSwitchSerial,
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 17)),
-				DefaultBmcPassword: &validPassword,
-				Labels:             map[string]string{"env": "test"},
-			},
-			expectErr: true,
-		},
-		// Boundary tests for BMC password (max 20 characters)
-		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
@@ -603,6 +572,14 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchUpdateRequest{
@@ -633,7 +610,7 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 				SwitchSerialNumber: &validSwitchSerial,
 				BmcIpAddress:       &emptyString,
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "nil BmcIpAddress (default)",
@@ -846,7 +823,11 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"nvOsUsername":null,"nvOsPassword":null,"labels":null}`},
 		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"nvosMacAddresses":[]}`, wantPaths: []string{"metadata.labels", "nvos_mac_addresses"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
+		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
+		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
 		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
+		{name: "NVOS username leaves the password unselected", body: `{"nvOsUsername":"admin","nvOsPassword":null}`, wantPaths: []string{"nvos_username"}},
+		{name: "NVOS password leaves the username unselected", body: `{"nvOsPassword":"secret"}`, wantPaths: []string{"nvos_password"}},
 		{name: "NVOS pair leaves BMC unchanged", body: `{"nvOsUsername":"admin","nvOsPassword":"secret"}`, wantPaths: []string{"nvos_username", "nvos_password"}},
 	}
 	for _, test := range tests {
@@ -867,14 +848,14 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 				assert.Equal(t, "slot_id", labels[0].GetKey())
 				assert.Equal(t, "0", labels[0].GetValue())
 			}
-			if request.DefaultBmcPassword != nil {
+			if request.DefaultBmcUsername != nil {
 				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedSwitch().GetBmcUsername())
+			}
+			if request.DefaultBmcPassword != nil {
 				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedSwitch().GetBmcPassword())
 			}
-			if request.NvOsPassword != nil {
-				assert.Equal(t, *request.NvOsUsername, decoded.GetExpectedSwitch().GetNvosUsername())
-				assert.Equal(t, *request.NvOsPassword, decoded.GetExpectedSwitch().GetNvosPassword())
-			}
+			assert.Equal(t, request.NvOsUsername, decoded.GetExpectedSwitch().NvosUsername)
+			assert.Equal(t, request.NvOsPassword, decoded.GetExpectedSwitch().NvosPassword)
 		})
 	}
 }

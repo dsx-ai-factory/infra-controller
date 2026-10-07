@@ -13,6 +13,10 @@ spec:
     {{- include "nico-flow.selectorLabels" . | nindent 4 }}
   ports:
     - port: {{ .Values.ports.flow }}
-      targetPort: {{ .Values.ports.flow }}
+      targetPort: grpc
       name: grpc
+      protocol: TCP
+    - port: {{ .Values.ports.metrics }}
+      targetPort: metrics
+      name: metrics
       protocol: TCP

@@ -15,8 +15,9 @@ nico-admin-cli machine force-delete <--machine>
 [-c|--delete-bmc-credentials]
 [--delete-bmc-suppressions]
 [--delete-retained-boot-interfaces]
+[--release-preserved-addresses]
 [--allow-delete-with-instance-type]
-[--allow-delete-with-instance]
+[--allow-delete-with-instance] [--wait-for-instance-dpu]
 [--allow-delete-with-orphaned-dpf-crds] [--extended]
 [--sort-by] [-h|--help]
 ```
@@ -55,6 +56,12 @@ Delete retained boot-interface pairs for the host/DPU BMC and interface
 MACs. Without this, deleted interfaces keep their boot targets for
 re-ingestion.
 
+`--release-preserved-addresses`
+
+Release preserved address reservations for deleted interfaces instead of
+parking them. Without this, an address marked for preservation is parked
+so the same MAC can reclaim it on re-ingestion.
+
 `--allow-delete-with-instance-type`
 
 Delete Machine with an assigned Instance Type. This flag acknowledges
@@ -66,6 +73,23 @@ Delete Machine with an attached Instance. This flag also allows removing
 an assigned Instance Type and removes the attached Instance
 control-plane record without first requesting a graceful workload
 shutdown; force-delete cleanup may forcibly restart the host.
+
+`--wait-for-instance-dpu`
+
+Wait for all attached DPUs to acknowledge the Admin network
+configuration before deleting a host that has an Instance when force
+deletion starts. Disabled by default; a fresh deletion without this flag
+does not wait for DPU acknowledgements. A fresh deletion without an
+Instance does not wait.
+
+Once recorded, the wait survives retries; omitting this flag cannot
+cancel it. Only servers supporting this option enforce a recorded wait.
+An older server can complete deletion without acknowledgement, even if a
+newer server already recorded the wait.
+
+An unavailable DPU can prevent completion indefinitely. The CLI polls
+every 5 seconds for up to 20 minutes, then exits with deletion still
+pending. This flag does not replace --allow-delete-with-instance.
 
 `--allow-delete-with-orphaned-dpf-crds`
 
@@ -102,6 +126,7 @@ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef012345
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions --delete-retained-boot-interfaces
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --allow-delete-with-instance-type
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --allow-delete-with-instance
+nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --release-preserved-addresses
 ```
 
 ---

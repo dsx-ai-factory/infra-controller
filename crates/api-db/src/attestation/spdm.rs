@@ -27,6 +27,9 @@ use sqlx::{PgConnection, Row};
 
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub async fn insert_device_attestations(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -395,7 +398,10 @@ pub async fn load_snapshot_for_machine_and_device_id(
 ) -> Result<SpdmDeviceAttestation, DatabaseError> {
     let query = r#"
         SELECT
-            mda.*,
+            mda.machine_id, mda.device_id, mda.nonce, mda.state,
+            mda.metadata, mda.ca_certificate_link, mda.ca_certificate,
+            mda.evidence_target, mda.evidence, mda.state_version,
+            mda.state_outcome, mda.completed_at, mda.started_at, mda.cancelled_at,
             jsonb_strip_nulls(
                 COALESCE(mt.topology->'bmc_info', '{}'::jsonb) ||
                 jsonb_build_object(

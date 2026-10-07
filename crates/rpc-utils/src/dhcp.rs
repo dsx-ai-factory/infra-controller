@@ -39,6 +39,12 @@ pub struct DhcpConfig {
     pub carbide_api_url: Option<String>,
     pub carbide_ntpservers: Vec<Ipv4Addr>,
     pub carbide_provisioning_server_ipv4: Ipv4Addr,
+    /// IPv6 provisioning address used to generate default DHCPv6 HTTP boot URLs.
+    ///
+    /// Omission disables URL generation. An explicit interface `booturl`,
+    /// including an empty one, takes precedence. DHCPv4 uses its own address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carbide_provisioning_server_ipv6: Option<Ipv6Addr>,
     pub carbide_dhcp_server: Ipv4Addr,
     #[serde(default)]
     pub carbide_nameservers_v6: Vec<Ipv6Addr>,
@@ -54,6 +60,13 @@ pub struct DhcpConfig {
     pub dhcpv6_preferred_lifetime_secs: u32,
     #[serde(default)]
     pub dhcpv6_valid_lifetime_secs: u32,
+    /// Preference emitted only in DHCPv6 ADVERTISE messages.
+    ///
+    /// `None` preserves legacy configuration behavior (effective preference
+    /// zero); `Some(0)` is an explicit configured value and must not collapse
+    /// into omission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcpv6_server_preference: Option<u8>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -86,11 +99,13 @@ impl Default for DhcpConfig {
             // These two must be updated with valid values.
             carbide_provisioning_server_ipv4: Ipv4Addr::from([127, 0, 0, 1]),
             carbide_dhcp_server: Ipv4Addr::from([127, 0, 0, 1]),
+            carbide_provisioning_server_ipv6: None,
             carbide_nameservers_v6: vec![],
             carbide_ntpservers_v6: vec![],
             carbide_dhcp_server_v6: None,
             dhcpv6_preferred_lifetime_secs: 0,
             dhcpv6_valid_lifetime_secs: 0,
+            dhcpv6_server_preference: None,
         }
     }
 }
@@ -454,6 +469,8 @@ mod tests {
         host_interface_id: Option<String>,
     ) -> ManagedHostNetworkConfigResponse {
         ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             use_admin_network,
             admin_interface,
             tenant_interfaces,
@@ -762,17 +779,23 @@ mod tests {
     #[test]
     fn dhcp_config_v6_fields_round_trip_and_default_when_absent() {
         let config = DhcpConfig {
+            carbide_provisioning_server_ipv6: Some("2001:db8::80".parse().unwrap()),
             carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
             carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
             carbide_dhcp_server_v6: Some("2001:db8::1".parse().unwrap()),
             dhcpv6_preferred_lifetime_secs: 3600,
             dhcpv6_valid_lifetime_secs: 7200,
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
 
         // Serialize a populated config and verify the IPv6 fields survive.
         let wire = serde_json::to_string(&config).expect("dhcp config serializes");
         let recovered: DhcpConfig = serde_json::from_str(&wire).expect("dhcp config deserializes");
+        assert_eq!(
+            recovered.carbide_provisioning_server_ipv6,
+            Some(Ipv6Addr::from_str("2001:db8::80").unwrap())
+        );
         assert_eq!(
             recovered.carbide_nameservers_v6,
             vec![Ipv6Addr::from_str("2001:db8::53").unwrap()]
@@ -787,6 +810,7 @@ mod tests {
         );
         assert_eq!(recovered.dhcpv6_preferred_lifetime_secs, 3600);
         assert_eq!(recovered.dhcpv6_valid_lifetime_secs, 7200);
+        assert_eq!(recovered.dhcpv6_server_preference, Some(0));
 
         // Deserialize old-style JSON and verify the new fields default cleanly.
         let old_wire = r#"{
@@ -803,9 +827,16 @@ mod tests {
             serde_json::from_str(old_wire).expect("old dhcp config deserializes");
         assert!(old_config.carbide_nameservers_v6.is_empty());
         assert!(old_config.carbide_ntpservers_v6.is_empty());
+        assert_eq!(old_config.carbide_provisioning_server_ipv6, None);
+        assert!(
+            !serde_json::to_string(&old_config)
+                .expect("legacy dhcp config serializes")
+                .contains("carbide_provisioning_server_ipv6")
+        );
         assert_eq!(old_config.carbide_dhcp_server_v6, None);
         assert_eq!(old_config.dhcpv6_preferred_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_valid_lifetime_secs, 0);
+        assert_eq!(old_config.dhcpv6_server_preference, None);
     }
 
     /// Verifies per-interface IPv6 details round-trip and old host configs default them.

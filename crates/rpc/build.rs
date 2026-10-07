@@ -23,6 +23,7 @@ use tonic_client_wrapper::codegen;
 const PROTO_FILES: &[&str] = &[
     "proto/codegen/v1/machine_id_types.proto",
     "proto/common.proto",
+    "proto/console_log.proto",
     "proto/scout_firmware_upgrade.proto",
     "proto/forge.proto",
     "proto/machine_discovery.proto",
@@ -162,6 +163,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .field_attribute("SkuComponentStorage.pci_patterns", "#[serde(default)]")
         .field_attribute("machine_discovery.BlockDevice.device_type", "#[serde(default)]")
         .field_attribute("machine_discovery.NvmeDevice.serial", "#[serde(default)]")
+        .field_attribute(
+            "machine_discovery.LldpSwitchData.id",
+            "#[serde(default, skip_serializing_if = \"String::is_empty\")]",
+        )
+        .field_attribute(
+            "machine_discovery.LldpSwitchData.remote_port",
+            "#[serde(default, skip_serializing_if = \"String::is_empty\")]",
+        )
         .field_attribute(
             "forge.InstanceTypeMachineCapabilityFilterAttributes.capability_type",
             "#[serde(deserialize_with = \"MachineCapabilityType::from_string\", serialize_with = \"MachineCapabilityType::serialize_from_enum_i32\")]",

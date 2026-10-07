@@ -32,6 +32,16 @@ app.kubernetes.io/name: flow
 {{- end -}}
 
 {{/*
+User-supplied pod annotations. Chart-owned annotations are rendered by the
+Deployment and cannot be overridden through values.
+*/}}
+{{- define "nico-flow.podAnnotations" -}}
+{{- with omit (.Values.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" "checksum/config" -}}
+{{- toYaml . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Flow image reference. If images.flow.repository is empty, fall back to
 <global.image.repository>/nico-flow. Same for the tag.
 Usage: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) }}

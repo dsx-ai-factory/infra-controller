@@ -142,11 +142,15 @@ func GetSAStatus(path string) {
 	}
 }
 
-func UpdateState(Elektra *elektratypes.Elektra) {
-	if (CompStatus(Elektra.Managers.CoreGrpc.State.HealthStatus.Load()) == CompHealthy) &&
-		(CompStatus(Elektra.Managers.Workflow.State.HealthStatus.Load()) == CompHealthy) {
-		Elektra.HealthStatus.Store(uint64(CompHealthy))
-	} else {
-		Elektra.HealthStatus.Store(uint64(CompUnhealthy))
+// SiteHealth derives aggregate health from Core, Temporal, and enabled Flow state.
+// No aggregate is cached, so concurrent updates cannot leave a stale stored result.
+func SiteHealth(Elektra *elektratypes.Elektra) CompStatus {
+	coreHealthy := CompStatus(Elektra.Managers.CoreGrpc.State.HealthStatus.Load()) == CompHealthy
+	temporalHealthy := CompStatus(Elektra.Managers.Workflow.State.HealthStatus.Load()) == CompHealthy
+	flowHealthy := !Elektra.Conf.FlowGrpc.Enabled ||
+		CompStatus(Elektra.Managers.FlowGrpc.State.HealthStatus.Load()) == CompHealthy
+	if coreHealthy && temporalHealthy && flowHealthy {
+		return CompHealthy
 	}
+	return CompUnhealthy
 }

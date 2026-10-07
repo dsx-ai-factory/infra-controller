@@ -51,6 +51,7 @@ const (
 	Flow_PowerOnRack_FullMethodName              = "/v1.Flow/PowerOnRack"
 	Flow_PowerOffRack_FullMethodName             = "/v1.Flow/PowerOffRack"
 	Flow_PowerResetRack_FullMethodName           = "/v1.Flow/PowerResetRack"
+	Flow_ACPowerCycleRack_FullMethodName         = "/v1.Flow/ACPowerCycleRack"
 	Flow_GetComponentInfoByID_FullMethodName     = "/v1.Flow/GetComponentInfoByID"
 	Flow_GetComponentInfoBySerial_FullMethodName = "/v1.Flow/GetComponentInfoBySerial"
 	Flow_GetComponents_FullMethodName            = "/v1.Flow/GetComponents"
@@ -64,6 +65,8 @@ const (
 	Flow_DetachRacksFromNVLDomain_FullMethodName = "/v1.Flow/DetachRacksFromNVLDomain"
 	Flow_GetListOfNVLDomains_FullMethodName      = "/v1.Flow/GetListOfNVLDomains"
 	Flow_GetRacksForNVLDomain_FullMethodName     = "/v1.Flow/GetRacksForNVLDomain"
+	Flow_GetNVLinkDomain_FullMethodName          = "/v1.Flow/GetNVLinkDomain"
+	Flow_GetListOfNVLinkDomains_FullMethodName   = "/v1.Flow/GetListOfNVLinkDomains"
 	Flow_ListTasks_FullMethodName                = "/v1.Flow/ListTasks"
 	Flow_GetTasksByIDs_FullMethodName            = "/v1.Flow/GetTasksByIDs"
 	Flow_CancelTask_FullMethodName               = "/v1.Flow/CancelTask"
@@ -134,6 +137,7 @@ type FlowClient interface {
 	PowerOnRack(ctx context.Context, in *PowerOnRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	PowerOffRack(ctx context.Context, in *PowerOffRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	PowerResetRack(ctx context.Context, in *PowerResetRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
+	ACPowerCycleRack(ctx context.Context, in *ACPowerCycleRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	// Component CRUD
 	GetComponentInfoByID(ctx context.Context, in *GetComponentInfoByIDRequest, opts ...grpc.CallOption) (*GetComponentInfoResponse, error)
 	GetComponentInfoBySerial(ctx context.Context, in *GetComponentInfoBySerialRequest, opts ...grpc.CallOption) (*GetComponentInfoResponse, error)
@@ -149,6 +153,8 @@ type FlowClient interface {
 	DetachRacksFromNVLDomain(ctx context.Context, in *DetachRacksFromNVLDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetListOfNVLDomains(ctx context.Context, in *GetListOfNVLDomainsRequest, opts ...grpc.CallOption) (*GetListOfNVLDomainsResponse, error)
 	GetRacksForNVLDomain(ctx context.Context, in *GetRacksForNVLDomainRequest, opts ...grpc.CallOption) (*GetRacksForNVLDomainResponse, error)
+	GetNVLinkDomain(ctx context.Context, in *GetNVLinkDomainRequest, opts ...grpc.CallOption) (*GetNVLinkDomainResponse, error)
+	GetListOfNVLinkDomains(ctx context.Context, in *GetListOfNVLinkDomainsRequest, opts ...grpc.CallOption) (*GetListOfNVLinkDomainsResponse, error)
 	// Tasks
 	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
 	GetTasksByIDs(ctx context.Context, in *GetTasksByIDsRequest, opts ...grpc.CallOption) (*GetTasksByIDsResponse, error)
@@ -483,6 +489,16 @@ func (c *flowClient) PowerResetRack(ctx context.Context, in *PowerResetRackReque
 	return out, nil
 }
 
+func (c *flowClient) ACPowerCycleRack(ctx context.Context, in *ACPowerCycleRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SubmitTaskResponse)
+	err := c.cc.Invoke(ctx, Flow_ACPowerCycleRack_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *flowClient) GetComponentInfoByID(ctx context.Context, in *GetComponentInfoByIDRequest, opts ...grpc.CallOption) (*GetComponentInfoResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetComponentInfoResponse)
@@ -607,6 +623,26 @@ func (c *flowClient) GetRacksForNVLDomain(ctx context.Context, in *GetRacksForNV
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRacksForNVLDomainResponse)
 	err := c.cc.Invoke(ctx, Flow_GetRacksForNVLDomain_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetNVLinkDomain(ctx context.Context, in *GetNVLinkDomainRequest, opts ...grpc.CallOption) (*GetNVLinkDomainResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetNVLinkDomainResponse)
+	err := c.cc.Invoke(ctx, Flow_GetNVLinkDomain_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetListOfNVLinkDomains(ctx context.Context, in *GetListOfNVLinkDomainsRequest, opts ...grpc.CallOption) (*GetListOfNVLinkDomainsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetListOfNVLinkDomainsResponse)
+	err := c.cc.Invoke(ctx, Flow_GetListOfNVLinkDomains_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -969,6 +1005,7 @@ type FlowServer interface {
 	PowerOnRack(context.Context, *PowerOnRackRequest) (*SubmitTaskResponse, error)
 	PowerOffRack(context.Context, *PowerOffRackRequest) (*SubmitTaskResponse, error)
 	PowerResetRack(context.Context, *PowerResetRackRequest) (*SubmitTaskResponse, error)
+	ACPowerCycleRack(context.Context, *ACPowerCycleRackRequest) (*SubmitTaskResponse, error)
 	// Component CRUD
 	GetComponentInfoByID(context.Context, *GetComponentInfoByIDRequest) (*GetComponentInfoResponse, error)
 	GetComponentInfoBySerial(context.Context, *GetComponentInfoBySerialRequest) (*GetComponentInfoResponse, error)
@@ -984,6 +1021,8 @@ type FlowServer interface {
 	DetachRacksFromNVLDomain(context.Context, *DetachRacksFromNVLDomainRequest) (*emptypb.Empty, error)
 	GetListOfNVLDomains(context.Context, *GetListOfNVLDomainsRequest) (*GetListOfNVLDomainsResponse, error)
 	GetRacksForNVLDomain(context.Context, *GetRacksForNVLDomainRequest) (*GetRacksForNVLDomainResponse, error)
+	GetNVLinkDomain(context.Context, *GetNVLinkDomainRequest) (*GetNVLinkDomainResponse, error)
+	GetListOfNVLinkDomains(context.Context, *GetListOfNVLinkDomainsRequest) (*GetListOfNVLinkDomainsResponse, error)
 	// Tasks
 	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
 	GetTasksByIDs(context.Context, *GetTasksByIDsRequest) (*GetTasksByIDsResponse, error)
@@ -1121,6 +1160,9 @@ func (UnimplementedFlowServer) PowerOffRack(context.Context, *PowerOffRackReques
 func (UnimplementedFlowServer) PowerResetRack(context.Context, *PowerResetRackRequest) (*SubmitTaskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PowerResetRack not implemented")
 }
+func (UnimplementedFlowServer) ACPowerCycleRack(context.Context, *ACPowerCycleRackRequest) (*SubmitTaskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ACPowerCycleRack not implemented")
+}
 func (UnimplementedFlowServer) GetComponentInfoByID(context.Context, *GetComponentInfoByIDRequest) (*GetComponentInfoResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentInfoByID not implemented")
 }
@@ -1159,6 +1201,12 @@ func (UnimplementedFlowServer) GetListOfNVLDomains(context.Context, *GetListOfNV
 }
 func (UnimplementedFlowServer) GetRacksForNVLDomain(context.Context, *GetRacksForNVLDomainRequest) (*GetRacksForNVLDomainResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRacksForNVLDomain not implemented")
+}
+func (UnimplementedFlowServer) GetNVLinkDomain(context.Context, *GetNVLinkDomainRequest) (*GetNVLinkDomainResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetNVLinkDomain not implemented")
+}
+func (UnimplementedFlowServer) GetListOfNVLinkDomains(context.Context, *GetListOfNVLinkDomainsRequest) (*GetListOfNVLinkDomainsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetListOfNVLinkDomains not implemented")
 }
 func (UnimplementedFlowServer) ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListTasks not implemented")
@@ -1780,6 +1828,24 @@ func _Flow_PowerResetRack_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_ACPowerCycleRack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ACPowerCycleRackRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).ACPowerCycleRack(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_ACPowerCycleRack_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).ACPowerCycleRack(ctx, req.(*ACPowerCycleRackRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Flow_GetComponentInfoByID_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetComponentInfoByIDRequest)
 	if err := dec(in); err != nil {
@@ -2010,6 +2076,42 @@ func _Flow_GetRacksForNVLDomain_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(FlowServer).GetRacksForNVLDomain(ctx, req.(*GetRacksForNVLDomainRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetNVLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetNVLinkDomainRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetNVLinkDomain(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetNVLinkDomain_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetNVLinkDomain(ctx, req.(*GetNVLinkDomainRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetListOfNVLinkDomains_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetListOfNVLinkDomainsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetListOfNVLinkDomains(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetListOfNVLinkDomains_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetListOfNVLinkDomains(ctx, req.(*GetListOfNVLinkDomainsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2710,6 +2812,10 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Flow_PowerResetRack_Handler,
 		},
 		{
+			MethodName: "ACPowerCycleRack",
+			Handler:    _Flow_ACPowerCycleRack_Handler,
+		},
+		{
 			MethodName: "GetComponentInfoByID",
 			Handler:    _Flow_GetComponentInfoByID_Handler,
 		},
@@ -2760,6 +2866,14 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRacksForNVLDomain",
 			Handler:    _Flow_GetRacksForNVLDomain_Handler,
+		},
+		{
+			MethodName: "GetNVLinkDomain",
+			Handler:    _Flow_GetNVLinkDomain_Handler,
+		},
+		{
+			MethodName: "GetListOfNVLinkDomains",
+			Handler:    _Flow_GetListOfNVLinkDomains_Handler,
 		},
 		{
 			MethodName: "ListTasks",

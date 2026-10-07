@@ -963,14 +963,15 @@ pub(crate) async fn delete(
 ) -> Result<Response<rpc::VpcDeletionResult>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
     // TODO: This needs to validate that nothing references the VPC anymore
     // (like NetworkSegments)
     let vpc_id: VpcId = request
         .into_inner()
         .id
         .ok_or(CarbideError::MissingArgument("id"))?;
+
+    let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let vpc = db::vpc::find_by_with_lock(
         txn.as_mut(),
@@ -1010,6 +1011,15 @@ pub(crate) async fn delete(
         }
     }
 
+    if !db::vpc_peering::find_ids(&mut txn, Some(vpc_id))
+        .await?
+        .is_empty()
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "VPC `{vpc_id}` still has peerings; delete its peerings and wait for them to disappear before deleting the VPC"
+        )).into());
+    }
+
     if db::vpc::try_delete(&mut txn, vpc_id).await?.is_none() {
         // Release an allocation only when this transaction deleted the VPC.
         return Err(CarbideError::NotFoundError {
@@ -1040,9 +1050,6 @@ pub(crate) async fn delete(
             }
         }
     }
-
-    // Delete associated VPC peerings
-    db::vpc_peering::delete_by_vpc_id(&mut txn, vpc_id).await?;
 
     txn.commit().await?;
 

@@ -16,6 +16,7 @@
  */
 
 mod chassis;
+mod component_integrity;
 mod computer_system;
 mod error;
 pub mod hw;
@@ -31,14 +32,15 @@ use std::time::Duration;
 
 use chassis::ExploredChassisCollection;
 use computer_system::ExploredComputerSystem;
+pub use computer_system::{VeraRubinMachinePosition, parse_vera_rubin_machine_position};
 pub use error::Error;
 use inventories::ExploredInventories;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
-    EndpointExplorationReport, EndpointType, InternalLockdownStatus, LockdownStatus,
-    MachineSetupDiff, MachineSetupStatus,
+    ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -123,7 +125,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
+/// `bmc` is the client `root` was fetched through. It is passed separately
+/// because nv-redfish keeps the service root's client private, and the
+/// `ComponentIntegrity` collection is a resource nv-redfish does not model.
 pub async fn nv_generate_exploration_report<B: Bmc>(
+    bmc: &B,
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
@@ -131,28 +137,50 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let mut explored_chassis =
         ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
+    let component_integrities = component_integrity::explore(bmc, &root).await;
 
     // Delta power shelves do not expose a `/redfish/v1/Systems` collection (and
     // report no vendor in the service root, so nv-redfish fabricates the path
     // and gets a 404). Detect them from the chassis and synthesize the report
     // from chassis + manager data instead of fetching a ComputerSystem.
     if explored_chassis.is_delta_powershelf() {
-        return build_delta_powershelf_report(&root, explored_chassis, explored_inventories).await;
+        return build_delta_powershelf_report(
+            &root,
+            explored_chassis,
+            explored_inventories,
+            component_integrities,
+        )
+        .await;
     }
 
     if explored_chassis.is_bluefield2() {
         root = root.as_ref().clone().restrict_expand().into();
     }
 
-    let mut systems_iter = root
+    let systems = root
         .systems()
         .await
         .map_err(Error::nv_redfish("systems"))?
         .ok_or_else(Error::bmc_not_provided("systems"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("systems members"))?
-        .into_iter();
+        .map_err(Error::nv_redfish("systems members"))?;
+
+    let machine_position = if root.vendor() == Some(Vendor::new("NVIDIA"))
+        && root.product() == Some(Product::new("VR NVL72"))
+    {
+        match systems
+            .iter()
+            .find(|system| system.raw().id == "HGX_Baseboard_0")
+        {
+            Some(system) => computer_system::vera_rubin_machine_position(system).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let mut systems_iter = systems.into_iter();
 
     let first_system = systems_iter
         .next()
@@ -260,7 +288,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
                 | hw::HwType::Gb200
                 | hw::HwType::LiteonPowerShelf
                 | hw::HwType::DeltaPowerShelf
-                | hw::HwType::NvSwitch,
+                | hw::HwType::NvSwitch
+                | hw::HwType::Sushy,
             ) => false,
             None => false,
         })
@@ -314,6 +343,22 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let system = explored_system.to_model(hw_type, &explored_chassis, &pcie_devices)?;
     let manager = explored_manager.to_model()?;
     let service = explored_inventories.to_model(hw_type);
+    let hardware_class = hardware_class(&root, &system);
+    let chassis = explored_chassis.to_model();
+    let physical_slot_number = machine_position
+        .filter(|_| {
+            chassis
+                .iter()
+                .all(|chassis| chassis.physical_slot_number.is_none())
+        })
+        .and_then(|position| position.physical_slot_number);
+    let compute_tray_index = machine_position
+        .filter(|_| {
+            chassis
+                .iter()
+                .all(|chassis| chassis.compute_tray_index.is_none())
+        })
+        .and_then(|position| position.compute_tray_index);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -322,9 +367,12 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_id: None,
         managers: vec![manager],
         systems: vec![system],
-        chassis: explored_chassis.to_model(),
+        chassis,
         service,
+        component_integrities: component_integrities.entries,
+        component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -332,8 +380,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        physical_slot_number: None,
-        compute_tray_index: None,
+        physical_slot_number,
+        compute_tray_index,
         topology_id: None,
         revision_id: None,
         remediation_error: None,
@@ -373,6 +421,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
+    component_integrities: component_integrity::Observation,
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let hw_type = hw::HwType::DeltaPowerShelf;
 
@@ -390,6 +439,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     let explored_manager = ExploredManager::explore(manager, &manager::Config::default()).await?;
 
     let system = explored_chassis.synthesized_powershelf_system();
+    let hardware_class = hardware_class(root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -400,7 +450,10 @@ async fn build_delta_powershelf_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service: explored_inventories.to_model(Some(hw_type)),
+        component_integrities: component_integrities.entries,
+        component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -418,6 +471,16 @@ async fn build_delta_powershelf_report<B: Bmc>(
         revision_id: None,
         remediation_error: None,
     })
+}
+
+/// The class recorded for an endpoint: the host system's reported identity,
+/// with the service root standing in for the fields it left empty.
+fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
+    derive_hardware_class(
+        Some(system),
+        root.vendor().map(Vendor::into_inner),
+        root.product().map(Product::into_inner),
+    )
 }
 
 pub(crate) fn hw_type<B: Bmc>(
@@ -479,6 +542,7 @@ pub(crate) fn hw_type<B: Bmc>(
                 Some(hw::HwType::Gb200)
             }
             "NVIDIA" if root.product() == Some(Product::new("P3809")) => Some(hw::HwType::NvSwitch),
+            "Contoso" | "Sushy" | "RedVirt" => Some(hw::HwType::Sushy),
             _ => None,
         })
         .or_else(|| {
@@ -823,6 +887,7 @@ fn machine_setup_status<B: Bmc>(
         hw::HwType::LiteonPowerShelf => (),
         hw::HwType::DeltaPowerShelf => (),
         hw::HwType::NvSwitch => (),
+        hw::HwType::Sushy => (),
         hw::HwType::Viking => {
             diffs.extend(
                 hw::viking::EXPECTED_BIOS_ATTRS

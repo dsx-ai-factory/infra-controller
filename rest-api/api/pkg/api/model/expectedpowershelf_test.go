@@ -218,6 +218,16 @@ func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
 		},
 		// BmcIpAddress validation tests
 		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedPowerShelfCreateRequest{
+				SiteID:            "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:     "00:11:22:33:44:55",
+				ShelfSerialNumber: validShelfSerial,
+				BmcIpAddress:      cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
+		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedPowerShelfCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
@@ -357,16 +367,6 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			desc:      "error when only DefaultBmcUsername is provided",
-			obj:       APIExpectedPowerShelfUpdateRequest{DefaultBmcUsername: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
-			desc:      "error when only DefaultBmcPassword is provided",
-			obj:       APIExpectedPowerShelfUpdateRequest{DefaultBmcPassword: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
 			desc: "ok when all fields are provided",
 			obj: APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber: &validShelfSerial,
@@ -504,6 +504,14 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 		},
 		// BmcIpAddress validation tests
 		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				ShelfSerialNumber: &validShelfSerial,
+				BmcIpAddress:      cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
+		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber: &validShelfSerial,
@@ -533,7 +541,7 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 				ShelfSerialNumber: &validShelfSerial,
 				BmcIpAddress:      &emptyString,
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "nil BmcIpAddress (default)",
@@ -691,6 +699,8 @@ func TestAPIExpectedPowerShelfUpdateRequest_ToProto(t *testing.T) {
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null}`},
 		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{}}`, wantPaths: []string{"metadata.labels"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
+		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
+		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
 		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
 	}
 	for _, test := range tests {
@@ -711,8 +721,10 @@ func TestAPIExpectedPowerShelfUpdateRequest_ToProto(t *testing.T) {
 				assert.Equal(t, "slot_id", labels[0].GetKey())
 				assert.Equal(t, "0", labels[0].GetValue())
 			}
-			if request.DefaultBmcPassword != nil {
+			if request.DefaultBmcUsername != nil {
 				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedPowerShelf().GetBmcUsername())
+			}
+			if request.DefaultBmcPassword != nil {
 				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedPowerShelf().GetBmcPassword())
 			}
 		})

@@ -236,11 +236,18 @@ impl VpcDpuLoopback {
     }
 }
 
+/// A retained peering reserves both endpoints until DPU permission removal completes.
 #[derive(Clone, Debug)]
 pub struct VpcPeering {
+    /// Stable identity used for discovery and deletion.
     pub id: VpcPeeringId,
+    /// The first endpoint in the database's ordered VPC pair.
     pub vpc_id: VpcId,
+    /// The second endpoint in the database's ordered VPC pair.
     pub peer_vpc_id: VpcId,
+    /// The committed deletion request, set once and never incremented. Its
+    /// timestamp identifies the request; `None` keeps the peering active.
+    pub deletion_version: Option<ConfigVersion>,
 }
 
 impl<'r> FromRow<'r, PgRow> for VpcPeering {
@@ -249,6 +256,7 @@ impl<'r> FromRow<'r, PgRow> for VpcPeering {
             id: row.try_get("id")?,
             vpc_id: row.try_get("vpc1_id")?,
             peer_vpc_id: row.try_get("vpc2_id")?,
+            deletion_version: row.try_get("deletion_version")?,
         })
     }
 }

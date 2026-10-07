@@ -243,7 +243,7 @@ func NewManageOperatingSystemInventory(config ManageInventoryConfig) ManageOpera
 // DiscoverOperatingSystemInventory collects Operating System inventory from nico-core and
 // publishes it to the cloud Temporal queue for reconciliation with the operating_system table.
 // It uses the shared paged inventory pipeline (see manageInventoryImpl) so large inventories
-// are chunked and the full reported ID set travels in each page's InventoryPage.ItemIds.
+// are chunked and the full reported ID set travels in the final page's InventoryPage.ItemIds.
 func (m *ManageOperatingSystemInventory) DiscoverOperatingSystemInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverOperatingSystemInventory").Logger()
 	logger.Info().Msg("Starting activity")

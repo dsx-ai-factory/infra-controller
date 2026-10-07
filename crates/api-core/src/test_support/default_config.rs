@@ -129,6 +129,7 @@ pub fn fully_populated() -> CarbideConfig {
             use_vpc_vrf_loopback: false,
         }),
         dsx_exchange_event_bus: Some(DsxExchangeEventBusConfig::default()),
+        ssh_console_url: Some("https://ssh-console.example:1079".parse().unwrap()),
         secrets: Some(SecretsConfig {
             kms: KmsConfig {
                 active: "local".to_string(),
@@ -178,6 +179,7 @@ pub fn get() -> CarbideConfig {
         asn: 0,
         datacenter_asn: 0,
         dhcp_servers: vec![],
+        dhcpv6_server_preference: None,
         route_servers: vec![],
         enable_route_servers: false,
         deny_prefixes: vec![],
@@ -196,6 +198,7 @@ pub fn get() -> CarbideConfig {
             identity_keyfile_path: "Not a real keyfile".to_string(),
             admin_root_cafile_path: "Not a real cafile".to_string(),
         }),
+        ssh_console_url: None,
         auth: None,
         pools: None,
         networks: None,
@@ -323,7 +326,8 @@ pub fn get() -> CarbideConfig {
             svpc_enabled: true,
             astra_enabled: false,
             subnet_ip: Ipv4Addr::UNSPECIFIED,
-            subnet_mask: 0_i32,
+            subnet_mask: EwEthersConfig::default_subnet_mask(),
+            astra: Default::default(),
             monitor_run_interval: std::time::Duration::from_secs(10),
             svpc: SvpcConfig {
                 mqtt_endpoint: "mqtt.forge".to_string(),

@@ -29,6 +29,7 @@ import (
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -46,23 +47,21 @@ const (
 
 // BatchCreateInstanceHandler is the API Handler for creating multiple instances with topology-optimized allocation
 type BatchCreateInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewBatchCreateInstanceHandler initializes and returns a new handler for batch creating Instances
 func NewBatchCreateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) BatchCreateInstanceHandler {
 	return BatchCreateInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -298,17 +297,11 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("started API handler for batch instance creation")
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := bcih.tracerSpan.CreateChildInContext(ctx, "BatchCreateInstanceHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
+	ctx, handlerSpan := cotel.StartSpan(ctx, "BatchCreateInstanceHandler")
+	defer handlerSpan.End()
+	cotel.SetAttribute(handlerSpan, attribute.String("org", org))
 
-		defer handlerSpan.End()
-
-		bcih.tracerSpan.SetAttribute(handlerSpan, attribute.String("org", org), logger)
-	}
-
-	dbUser, logger, err := common.GetUserAndEnrichLogger(c, logger, bcih.tracerSpan, handlerSpan)
+	dbUser, logger, err := common.GetUserAndEnrichLogger(c, logger, handlerSpan)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
@@ -1421,7 +1414,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		// Allocate machines with topology optimization
-		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, logger)
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments, logger)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -1850,6 +1843,8 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					DeviceInstance:       *sac.DeviceInstance,
 					AttachmentType:       sac.AttachmentType,
 					VirtualFunctionID:    sac.VirtualFunctionID,
+					BridgeName:           sac.BridgeName,
+					OvnNetworkName:       sac.OvnNetworkName,
 					Status:               cdbm.SpectrumXAttachmentStatusPending,
 					CreatedBy:            dbUser.ID,
 				})
@@ -2029,6 +2024,7 @@ func allocateMachinesForBatch(
 	count int,
 	topologyOptimized bool,
 	machineLabelSelector map[string]string,
+	spectrumXAttachments []model.APISpectrumXAttachmentCreateOrUpdateRequest,
 	logger zerolog.Logger,
 ) ([]cdbm.Machine, *cutil.APIError) {
 	if instancetype == nil || count <= 0 {
@@ -2060,6 +2056,20 @@ func allocateMachinesForBatch(
 		return nil, cutil.NewAPIError(http.StatusConflict,
 			fmt.Sprintf("Insufficient machines available: requested %d, available %d", count, len(machines)), nil)
 	}
+
+	// Filter before choosing the NVLink domain. Choosing the largest unfiltered
+	// domain could hide compatible capacity elsewhere.
+	compatible, capErr := common.FilterMachinesBySpectrumXAttachments(ctx, tx, dbSession, machines, spectrumXAttachments)
+	if capErr != nil {
+		logger.Error().Err(capErr).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Capabilities for Machines", nil)
+	}
+	if len(compatible) < count {
+		return nil, cutil.NewAPIError(http.StatusConflict,
+			fmt.Sprintf("Insufficient Machines with the requested SpectrumX capabilities: requested %d, compatible %d", count, len(compatible)), nil)
+	}
+	spectrumXFiltered := len(compatible) < len(machines)
+	machines = compatible
 
 	var candidateMachines []*cdbm.Machine
 
@@ -2102,6 +2112,10 @@ func allocateMachinesForBatch(
 		if len(nvlinkDomainMap[bestDomainID]) < count {
 			logger.Warn().Str("bestDomainID", bestDomainID).Int("bestDomainCount", len(nvlinkDomainMap[bestDomainID])).Int("requested", count).
 				Msg("topology optimization requires same NVLink domain but insufficient machines in any single domain")
+			if spectrumXFiltered {
+				return nil, cutil.NewAPIError(http.StatusConflict,
+					fmt.Sprintf("Topology optimization requires all %d machines with the requested SpectrumX capabilities on same NVLink domain, but best domain only has %d compatible", count, len(nvlinkDomainMap[bestDomainID])), nil)
+			}
 			return nil, cutil.NewAPIError(http.StatusConflict,
 				fmt.Sprintf("Topology optimization requires all %d machines on same NVLink domain, but best domain only has %d available", count, len(nvlinkDomainMap[bestDomainID])), nil)
 		}
@@ -2129,27 +2143,41 @@ func allocateMachinesForBatch(
 			break
 		}
 
-		// Acquire an advisory lock on the MachineID
-		err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+		// Verify the Machine inside a savepoint, so a rejected Machine is unlocked right away
+		// instead of staying locked until the batch create transaction ends.
+		var umc *cdbm.Machine
+		err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+			// Acquire an advisory lock on the MachineID
+			lerr := sp.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+			if lerr != nil {
+				return lerr
+			}
+
+			// Re-obtain the Machine record to ensure it is still available
+			var gerr error
+			umc, gerr = mcDAO.GetByID(ctx, sp, mc.ID, nil, true)
+			if gerr != nil {
+				return gerr
+			}
+
+			if umc.Status != cdbm.MachineStatusReady {
+				return common.ErrMachineUnavailable
+			}
+
+			if umc.IsAssigned {
+				return common.ErrMachineUnavailable
+			}
+
+			if !umc.MatchesLabelSelector(machineLabelSelector) {
+				return common.ErrMachineUnavailable
+			}
+			return nil
+		})
+		if errors.Is(err, cdb.ErrTransactionSavepoint) {
+			logger.Error().Err(err).Str("machineID", mc.ID).Msg("failed to verify Machine for batch allocation, DB savepoint error")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify Machines for allocation, DB error", nil)
+		}
 		if err != nil {
-			continue
-		}
-
-		// Re-obtain the Machine record to ensure it is still available
-		umc, err := mcDAO.GetByID(ctx, tx, mc.ID, nil, true)
-		if err != nil {
-			continue
-		}
-
-		if umc.Status != cdbm.MachineStatusReady {
-			continue
-		}
-
-		if umc.IsAssigned {
-			continue
-		}
-
-		if !umc.MatchesLabelSelector(machineLabelSelector) {
 			continue
 		}
 
@@ -2157,6 +2185,7 @@ func allocateMachinesForBatch(
 		updateInputs = append(updateInputs, cdbm.MachineUpdateInput{
 			MachineID:  mc.ID,
 			IsAssigned: cutil.GetPtr(true),
+			Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
 		})
 		verifiedMachines = append(verifiedMachines, umc)
 	}
@@ -2174,6 +2203,20 @@ func allocateMachinesForBatch(
 		logger.Error().Err(err).Msg("failed to batch update machines to assigned")
 		return nil, cutil.NewAPIError(http.StatusInternalServerError,
 			fmt.Sprintf("Failed to batch update machines: %v", err), nil)
+	}
+
+	statusDetails := make([]cdbm.StatusDetailCreateInput, 0, len(allocatedMachines))
+	for _, machine := range allocatedMachines {
+		statusDetails = append(statusDetails, cdbm.StatusDetailCreateInput{
+			EntityID: machine.ID,
+			Status:   cdbm.MachineStatusInUse,
+			Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+		})
+	}
+	_, err = cdbm.NewStatusDetailDAO(dbSession).CreateMultiple(ctx, tx, statusDetails)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to create Machine status details for batch allocation")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to record Machine status changes", nil)
 	}
 
 	// Log NVLink domain distribution for observability

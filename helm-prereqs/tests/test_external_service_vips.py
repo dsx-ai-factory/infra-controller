@@ -175,26 +175,115 @@ nico-api:
                     self.assertEqual(len(errors), 1)
                     self.assertIn(expected_error, errors[0])
 
-    def test_ipv4_only_external_services(self):
-        """Reject in-pool IPv6 VIPs when the chart explicitly fixes the Service family to IPv4."""
+    def test_ipv4_external_service_defaults(self):
+        """Reject in-pool IPv6 VIPs when the chart renders the Service family as IPv4."""
         cases = [
             # DHCPv4 has its own IPv4 Service, separate from the DHCPv6 workload.
-            ("nico-dhcp", {}),
-            # Both Unbound external Services remain IPv4 even when internal IPv6 is enabled.
-            ("unbound", {"ipv6": {"enabled": True}}),
+            ("nico-dhcp", "must be an IPv4 address"),
+            # Unbound uses IPv4 unless externalService explicitly selects another family.
+            ("unbound", "does not match ipFamilies ['IPv4']"),
         ]
-        for component, config in cases:
+        for component, diagnostic in cases:
             with self.subTest(component=component):
                 # Pool membership must not override the Service's declared address family.
-                values = {component: {**config, "externalService": {
+                values = {component: {"externalService": {
                     "enabled": True,
                     "annotations": {"metallb.io/loadBalancerIPs": "2001:db8::67"},
                 }}}
                 pools = {"kind": "IPAddressPool", "spec": {"addresses": ["2001:db8::/64"]}}
                 errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)), io.StringIO(json.dumps(pools)))
-                self.assertEqual(errors, [f"{component}.externalService: VIP 2001:db8::67 must be an IPv4 address"])
+                self.assertEqual(errors, [f"{component}.externalService: VIP 2001:db8::67 {diagnostic}"])
                 self.assertEqual(warnings, [])
                 self.assertEqual(pool_errors, [])
+
+    def test_unbound_service_family_selection(self):
+        """Honor external family selection while retaining Unbound's explicit IPv4 fallback."""
+        cases = [
+            ("empty settings keep IPv4", [], "", "2001:db8::53", "IPv4"),
+            ("IPv6 Service", ["IPv6"], "SingleStack", "2001:db8::53", None),
+        ]
+        for name, families, policy, vips, mismatched_family in cases:
+            with self.subTest(name=name):
+                values = {"unbound": {"externalService": {
+                    "enabled": True, "ipFamilies": families, "ipFamilyPolicy": policy,
+                    "annotations": {"metallb.io/loadBalancerIPs": vips},
+                }}}
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                expected = ([f"unbound.externalService: VIP {vips} does not match ipFamilies ['{mismatched_family}']"]
+                            if mismatched_family else [])
+                self.assertEqual(errors, expected)
+                self.assertEqual(warnings, [])
+                self.assertEqual(pool_errors, [])
+
+    def test_api_service_family_selection(self):
+        """Reject known family mismatches without guessing cluster-dependent defaults."""
+        cases = [
+            ("IPv6 Service", ["IPv6"], "SingleStack", "2001:db8::1", []),
+            ("explicit mismatch", ["IPv4"], "SingleStack", "2001:db8::1",
+             ["nico-api.externalService: VIP 2001:db8::1 does not match ipFamilies ['IPv4']"]),
+            ("omitted policy is single-stack", ["IPv6"], "", "192.0.2.1",
+             ["nico-api.externalService: VIP 192.0.2.1 does not match ipFamilies ['IPv6']"]),
+            ("cluster default family", [], "", "2001:db8::1", []),
+            # Whether the secondary family is available depends on the cluster.
+            ("implicit secondary family", ["IPv4"], "PreferDualStack", "192.0.2.1,2001:db8::1", []),
+        ]
+        for name, families, policy, vips, expected in cases:
+            with self.subTest(name=name):
+                values = {"nico-api": {"externalService": {
+                    "enabled": True, "ipFamilies": families, "ipFamilyPolicy": policy,
+                    "annotations": {"metallb.io/loadBalancerIPs": vips},
+                }}}
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(errors, expected)
+                self.assertEqual(warnings, [])
+                self.assertEqual(pool_errors, [])
+
+    def test_per_pod_service_family_selection(self):
+        """Check every DNS/NTP replica against its chart-wide family selection."""
+        for component in ("nico-dns", "nico-ntp"):
+            with self.subTest(component=component):
+                values = {component: {"externalService": {
+                    "enabled": True, "ipFamilies": ["IPv6"], "ipFamilyPolicy": "SingleStack",
+                    "perPodAnnotations": [
+                        {"metallb.io/loadBalancerIPs": "2001:db8::1"},
+                        {"metallb.io/loadBalancerIPs": "192.0.2.1"},
+                    ],
+                }}}
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(errors, [
+                    f"{component}.externalService: VIP 192.0.2.1 does not match ipFamilies ['IPv6']",
+                ])
+                self.assertEqual(warnings, [])
+                self.assertEqual(pool_errors, [])
+
+    def test_invalid_pxe_family_configuration(self):
+        values = {"nico-pxe": {"externalService": {
+            "enabled": True, "ipFamilyPolicy": "RequiredDualStack",
+        }}}
+        with self.assertRaises(ValueError) as raised:
+            check_vips(io.StringIO(json.dumps(values)))
+        self.assertEqual(str(raised.exception),
+                         "nico-pxe.externalService.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
+
+    def test_invalid_api_family_configuration(self):
+        """Report malformed family settings before inspecting explicit or automatic VIPs."""
+        cases = [
+            ({"ipFamilies": "IPv6"}, "ipFamilies must be a list"),
+            ({"ipFamilies": ["ipv6"]}, "ipFamilies must contain unique IPv4 or IPv6 entries"),
+            ({"ipFamilies": ["IPv6", "IPv6"]}, "ipFamilies must contain unique IPv4 or IPv6 entries"),
+            ({"ipFamilyPolicy": "dual"}, "ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack"),
+            ({"ipFamilyPolicy": False}, "ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack"),
+            # NodePort renders family settings even though it does not use a load-balancer VIP.
+            ({"type": "NodePort", "ipFamilyPolicy": "dual"},
+             "ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack"),
+            ({"ipFamilies": ["IPv4", "IPv6"]}, "ipFamilies must contain one family for SingleStack"),
+        ]
+        for settings, message in cases:
+            with self.subTest(settings=settings):
+                values = {"nico-api": {"externalService": {"enabled": True, **settings}}}
+                with self.assertRaises(ValueError) as raised:
+                    check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(str(raised.exception), f"nico-api.externalService.{message}")
 
     def test_invalid_pool_entries(self):
         """Report empty or invalid pools instead of silently skipping their containment checks."""

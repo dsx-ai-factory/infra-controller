@@ -33,6 +33,7 @@ use component_manager::nv_switch_manager::{
 };
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
 use db::{rack as db_rack, switch as db_switch};
+use librms::protos::rack_manager::SwitchService;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::rack::{RackConfig, RackErrorRecoveryPolicy, RackState};
@@ -385,14 +386,14 @@ async fn test_configure_certificate_start_transitions_to_wait_for_complete_with_
     .await?;
     txn.commit().await?;
 
+    let mock_switch_manager = Arc::new(MockNvSwitchManager::default());
+
     run_switch_controller_with_services(
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
             db_pool: pool.clone(),
-            component_manager: Some(mock_component_manager(Arc::new(
-                MockNvSwitchManager::default(),
-            ))),
+            component_manager: Some(mock_component_manager(mock_switch_manager.clone())),
             credential_manager: env.test_credential_manager.clone(),
             switch_mtls_services: default_switch_mtls_services(),
             per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
@@ -427,12 +428,112 @@ async fn test_configure_certificate_start_transitions_to_wait_for_complete_with_
     assert_eq!(switch.rack_id.as_ref(), Some(&"rack-id-1".into()));
 
     assert_eq!(
+        mock_switch_manager.certificate_services(),
+        vec![vec![
+            SwitchService::NvueApi as i32,
+            SwitchService::ScaleUpFabricTelemetryInterface as i32,
+        ]]
+    );
+
+    assert_eq!(
         env.test_credential_manager
             .get_credentials_from_writer(&credential_key)
             .await
             .expect("failed to read imported NVOS credentials"),
         Some(imported_credentials)
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_non_primary_with_only_cluster_services_skips_certificate_job(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("Switch4".to_string()), None).await?;
+
+    let mut txn = pool.begin().await?;
+    set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
+
+    transition_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        configure_certificate_start_state(),
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    let mock_switch_manager = Arc::new(MockNvSwitchManager::default());
+
+    let services = SwitchStateHandlerServices {
+        db_pool: pool.clone(),
+        component_manager: Some(mock_component_manager(mock_switch_manager.clone())),
+        credential_manager: env.test_credential_manager.clone(),
+        switch_mtls_services: vec![SwitchService::ScaleUpFabricManager as i32],
+        per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
+            Vec::new(),
+            Duration::from_secs(60),
+        ),
+        redfish_client_pool: env.redfish_sim.clone(),
+        bmc_credential_ops: env.redfish_sim.clone(),
+        bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+            db::credential_rotation::CredentialRotationType::Bmc,
+        ),
+        bmc_rotation_enabled: false,
+    };
+
+    run_switch_controller_with_services(
+        pool.clone(),
+        env.api.work_lock_manager_handle(),
+        services.clone(),
+    )
+    .await;
+
+    let mut conn = pool.acquire().await?;
+
+    let switch = db_switch::find_by_id(&mut conn, &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert!(!switch.is_primary);
+
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::RotateOsPassword,
+        }
+    ));
+
+    drop(conn);
+
+    let mut txn = pool.begin().await?;
+
+    transition_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::Maintenance {
+            operation: model::switch::SwitchMaintenanceOperation::ReconfigureCertificate,
+            request: None,
+            configure_certificate: None,
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    run_switch_controller_with_services(pool.clone(), env.api.work_lock_manager_handle(), services)
+        .await;
+
+    let mut conn = pool.acquire().await?;
+
+    let switch = db_switch::find_by_id(&mut conn, &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert_eq!(switch.controller_state.value, SwitchControllerState::Ready);
+    assert!(mock_switch_manager.certificate_services().is_empty());
 
     Ok(())
 }

@@ -19,17 +19,17 @@ use super::args::{NvlinkInfoArgs, NvlinkInfoPopulateArgs};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-#[allow(deprecated)]
 pub(super) async fn handle_nvlink_info_show(
     args: NvlinkInfoArgs,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     let machine = api_client.get_machine(args.machine_id).await?;
 
+    let status = machine.status.as_ref();
+
     // Check if this is an MNNVL machine (GB200)
-    let is_mnnvl = machine
-        .discovery_info
-        .as_ref()
+    let is_mnnvl = status
+        .and_then(|status| status.discovery_info.as_ref())
         .and_then(|info| info.dmi_data.as_ref())
         .map(|dmi| dmi.product_name.contains("GB200"))
         .unwrap_or(false);
@@ -41,7 +41,7 @@ pub(super) async fn handle_nvlink_info_show(
         )));
     }
 
-    match machine.nvlink_info {
+    match status.and_then(|status| status.nvlink_info.clone()) {
         Some(nvlink_info) => {
             println!("{}", serde_json::to_string_pretty(&nvlink_info)?);
         }

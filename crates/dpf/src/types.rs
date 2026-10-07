@@ -29,6 +29,13 @@ use crate::crds::dpus_generated::{
     DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
 
+/// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
+#[derive(Debug, Clone, Copy)]
+pub struct AstraRoutePrefixes {
+    pub rail_route_prefix_len: u8,
+    pub software_plane_route_prefix_len: u8,
+}
+
 /// Async provider for BMC passwords used to create and refresh the K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
 /// a vault or credential manager). Return
@@ -155,6 +162,8 @@ pub struct InitDpfResourcesConfig {
     /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
     /// DPUs.
     pub(crate) extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
+    pub(crate) enable_delay_host_init: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
 }
@@ -169,6 +178,13 @@ pub struct BlueFieldSoftwareParams {
     /// Optional PLDM firmware bundle URLs for baseline firmware updates
     /// (`spec.pldmFwBundle`).
     pub pldm_fw_bundle: Option<BTreeMap<String, String>>,
+}
+
+impl InitDpfResourcesConfig {
+    /// Returns the platform profile selected for this initialization configuration.
+    pub fn deployment_type(&self) -> DpuDeploymentType {
+        self.deployment_type
+    }
 }
 
 impl Default for InitDpfResourcesConfig {
@@ -188,6 +204,7 @@ impl Default for InitDpfResourcesConfig {
             interfaces: Vec::new(),
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
@@ -676,20 +693,30 @@ impl ServiceDefinition {
 /// Desired definition of a direct, detached DPUService.
 ///
 /// This is deliberately distinct from [`ServiceDefinition`], which produces a
-/// DPUServiceTemplate/DPUServiceConfiguration pair for DPUDeployment. A
-/// detached service has no DPUDeployment, service ID, interfaces, config
-/// ports, or DPU-cluster selector.
+/// DPUServiceTemplate/DPUServiceConfiguration pair for DPUDeployment.
 #[derive(Debug, Clone)]
 pub struct DetachedDpuServiceDefinition {
     pub name: String,
     pub namespace: String,
     pub labels: BTreeMap<String, String>,
     pub helm_chart: DetachedHelmChart,
-    pub deploy_in_cluster: bool,
-    pub security_privileged: bool,
+    pub deploy_in_cluster: Option<bool>,
+    pub security: DetachedDpuServiceSecurity,
     /// Optional DaemonSet settings supplied by the feature using the SDK.
     /// Absence remains absence; the SDK does not impose placement policy.
     pub service_daemon_set: Option<DetachedServiceDaemonSet>,
+    /// Optional stable workload identity projected to the DPUService specification.
+    pub service_id: Option<String>,
+}
+
+/// Security settings for a detached DPUService managed by an SDK caller.
+///
+/// Keeping the fields together preserves the DPF security boundary and makes
+/// presence-gated capabilities explicit at the SDK boundary.
+#[derive(Debug, Clone)]
+pub struct DetachedDpuServiceSecurity {
+    pub privileged: bool,
+    pub spiffe: bool,
 }
 
 /// Caller-configurable fields on a detached DPUService's generated DaemonSet.
@@ -741,13 +768,23 @@ pub struct DpuServiceObservation {
     pub dpu_cluster_selector_present: bool,
     pub interfaces_present: bool,
     pub paused: Option<bool>,
-    pub security_privileged: Option<bool>,
+    pub security: Option<DpuServiceSecurityObservation>,
     pub service_daemon_set: Option<DpuServiceDaemonSetObservation>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
     /// Whether Kubernetes has accepted deletion and the CR is retained only
     /// while finalizers remove its dependent resources.
     pub is_deleting: bool,
+}
+
+/// Security settings observed on a live DPUService.
+///
+/// Optional privilege state preserves malformed or legacy resources, while
+/// the SPIFFE Boolean records whether its presence-gated object exists.
+#[derive(Debug, Clone)]
+pub struct DpuServiceSecurityObservation {
+    pub privileged: Option<bool>,
+    pub spiffe: bool,
 }
 
 /// SDK-owned view of the DaemonSet settings observed on a DPUService.
@@ -1476,6 +1513,12 @@ mod tests {
             run = |()| InitDpfResourcesConfig::default().proxy.is_none();
             "proxy is none" {
                 () => true,
+            }
+        );
+        value_scenarios!(
+            run = |()| InitDpfResourcesConfig::default().enable_delay_host_init;
+            "host initialization delay is disabled" {
+                () => false,
             }
         );
     }

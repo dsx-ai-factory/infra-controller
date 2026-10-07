@@ -24,18 +24,18 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use mat_protocol_gateway::{
-    ExitReason, Gateway, SOURCE_LIST_CHANGED_EXIT_CODE, SourceListCheck, TlsConfig,
+    ExitReason, Gateway, SOURCE_LIST_CHANGED_EXIT_CODE, SourceListCheck, TlsConfig, run,
     watch_source_list,
 };
 use reqwest::header::AUTHORIZATION;
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use ufm_mock::FailureAction;
 
 use crate::common::{
     FakeController, FakeMachineATron, GUID_A, GUID_B, GUID_B2, GUID_C, PORT_A, PORT_B, PORT_B2,
-    PORT_C, QUIET_PERIOD, auth_token, finished, free_loopback_address, gateway_config, probe,
-    serve, source_list_client, spawn_run, ufm_ports, unbound_gateway_config, wait_for_ports,
-    wait_until,
+    PORT_C, QUIET_PERIOD, auth_token, finished, gateway_config, probe, serve, source_list_client,
+    spawn_run, ufm_ports, unbound_gateway_config, wait_for_ports, wait_until,
 };
 
 /// The restart scenario the exit code exists for: the process bound to `{a, b}` exits with code
@@ -47,13 +47,15 @@ async fn run_exits_with_code_3_on_an_added_source_and_the_restart_serves_all_sou
     let mat_b = FakeMachineATron::start("mat-b", &[GUID_B]).await;
     let mat_c = FakeMachineATron::start("mat-c", &[GUID_C]).await;
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 7);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
 
     // First process: bound to {a, b}.
     let shutdown = CancellationToken::new();
-    let first = spawn_run(config.clone(), shutdown.clone());
+    let first = spawn_run(config.clone(), shutdown.clone(), listener);
+
     wait_for_ports(&http, listen, &[(PORT_A, "Active"), (PORT_B, "Active")]).await;
     assert_eq!(probe(&http, listen, "/readyz").await, Some(StatusCode::OK));
 
@@ -79,7 +81,9 @@ async fn run_exits_with_code_3_on_an_added_source_and_the_restart_serves_all_sou
     // replayed as not ready for a moment so the readiness transition is observable.
     controller.ready.store(false, Ordering::SeqCst);
     let shutdown = CancellationToken::new();
-    let second = spawn_run(config, shutdown.clone());
+    let listener = TcpListener::bind(listen).await.unwrap();
+    let second = spawn_run(config, shutdown.clone(), listener);
+
     wait_until("the restarted listener answers /livez", || async {
         probe(&http, listen, "/livez").await == Some(StatusCode::OK)
     })
@@ -112,6 +116,50 @@ async fn run_exits_with_code_3_on_an_added_source_and_the_restart_serves_all_sou
     assert_eq!(reason.exit_code(), 0);
 }
 
+/// The gateway serves the reserved socket even when the configured address is occupied.
+#[tokio::test]
+async fn run_with_listener_keeps_the_reserved_port() {
+    let mat = FakeMachineATron::start("mat-a", &[GUID_A]).await;
+    let controller = FakeController::new(vec![mat.source()], 1);
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = gateway_config(controller.serve().await, occupied.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let http = reqwest::Client::new();
+    let shutdown = CancellationToken::new();
+
+    let bind_error = TcpListener::bind(address).await.unwrap_err();
+
+    assert_eq!(bind_error.kind(), std::io::ErrorKind::AddrInUse);
+
+    let running = spawn_run(config, shutdown.clone(), listener);
+    crate::common::wait_until_ready(&http, address).await;
+    let ports = wait_for_ports(&http, address, &[(PORT_A, "Active")]).await;
+
+    assert_eq!(ports.len(), 1);
+
+    shutdown.cancel();
+
+    assert_eq!(finished(running).await, ExitReason::Shutdown);
+}
+
+/// An occupied configured port fails startup with the binding error.
+#[tokio::test]
+async fn run_reports_an_occupied_listen_address() {
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let controller = FakeController::new(Vec::new(), 1);
+    let config = gateway_config(controller.serve().await, occupied.local_addr().unwrap());
+
+    let error = run(config, &auth_token(), CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+}
+
 /// SIGTERM must always be exit code 0, whether it arrives while the gateway is serving or while
 /// it is still waiting for the controller. Cancelling the shutdown token stops the listener too,
 /// so `run` sees two futures complete on one event; the outcome must not depend on which one
@@ -126,7 +174,9 @@ async fn shutdown_is_exit_code_0_whichever_phase_it_interrupts() {
     for _ in 0..50 {
         let fetched = controller.fetches();
         let shutdown = CancellationToken::new();
-        let running = spawn_run(config.clone(), shutdown.clone());
+        let listener = TcpListener::bind(config.listen_address).await.unwrap();
+        let running = spawn_run(config.clone(), shutdown.clone(), listener);
+
         controller.wait_for_fetches(fetched + 1).await;
         shutdown.cancel();
         assert_eq!(finished(running).await, ExitReason::Shutdown);
@@ -137,7 +187,9 @@ async fn shutdown_is_exit_code_0_whichever_phase_it_interrupts() {
     for _ in 0..50 {
         let fetched = controller.fetches();
         let shutdown = CancellationToken::new();
-        let running = spawn_run(config.clone(), shutdown.clone());
+        let listener = TcpListener::bind(config.listen_address).await.unwrap();
+        let running = spawn_run(config.clone(), shutdown.clone(), listener);
+
         controller.wait_for_fetches(fetched + 1).await;
         shutdown.cancel();
         assert_eq!(finished(running).await, ExitReason::Shutdown);
@@ -154,14 +206,16 @@ async fn run_keeps_serving_across_a_source_epoch_change_and_follows_its_new_inve
     let mat_a = FakeMachineATron::start("mat-a", &[GUID_A]).await;
     let mat_b = FakeMachineATron::start("mat-b", &[GUID_B]).await;
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 3);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let mut config = gateway_config(controller.serve().await, listen);
     config.ufm.inventory.failure_grace_period = Duration::from_millis(150);
     config.validate().unwrap();
     let http = reqwest::Client::new();
 
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_for_ports(&http, listen, &[(PORT_A, "Active"), (PORT_B, "Active")]).await;
 
     // mat-b's pod restarts: new epoch_id, generation back at 1, a different port GUID. The
@@ -210,7 +264,8 @@ async fn run_serves_over_tls_and_restarts_on_the_same_tls_port() {
     let mat_a = FakeMachineATron::start("mat-a", &[GUID_A]).await;
     let mat_b = FakeMachineATron::start("mat-b", &[GUID_B]).await;
     let controller = FakeController::new(vec![mat_a.source()], 1);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let mut config = gateway_config(controller.serve().await, listen);
     config.tls = Some(TlsConfig {
         cert_path,
@@ -260,7 +315,8 @@ async fn run_serves_over_tls_and_restarts_on_the_same_tls_port() {
     };
 
     let shutdown = CancellationToken::new();
-    let first = spawn_run(config.clone(), shutdown.clone());
+    let first = spawn_run(config.clone(), shutdown.clone(), listener);
+
     wait_until("the TLS listener answers /livez", || async {
         probe_tls("/livez").await == Some(StatusCode::OK)
     })
@@ -290,7 +346,9 @@ async fn run_serves_over_tls_and_restarts_on_the_same_tls_port() {
     assert_eq!(probe_tls("/livez").await, None, "the port is released");
 
     let shutdown = CancellationToken::new();
-    let second = spawn_run(config, shutdown.clone());
+    let listener = TcpListener::bind(listen).await.unwrap();
+    let second = spawn_run(config, shutdown.clone(), listener);
+
     wait_until("the restarted TLS listener is ready", || async {
         probe_tls("/readyz").await == Some(StatusCode::OK)
     })

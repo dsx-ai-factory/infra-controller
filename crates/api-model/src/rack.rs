@@ -19,7 +19,7 @@ use std::fmt::Display;
 
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -66,6 +66,8 @@ pub const LABEL_LOCATION_POSITION: &str = "location.position";
 pub struct Rack {
     pub id: RackId,
     pub rack_profile_id: Option<RackProfileId>,
+    /// External group identity copied from the expected rack at discovery.
+    pub rack_group_id: Option<RackGroupId>,
     pub config: RackConfig,
     pub controller_state: Versioned<RackState>,
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
@@ -333,6 +335,7 @@ pub enum SwitchNvosUpdateState {
 #[derive(Clone, Debug, Default)]
 pub struct RackSearchFilter {
     pub label: Option<crate::metadata::LabelFilter>,
+    pub deleted: crate::DeletedFilter,
 }
 
 pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_report::HealthReport {
@@ -376,6 +379,7 @@ impl<'r> FromRow<'r, PgRow> for Rack {
         Ok(Rack {
             id: row.try_get("id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             config: config.0,
             controller_state: Versioned {
                 value: controller_state.0,
@@ -538,15 +542,17 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` rotates every rack switch's NVUE certificate before submitting the
-/// asynchronous RMS ScaleUpFabricManager workflow.
-/// `WaitForSwitchCertificateJob` polls the certificate batch, and
-/// `WaitForScaleUpFabricManagerJob` polls the fabric-manager job.
+/// `Start` rotates switch-local certificates before submitting the asynchronous
+/// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
+/// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
+/// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
+/// controller restarts.
 ///
-/// The remaining variants name sub-states of a workflow this version does not
-/// run. A `controller_state` row can still hold one, so they are decoded to
-/// keep that row from failing the batch queries that load every rack.
-/// Maintenance cannot resume from them.
+/// `ConfigureCertificates`, `DisableScaleUpFabricState`,
+/// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
+/// a workflow this version does not run. A `controller_state` row can still
+/// hold one, so they are decoded to keep that row from failing the batch queries
+/// that load every rack. Maintenance cannot resume from them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
@@ -559,6 +565,12 @@ pub enum ConfigureNmxClusterState {
 
     WaitForScaleUpFabricManagerJob {
         /// RMS job identifier returned by submission.
+        job_id: String,
+    },
+
+    /// Waits for the configured primary nmx-telemetry binding to complete.
+    WaitForPrimarySwitchCertificateJob {
+        /// Parent RMS job identifier returned by certificate configuration.
         job_id: String,
     },
 
@@ -585,6 +597,9 @@ impl Display for ConfigureNmxClusterState {
             }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
+            }
+            ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
+                write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
             }
             ConfigureNmxClusterState::ConfigureCertificates {} => {
                 write!(f, "ConfigureCertificates")
@@ -1266,6 +1281,7 @@ mod tests {
         Rack {
             id: RackId::default(),
             rack_profile_id: None,
+            rack_group_id: None,
             config: RackConfig {
                 maintenance_requested,
                 ..Default::default()

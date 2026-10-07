@@ -56,6 +56,13 @@ spec:
           ports:
             - containerPort: {{ .Values.service.port }}
               name: https
+          {{- with .Values.extraEnv }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
           volumeMounts:
             - name: tls-certs
               mountPath: /etc/tls

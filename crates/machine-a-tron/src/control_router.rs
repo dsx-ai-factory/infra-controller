@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -28,18 +28,26 @@ use bmc_mock::{HardwareType, MockPowerState, RackPlacement, ResourceResetType, T
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
 use mac_address::MacAddress;
+use nmxc_mock::{NmxcInventory, SimComputeNode, SimDomain, SimGpu, SimSwitch};
 use rms_mock::{PowerOperation, RmsInventory, SimNode, SimNodeKind, SimPowerState};
 use tower::Service;
 use ufm_mock::{
     EpochId, Generation, InventoryId, InventoryMachine as UfmInventoryMachine, InventoryPort,
     InventoryProvider, InventorySnapshot, MachineId, MatId,
 };
+use uuid::Uuid;
 
 use crate::device_handle::DeviceHandle;
-use crate::device_simulator::SimulatorLifecycle;
+use crate::device_simulator::{DeviceSimulator, SimulatorLifecycle};
+use crate::discovery_info;
 use crate::expected_inventory::ExpectedInventorySummary;
+use crate::rack::RackInstance;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig, DevicesStatusResponse};
+
+/// NVLink switch chips per simulated switch tray, matching the two NVSwitch
+/// components the tray's Redfish chassis lists.
+const NVSWITCHES_PER_TRAY: u32 = 2;
 
 pub fn append(router: Option<Router>, control_state: ControlState) -> Router {
     Router::new()
@@ -72,6 +80,7 @@ pub struct ControlState {
     status_config: DeviceStatusConfig,
     inventory_version: Arc<Mutex<InventoryVersion>>,
     rms_snapshot: Arc<Mutex<RmsSnapshot>>,
+    nmxc_snapshot: Arc<Mutex<NmxcSnapshot>>,
     expected_inventory: Arc<ExpectedInventorySummary>,
 }
 
@@ -100,6 +109,20 @@ struct RmsSnapshot {
     nodes: Arc<[SimNode]>,
 }
 
+/// The racks as last reported to the NMX-C mock, and the fingerprint they
+/// were built from.
+///
+/// Same idea as `RmsSnapshot`. Everything in a domain is fixed when its
+/// devices are built except the switches' DHCP-assigned NVOS addresses, so
+/// those are the whole fingerprint; the RMS fingerprint is not reused because
+/// it also changes on BMC addresses, which no domain carries.
+#[derive(Debug, Default)]
+struct NmxcSnapshot {
+    /// The NVOS address per device, in registry order.
+    nvos_ips: Vec<Option<Ipv4Addr>>,
+    domains: Arc<[SimDomain]>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InventoryMachine {
     mat_id: MatId,
@@ -116,6 +139,8 @@ impl ControlState {
             .ok_or_else(|| eyre::eyre!("no simulated device has BMC MAC {bmc_mac}"))
     }
 
+    /// Builds the control state over `simulators`, collecting each device's initial
+    /// status.
     pub fn new(
         simulators: SimulatorRegistry,
         status_config: DeviceStatusConfig,
@@ -134,6 +159,7 @@ impl ControlState {
                 snapshot: Self::inventory_snapshot(&devices),
             })),
             rms_snapshot: Arc::default(),
+            nmxc_snapshot: Arc::default(),
             expected_inventory: Arc::default(),
         }
     }
@@ -342,6 +368,123 @@ impl ControlState {
     }
 }
 
+/// Report simulated racks to the hosted NMX-C mock, one NVLink domain each.
+///
+/// A domain's GPUs come from the same generator that builds the rack's
+/// machines' discovery reports, so the fabric GUIDs NMX-C lists are the ones
+/// NICo already holds for those machines and its partition monitor can join
+/// the two. Racks without NVLink GPUs have no controller and are not
+/// reported.
+///
+/// The snapshot is rebuilt only when a switch's NVOS address has changed
+/// since the last request (see `NmxcSnapshot`); nothing else in it can
+/// change, so a cached snapshot is never stale.
+impl NmxcInventory for ControlState {
+    /// One NVLink domain per simulated rack, rebuilt only when a switch NVOS lease
+    /// changed since the last snapshot.
+    fn domains(&self) -> Arc<[SimDomain]> {
+        let mut cached = self
+            .nmxc_snapshot
+            .lock()
+            .expect("NMX-C snapshot lock poisoned");
+        let nvos_ips: Vec<Option<Ipv4Addr>> = self
+            .simulators
+            .devices()
+            .iter()
+            .map(|simulator| simulator.handle().host_ip())
+            .collect();
+        if cached.nvos_ips != nvos_ips {
+            cached.domains = self
+                .simulators
+                .racks()
+                .filter_map(|(rack, members)| Self::sim_domain(rack, &members))
+                .collect();
+            cached.nvos_ips = nvos_ips;
+        }
+        Arc::clone(&cached.domains)
+    }
+}
+
+impl ControlState {
+    /// The NMX-C view of one rack, or `None` for a rack with no NVLink GPUs.
+    fn sim_domain(rack: &RackInstance, members: &[&DeviceSimulator]) -> Option<SimDomain> {
+        let mut nvos_ips = Vec::new();
+        let mut switches = Vec::new();
+        let mut compute_nodes = Vec::new();
+        for simulator in members {
+            let handle = simulator.handle();
+            let info = handle.host_info();
+            match handle.kind() {
+                DeviceKind::Switch => {
+                    nvos_ips.extend(handle.host_ip().map(IpAddr::V4));
+                    let (slot_number, tray_index) =
+                        match info.rack_placement.and_then(RackPlacement::tray) {
+                            Some(TrayPlacement::Switch {
+                                tray_index,
+                                slot_number,
+                            }) => (slot_number, u32::from(tray_index)),
+                            _ => (0, 0),
+                        };
+                    switches.push(SimSwitch {
+                        chassis_serial: info
+                            .switch_serial_number
+                            .clone()
+                            .unwrap_or_else(|| info.serial.clone()),
+                        slot_number,
+                        tray_index,
+                        num_switches: NVSWITCHES_PER_TRAY,
+                    });
+                }
+                DeviceKind::Machine => {
+                    let gpus = discovery_info::nvlink_gpus(info);
+                    let Some(platform) = gpus.first().and_then(|gpu| gpu.platform_info.as_ref())
+                    else {
+                        continue;
+                    };
+                    compute_nodes.push(SimComputeNode {
+                        chassis_serial: platform.chassis_serial.clone(),
+                        slot_number: platform.slot_number,
+                        tray_index: platform.tray_index,
+                        host_id: platform.host_id,
+                        gpus: gpus
+                            .iter()
+                            .filter_map(|gpu| gpu.platform_info.as_ref())
+                            .filter_map(|platform| {
+                                Some(SimGpu {
+                                    uid: parse_fabric_guid(&platform.fabric_guid)?,
+                                    module_id: platform.module_id,
+                                })
+                            })
+                            .collect(),
+                    });
+                }
+                DeviceKind::Dpu | DeviceKind::PowerShelf => {}
+            }
+        }
+        if compute_nodes.is_empty() {
+            return None;
+        }
+        Some(SimDomain {
+            key: rack.rack_id.to_string(),
+            // Deterministic per rack, so the domain survives a machine-a-tron
+            // restart the way a real controller's identity does.
+            domain_uuid: Uuid::new_v5(&Uuid::NAMESPACE_OID, rack.rack_id.as_str().as_bytes()),
+            nvos_ips,
+            switches,
+            compute_nodes,
+        })
+    }
+}
+
+/// The GUID `discovery_info` formats, parsed the way NICo parses it: `0x` hex
+/// or decimal.
+fn parse_fabric_guid(fabric_guid: &str) -> Option<u64> {
+    match fabric_guid.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => fabric_guid.parse().ok(),
+    }
+}
+
 // This adapter connects machine-a-tron's live control state to the hosted UFM mock. It lets the
 // mock consume the same in-process inventory when `include_local_inventory` is enabled, without
 // polling machine-a-tron over HTTP.
@@ -497,21 +640,86 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
-    use bmc_mock::{HardwareType, RackInfo, RackType};
+    use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
+    use bmc_mock::{HardwareType, HostMachineInfo, RackInfo, RackType};
     use carbide_uuid::rack::{RackId, RackProfileId};
     use mac_address::MacAddress;
+    use nmxc_mock::NmxcInventory;
     use rms_mock::{PowerOperation, RmsInventory, SimPowerState};
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use super::{ControlState, append};
-    use crate::DeviceHandle;
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
     use crate::expected_inventory::ExpectedInventorySummary;
     use crate::rack::{RackMemberRegistration, RackRegistration};
     use crate::simulator_registry::SimulatorRegistry;
     use crate::status::DeviceStatusConfig;
+    use crate::{DeviceHandle, discovery_info};
+
+    const GB200_RACK: RackInfo = RackInfo {
+        rack_type: RackType::WiwynnGb200Nvl72,
+    };
+
+    /// Static hardware for a rack member at `position`, distinguished from
+    /// other members by the last byte of its BMC MAC.
+    fn rack_member_info(hw_type: HardwareType, position: u8, mac_suffix: u8) -> HostMachineInfo {
+        let mac = MacAddress::new([2, 0, 0, 0, 0, mac_suffix]);
+        let is_switch = matches!(hw_type, HardwareType::NvidiaSwitchNd5200Ld);
+        HostMachineInfo {
+            hw_type,
+            rack_placement: Some(GB200_RACK.placement(position)),
+            bmc_mac_address: mac,
+            serial: format!("serial-{mac_suffix}"),
+            dpus: Vec::new(),
+            non_dpu_mac_address: None,
+            nvos_mac_addresses: Vec::new(),
+            switch_serial_number: is_switch.then(|| format!("MT{mac_suffix}")),
+            hw_mac_addr_pool: MacAddressPoolConfig::new(mac, 24).unwrap(),
+            delta_psu_power: None,
+            initial_host_firmware: None,
+            desired_host_firmware: None,
+        }
+    }
+
+    /// A GB200 rack with one compute tray at position 11 and one switch tray
+    /// at position 19.
+    fn gb200_rack_registration(
+        rack_id: &str,
+        tray_section: &str,
+        switch_section: &str,
+    ) -> RackRegistration {
+        partial_rack_registration(
+            rack_id,
+            vec![
+                RackMemberRegistration {
+                    placement: GB200_RACK.placement(11),
+                    hardware_type: HardwareType::WiwynnGB200Nvl,
+                    machine_config_section: tray_section.to_string(),
+                },
+                RackMemberRegistration {
+                    placement: GB200_RACK.placement(19),
+                    hardware_type: HardwareType::NvidiaSwitchNd5200Ld,
+                    machine_config_section: switch_section.to_string(),
+                },
+            ],
+        )
+    }
+
+    /// A GB200 rack registration holding only the listed members.
+    fn partial_rack_registration(
+        rack_id: &str,
+        members: Vec<RackMemberRegistration>,
+    ) -> RackRegistration {
+        RackRegistration {
+            rack_id: RackId::new(rack_id),
+            rack_profile_id: RackProfileId::new("test-profile"),
+            rack_type: RackType::WiwynnGb200Nvl72,
+            version: 1,
+            members,
+        }
+    }
 
     fn control_state(handles: Vec<DeviceHandle>) -> ControlState {
         ControlState::new(
@@ -525,13 +733,12 @@ mod tests {
         rack_control_state_for(vec![handle], vec![rack_registration("rack-001", "test")])
     }
 
+    /// A one-tray GB200 rack registration for `rack_id` whose tray is configured by
+    /// `machine_config_section`.
     fn rack_registration(rack_id: &str, machine_config_section: &str) -> RackRegistration {
-        RackRegistration {
-            rack_id: RackId::new(rack_id),
-            rack_profile_id: RackProfileId::new("test-profile"),
-            rack_type: RackType::WiwynnGb200Nvl72,
-            version: 1,
-            members: vec![RackMemberRegistration {
+        partial_rack_registration(
+            rack_id,
+            vec![RackMemberRegistration {
                 placement: RackInfo {
                     rack_type: RackType::WiwynnGb200Nvl72,
                 }
@@ -539,7 +746,7 @@ mod tests {
                 hardware_type: HardwareType::WiwynnGB200Nvl,
                 machine_config_section: machine_config_section.to_string(),
             }],
-        }
+        )
     }
 
     fn rack_control_state_for(
@@ -609,6 +816,86 @@ mod tests {
         assert!(!Arc::ptr_eq(&second, &third));
         assert_eq!(third[0].bmc_ip, Some(IpAddr::from([10, 0, 0, 7])));
         assert!(Arc::ptr_eq(&third, &state.nodes()));
+    }
+
+    /// Domains carry the GPUs, compute nodes and switch NVOS addresses that the
+    /// rack's devices report through discovery.
+    #[test]
+    fn nmxc_inventory_reports_one_domain_per_rack_from_discovery() {
+        let tray_info = rack_member_info(HardwareType::WiwynnGB200Nvl, 11, 0x11);
+        let tray = DeviceHandle::for_control_test_host(tray_info.clone(), "tray-11");
+        let switch = DeviceHandle::for_control_test_switch(
+            rack_member_info(HardwareType::NvidiaSwitchNd5200Ld, 19, 0x19),
+            "switch-19",
+            Some(Ipv4Addr::new(10, 0, 0, 5)),
+        );
+        let state = rack_control_state_for(
+            vec![tray, switch.clone()],
+            vec![gb200_rack_registration("rack-001", "tray-11", "switch-19")],
+        );
+
+        let domains = state.domains();
+        let [domain] = &domains[..] else {
+            panic!("one rack is one domain: {domains:?}");
+        };
+        assert_eq!(domain.key, "rack-001");
+        assert_eq!(
+            domain.domain_uuid,
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"rack-001")
+        );
+        assert_eq!(domain.nvos_ips, [IpAddr::from([10, 0, 0, 5])]);
+
+        let [switch_tray] = &domain.switches[..] else {
+            panic!("one switch tray: {:?}", domain.switches);
+        };
+        assert_eq!(switch_tray.chassis_serial, "MT25");
+        assert_eq!((switch_tray.slot_number, switch_tray.tray_index), (19, 0));
+        assert_eq!(switch_tray.num_switches, 2);
+
+        let [compute] = &domain.compute_nodes[..] else {
+            panic!("one compute tray: {:?}", domain.compute_nodes);
+        };
+        let discovered: Vec<(u64, u32)> = discovery_info::nvlink_gpus(&tray_info)
+            .iter()
+            .map(|gpu| gpu.platform_info.as_ref().unwrap())
+            .map(|platform| {
+                (
+                    u64::from_str_radix(platform.fabric_guid.trim_start_matches("0x"), 16).unwrap(),
+                    platform.module_id,
+                )
+            })
+            .collect();
+        let served: Vec<(u64, u32)> = compute
+            .gpus
+            .iter()
+            .map(|gpu| (gpu.uid, gpu.module_id))
+            .collect();
+        assert_eq!(
+            served, discovered,
+            "NMX-C serves the GPUs discovery reports"
+        );
+        assert_eq!(served.len(), 4);
+        assert_eq!(compute.chassis_serial, "serial-17");
+        assert_eq!(
+            (compute.slot_number, compute.tray_index),
+            (10, 0),
+            "placement comes from the rack elevation, not the platform fallback"
+        );
+
+        assert!(Arc::ptr_eq(&domains, &state.domains()));
+        switch.set_control_test_nvos_ip(Some(Ipv4Addr::new(10, 0, 0, 6)));
+        let rebuilt = state.domains();
+        assert!(!Arc::ptr_eq(&domains, &rebuilt));
+        assert_eq!(rebuilt[0].nvos_ips, [IpAddr::from([10, 0, 0, 6])]);
+    }
+
+    /// A rack whose trays report no NVLink GPUs yields no domain.
+    #[test]
+    fn nmxc_inventory_skips_racks_without_nvlink_gpus() {
+        let handle = DeviceHandle::for_control_test(Vec::new(), None);
+        let state = rack_control_state(handle);
+
+        assert!(state.domains().is_empty());
     }
 
     /// RMS power reads the BMC's own state and is refused by the BMC's own

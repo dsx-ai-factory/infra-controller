@@ -63,8 +63,8 @@ pub async fn handle_maintenance(
         SwitchMaintenanceOperation::PowerOn => {
             handle_power_on(switch_id, state, request, ctx).await
         }
-        SwitchMaintenanceOperation::PowerOff => {
-            handle_power_off(switch_id, state, request, ctx).await
+        SwitchMaintenanceOperation::PowerOff { graceful } => {
+            handle_power_off(switch_id, state, request, ctx, *graceful).await
         }
         SwitchMaintenanceOperation::Reset => handle_reset(switch_id, state, request, ctx).await,
         SwitchMaintenanceOperation::ReconfigureCertificate => {
@@ -106,14 +106,20 @@ async fn handle_power_off(
     state: &Switch,
     request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!(switch_id = %switch_id, "Switch maintenance: PowerOff");
+    let action = if graceful {
+        PowerAction::GracefulShutdown
+    } else {
+        PowerAction::ForceOff
+    };
+    tracing::info!(switch_id = %switch_id, graceful, "Switch maintenance: PowerOff");
     invoke_power_operation(
         switch_id,
         state,
         request,
         ctx,
-        PowerAction::ForceOff,
+        action,
         "PowerOff",
         SwitchControllerState::Ready,
     )

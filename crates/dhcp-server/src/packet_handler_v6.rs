@@ -22,6 +22,7 @@
 //! `carbide-dhcpv6` decoder therefore uses a deliberately small raw-TLV parser,
 //! while this server uses dhcproto's typed API for response options.
 
+use std::borrow::Cow;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
@@ -30,14 +31,15 @@ use carbide_dhcpv6::{
     RelayEnvelope, decode as decode_wire_packet, extract_mac_from_duid, extract_mac_from_option79,
 };
 use dhcproto::v6::{
-    DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, NtpSuboption, OptionCode, Status,
-    StatusCode, UnknownOption,
+    Architecture, DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, NtpSuboption,
+    OptionCode, Status, StatusCode, UnknownOption, VendorClass,
 };
 use dhcproto::{Encodable, Encoder};
 use ipnetwork::Ipv6Network;
 use lru::LruCache;
 use rpc::forge::{AddressFamily, DhcpDiscovery, MessageKind};
 use tokio::sync::Mutex;
+use tonic::transport::Uri;
 
 use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
@@ -71,6 +73,49 @@ impl PacketV6 {
 }
 
 impl DecodedPacketV6 {
+    fn http_vendor_class(&self) -> Option<&VendorClass> {
+        self.message
+            .opts()
+            .get_all(OptionCode::VendorClass)?
+            .iter()
+            .find_map(|option| match option {
+                DhcpOption::VendorClass(vendor)
+                    if vendor.data.iter().any(|class| {
+                        class == b"HTTPClient" || class.starts_with(b"HTTPClient:")
+                    }) =>
+                {
+                    Some(vendor)
+                }
+                _ => None,
+            })
+    }
+
+    /// Select the first supported HTTP boot architecture in the client's preference order.
+    fn default_http_boot_url(
+        &self,
+        provisioning_address: Ipv6Addr,
+    ) -> Option<(String, Architecture)> {
+        self.http_vendor_class()?;
+        let DhcpOption::ClientArchType(architectures) =
+            self.message.opts().get(OptionCode::ClientArchType)?
+        else {
+            return None;
+        };
+        architectures.iter().copied().find_map(|architecture| {
+            let directory = match architecture {
+                Architecture::X64_Http => "x86_64",
+                Architecture::Arm64_Http => "aarch64",
+                _ => return None,
+            };
+            Some((
+                format!(
+                    "http://[{provisioning_address}]:8080/public/blobs/internal/{directory}/ipxe.efi"
+                ),
+                architecture,
+            ))
+        })
+    }
+
     /// Decode a direct client message or one supported Relay-Forward envelope.
     fn decode(packet: &[u8]) -> Result<Self, DhcpError> {
         let WirePacket { message, relay } = decode_wire_packet(packet).map_err(map_wire_error)?;
@@ -468,6 +513,14 @@ fn ensure_server_identifier(message: &Message, config: &Config) -> Result<(), Dh
     Ok(())
 }
 
+fn boot_url_has_ipv6_host(boot_url: &Uri) -> bool {
+    boot_url
+        .host()
+        .and_then(|host| host.strip_prefix('['))
+        .and_then(|host| host.strip_suffix(']'))
+        .is_some_and(|host| host.parse::<Ipv6Addr>().is_ok())
+}
+
 /// Encode a mode-backed address or options response.
 fn encode_mode_reply(
     request: &DecodedPacketV6,
@@ -482,6 +535,59 @@ fn encode_mode_reply(
         Some(DhcpOption::Unknown(option)) => option.data().first().copied(),
         _ => None,
     };
+
+    let booturl = match &outcome {
+        V6Outcome::Stateful(record) | V6Outcome::OptionsOnly(record) => record
+            .booturl
+            .as_deref()
+            .map(|url| (Cow::Borrowed(url), None))
+            .or_else(|| {
+                request
+                    .default_http_boot_url(config.dhcp_config.carbide_provisioning_server_ipv6?)
+                    .map(|(url, architecture)| (Cow::Owned(url), Some(architecture)))
+            }),
+        V6Outcome::NoAddress => None,
+    };
+    if let Some((booturl, architecture)) = booturl
+        && !booturl.is_empty()
+        && let Some(DhcpOption::ORO(requested)) = request.message.opts().get(OptionCode::ORO)
+        && requested.opts.contains(&OptionCode::OptBootfileUrl)
+    {
+        reply
+            .opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::OptBootfileUrl,
+                booturl.as_bytes().to_vec(),
+            )));
+        if let Some(architecture) = architecture {
+            // RFC 5970 returns the architecture of the selected boot image.
+            reply
+                .opts_mut()
+                .insert(DhcpOption::ClientArchType(vec![architecture]));
+        }
+
+        // EDK2 rejects HTTP offers without an IPv6 literal or DNS before
+        // trying a firmware-configured URI. Leave those offers unmarked.
+        if requested.opts.contains(&OptionCode::VendorClass)
+            && let Ok(boot_uri) = booturl.parse::<Uri>()
+            && matches!(boot_uri.scheme_str(), Some("http" | "https"))
+            && (!config.dhcp_config.carbide_nameservers_v6.is_empty()
+                || boot_url_has_ipv6_host(&boot_uri))
+            && let Some(vendor) = request.http_vendor_class()
+        {
+            // UEFI clients need this marker to recognize an HTTP boot offer.
+            // Use the raw option: dhcproto 0.15 miscalculates the typed VendorClass length.
+            let mut data = vendor.num.to_be_bytes().to_vec();
+            data.extend_from_slice(&10u16.to_be_bytes());
+            data.extend_from_slice(b"HTTPClient");
+            reply
+                .opts_mut()
+                .insert(DhcpOption::Unknown(UnknownOption::new(
+                    OptionCode::VendorClass,
+                    data,
+                )));
+        }
+    }
 
     match outcome {
         V6Outcome::Stateful(record) => {
@@ -613,6 +719,13 @@ fn base_reply(request: &DecodedPacketV6, message_type: MessageType, config: &Con
     reply
         .opts_mut()
         .insert(DhcpOption::ServerId(server_identifier(config)));
+    // Preference participates in server selection and therefore belongs only
+    // in ADVERTISE, not the eventual REPLY.
+    if message_type == MessageType::Advertise
+        && let Some(preference) = config.dhcp_config.dhcpv6_server_preference
+    {
+        reply.opts_mut().insert(DhcpOption::Preference(preference));
+    }
     reply
 }
 
@@ -912,6 +1025,50 @@ mod tests {
                 Row { message_type: MessageType::Request, server_ids: ServerIds::DuplicateSame } => false,
                 // Conflicting duplicate identifiers must not depend on option ordering.
                 Row { message_type: MessageType::Request, server_ids: ServerIds::DuplicateMixed } => false,
+            }
+        );
+    }
+
+    /// Verifies Preference is presence-bearing and ADVERTISE-only because a
+    /// REPLY must not repeat the server-selection signal.
+    #[test]
+    fn preference_is_emitted_only_in_advertise() {
+        value_scenarios!(run = |(message_type, preference): (MessageType, Option<u8>)| {
+                let request = DecodedPacketV6 {
+                    message: Message::new_with_id(MessageType::Solicit, [0, 0, 0]),
+                    relay: None,
+                    duid: vec![0, 3, 0, 1, 2, 3, 4, 5, 6, 7],
+                    duid_mac: DuidMac::NoLinkLayerMac,
+                };
+                let config = Config::new(
+                    DhcpConfig {
+                        dhcpv6_server_preference: preference,
+                        ..Default::default()
+                    },
+                    None,
+                    67,
+                    ForgeClientConfig::new(String::new(), None),
+                );
+
+                match base_reply(&request, message_type, &config)
+                    .opts()
+                    .get(OptionCode::Preference)
+                {
+                    Some(DhcpOption::Preference(value)) => Some(*value),
+                    _ => None,
+                }
+            };
+            "ADVERTISE configuration" {
+                // Legacy omission leaves the protocol fallback implicit.
+                (MessageType::Advertise, None) => None,
+                // Explicit zero must remain present despite matching the fallback value.
+                (MessageType::Advertise, Some(0)) => Some(0),
+                // The protocol maximum remains a valid explicit preference.
+                (MessageType::Advertise, Some(255)) => Some(255),
+            }
+            "REPLY configuration" {
+                // Preference selects among ADVERTISE messages and never belongs in REPLY.
+                (MessageType::Reply, Some(255)) => None,
             }
         );
     }

@@ -474,13 +474,28 @@ if [[ -n "${KUBECONFIG:-}" && ! -f "${KUBECONFIG}" ]]; then
     ERRORS+=("KUBECONFIG='${KUBECONFIG}' does not exist — check the path to your cluster kubeconfig")
 fi
 
+# A phase that installs from a pinned helm-prereqs/<name> submodule needs git
+# and a record of the pinned commit: the gitlink in a git checkout of this
+# repository, or the helm-prereqs/<name>.pin file shipped with the packaged
+# chart (setup.sh clones that commit). A source tarball has neither, so fail
+# here rather than in setup.sh after earlier phases have already changed the
+# cluster.
+#   $1 phase label   $2 submodule name   $3 local-source override   $4 skip flag
+_check_pinned_submodule() {
+    local _phase="$1" _name="$2" _override="$3" _skip="$4"
+    if ! command -v git &>/dev/null; then
+        ERRORS+=("${_phase} requires 'git' to fetch the pinned ${_name} source - install it, set ${_override}, or pass ${_skip}")
+    elif ! git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | grep -q '^160000 ' && \
+         ! grep -qE '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null; then
+        ERRORS+=("${_phase} requires the pinned helm-prereqs/${_name} commit: a git checkout of this repository recording the submodule, or the helm-prereqs/${_name}.pin file from the packaged chart (a source tarball has neither) - run from a git clone or the packaged chart, set ${_override}, or pass ${_skip}")
+    fi
+}
+
 # RMS requirements. RMS installs by default; these apply unless --skip-rms
 # (NICO_SKIP_RMS=true / NICO_INSTALL_RMS=false), which clears INSTALL_RMS.
 if [[ "${INSTALL_RMS:-true}" == "true" ]]; then
-    if [[ -z "${NICO_RMS_CHART:-}" ]]; then
-        command -v git &>/dev/null || \
-            ERRORS+=("RMS requires 'git' to initialize the nv-rms submodule - install it, or set NICO_RMS_CHART to a local chart path")
-    fi
+    [[ -n "${NICO_RMS_CHART:-}" ]] || \
+        _check_pinned_submodule RMS nv-rms 'NICO_RMS_CHART=<clone>/helm' --skip-rms
     [[ -z "${NICO_RMS_IMAGE_TAG:-}" ]] && \
         ERRORS+=("NICO_RMS_IMAGE_TAG is not set    (RMS API server image tag; the rack-manager chart fails at render without one — required unless --skip-rms)")
     # The default rms-api image is entitlement-gated on NGC; without a key the
@@ -501,8 +516,11 @@ fi
 # DPF requirements. DPF installs by default; these apply unless --skip-dpf
 # (NICO_SKIP_DPF=true / NICO_INSTALL_DPF=false), which clears INSTALL_DPF.
 if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
-    command -v git &>/dev/null || \
-        ERRORS+=("DPF requires 'git' to clone doca-platform — install it, or pass --skip-dpf")
+    [[ -n "${NICO_DPF_SRC:-}" ]] || \
+        _check_pinned_submodule DPF doca-platform 'NICO_DPF_SRC=<clone>' --skip-dpf
+    if [[ -n "${NICO_DPF_SRC:-}" && ! -d "${NICO_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
+        ERRORS+=("NICO_DPF_SRC='${NICO_DPF_SRC}' has no deploy/charts/dpf-operator - point it at a NVIDIA/doca-platform checkout")
+    fi
     command -v envsubst &>/dev/null || \
         ERRORS+=("DPF requires 'envsubst' (gettext) to render DPF manifests — install it, or pass --skip-dpf")
     [[ -z "${NICO_DPF_DPU_INTERFACE:-}" ]] && \

@@ -18,6 +18,11 @@ rootCaFile: forge_root.pem
 prometheusPort: 9999
 # Opt in to unauthenticated metrics on all DPU host interfaces for remote Service scraping.
 prometheusRemoteAccess: false
+# containerd socket on the DPU host, bind-mounted only into the
+# punt-stats-helper sidecar (see puntStatsHelper below) so it can crictl exec
+# into doca-hbn to read punt stats. The general-purpose otelcol-contrib
+# container never gets this socket.
+containerdSocket: /run/containerd/containerd.sock
 # Host:port for prometheus scrape targets (see otel_config.yaml). DPF sets these via nico-api.
 nico_dpu_agent: ""
 nico_fmds: ""
@@ -53,6 +58,27 @@ transceiverExporter:
   # Must match the prometheus/transceiver scrape target (localhost:9300) in otel_config.yaml.
   port: 9300
   resources: {}
+# punt-stats-helper sidecar: the only container with containerd-socket
+# access. It crictl-execs into the named container on an interval and writes
+# the punt stats file to a shared emptyDir, which the punt_stats receiver in
+# otel_config.yaml reads directly (container_name: ""). This keeps CRI exec
+# access out of the general-purpose otelcol-contrib container.
+puntStatsHelper:
+  containerName: doca-hbn
+  srcPath: /cumulus/nl2docad/run/stats/punt
+  # Shared path both containers mount. The chart also renders it into
+  # punt_stats.file_path in otel_config.yaml. It must stay under the
+  # /var/run/punt-stats emptyDir mount.
+  dstPath: /var/run/punt-stats/punt
+  intervalSeconds: 60
+  resources: {}
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
 imagePullSecrets: []
 podSecurityContext: {}
 securityContext:
