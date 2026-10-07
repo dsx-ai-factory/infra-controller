@@ -24,7 +24,9 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	echo "github.com/labstack/echo/v4"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 )
@@ -117,21 +119,102 @@ func Test_InitMetricsServer(t *testing.T) {
 		cfg *config.Config
 	}
 	tests := []struct {
-		name string
-		args args
+		name  string
+		args  args
+		hosts []string
 	}{
 		{
-			name: "test initMetricsServer success",
+			name: "bounds caller-controlled Host labels",
 			args: args{
 				e:   echo.New(),
 				cfg: common.GetTestConfig(),
+			},
+			hosts: []string{
+				"nico-probe-a.invalid",
+				"nico-probe-b.invalid",
+				"nico-probe-a.invalid",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			registry := useIsolatedPrometheusRegistry(t)
+
+			tt.args.e.GET("/v2/probe", func(c echo.Context) error {
+				return c.NoContent(http.StatusUnauthorized)
+			})
 			InitMetricsServer(tt.args.e, tt.args.cfg)
+
+			for _, host := range tt.hosts {
+				req := httptest.NewRequest(http.MethodGet, "/v2/probe", nil)
+				req.Host = host
+				rec := httptest.NewRecorder()
+				tt.args.e.ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			}
+
+			assertBoundedMetricsHostLabels(t, registry, tt.args.cfg.GetAPIName())
 		})
+	}
+}
+
+func useIsolatedPrometheusRegistry(t *testing.T) *prometheus.Registry {
+	t.Helper()
+
+	registry := prometheus.NewRegistry()
+	previousRegisterer := prometheus.DefaultRegisterer
+	previousGatherer := prometheus.DefaultGatherer
+	prometheus.DefaultRegisterer = registry
+	prometheus.DefaultGatherer = registry
+
+	t.Cleanup(func() {
+		prometheus.DefaultRegisterer = previousRegisterer
+		prometheus.DefaultGatherer = previousGatherer
+	})
+
+	return registry
+}
+
+func assertBoundedMetricsHostLabels(t *testing.T, registry *prometheus.Registry, apiName string) {
+	t.Helper()
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	prefix := apiName + "_api_"
+	expectedFamilies := map[string]bool{
+		prefix + "requests_total":           false,
+		prefix + "request_duration_seconds": false,
+		prefix + "request_size_bytes":       false,
+		prefix + "response_size_bytes":      false,
+	}
+
+	for _, family := range families {
+		name := family.GetName()
+		if _, ok := expectedFamilies[name]; !ok {
+			continue
+		}
+
+		expectedFamilies[name] = true
+		require.Len(t, family.GetMetric(), 1, "%s must not create a series per HTTP Host", name)
+
+		hostLabels := 0
+
+		for _, label := range family.GetMetric()[0].GetLabel() {
+			if label.GetName() != "host" {
+				continue
+			}
+
+			hostLabels++
+
+			assert.Equal(t, apiName, label.GetValue())
+		}
+
+		assert.Equal(t, 1, hostLabels, "%s must retain one bounded host label", name)
+	}
+
+	for name, found := range expectedFamilies {
+		assert.True(t, found, "expected metric family %s", name)
 	}
 }
 

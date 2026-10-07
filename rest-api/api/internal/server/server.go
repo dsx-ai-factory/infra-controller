@@ -290,9 +290,16 @@ func InitMetricsServer(e *echo.Echo, cfg *config.Config) *echo.Echo {
 	ep := echo.New()
 	ep.HideBanner = true
 
+	apiName := cfg.GetAPIName()
 	conf := echoPrometheus.MiddlewareConfig{
-		Subsystem: fmt.Sprintf("%s_api", cfg.GetAPIName()),
+		Subsystem: apiName + "_api",
 		Skipper:   api.MetricsURLSkipper,
+		// echoprometheus otherwise uses the caller-controlled HTTP Host header.
+		// Keep the published label but give it one server-controlled value so
+		// unauthenticated requests cannot create unbounded time series.
+		LabelFuncs: map[string]echoPrometheus.LabelValueFunc{
+			"host": func(echo.Context, error) string { return apiName },
+		},
 	}
 
 	p := echoPrometheus.NewMiddlewareWithConfig(conf)
