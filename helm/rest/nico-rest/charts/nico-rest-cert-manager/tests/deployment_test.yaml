@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: HTTPS listener SANs passed as --dns-name
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-rest
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's deployment template renders standalone under helm-unittest.
+  global.image.repository: nvcr.io/nico
+  global.image.tag: latest
+  global.image.pullPolicy: IfNotPresent
+  global.imagePullSecrets:
+    - name: image-pull-secret
+tests:
+  - it: covers every in-cluster name of the Service by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager.nico-rest
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager.nico-rest.svc
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager.nico-rest.svc.cluster.local
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=localhost
+
+  - it: follows namespaceOverride so the SANs match where the Service resolves
+    set:
+      namespaceOverride: nico-rest-staging
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager.nico-rest-staging
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager.nico-rest
+
+  - it: fully replaces the generated SANs when config.dnsNames is set
+    set:
+      config:
+        dnsNames:
+          - credsmgr.override.example.com
+          - localhost
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=credsmgr.override.example.com
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --dns-name=nico-rest-cert-manager

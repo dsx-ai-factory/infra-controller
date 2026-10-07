@@ -17,7 +17,14 @@ service:
 
 args:
   listenPort: 8100
-  credsManagerUrl: "https://nico-rest-cert-manager.nico-rest:8000"
+  # -- Fully override the nico-rest-cert-manager endpoint. When empty, it is
+  # generated from the release namespace, which is where that subchart lands
+  # unless it carries its own namespaceOverride. Set this explicitly in that
+  # case. The hostname has to be one of the SANs on that service's certificate
+  # (nico-rest-cert-manager.config.dnsNames). Deploying through the nico-rest
+  # parent chart fails rendering when either of those settings would invalidate
+  # the generated endpoint and this is left empty.
+  credsManagerUrl: ""
   tlsCertPath: /etc/tls/tls.crt
   tlsKeyPath: /etc/tls/tls.key
   debug: true

@@ -19,6 +19,12 @@ config:
   tlsPort: 8000
   insecurePort: 8001
   caBaseDns: "nico.local"
+  # -- Fully override the SANs stamped on the HTTPS listener's certificate.
+  # When empty, they are generated from the Service name and namespace (plus
+  # localhost). Any hostname a client dials must appear here, or that client's
+  # TLS hostname verification fails; the nico-rest parent chart enforces that
+  # for nico-rest-site-manager, which is the one in-tree client.
+  dnsNames: []
   debug: false
 
 secrets:

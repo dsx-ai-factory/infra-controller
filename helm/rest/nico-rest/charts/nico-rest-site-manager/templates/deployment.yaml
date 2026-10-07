@@ -46,7 +46,7 @@ spec:
                 - ALL
           args:
             - --listen-port={{ .Values.args.listenPort }}
-            - --creds-manager-url={{ .Values.args.credsManagerUrl }}
+            - --creds-manager-url={{ include "nico-rest-site-manager.credsManagerUrl" . }}
             - --tls-cert-path={{ .Values.args.tlsCertPath }}
             - --tls-key-path={{ .Values.args.tlsKeyPath }}
             - --namespace={{ include "nico-rest-site-manager.namespace" . }}

@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{/*
+nico-rest-site-manager has to reach nico-rest-cert-manager over verified TLS,
+which needs the hostname it dials to agree with how that subchart is actually
+deployed. A subchart cannot read a sibling's values, so neither can keep itself
+in step; this chart is the only scope that sees both. Each failure names the
+setting to adjust.
+*/}}
+{{- $certManager := (index .Values "nico-rest-cert-manager") | default dict -}}
+{{- $siteManager := (index .Values "nico-rest-site-manager") | default dict -}}
+{{- if and $certManager.enabled $siteManager.enabled -}}
+
+{{/*
+Endpoint. Site Manager derives it from the release namespace and the fixed
+Service name, so settings that move the Service or restrict its SANs invalidate
+that derivation. Both are satisfied by setting args.credsManagerUrl explicitly.
+*/}}
+{{- if not (($siteManager.args | default dict).credsManagerUrl) -}}
+
+{{- $overrideNamespace := $certManager.namespaceOverride | default "" -}}
+{{- if and $overrideNamespace (ne $overrideNamespace .Release.Namespace) -}}
+{{- fail (printf "nico-rest-cert-manager.namespaceOverride is %q, so its Service is not in the release namespace %q that nico-rest-site-manager derives its endpoint from. Set nico-rest-site-manager.args.credsManagerUrl to the real endpoint." $overrideNamespace .Release.Namespace) -}}
+{{- end -}}
+
+{{- $dnsNames := ($certManager.config | default dict).dnsNames -}}
+{{- $endpointHost := printf "nico-rest-cert-manager.%s" .Release.Namespace -}}
+{{/*
+Go accepts a wildcard only as the whole leftmost label, matching exactly one
+label, so "*.<namespace>" is the single wildcard form that can cover a
+two-label endpoint host. A bare "*", a trailing "*", and any deeper wildcard
+are rejected by x509.VerifyHostname and so are not accepted here either.
+*/}}
+{{- $wildcardHost := printf "*.%s" .Release.Namespace -}}
+{{- if and $dnsNames (not (has $endpointHost $dnsNames)) (not (has $wildcardHost $dnsNames)) -}}
+{{- fail (printf "nico-rest-cert-manager.config.dnsNames covers neither %q, the host nico-rest-site-manager dials, nor %q, so its TLS hostname verification would fail. Add one of those names, or set nico-rest-site-manager.args.credsManagerUrl to a host the list does cover." $endpointHost $wildcardHost) -}}
+{{- end -}}
+
+{{- end -}}
+{{- end -}}

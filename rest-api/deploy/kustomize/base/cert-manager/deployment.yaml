@@ -48,6 +48,15 @@ spec:
             - --tls-port=8000
             - --insecure-port=8001
             - --ca-base-dns=nico.local
+            # Clients reach the Service by both its short name and its
+            # namespace-qualified forms, so all of them need to be SANs on the
+            # HTTPS listener's certificate. These assume the nico-rest
+            # namespace the overlays deploy into; change them alongside it.
+            - --dns-name=nico-rest-cert-manager
+            - --dns-name=nico-rest-cert-manager.nico-rest
+            - --dns-name=nico-rest-cert-manager.nico-rest.svc
+            - --dns-name=nico-rest-cert-manager.nico-rest.svc.cluster.local
+            - --dns-name=localhost
             - --debug
           ports:
             - containerPort: 8000
