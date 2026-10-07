@@ -107,7 +107,7 @@ nico-dhcp:
       metallb.universe.tf/loadBalancerIPs: "2001:db8:10::67"
 ```
 
-Apply through the site's normal Helm upgrade workflow. Stored values from a chart without the `dhcp` and `v6ExternalService` maps are supported with `--reuse-values`. A chart-only upgrade preserves an older pinned Core image's IPv4 listener defaults. DSX, hardware-health, and PXE adopt their dual-stack defaults when the Core image is upgraded, unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
+Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](../../helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
 
 ## Kustomize
 

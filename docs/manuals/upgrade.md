@@ -167,7 +167,7 @@ git diff upstream/release/v2.0..upstream/release/v2.1 -- helm-prereqs/values.yam
 
 ### Update image tags
 
-Set the new image tags for the target release:
+Build and push images from the same repository revision as the target release checkout, then set their tags below. The chart and setup script must come from that revision too; see the [image compatibility policy](../../helm/README.md#image-configuration).
 
 ```bash
 export NICO_IMAGE_REGISTRY=registry.example.com/nico   # your registry
@@ -507,7 +507,7 @@ You can narrow an upgrade to particular components with the `--skip-*` flags. `-
 
 The prerequisite phases therefore run on every invocation. That is by design and is cheap: each one is idempotent, and a phase whose inputs have not changed reconciles to the same state and exits quickly.
 
-For a single-Helm-chart upgrade (such as rotating the NICo Core image tag without going through the full script), run from the **repository root**, matching what `setup.sh` itself executes:
+To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision, following the [image compatibility policy](../../helm/README.md#image-configuration). Update both together when moving to a new revision. Run from the **repository root**, matching what `setup.sh` itself executes:
 
 ```bash
 helm upgrade --install nico ./helm \
