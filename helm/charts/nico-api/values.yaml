@@ -187,8 +187,6 @@ service:
       - vpc_prefix
       - spdm_attestation
       - ib_partition
-  profiler:
-    port: 1081
 
 sshConsole:
   serviceName: nico-ssh-console-rs

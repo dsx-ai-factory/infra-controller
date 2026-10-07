@@ -295,7 +295,7 @@ nico-dns:
 
 | Subchart | Workload Type | Primary Port(s) | TLS Certificate | Metrics |
 |----------|--------------|-----------------|-----------------|---------|
-| nico-api | Deployment | 1079 (gRPC), 1080 (metrics), 1081 (profiler) | Yes | ServiceMonitor |
+| nico-api | Deployment | 1079 (gRPC), 1080 (metrics) | Yes | ServiceMonitor |
 | nico-bmc-proxy | Deployment | 1079 (gRPC), 1080 (metrics) | Yes | ServiceMonitor |
 | nico-dhcp | Deployment | 67/UDP, 1089 (metrics) | Yes | ServiceMonitor |
 | nico-dns | StatefulSet | 53/TCP, 53/UDP | Yes | -- |

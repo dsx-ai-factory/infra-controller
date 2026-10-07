@@ -105,7 +105,6 @@ Path: `deploy/nico-base/api/`
 - Services
   - `nico-api` – gRPC, port **1079**
   - `nico-api-metrics` – metrics, port **1080**
-  - `nico-api-profiler` – profiler, port **1081**
 - ConfigMaps
   - `nico-api-config-files` – base config (`carbide-api-config.toml`, `casbin-policy.csv`)
   - `nico-api-site-config-files` – overlay for site‑specific TOML (empty in base)
@@ -134,7 +133,7 @@ Path: `deploy/nico-base/api/`
 
 - Runtime config lives in `carbide-api-config.toml` and is overlaid by a site‑specific TOML in `nico-api-site-config-files`.
 - Important knobs include:
-  - listen/metrics/profiler ports
+  - API and metrics ports
   - firmware/DPU settings
   - site explorer enablement
   - TLS paths under `[tls]` (aligned with the SPIFFE Secret mount)
@@ -150,6 +149,15 @@ Path: `deploy/nico-base/api/`
 
    ```bash
    kubectl apply -k deploy/nico-base/api -n <NICO_NAMESPACE>
+   ```
+
+5. If you upgrade from a revision that exposed the profiler Service, delete
+   the obsolete Service after applying the manifests:
+
+   ```bash
+   kubectl delete service nico-api-profiler \
+     --namespace <NICO_NAMESPACE> \
+     --ignore-not-found
    ```
 
 ---
