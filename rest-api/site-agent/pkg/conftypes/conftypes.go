@@ -128,6 +128,7 @@ type Config struct {
 	BootstrapSecret     string        `json:"bootstrapSecret"`     // Path to the bootstrap secret file
 	BootstrapSecretName string        `json:"bootstrapSecretName"` // Name of the Secret mounted at BootstrapSecret, OTP rotation writes to it
 	WatcherInterval     time.Duration `json:"watcherInterval"`
+	PodName             string        `json:"podName"`
 	PodNamespace        string        `json:"podNamespace"`
 	TemporalSecret      string        `json:"temporalSecret"`
 	MetricsPort         string        `json:"metricsPort"`

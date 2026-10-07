@@ -192,6 +192,8 @@ func (Managers *Manager) Start() {
 	Managers.CoreGrpc().Start()
 	Managers.Bootstrap().Start()
 	Managers.Orchestrator().Start()
+	// Checks begin once Core gRPC and Temporal have made their first connection attempt.
+	go StartHealthChecker()
 	Managers.FlowGrpc().Start()
 }
 
@@ -206,5 +208,6 @@ func StartMetricServer() {
 	log.Info().Msgf("Beginning to serve on port %v", ManagerAccess.Conf.EB.MetricsPort)
 	port := ":" + ManagerAccess.Conf.EB.MetricsPort
 	mux := newMetricsServeMux()
-	http.ListenAndServe(port, mux)
+	err := http.ListenAndServe(port, mux)
+	log.Error().Err(err).Msg("Managers: metrics server stopped")
 }
