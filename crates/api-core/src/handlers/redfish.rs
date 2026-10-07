@@ -69,6 +69,9 @@ struct RedfishActionResultPersistenceFailed {
     error: String,
 }
 
+/// Performs a Core-mediated Redfish GET, diagnoses upstream HTTP 4xx/5xx responses,
+/// and redacts known direct-authentication credentials from readable error bodies
+/// while preserving the existing browse-response and RPC-error contracts.
 pub(crate) async fn redfish_browse(
     api: &crate::api::Api,
     request: tonic::Request<::rpc::forge::RedfishBrowseRequest>,
