@@ -303,11 +303,15 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
         match carbide_config.rms.api_url.clone() {
             Some(url) if !url.is_empty() => {
-                let rms_client_config = librms::client_config::RmsClientConfig::new(
+                let mut rms_client_config = librms::client_config::RmsClientConfig::new(
                     carbide_config.rms.root_ca_path.clone(),
                     carbide_config.rms.client_cert.clone(),
                     carbide_config.rms.client_key.clone(),
                     carbide_config.rms.enforce_tls,
+                );
+                rms_observability::configure(
+                    &mut rms_client_config,
+                    Some(dynamic_settings.tracing_enabled.clone()),
                 );
                 let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
                 let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);

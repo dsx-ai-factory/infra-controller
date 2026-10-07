@@ -113,6 +113,7 @@ impl StateHandler for RackStateHandler {
     type ControllerState = RackState;
     type ContextObjects = RackStateHandlerContextObjects;
 
+    #[tracing::instrument(skip_all, fields(rack_id = %id, rack_state = %controller_state))]
     async fn handle_object_state(
         &self,
         id: &Self::ObjectId,

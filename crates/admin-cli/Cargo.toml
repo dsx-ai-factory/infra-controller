@@ -27,6 +27,7 @@ name = "nico-admin-cli"
 path = "src/main.rs"
 
 [dependencies]
+rms-observability = { path = "../rms-observability" }
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 bmc-vendor = { path = "../bmc-vendor" }
