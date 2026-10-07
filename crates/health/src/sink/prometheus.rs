@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -51,7 +51,7 @@ const COMPONENT_HEALTH_LABELS: [&str; 4] = [
 struct ComponentHealthState {
     state: GaugeVec,
     observed_time_seconds: GaugeVec,
-    series_by_stream: DashMap<String, HashSet<ComponentHealthSeries>>,
+    series_by_stream: DashMap<String, HashMap<ComponentHealthSeries, ComponentHealthSample>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -62,6 +62,12 @@ struct ComponentHealthSeries {
     report_source: &'static str,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ComponentHealthSample {
+    state: u8,
+    observed_at_millis: i64,
+}
+
 impl ComponentHealthSeries {
     fn from_report(context: &EventContext, report: &HealthReport) -> Option<Self> {
         if report.target != context.health_report_target() {
@@ -70,14 +76,23 @@ impl ComponentHealthSeries {
 
         let component_uid = match report.target? {
             HealthReportTarget::Machine => context.machine_id()?.to_string(),
-            HealthReportTarget::Switch => context
-                .switch_id()
-                .map(|id| id.to_string())
-                .or_else(|| context.switch_serial().map(str::to_string))?,
+            HealthReportTarget::Switch => {
+                context.switch_id().map(|id| id.to_string()).or_else(|| {
+                    context
+                        .switch_serial()
+                        .filter(|serial| !serial.trim().is_empty())
+                        .map(str::to_string)
+                })?
+            }
             HealthReportTarget::PowerShelf => context
                 .power_shelf_id()
                 .map(|id| id.to_string())
-                .or_else(|| context.serial_number().map(str::to_string))?,
+                .or_else(|| {
+                    context
+                        .serial_number()
+                        .filter(|serial| !serial.trim().is_empty())
+                        .map(str::to_string)
+                })?,
             HealthReportTarget::NvLinkDomain | HealthReportTarget::Rack => return None,
         };
 
@@ -157,6 +172,27 @@ impl ComponentHealthState {
         Some(state)
     }
 
+    fn publish_latest(&self, series: &ComponentHealthSeries) {
+        let latest = self
+            .series_by_stream
+            .iter()
+            .filter_map(|stream| stream.value().get(series).copied())
+            .max_by_key(|sample| sample.observed_at_millis);
+        let labels = series.labels();
+
+        if let Some(sample) = latest {
+            self.state
+                .with_label_values(&labels)
+                .set(f64::from(sample.state));
+            self.observed_time_seconds
+                .with_label_values(&labels)
+                .set(sample.observed_at_millis as f64 / 1_000.0);
+        } else {
+            let _ = self.state.remove_label_values(&labels);
+            let _ = self.observed_time_seconds.remove_label_values(&labels);
+        }
+    }
+
     fn record(&self, context: &EventContext, report: &HealthReport) {
         let Some(state) = Self::report_state(report) else {
             return;
@@ -168,26 +204,30 @@ impl ComponentHealthState {
             return;
         };
 
-        let labels = series.labels();
-        self.state.with_label_values(&labels).set(f64::from(state));
-        self.observed_time_seconds
-            .with_label_values(&labels)
-            .set(observed_at.timestamp_millis() as f64 / 1_000.0);
+        let sample = ComponentHealthSample {
+            state,
+            observed_at_millis: observed_at.timestamp_millis(),
+        };
         self.series_by_stream
             .entry(Self::stream_key(context))
             .or_default()
-            .insert(series);
+            .entry(series.clone())
+            .and_modify(|current| {
+                if sample.observed_at_millis >= current.observed_at_millis {
+                    *current = sample;
+                }
+            })
+            .or_insert(sample);
+        self.publish_latest(&series);
     }
 
     fn remove(&self, context: &EventContext) {
-        let Some((_, series)) = self.series_by_stream.remove(&Self::stream_key(context)) else {
+        let Some((_, samples)) = self.series_by_stream.remove(&Self::stream_key(context)) else {
             return;
         };
 
-        for series in series {
-            let labels = series.labels();
-            let _ = self.state.remove_label_values(&labels);
-            let _ = self.observed_time_seconds.remove_label_values(&labels);
+        for series in samples.keys() {
+            self.publish_latest(series);
         }
     }
 }
@@ -200,7 +240,13 @@ impl PrometheusSink {
         Self::new_with_component_health_state(metrics_manager, metrics_prefix, false)
     }
 
-    pub fn new_with_component_health_state(
+    /// Creates a sink with optional component-health metric export.
+    ///
+    /// Enabling the flag registers the state and observation-time gauges in
+    /// the global registry. This does not configure health-report processing;
+    /// the crate's sink builder does that separately. [`Self::new`] disables
+    /// the export.
+    pub(crate) fn new_with_component_health_state(
         metrics_manager: Arc<MetricsManager>,
         metrics_prefix: &str,
         export_component_health_state: bool,
@@ -1244,5 +1290,39 @@ mod tests {
                 .expect("metrics")
                 .contains("test_component_health_state{")
         );
+    }
+
+    #[test]
+    fn component_health_state_preserves_a_series_owned_by_another_stream() {
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+        let sink = PrometheusSink::new_with_component_health_state(manager.clone(), "test", true)
+            .expect("sink");
+        let first = component_health_context();
+        let mut second = first.clone();
+        second.endpoint_key = "42:9e:b1:bd:9d:de".to_string();
+
+        sink.handle_event(
+            &first,
+            &CollectorEvent::HealthReport(Arc::new(component_health_report(vec![
+                Classification::SensorWarning,
+            ]))),
+        );
+
+        let mut latest = component_health_report(vec![Classification::SensorCritical]);
+        latest.observed_at = latest
+            .observed_at
+            .map(|observed_at| observed_at + chrono::Duration::seconds(1));
+        sink.handle_event(&second, &CollectorEvent::HealthReport(Arc::new(latest)));
+
+        sink.handle_event(&second, &CollectorEvent::CollectorRemoved);
+
+        let exposition = manager.export_metrics().expect("metrics");
+        assert!(exposition.lines().any(|line| {
+            line.starts_with("test_component_health_state{") && line.ends_with(" 2")
+        }));
+        assert!(exposition.lines().any(|line| {
+            line.starts_with("test_component_health_observed_time_seconds{")
+                && line.ends_with(" 1791115200")
+        }));
     }
 }

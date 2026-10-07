@@ -397,6 +397,16 @@ impl StaticBmcEndpoint {
                 "{config_path}[{index}].power_shelf requires id or serial"
             ));
         }
+        if self
+            .power_shelf
+            .as_ref()
+            .and_then(|power_shelf| power_shelf.serial.as_deref())
+            .is_some_and(|serial| serial.trim().is_empty())
+        {
+            return Err(format!(
+                "{config_path}[{index}].power_shelf.serial must not be empty"
+            ));
+        }
 
         if let Some(switch) = &self.switch
             && switch.id.is_none()
@@ -404,6 +414,16 @@ impl StaticBmcEndpoint {
         {
             return Err(format!(
                 "{config_path}[{index}].switch requires id or serial"
+            ));
+        }
+        if self
+            .switch
+            .as_ref()
+            .and_then(|switch| switch.serial.as_deref())
+            .is_some_and(|serial| serial.trim().is_empty())
+        {
+            return Err(format!(
+                "{config_path}[{index}].switch.serial must not be empty"
             ));
         }
 
@@ -3504,6 +3524,21 @@ username = "root"
                         ..static_endpoint()
                     },
                 } => Yields(()),
+
+                IndexedStaticEndpoint {
+                    index: 3,
+                    endpoint: StaticBmcEndpoint {
+                        power_shelf: Some(StaticPowerShelfEndpoint {
+                            id: None,
+                            serial: Some("  ".to_string()),
+                            nvlink_domain_uuid: None,
+                        }),
+                        ..static_endpoint()
+                    },
+                } => FailsWith(
+                    "endpoint_sources.static_bmc_endpoints[3].power_shelf.serial must not be empty"
+                        .to_string()
+                ),
             }
 
             "switch identity" {
@@ -3528,6 +3563,20 @@ username = "root"
                         ..static_endpoint()
                     },
                 } => Yields(()),
+
+                IndexedStaticEndpoint {
+                    index: 3,
+                    endpoint: StaticBmcEndpoint {
+                        switch: Some(StaticSwitchEndpoint {
+                            serial: Some(String::new()),
+                            ..static_switch()
+                        }),
+                        ..static_endpoint()
+                    },
+                } => FailsWith(
+                    "endpoint_sources.static_bmc_endpoints[3].switch.serial must not be empty"
+                        .to_string()
+                ),
             }
         );
     }
