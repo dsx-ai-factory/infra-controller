@@ -431,7 +431,7 @@ impl GnmiSampleProcessor {
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
-                "component_asic_temperature_celsius",
+                "component_asic_temperature",
                 comp_name,
                 v,
                 "celsius",
