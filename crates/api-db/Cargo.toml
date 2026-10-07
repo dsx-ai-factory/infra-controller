@@ -33,6 +33,7 @@ test-support = []
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 config-version = { path = "../config-version", features = ["sqlx"] }
+carbide-macros = { path = "../macros" }
 carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-instrument = { path = "../instrument" }
 carbide-network = { path = "../network", features = ["sqlx"] }
@@ -99,7 +100,6 @@ carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }
 lazy_static = { workspace = true }
-carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 ctor = { workspace = true }

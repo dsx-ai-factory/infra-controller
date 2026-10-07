@@ -21,7 +21,30 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{DeriveInput, LitStr, Meta, Token};
 
+mod db_table;
+
 type AttributeArgs = syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>;
+
+/// `DbTable` derives `carbide_uuid::DbTable` from a struct's field names.
+///
+/// Set the table with exactly one `#[db_table(name = "table_name")]`
+/// attribute. The struct must have at least one named field; columns follow
+/// declaration order without inspecting field types or unrelated attributes.
+/// `db_table_columns()` returns `carbide_uuid::DbColumns` for direct SQL
+/// formatting, with the original names available through `as_slice()`.
+/// Both table and field names must match `[a-z_][a-z0-9_]*`. Names are returned
+/// unquoted, so callers must avoid reserved SQL keywords. Raw Rust identifiers, qualified
+/// table names, and `#[sqlx(...)]` attributes on the struct or its fields are
+/// unsupported; implement `DbTable` manually when the decoder needs mappings.
+/// The consuming crate must depend on `carbide-uuid` as `carbide_uuid`.
+#[proc_macro_derive(DbTable, attributes(db_table))]
+pub fn derive_db_table(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+    match db_table::expand(input) {
+        Ok(output) => output.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
 
 /// derive_dispatch is a derive macro that generates a `Dispatch` impl
 /// for a CLI command enum. Each variant can either be a tuple variant

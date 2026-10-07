@@ -2638,6 +2638,8 @@ dependencies = [
 name = "carbide-macros"
 version = "0.0.0"
 dependencies = [
+ "carbide-test-support",
+ "carbide-uuid",
  "proc-macro2",
  "quote",
  "sqlx-macros-core",
@@ -2683,6 +2685,7 @@ dependencies = [
 name = "carbide-measured-boot"
 version = "0.0.0"
 dependencies = [
+ "carbide-macros",
  "carbide-test-support",
  "carbide-uuid",
  "chrono",
