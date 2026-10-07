@@ -110,6 +110,9 @@ include_diagnostics = false
 [sinks.prometheus]
 enabled = true
 
+# Export current per-source component health and observation-time metrics.
+component_health_state = false
+
 [sinks.log_file]
 enabled = false
 
