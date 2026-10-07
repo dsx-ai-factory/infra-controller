@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
+use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
@@ -39,8 +40,11 @@ use component_manager::power_shelf_manager::{
 };
 use component_manager::types::FirmwareUpdateOptions;
 use mac_address::MacAddress;
+use model::address_selection_strategy::AddressSelectionStrategy;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
+use model::expected_machine::ExpectedMachine;
 use model::expected_power_shelf::ExpectedPowerShelf;
+use model::expected_rack::ExpectedRack;
 use model::expected_switch::ExpectedSwitch;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack::{MaintenanceActivity, RackConfig, RackState};
@@ -134,6 +138,7 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
 struct RecordingNvSwitchManager {
     inner: MockNvSwitchManager,
     target_versions: Mutex<Vec<String>>,
+    non_rms: Mutex<bool>,
 }
 
 #[async_trait]
@@ -143,7 +148,7 @@ impl NvSwitchManager for RecordingNvSwitchManager {
     }
 
     fn supports_firmware_object_json(&self) -> bool {
-        true
+        !*self.non_rms.lock().unwrap()
     }
 
     async fn power_control(
@@ -696,6 +701,300 @@ async fn empty_version_resolves_profile_for_direct_rms_paths(
         fixture.fetcher.requested_urls.lock().unwrap().as_slice(),
         [FIRMWARE_OBJECT_URL; 3]
     );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn empty_version_skips_current_non_rms_switches(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, [_, switch_mac, _]) = create_pre_ingestion_firmware_fixture(pool.clone()).await?;
+
+    let manager = &fixture.nv_switch_manager;
+    *manager.non_rms.lock().unwrap() = true;
+
+    let desired = crate::handlers::firmware::get_desired_firmware_versions(
+        &fixture.env.api,
+        Request::new(rpc::GetDesiredFirmwareVersionsRequest {}),
+    )
+    .await?
+    .into_inner()
+    .entries
+    .into_iter()
+    .find(|entry| !entry.component_versions.is_empty())
+    .unwrap();
+
+    let mut report = model::site_explorer::EndpointExplorationReport {
+        versions: desired
+            .component_versions
+            .into_iter()
+            .map(|(key, version)| Ok((serde_json::from_value(key.into())?, version)))
+            .collect::<Result<_, serde_json::Error>>()?,
+        ..Default::default()
+    };
+
+    let mut txn = pool.begin().await?;
+
+    let address = db::machine_interface::lookup_bmc_ip_by_mac_address(&mut *txn, switch_mac)
+        .await?
+        .into_iter()
+        .next()
+        .unwrap();
+
+    db::explored_endpoints::insert(address, &report, false, txn.as_mut()).await?;
+    sqlx::query("UPDATE switches SET bmc_mac_address = $1 WHERE id = $2")
+        .bind(switch_mac)
+        .bind(fixture.switch_id)
+        .execute(txn.as_mut())
+        .await?;
+
+    txn.commit().await?;
+
+    let id_request = switch_request(fixture.switch_id, true).into_inner();
+
+    let mac_request = rpc::UpdateComponentFirmwareRequest {
+        bypass_state_controller: true,
+        target: Some(rpc::update_component_firmware_request::Target::Switches(
+            rpc::UpdateSwitchFirmwareTarget {
+                switch_ids: None,
+                bmc_macs: Some(rpc::MacAddressList {
+                    mac_addresses: vec![switch_mac.to_string()],
+                }),
+                components: vec![],
+            },
+        )),
+        ..Default::default()
+    };
+
+    for request in [id_request.clone(), mac_request] {
+        let response = crate::handlers::component_manager::update_component_firmware(
+            &fixture.env.api,
+            Request::new(request),
+        )
+        .await?
+        .into_inner();
+
+        assert_eq!(response.results.len(), 1);
+
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::Success as i32
+        );
+    }
+
+    assert!(manager.target_versions.lock().unwrap().is_empty());
+    assert!(fixture.fetcher.requested_urls.lock().unwrap().is_empty());
+
+    *manager.non_rms.lock().unwrap() = false;
+    *fixture.fetcher.response.lock().unwrap() = Err("firmware source unavailable".to_owned());
+
+    let error = crate::handlers::component_manager::update_component_firmware(
+        &fixture.env.api,
+        Request::new(id_request.clone()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert!(manager.target_versions.lock().unwrap().is_empty());
+
+    *manager.non_rms.lock().unwrap() = true;
+
+    report
+        .versions
+        .values_mut()
+        .for_each(|version| *version = "outdated".to_owned());
+
+    sqlx::query("UPDATE explored_endpoints SET exploration_report = $1 WHERE address = $2")
+        .bind(sqlx::types::Json(&report))
+        .bind(address)
+        .execute(&pool)
+        .await?;
+
+    crate::handlers::component_manager::update_component_firmware(
+        &fixture.env.api,
+        Request::new(id_request),
+    )
+    .await?;
+
+    assert_eq!(manager.target_versions.lock().unwrap().as_slice(), [""]);
+
+    Ok(())
+}
+
+async fn create_pre_ingestion_firmware_fixture(
+    pool: sqlx::PgPool,
+) -> Result<(FirmwareObjectFixture, [MacAddress; 3]), Box<dyn std::error::Error>> {
+    let fixture = create_firmware_object_fixture(pool.clone()).await?;
+    let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let compute_mac: MacAddress = "02:00:00:00:00:11".parse()?;
+    let switch_mac: MacAddress = "02:00:00:00:00:12".parse()?;
+    let shelf_mac: MacAddress = "02:00:00:00:00:13".parse()?;
+    let nvos_mac: MacAddress = "02:00:00:00:00:14".parse()?;
+    let mut txn = pool.begin().await?;
+    let underlay = db::network_segment::find_by_name(txn.as_mut(), "UNDERLAY").await?;
+
+    db::expected_rack::create(
+        txn.as_mut(),
+        &ExpectedRack {
+            rack_id: rack_id.clone(),
+            rack_profile_id: RackProfileId::new("NVL72"),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    for mac in [compute_mac, switch_mac, shelf_mac, nvos_mac] {
+        db::machine_interface::create(
+            txn.as_mut(),
+            std::slice::from_ref(&underlay),
+            &mac,
+            false,
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+    }
+
+    db::expected_machine::create(
+        txn.as_mut(),
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: compute_mac,
+            data: rpc::ExpectedMachine {
+                chassis_serial_number: "pre-ingestion-compute".to_owned(),
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            }
+            .try_into()?,
+        },
+    )
+    .await?;
+
+    db::expected_switch::create(
+        txn.as_mut(),
+        ExpectedSwitch {
+            bmc_mac_address: switch_mac,
+            nvos_mac_addresses: vec![nvos_mac],
+            serial_number: "pre-ingestion-switch".to_owned(),
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    db::expected_power_shelf::create(
+        txn.as_mut(),
+        ExpectedPowerShelf {
+            bmc_mac_address: shelf_mac,
+            serial_number: "pre-ingestion-power-shelf".to_owned(),
+            rack_id: Some(rack_id),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    let bmc_keys = [compute_mac, switch_mac, shelf_mac].map(|mac| CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::BmcRoot {
+            bmc_mac_address: mac,
+        },
+    });
+
+    let nvos_key = CredentialKey::SwitchNvosAdmin {
+        bmc_mac_address: switch_mac,
+    };
+
+    let credentials = Credentials::UsernamePassword {
+        username: "test-user".to_owned(),
+        password: "test-password".to_owned(),
+    };
+
+    for key in bmc_keys.into_iter().chain([nvos_key]) {
+        fixture
+            .env
+            .api
+            .credential_manager
+            .set_credentials(&key, &credentials)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok((fixture, [compute_mac, switch_mac, shelf_mac]))
+}
+
+#[crate::sqlx_test]
+async fn empty_version_resolves_profile_for_pre_ingestion_macs(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (
+        FirmwareObjectFixture {
+            env,
+            compute_tray_manager,
+            nv_switch_manager,
+            power_shelf_manager,
+            switch_id,
+            power_shelf_id,
+            machine_id,
+            ..
+        },
+        [compute_mac, switch_mac, shelf_mac],
+    ) = create_pre_ingestion_firmware_fixture(pool).await?;
+
+    for (mut request, mac) in [
+        (compute_request(machine_id, false).into_inner(), compute_mac),
+        (switch_request(switch_id, false).into_inner(), switch_mac),
+        (
+            power_shelf_request(power_shelf_id, false).into_inner(),
+            shelf_mac,
+        ),
+    ] {
+        let macs = Some(rpc::MacAddressList {
+            mac_addresses: vec![mac.to_string()],
+        });
+
+        match request.target.as_mut().unwrap() {
+            rpc::update_component_firmware_request::Target::ComputeTrays(target) => {
+                target.machine_ids = None;
+                target.bmc_macs = macs;
+            }
+            rpc::update_component_firmware_request::Target::Switches(target) => {
+                target.switch_ids = None;
+                target.bmc_macs = macs;
+            }
+            rpc::update_component_firmware_request::Target::PowerShelves(target) => {
+                target.power_shelf_ids = None;
+                target.pmc_macs = macs;
+            }
+            rpc::update_component_firmware_request::Target::Racks(_) => unreachable!(),
+        }
+
+        let response = crate::handlers::component_manager::update_component_firmware(
+            &env.api,
+            Request::new(request),
+        )
+        .await?
+        .into_inner();
+
+        assert_eq!(
+            response.results,
+            vec![rpc::ComponentResult {
+                status: rpc::ComponentManagerStatusCode::Success as i32,
+                mac_address: Some(mac.to_string()),
+                ..Default::default()
+            }]
+        );
+    }
+
+    for versions in [
+        compute_tray_manager.target_versions(),
+        nv_switch_manager.target_versions.lock().unwrap().clone(),
+        power_shelf_manager.target_versions.lock().unwrap().clone(),
+    ] {
+        assert_eq!(versions, [FIRMWARE_OBJECT]);
+    }
 
     Ok(())
 }

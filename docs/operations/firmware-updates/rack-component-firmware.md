@@ -313,6 +313,8 @@ components for the selected backend.
 
 When `version` is omitted, Flow calls Core with an empty target. Core resolves
 the owning rack profile's desired firmware object before starting an RMS update.
+Non-RMS direct updates skip dispatch when every switch matches a configured
+desired firmware entry; otherwise Core forwards the empty target to the backend.
 
 ### Power shelves
 

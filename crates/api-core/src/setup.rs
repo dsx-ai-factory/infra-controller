@@ -661,6 +661,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     .await?;
 
     let default_redirect_policy = reqwest::redirect::Policy::default();
+
     let firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher> = Arc::new(
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::custom(move |attempt| {

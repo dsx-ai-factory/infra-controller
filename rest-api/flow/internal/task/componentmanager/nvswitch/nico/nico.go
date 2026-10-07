@@ -325,7 +325,8 @@ func (m *Manager) GetPowerStatus(
 // FirmwareControl schedules a firmware update via NICo's UpdateComponentFirmware API.
 //
 // TargetVersion is forwarded directly to Core. For an empty TargetVersion,
-// Core resolves the rack profile's desired firmware object.
+// Core resolves the rack profile's desired firmware object for RMS, or skips
+// an already-current switch on the non-RMS direct path.
 func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
 	log.Debug().
 		Str("components", target.String()).

@@ -27,7 +27,7 @@ use carbide_secrets::credentials::{
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use component_manager::component_manager::{ComponentManager, SwitchMaintenanceRequestResult};
 use component_manager::compute_tray_manager::{
@@ -1357,32 +1357,43 @@ async fn group_power_shelf_ids_by_rack(
     Ok(targets)
 }
 
-async fn resolve_rack_firmware_object(
+async fn resolve_rack_firmware_object<'a>(
     api: &Api,
-    targets: &[RackFirmwareMaintenanceTarget],
+    rack_ids: impl Iterator<Item = &'a RackId>,
+    resolved_profile_id: Option<&RackProfileId>,
 ) -> Result<String, Status> {
-    let [target] = targets else {
+    let mut rack_ids: Vec<_> = rack_ids.collect();
+    rack_ids.sort_unstable();
+    rack_ids.dedup();
+
+    let [rack_id] = rack_ids.as_slice() else {
         return Err(Status::failed_precondition(
             "an empty target_version requires targets from exactly one rack",
         ));
     };
 
-    let racks = db::rack::find_by(
-        api.db_reader().as_mut(),
-        db::ObjectColumnFilter::One(db::rack::IdColumn, &target.rack_id),
-    )
-    .await
-    .map_err(|e| Status::internal(format!("failed to look up rack {}: {e}", target.rack_id)))?;
+    // MAC inventory resolves the profile before a live rack necessarily exists.
+    let rack_profile_id = if let Some(profile_id) = resolved_profile_id {
+        profile_id.to_string()
+    } else {
+        let racks = db::rack::find_by(
+            api.db_reader().as_mut(),
+            db::ObjectColumnFilter::One(db::rack::IdColumn, *rack_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("failed to look up rack {rack_id}: {e}")))?;
 
-    let rack = racks.into_iter().next().ok_or_else(|| {
-        Status::failed_precondition(format!("rack {} was not found", target.rack_id))
-    })?;
+        let rack = racks
+            .into_iter()
+            .next()
+            .ok_or_else(|| Status::failed_precondition(format!("rack {rack_id} was not found")))?;
 
-    let rack_profile_id = rack.rack_profile_id.ok_or_else(|| {
-        Status::failed_precondition(format!("rack {} has no rack profile", target.rack_id))
-    })?;
-
-    let rack_profile_id = rack_profile_id.to_string();
+        rack.rack_profile_id
+            .ok_or_else(|| {
+                Status::failed_precondition(format!("rack {rack_id} has no rack profile"))
+            })?
+            .to_string()
+    };
 
     let rack_profile = api
         .runtime_config
@@ -1390,8 +1401,7 @@ async fn resolve_rack_firmware_object(
         .get(&rack_profile_id)
         .ok_or_else(|| {
             Status::failed_precondition(format!(
-                "rack profile {rack_profile_id} for rack {} is not configured",
-                target.rack_id
+                "rack profile {rack_profile_id} for rack {rack_id} is not configured"
             ))
         })?;
 
@@ -3770,6 +3780,63 @@ pub(crate) async fn get_component_inventory(
 
 // ---- Firmware Update ----
 
+async fn current_switch_firmware_results(
+    api: &Api,
+    target: &rpc::UpdateSwitchFirmwareTarget,
+) -> Result<Option<Vec<rpc::ComponentResult>>, Status> {
+    let inventory_target = match (&target.switch_ids, &target.bmc_macs) {
+        (Some(ids), None) if !ids.ids.is_empty() => {
+            rpc::get_component_inventory_request::Target::SwitchIds(ids.clone())
+        }
+        (None, Some(macs)) if !macs.mac_addresses.is_empty() => {
+            rpc::get_component_inventory_request::Target::SwitchBmcMacs(macs.clone())
+        }
+        _ => return Ok(None),
+    };
+
+    let desired = load_desired_firmware_version_entries(api).await?;
+
+    let entries = get_component_inventory(
+        api,
+        Request::new(rpc::GetComponentInventoryRequest {
+            target: Some(inventory_target),
+        }),
+    )
+    .await?
+    .into_inner()
+    .entries;
+
+    let all_current = !entries.is_empty()
+        && entries.iter().all(|entry| {
+            let Some(report) = &entry.report else {
+                return false;
+            };
+
+            let mut actual = report.firmware_versions.clone();
+
+            if actual.is_empty() {
+                actual.extend(report.service.iter().flat_map(|service| {
+                    service.inventories.iter().filter_map(|inventory| {
+                        inventory
+                            .version
+                            .as_ref()
+                            .filter(|version| !version.is_empty())
+                            .map(|version| (inventory.id.clone(), version.clone()))
+                    })
+                }));
+            }
+
+            matches_any_desired_firmware_entry(&actual, &desired)
+        });
+
+    Ok(all_current.then(|| {
+        entries
+            .into_iter()
+            .filter_map(|entry| entry.result)
+            .collect()
+    }))
+}
+
 /// Update firmware for a set of ingested switches by id.
 ///
 /// Routes through rack maintenance when the state controller is enabled and not
@@ -3793,35 +3860,31 @@ async fn update_switch_firmware_by_ids(
         !route_through_state_controller && cm.nv_switch.supports_firmware_object_json();
 
     if route_through_state_controller {
-        let explicit_token = if target_version.trim().is_empty() {
-            None
-        } else {
-            Some(require_firmware_object_json_for_rack_maintenance(
-                "switch",
-                access_token,
-                target_version,
-            )?)
-        };
+        if !target_version.trim().is_empty() {
+            validate_firmware_object_json_request(target_version)?;
+        }
 
         let components = map_nv_switch_components(components)?;
         let rack_maintenance_targets = group_switch_ids_by_rack(api, switch_ids).await?;
 
         let resolved_target_version = if target_version.trim().is_empty() {
-            Some(resolve_rack_firmware_object(api, &rack_maintenance_targets).await?)
+            Some(
+                resolve_rack_firmware_object(
+                    api,
+                    rack_maintenance_targets
+                        .iter()
+                        .map(|target| &target.rack_id),
+                    None,
+                )
+                .await?,
+            )
         } else {
             None
         };
 
         let target_version = resolved_target_version.as_deref().unwrap_or(target_version);
 
-        let token = match explicit_token {
-            Some(token) => token,
-            None => require_firmware_object_json_for_rack_maintenance(
-                "switch",
-                access_token,
-                target_version,
-            )?,
-        };
+        let token = rms_access_token_or_noauth(access_token.as_deref());
 
         let maintenance_activities = switch_firmware_maintenance_activities(
             target_version,
@@ -3839,7 +3902,14 @@ async fn update_switch_firmware_by_ids(
     } else {
         let resolved_target_version = if use_direct_rms_json && target_version.trim().is_empty() {
             let targets = group_switch_ids_by_rack(api, switch_ids).await?;
-            Some(resolve_rack_firmware_object(api, &targets).await?)
+            Some(
+                resolve_rack_firmware_object(
+                    api,
+                    targets.iter().map(|target| &target.rack_id),
+                    None,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -3902,6 +3972,42 @@ async fn dispatch_pre_ingestion_switch_firmware(
     force_update: bool,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let cm = require_component_manager(api)?;
+
+    let firmware_object =
+        if cm.nv_switch.supports_firmware_object_json() && target_version.trim().is_empty() {
+            let identities =
+                db::expected_switch::find_rms_identities_by_bmc_macs(&mut api.db_reader(), macs)
+                    .await
+                    .map_err(|error| {
+                        Status::internal(format!("failed to resolve switch racks: {error}"))
+                    })?;
+
+            if macs.iter().any(|mac| {
+                !identities
+                    .iter()
+                    .any(|identity| identity.bmc_mac_address == *mac)
+            }) {
+                return Err(Status::failed_precondition(
+                    "an empty target_version requires every switch to be associated with a rack",
+                ));
+            }
+
+            Some(
+                resolve_rack_firmware_object(
+                    api,
+                    identities.iter().map(|identity| &identity.rack_id),
+                    identities
+                        .first()
+                        .and_then(|identity| identity.rack_profile_id.as_ref()),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+    let target_version = firmware_object.as_deref().unwrap_or(target_version);
+
     let options = if cm.nv_switch.supports_firmware_object_json() {
         require_firmware_object_json_for_direct_rms(
             "switch",
@@ -4030,34 +4136,30 @@ async fn update_power_shelf_firmware_by_ids(
         cm.power_shelf_use_state_controller && !bypass_state_controller;
 
     if route_through_state_controller {
-        let explicit_token = if target_version.trim().is_empty() {
-            None
-        } else {
-            Some(require_firmware_object_json_for_rack_maintenance(
-                "power shelf",
-                access_token,
-                target_version,
-            )?)
-        };
+        if !target_version.trim().is_empty() {
+            validate_firmware_object_json_request(target_version)?;
+        }
 
         let rack_maintenance_targets = group_power_shelf_ids_by_rack(api, power_shelf_ids).await?;
 
         let resolved_target_version = if target_version.trim().is_empty() {
-            Some(resolve_rack_firmware_object(api, &rack_maintenance_targets).await?)
+            Some(
+                resolve_rack_firmware_object(
+                    api,
+                    rack_maintenance_targets
+                        .iter()
+                        .map(|target| &target.rack_id),
+                    None,
+                )
+                .await?,
+            )
         } else {
             None
         };
 
         let target_version = resolved_target_version.as_deref().unwrap_or(target_version);
 
-        let token = match explicit_token {
-            Some(token) => token,
-            None => require_firmware_object_json_for_rack_maintenance(
-                "power shelf",
-                access_token,
-                target_version,
-            )?,
-        };
+        let token = rms_access_token_or_noauth(access_token.as_deref());
 
         let components = map_power_shelf_components(components)?;
         let component_names = components
@@ -4086,7 +4188,14 @@ async fn update_power_shelf_firmware_by_ids(
 
         let resolved_target_version = if use_direct_rms_json && target_version.trim().is_empty() {
             let targets = group_power_shelf_ids_by_rack(api, power_shelf_ids).await?;
-            Some(resolve_rack_firmware_object(api, &targets).await?)
+            Some(
+                resolve_rack_firmware_object(
+                    api,
+                    targets.iter().map(|target| &target.rack_id),
+                    None,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -4151,6 +4260,43 @@ async fn dispatch_pre_ingestion_power_shelf_firmware(
     force_update: bool,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let cm = require_component_manager(api)?;
+
+    let firmware_object = if cm.power_shelf.supports_firmware_object_json()
+        && target_version.trim().is_empty()
+    {
+        let identities =
+            db::expected_power_shelf::find_rms_identities_by_bmc_macs(&mut api.db_reader(), macs)
+                .await
+                .map_err(|error| {
+                    Status::internal(format!("failed to resolve power shelf racks: {error}"))
+                })?;
+
+        if macs.iter().any(|mac| {
+            !identities
+                .iter()
+                .any(|identity| identity.bmc_mac_address == *mac)
+        }) {
+            return Err(Status::failed_precondition(
+                "an empty target_version requires every power shelf to be associated with a rack",
+            ));
+        }
+
+        Some(
+            resolve_rack_firmware_object(
+                api,
+                identities.iter().map(|identity| &identity.rack_id),
+                identities
+                    .first()
+                    .and_then(|identity| identity.rack_profile_id.as_ref()),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let target_version = firmware_object.as_deref().unwrap_or(target_version);
+
     let options = if cm.power_shelf.supports_firmware_object_json() {
         require_firmware_object_json_for_direct_rms(
             "power shelf",
@@ -4282,7 +4428,29 @@ pub(crate) async fn update_component_firmware(
     // shared response below; every other arm returns its response directly.
     let results = match target {
         rpc::update_component_firmware_request::Target::Switches(t) => {
-            require_component_manager(api)?;
+            let cm = require_component_manager(api)?;
+
+            // Only non-RMS direct dispatch may skip an empty-version update.
+            // RMS must validate its configured source even when inventory matches.
+            if req.target_version.is_empty()
+                && !cm.nv_switch.supports_firmware_object_json()
+                && (!cm.nv_switch_use_state_controller || bypass_state_controller)
+            {
+                map_nv_switch_components(&t.components)?;
+
+                match current_switch_firmware_results(api, &t).await {
+                    Ok(Some(results)) => {
+                        return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
+                            results,
+                        }));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "switch desired-firmware check failed, proceeding with update");
+                    }
+                    Ok(None) => {}
+                }
+            }
+
             let components = t.components;
             // switch_ids and bmc_macs are plain fields (not a proto oneof, to
             // keep field 1 wire-compatible), so the server enforces exactly one.
@@ -4565,6 +4733,34 @@ async fn update_pre_ingestion_compute_tray_firmware(
     reject_firmware_object_json_for_direct_dispatch("compute tray", access_token)?;
     let components = map_compute_tray_components(components)?;
 
+    let firmware_object = if cm.compute_tray.backend() == ComputeTrayBackend::Rms
+        && target_version.trim().is_empty()
+    {
+        let identities = db::expected_machine::find_rms_identities_by_bmc_macs(
+            &mut api.db_reader(),
+            &rack_scale,
+        )
+        .await
+        .map_err(|error| {
+            Status::internal(format!("failed to resolve compute tray racks: {error}"))
+        })?;
+
+        Some(
+            resolve_rack_firmware_object(
+                api,
+                identities.iter().map(|identity| &identity.rack_id),
+                identities
+                    .first()
+                    .and_then(|identity| identity.rack_profile_id.as_ref()),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let target_version = firmware_object.as_deref().unwrap_or(target_version);
+
     let mut endpoints = Vec::new();
     for mac in rack_scale {
         match build_pre_ingestion_compute_endpoint(api, mac).await {
@@ -4666,7 +4862,10 @@ async fn update_compute_tray_firmware_by_machine_ids(
     };
 
     let resolved_target_version = match rack_scale_targets.as_ref() {
-        Some(targets) => Some(resolve_rack_firmware_object(api, targets).await?),
+        Some(targets) => Some(
+            resolve_rack_firmware_object(api, targets.iter().map(|target| &target.rack_id), None)
+                .await?,
+        ),
         None => None,
     };
 
