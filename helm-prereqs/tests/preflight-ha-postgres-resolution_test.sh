@@ -138,6 +138,8 @@ resolver_cases=(
     "deleted Temporal recorded on the StatefulSet after it was removed|temporal|auto||||temporal=standalone|false|false|"
     "explicit true overrides the deployed database|temporal|true|postgres.postgres.svc.cluster.local.||statefulset||false|true|"
     "Temporal on an unrecognized host|temporal|auto|pg.example.com||||false||auto doesn't recognize pg.example.com, the PostgreSQL host the deployed temporal uses"
+    "Temporal on a host that only starts like nico-pg-cluster|temporal|auto|nico-pg-cluster.postgres.example.net|||statefulset|false||auto doesn't recognize nico-pg-cluster.postgres.example.net"
+    "Keycloak on a host that only starts like the StatefulSet|keycloak|auto||jdbc:postgresql://postgres.postgres.example.net:5432/keycloak||statefulset|false||auto doesn't recognize postgres.postgres.example.net"
     "Keycloak on the StatefulSet|keycloak|auto||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset||false|false|"
     "Keycloak on nico-pg-cluster|keycloak|auto||jdbc:postgresql://nico-pg-cluster.postgres.svc.cluster.local:5432/keycloak?sslmode=require|statefulset||false|true|"
     "Keycloak with KC_DB_URL from valueFrom|keycloak|auto||valueFrom|||false||auto could not tell which PostgreSQL the deployed keycloak uses"

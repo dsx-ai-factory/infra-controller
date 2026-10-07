@@ -750,12 +750,16 @@ _db_location() {
         _DB_LOCATION_ERROR="could not tell which PostgreSQL the deployed ${_component} uses"
         return 0
     fi
+    # Only the names Kubernetes DNS resolves for the two Services count. A host
+    # with any other suffix, such as .example.net, is a different database.
     case "${_db_host}" in
-        nico-pg-cluster.postgres|nico-pg-cluster.postgres.*)
+        nico-pg-cluster.postgres | nico-pg-cluster.postgres.svc \
+            | nico-pg-cluster.postgres.svc.cluster.local | nico-pg-cluster.postgres.svc.cluster.local.)
             _DB_LOCATION=nico-pg-cluster
             return 0
             ;;
-        postgres.postgres|postgres.postgres.*)
+        postgres.postgres | postgres.postgres.svc \
+            | postgres.postgres.svc.cluster.local | postgres.postgres.svc.cluster.local.)
             _DB_LOCATION=standalone
             return 0
             ;;
