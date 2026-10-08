@@ -26,9 +26,7 @@ pub use serde_json::Value as JsonValue;
 
 use crate::config::{NvueConfig, NvueConfigWithHeader, NvueRevision};
 use crate::types::bgp::{BgpNeighbors, BgpVrfInfo};
-use crate::types::revision::{
-    RevisionApplyStatus, RevisionConfigDiff, RevisionData, RevisionIssueSummary,
-};
+use crate::types::revision::{RevisionConfigDiff, RevisionData, RevisionIssueSummary};
 
 /// Repeated NVUE field-selection query parameters.
 ///
@@ -338,6 +336,17 @@ impl NvueClient {
         Ok(())
     }
 
+    /// Apply the specified revision ID and poll it until NVUE reports it as
+    /// "applied" or another terminal state.
+    ///
+    /// If the config revision enters an error state with a rollback revision
+    /// specified, this method will also poll that until it's in a terminal
+    /// state to ensure the "applied" revision is not still churning when we
+    /// return control.
+    ///
+    /// Each of these polls can take up to 45 seconds, so in the worst case
+    /// this may take 90 seconds to complete (plus a bit of wiggle room for the
+    /// per-request timeout).
     pub async fn apply_config_revision(&self, revision_id: &str) -> Result<(), NvueClientError> {
         let revision_path = format!("/nvue_v1/revision/{revision_id}");
         let builder = self.request(Method::PATCH, &revision_path)?;
@@ -346,42 +355,23 @@ impl NvueClient {
         let request = builder.build()?;
         let _response = self.execute("apply_config_revision", request).await?;
 
-        let started = tokio::time::Instant::now();
-        let deadline = started + Self::APPLY_CONFIG_REVISION_TIMEOUT;
-
-        loop {
-            let revision = self.get_revision(revision_id).await?;
-
-            let now = tokio::time::Instant::now();
-            let remaining = deadline.checked_duration_since(now);
-
-            match (revision.apply_status(), remaining) {
-                (RevisionApplyStatus::Applied, _) => break Ok(()),
-                (RevisionApplyStatus::Failed(error_issues), _) => {
-                    break Err(NvueClientError::RevisionApplyFailed {
-                        revision_id: revision_id.to_owned(),
-                        reason: RevisionApplyFailureReason::Error,
-                        last_state: revision.state.clone(),
-                        progress: revision.transition_progress().map(String::from),
-                        error_issues,
-                    });
-                }
-                (RevisionApplyStatus::Pending, Some(remaining)) => {
-                    tokio::time::sleep(remaining.min(Self::APPLY_CONFIG_REVISION_POLL_INTERVAL))
-                        .await;
-                }
-                (RevisionApplyStatus::Pending, None) => {
-                    let elapsed = now - started;
-                    break Err(NvueClientError::RevisionApplyFailed {
-                        revision_id: revision_id.to_owned(),
-                        reason: RevisionApplyFailureReason::Timeout { waited: elapsed },
-                        last_state: revision.state.clone(),
-                        progress: revision.transition_progress().map(String::from),
-                        error_issues: Vec::new(),
-                    });
-                }
-            }
+        let revision = self.poll_revision_to_terminal_state(revision_id).await?;
+        if revision.is_apply_success() {
+            return Ok(());
         }
+
+        let error = NvueClientError::RevisionApplyFailed {
+            revision_id: revision_id.to_owned(),
+            reason: RevisionApplyFailureReason::Error,
+            last_state: revision.state.clone(),
+            progress: revision.transition_progress().map(str::to_owned),
+            error_issues: revision.error_issue_summaries(),
+        };
+
+        if let Some(rollback_target) = revision.rollback_target() {
+            let _ = self.poll_revision_to_terminal_state(rollback_target).await;
+        }
+        Err(error)
     }
 
     async fn poll_revision_to_terminal_state(
