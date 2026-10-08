@@ -27,7 +27,7 @@ use forge_tls::dummy_tls_verifier::DummyTlsVerifier;
 use hickory_resolver::config::ResolverConfig;
 use hyper::body::Incoming;
 use hyper_util::client::legacy;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
+use hyper_util::rt::TokioTimer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tonic::body::Body;
@@ -471,6 +471,20 @@ impl<'a> ApiConfig<'a> {
     }
 }
 
+/// Runs hyper's connection tasks outside the caller's span.
+#[derive(Clone, Copy, Debug, Default)]
+struct DetachedExecutor;
+
+impl<F> hyper::rt::Executor<F> for DetachedExecutor
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        tokio::spawn(future);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ForgeTlsClient<'a> {
     forge_client_config: &'a ForgeClientConfig,
@@ -584,7 +598,7 @@ impl<'a> ForgeTlsClient<'a> {
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
         // so that the application gets a chance to fix things before the kernel.
-        let hyper_client = legacy::Client::builder(TokioExecutor::new())
+        let hyper_client = legacy::Client::builder(DetachedExecutor)
             .http2_only(true)
             // Send a PING frame every this
             .http2_keep_alive_interval(Some(Duration::from_secs(10)))
@@ -807,7 +821,7 @@ impl<'a> ForgeTlsClient<'a> {
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
         // so that the application gets a chance to fix things before the kernel.
-        let hyper_client = legacy::Client::builder(TokioExecutor::new())
+        let hyper_client = legacy::Client::builder(DetachedExecutor)
             .http2_only(true)
             // Send a PING frame every this
             .http2_keep_alive_interval(Some(Duration::from_secs(10)))
@@ -955,9 +969,38 @@ mod tests {
 
     use carbide_test_support::value_scenarios;
     use forge_http_connector::connector::ConnectorMetrics;
+    use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
+    use hyper_util::rt::TokioExecutor;
+    use tracing::Instrument as _;
 
     use super::*;
+
+    /// A connection task spawned while a call's span is current runs outside
+    /// it, where a task spawned in the current span, as hyper-util's
+    /// `TokioExecutor` spawns under its `tracing` feature, runs inside it.
+    #[tokio::test]
+    async fn connection_tasks_run_outside_the_callers_span() {
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let call = tracing::info_span!("call");
+        let span_seen = || {
+            let (seen, seen_in) = tokio::sync::oneshot::channel();
+            let task = async move {
+                seen.send(tracing::Span::current().id()).ok();
+            };
+            (task, seen_in)
+        };
+
+        let (task, seen_in) = span_seen();
+        call.in_scope(|| tokio::spawn(task.in_current_span()));
+        assert_eq!(seen_in.await.unwrap(), call.id(), "spawned in the span");
+
+        // Under `tokio_unstable`, tokio runs each task in a root span of its
+        // own, so a detached task's span is not none, only not the call's.
+        let (task, seen_in) = span_seen();
+        call.in_scope(|| DetachedExecutor.execute(task));
+        assert_ne!(seen_in.await.unwrap(), call.id(), "spawned detached");
+    }
 
     /// A node-token client presents no client certificate, which by itself
     /// drops the channel onto `DummyTlsVerifier`. `require_tls_enforcement`
