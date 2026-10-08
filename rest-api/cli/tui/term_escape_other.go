@@ -5,7 +5,15 @@
 
 package tui
 
-import "os"
+import (
+	"os"
+
+	"golang.org/x/term"
+)
+
+func terminalEOFIsTransient(input *os.File) (bool, error) {
+	return term.IsTerminal(int(input.Fd())), nil
+}
 
 // Non-Unix terminals do not use the ANSI three-byte arrow sequences handled
 // by ReadKey. Treat Escape as a standalone cancellation key without waiting.

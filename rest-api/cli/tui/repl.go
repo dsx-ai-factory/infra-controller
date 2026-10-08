@@ -241,7 +241,8 @@ func RunREPL(s *Session) error {
 			fmt.Fprintf(os.Stderr, "%s %v\n\n", Red("Error:"), parseErr)
 			continue
 		}
-		if err := command.Run(s, args); err != nil {
+		err = command.Run(s, args)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s %v\n", Red("Error:"), err)
 		}
 		fmt.Println()

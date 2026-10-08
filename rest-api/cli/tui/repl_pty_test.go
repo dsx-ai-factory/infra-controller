@@ -70,8 +70,120 @@ func (r *cliRegressionRecorder) matching(method, path string) []cliRegressionReq
 	return matches
 }
 
+func TestTerminalEOFIsTransient(t *testing.T) {
+	tests := []struct {
+		name     string
+		terminal bool
+		hangup   bool
+		want     bool
+	}{
+		{
+			name:     "connected terminal preserves recovery across Ctrl+D",
+			terminal: true,
+			want:     true,
+		},
+		{
+			name:     "disconnected terminal ends recovery instead of spinning",
+			terminal: true,
+			hangup:   true,
+		},
+		{
+			name: "piped EOF ends recovery",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var input, peer *os.File
+			var err error
+			if test.terminal {
+				peer, input, err = pty.Open()
+			} else {
+				input, peer, err = os.Pipe()
+			}
+			require.NoError(t, err)
+			defer input.Close()
+			defer peer.Close()
+			if test.hangup {
+				require.NoError(t, peer.Close())
+			}
+			transient, checkErr := terminalEOFIsTransient(input)
+			require.NoError(t, checkErr)
+			assert.Equal(t, test.want, transient)
+		})
+	}
+}
+
 func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 	binaryPath := buildRegressionCLI(t)
+
+	t.Run("oversized boot input cannot reach REPL or parent shell", func(t *testing.T) {
+		recorder := &cliRegressionRecorder{}
+		server := httptest.NewServer(newInteractiveRegressionHandler(recorder))
+		defer server.Close()
+
+		configPath := writeRegressionConfig(t, server.URL)
+		command := exec.Command("/bin/sh", "-i")
+		markerPath := filepath.Join(t.TempDir(), "queued-input-executed")
+		completionPath := filepath.Join(t.TempDir(), "shell-check-complete")
+		command.Env = regressionEnvironment(map[string]string{
+			"NICO_TOKEN": ptyAuthToken,
+			"TERM":       "xterm-256color",
+			"PS1":        "regression-shell> ",
+			"HISTFILE":   "/dev/null",
+			"ENV":        "/dev/null",
+		})
+		terminal := startRegressionPTY(t, command)
+		defer terminal.close()
+		terminal.waitFor(t, "regression-shell> ")
+		terminal.send(t, shellQuoteCLIArg(binaryPath)+" --config "+shellQuoteCLIArg(configPath)+" tui\r")
+		terminal.waitFor(t, "Type a command or")
+		terminal.send(t, "scope site site-one\r")
+		terminal.waitFor(t, "Scope set: site =")
+		terminal.send(t, "instance create\r")
+		terminal.waitFor(t, "VPC:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Machine")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Instance name")
+		terminal.send(t, "oversized-script-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "n\r")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "#!ipxe\n")
+
+		// Short lines and paced writes avoid canonical terminal input limits.
+		used := len("#!ipxe")
+		for used+1000 <= maxIPXEScriptBytes {
+			terminal.send(t, strings.Repeat("#", 999)+"\n")
+			used += 1000
+			time.Sleep(time.Millisecond)
+		}
+		remaining := maxIPXEScriptBytes - used
+		if remaining > 0 {
+			terminal.send(t, strings.Repeat("#", remaining-1)+"\n")
+		}
+		// A dot at the end of the rejected line must not finish recovery.
+		// Both subsequent lines are script content, not commands to execute.
+		terminal.send(t, "xx.\n")
+		terminal.waitFor(t, "discarding remaining input")
+		terminal.sendBytes(t, []byte{KeyCtrlD})
+		terminal.send(t, "org set unintended-review-org\necho shell-ran > "+shellQuoteCLIArg(markerPath)+"\n.\n")
+		terminal.waitFor(t, "input exceeds")
+		terminal.send(t, "quit\r")
+		terminal.waitFor(t, "regression-shell> ")
+		terminal.send(t, "echo complete > "+shellQuoteCLIArg(completionPath)+"\r")
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(completionPath)
+			return err == nil
+		}, 3*time.Second, 10*time.Millisecond, "parent shell must finish processing queued input")
+		_, markerErr := os.Stat(markerPath)
+		assert.True(t, os.IsNotExist(markerErr), "rejected script ran in the parent shell: %v", markerErr)
+		assert.NotContains(t, terminal.transcript(), "Org set to:")
+		assert.NotContains(t, terminal.transcript(), "interactive session stopped after oversized input")
+		assert.Empty(t, recorder.matching(http.MethodPost, "/v2/org/acme/nico/instance"))
+		terminal.send(t, "exit 0\r")
+		terminal.waitForExit(t)
+	})
 
 	t.Run("interactive PTY exercises navigation scopes generated forms and secrets", func(t *testing.T) {
 		recorder := &cliRegressionRecorder{}

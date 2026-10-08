@@ -1417,26 +1417,39 @@ func promptOperatingSystemType(s *Session, ctx context.Context) (string, error) 
 	return operatingSystemTypeTemplatedIPXE, nil
 }
 
+// maxIPXEScriptBytes bounds TUI input independently of server-side validation.
+const maxIPXEScriptBytes = 1 << 20
+
 func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
 	fmt.Println("Enter a URL on one line, or a script starting with #!ipxe; finish the script with a line containing only '.'")
 	for {
-		ipxeScript, err := PromptText("iPXE script or URL", true)
+		ipxeScript, err := promptTextWithLimit("iPXE script or URL", true, maxIPXEScriptBytes)
 		if err != nil {
-			return err
+			return recoverIPXEInput(err, false)
 		}
 		if strings.HasPrefix(ipxeScript, "#!ipxe") {
-			lines := []string{ipxeScript}
+			var script strings.Builder
+			script.WriteString(ipxeScript)
 			for {
-				line, readErr := readPromptLine()
+				// Reserve the separator, but allow the terminator even when full.
+				remaining := maxIPXEScriptBytes - script.Len()
+				line, readErr := readPromptLineWithLimit(max(1, remaining-1))
 				if readErr != nil {
-					return readErr
+					return recoverIPXEInput(
+						fmt.Errorf("reading iPXE script (maximum %d bytes): %w", maxIPXEScriptBytes, readErr),
+						false,
+					)
 				}
 				if line == "." {
 					break
 				}
-				lines = append(lines, line)
+				if len(line)+1 > remaining {
+					return recoverIPXEInput(fmt.Errorf("iPXE %w: %d bytes", errPromptInputLimitExceeded, maxIPXEScriptBytes), true)
+				}
+				script.WriteByte('\n')
+				script.WriteString(line)
 			}
-			body["ipxeScript"] = strings.Join(lines, "\n")
+			body["ipxeScript"] = script.String()
 			return nil
 		}
 		parsedURL, parseErr := url.ParseRequestURI(ipxeScript)
@@ -1445,6 +1458,61 @@ func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
 			return nil
 		}
 		fmt.Println(Red("  (enter a script starting with #!ipxe or an absolute HTTP(S) URL)"))
+	}
+}
+
+func recoverIPXEInput(inputErr error, lineComplete bool) error {
+	if !errors.Is(inputErr, errPromptInputLimitExceeded) {
+		return inputErr
+	}
+	fmt.Println(Red("iPXE input is too large; discarding remaining input. Finish with a line containing only '.' to return to the command prompt."))
+	discardErr := discardIPXEInput(lineComplete)
+	if discardErr != nil {
+		return errors.Join(inputErr, discardErr)
+	}
+	return inputErr
+}
+
+// discardIPXEInput keeps rejected boot data away from the REPL and parent
+// shell without retaining it. A partial rejected line cannot be a terminator.
+func discardIPXEInput(lineComplete bool) error {
+	var one [1]byte
+	skipLine := !lineComplete
+	lineLength := 0
+	dotOnly := true
+	for {
+		n, err := os.Stdin.Read(one[:])
+		if n > 0 {
+			switch one[0] {
+			case '\r':
+			case '\n':
+				if !skipLine && lineLength == 1 && dotOnly {
+					return nil
+				}
+				skipLine = false
+				lineLength = 0
+				dotOnly = true
+			default:
+				lineLength = min(2, lineLength+1)
+				dotOnly = dotOnly && one[0] == '.'
+			}
+		}
+		if err != nil {
+			// Ctrl+D is a transient terminal EOF, not the end of a paste.
+			if errors.Is(err, io.EOF) {
+				transient, checkErr := terminalEOFIsTransient(os.Stdin)
+				if checkErr != nil {
+					return errors.Join(err, checkErr)
+				}
+				if transient {
+					continue
+				}
+			}
+			if errors.Is(err, io.EOF) && !skipLine && lineLength == 1 && dotOnly {
+				return nil
+			}
+			return fmt.Errorf("discarding oversized iPXE input: %w", err)
+		}
 	}
 }
 

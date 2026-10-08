@@ -382,13 +382,69 @@ func TestPromptOperatingSystemTypeStopsOnUnexpectedTenantError(t *testing.T) {
 	assert.Equal(t, int32(1), tenantCalls.Load())
 }
 
+func TestDiscardIPXEInput(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		lineComplete bool
+		wantNext     string
+		wantEOF      bool
+	}{
+		{
+			name:     "partial dot and oversized discarded lines cannot end recovery",
+			input:    ".\r\n" + strings.Repeat("x", maxIPXEScriptBytes+1) + "\n..\n .\n.\r\nnext-answer\n",
+			wantNext: "next-answer",
+		},
+		{
+			name:         "completed rejected line preserves the next terminator",
+			input:        ".\nnext-answer\n",
+			lineComplete: true,
+			wantNext:     "next-answer",
+		},
+		{
+			name:         "complete terminator at EOF is accepted",
+			input:        ".",
+			lineComplete: true,
+		},
+		{
+			name:    "EOF after a partial dot preserves failure",
+			input:   ".\n",
+			wantEOF: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				discardErr := discardIPXEInput(test.lineComplete)
+				if discardErr != nil {
+					return discardErr
+				}
+				if test.wantNext != "" {
+					nextAnswer, readErr := readPromptLine()
+					require.NoError(t, readErr)
+					assert.Equal(t, test.wantNext, nextAnswer)
+				}
+				return nil
+			})
+			if test.wantEOF {
+				require.ErrorIs(t, err, io.EOF)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestPromptRawIPXEOperatingSystem(t *testing.T) {
+	fullScript := "#!ipxe\n" + strings.Repeat("x", maxIPXEScriptBytes-len("#!ipxe\n"))
 	tests := []struct {
 		name          string
 		input         string
 		wantScript    string
 		wantCancelled bool
 		wantInvalid   int
+		wantError     string
+		wantNext      string
 	}{
 		{
 			name: "required URL retries blank and invalid input before reading next answer",
@@ -416,12 +472,44 @@ func TestPromptRawIPXEOperatingSystem(t *testing.T) {
 			input:         "#!ipxe\nboot\n",
 			wantCancelled: true,
 		},
+		{
+			name:       "script at byte limit accepts terminator and preserves next answer",
+			input:      fullScript + "\n.\nnext-answer\n",
+			wantScript: fullScript,
+		},
+		{
+			name:      "oversized initial line fails before newline",
+			input:     strings.Repeat("x", maxIPXEScriptBytes+1),
+			wantError: "input exceeds",
+		},
+		{
+			name:      "oversized initial line discards partial dot and remaining script",
+			input:     strings.Repeat("x", maxIPXEScriptBytes+1) + ".\norg set unintended\n.\nnext-answer\n",
+			wantError: "input exceeds",
+			wantNext:  "next-answer",
+		},
+		{
+			name:      "oversized continuation fails before newline",
+			input:     fullScript + "x",
+			wantError: "input exceeds",
+		},
+		{
+			name:      "line separators count toward total script limit",
+			input:     fullScript + "\n\n.\nnext-answer\n",
+			wantError: "iPXE input exceeds",
+			wantNext:  "next-answer",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := map[string]interface{}{}
 			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
 				promptErr := promptRawIPXEOperatingSystem(body)
+				if test.wantNext != "" {
+					nextAnswer, readErr := readPromptLine()
+					require.NoError(t, readErr)
+					assert.Equal(t, test.wantNext, nextAnswer)
+				}
 				if promptErr != nil {
 					return promptErr
 				}
@@ -434,6 +522,12 @@ func TestPromptRawIPXEOperatingSystem(t *testing.T) {
 			})
 			if test.wantCancelled {
 				require.ErrorContains(t, err, "input cancelled")
+				assert.Empty(t, body)
+				return
+			}
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				require.ErrorIs(t, err, errPromptInputLimitExceeded)
 				assert.Empty(t, body)
 				return
 			}
