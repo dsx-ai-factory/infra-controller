@@ -1554,15 +1554,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request data is not in Ready state", ibp.ID), nil)
 				}
 
-				dbibic = append(dbibic, cdbm.InfiniBandInterface{
-					InfiniBandPartitionID: ibp.ID,
-					InfiniBandPartition:   ibp,
-					Device:                ibic.Device,
-					Vendor:                ibic.Vendor,
-					DeviceInstance:        ibic.DeviceInstance,
-					IsPhysical:            ibic.IsPhysical,
-					VirtualFunctionID:     ibic.VirtualFunctionID,
-				})
+				dbibic = append(dbibic, cdbm.InfiniBandInterface{InfiniBandPartitionID: ibp.ID, Device: ibic.Device, Vendor: ibic.Vendor, DeviceInstance: ibic.DeviceInstance, IsPhysical: ibic.IsPhysical, VirtualFunctionID: ibic.VirtualFunctionID})
 			}
 		}
 
@@ -1906,7 +1898,6 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			ifc := *retibifc
-			ifc.InfiniBandPartition = ibifc.InfiniBandPartition
 			ibifcs = append(ibifcs, ifc)
 
 			ibInterfaceConfig := &corev1.InstanceIBInterfaceConfig{
@@ -1914,7 +1905,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				Vendor:         ifc.Vendor,
 				DeviceInstance: uint32(ifc.DeviceInstance),
 				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
-				IbPartitionId:  &corev1.IBPartitionId{Value: ifc.SitePartitionID().String()},
+				IbPartitionId:  &corev1.IBPartitionId{Value: ifc.InfiniBandPartitionID.String()},
 			}
 			ibInterfaceConfigs = append(ibInterfaceConfigs, ibInterfaceConfig)
 
@@ -3966,13 +3957,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		ibiDAO := cdbm.NewInfiniBandInterfaceDAO(uih.dbSession)
 
 		// OrderAscending is our best-effort to make sure we send NICo the interfaces in the order it originally received them. so the config doesn't get rejected
-		existingIbIfcs, _, derr = ibiDAO.GetAll(
-			ctx,
-			tx,
-			cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instanceID}},
-			cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InfiniBandInterfaceOrderByCreated, Order: cdbp.OrderAscending}},
-			[]string{cdbm.InfiniBandPartitionRelationName},
-		)
+		existingIbIfcs, _, derr = ibiDAO.GetAll(ctx, tx, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instanceID}}, cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InfiniBandInterfaceOrderByCreated, Order: cdbp.OrderAscending}}, nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to retrieve InfinibandInterface details for Instance")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infiniband Interfaces for Instance, DB error", nil)
@@ -4066,7 +4051,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Infiniband Interface for Instance, DB error", nil)
 					}
 
-					dbibifc.InfiniBandPartition = ibpIDMap[ibpID]
 					newIbIfcs = append(newIbIfcs, *dbibifc)
 				}
 
@@ -4526,7 +4510,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				Vendor:         newIbIfc.Vendor,
 				DeviceInstance: uint32(newIbIfc.DeviceInstance),
 				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
-				IbPartitionId:  &corev1.IBPartitionId{Value: newIbIfc.SitePartitionID().String()},
+				IbPartitionId:  &corev1.IBPartitionId{Value: newIbIfc.InfiniBandPartitionID.String()},
 			}
 
 			// NOTE: Not supported yet, but ensures future compatibility

@@ -184,18 +184,17 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 		false,
 	)
 
-	restoredControllerID := uuid.New()
-	staleControllerID := uuid.New()
 	softDeletedIbp := util.TestBuildInfiniBandPartition(
 		t,
 		dbSession,
 		"test-ibp-soft-deleted",
 		st4,
 		tn,
-		&staleControllerID,
+		nil,
 		cdbm.InfiniBandPartitionStatusDeleting,
 		true,
 	)
+	restoredControllerID := softDeletedIbp.ID
 	oldPartitionKey := "0x111"
 	oldPartitionName := "old-partition"
 	oldServiceLevel := 1
@@ -459,7 +458,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 
 				if assert.Len(t, statusDetails, 1) {
 					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
-					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, Ready for use"), statusDetails[0].Message)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, ready for use"), statusDetails[0].Message)
 				}
 			},
 		},
@@ -507,7 +506,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 				assert.Equal(t, 1, total)
 				if assert.Len(t, statusDetails, 1) {
 					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusError), statusDetails[0].Status)
-					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, In error state"), statusDetails[0].Message)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site"), statusDetails[0].Message)
 				}
 			},
 		},
@@ -555,8 +554,6 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 				assert.Nil(t, restored.Description)
 				assert.Nil(t, restored.Labels)
 				assert.Equal(t, restoredControllerID, *restored.ControllerIBPartitionID)
-				assert.Equal(t, restoredControllerID.String(), restored.ToProto().GetId().GetValue())
-				assert.Equal(t, restoredControllerID.String(), restored.ToDeletionRequestProto().GetId().GetValue())
 				assert.Equal(t, "0x333", *restored.PartitionKey)
 				assert.Nil(t, restored.PartitionName)
 				assert.Nil(t, restored.ServiceLevel)
@@ -578,7 +575,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 
 				if assert.Len(t, statusDetails, 1) {
 					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
-					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, Ready for use"), statusDetails[0].Message)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, ready for use"), statusDetails[0].Message)
 				}
 			},
 		},

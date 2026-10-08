@@ -4396,17 +4396,6 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						assertInterfaceVpcSelection(t, req.Config.Network.Interfaces[i], expectedControllerVpcID, reqIfc.VpcIPFamilyMode())
 					}
 				}
-
-				if len(tt.args.reqData.InfiniBandInterfaces) > 0 {
-					require.NotNil(t, req.Config.Infiniband)
-					require.Len(t, req.Config.Infiniband.IbInterfaces, len(tt.args.reqData.InfiniBandInterfaces))
-					ibpDAO := cdbm.NewInfiniBandPartitionDAO(dbSession)
-					for i, reqIbIfc := range tt.args.reqData.InfiniBandInterfaces {
-						ibp, err := ibpDAO.GetByID(ec.Request().Context(), nil, uuid.MustParse(reqIbIfc.InfiniBandPartitionID), nil)
-						require.NoError(t, err)
-						assert.Equal(t, ibp.ControllerID().String(), req.Config.Infiniband.IbInterfaces[i].GetIbPartitionId().GetValue())
-					}
-				}
 			}
 
 			if len(tt.args.reqData.InfiniBandInterfaces) > 0 {
@@ -8599,16 +8588,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						assert.Equal(t, len(siteReq.Config.Infiniband.IbInterfaces), len(tt.args.reqData.InfiniBandInterfaces))
 
 						// Make sure order to should be same as the request received
-						ibpDAO := cdbm.NewInfiniBandPartitionDAO(tt.fields.dbSession)
 						for i := range siteReq.Config.Infiniband.IbInterfaces {
-							ibp, err := ibpDAO.GetByID(
-								ec.Request().Context(),
-								nil,
-								uuid.MustParse(tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID),
-								nil,
-							)
-							require.NoError(t, err)
-							assert.Equal(t, ibp.ControllerID().String(), siteReq.Config.Infiniband.IbInterfaces[i].GetIbPartitionId().GetValue())
+							assert.Equal(t, siteReq.Config.Infiniband.IbInterfaces[i].IbPartitionId.Value, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID)
 						}
 					}
 

@@ -54,19 +54,6 @@ func TestInfiniBandPartition_ToProto(t *testing.T) {
 		assert.Equal(t, "", got.Metadata.Description)
 		assert.Nil(t, got.Metadata.Labels)
 	})
-
-	t.Run("controller ID replaces a divergent REST ID", func(t *testing.T) {
-		controllerID := uuid.New()
-		ibp := &InfiniBandPartition{
-			ID:                      id,
-			ControllerIBPartitionID: &controllerID,
-			Org:                     "org-1",
-			Name:                    "ibp-a",
-		}
-		got := ibp.ToProto()
-		require.NotNil(t, got.Id)
-		assert.Equal(t, controllerID.String(), got.Id.Value)
-	})
 }
 
 func TestInfiniBandPartition_FromProto(t *testing.T) {
@@ -149,25 +136,12 @@ func TestInfiniBandPartition_FromProto(t *testing.T) {
 }
 
 func TestInfiniBandPartition_ToDeletionRequestProto(t *testing.T) {
-	restID := uuid.New()
-	controllerID := uuid.New()
-	tests := []struct {
-		name         string
-		controllerID *uuid.UUID
-		wantID       uuid.UUID
-	}{
-		{name: "REST ID fallback", wantID: restID},
-		{name: "controller ID", controllerID: &controllerID, wantID: controllerID},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ibp := &InfiniBandPartition{ID: restID, ControllerIBPartitionID: tc.controllerID}
-			req := ibp.ToDeletionRequestProto()
-			require.NotNil(t, req)
-			require.NotNil(t, req.Id)
-			assert.Equal(t, tc.wantID.String(), req.Id.Value)
-		})
-	}
+	id := uuid.New()
+	ibp := &InfiniBandPartition{ID: id}
+	req := ibp.ToDeletionRequestProto()
+	require.NotNil(t, req)
+	require.NotNil(t, req.Id)
+	assert.Equal(t, id.String(), req.Id.Value)
 }
 
 func TestInfiniBandPartitionStatus_FromProto(t *testing.T) {
@@ -206,41 +180,6 @@ func TestInfiniBandPartitionStatus_Message(t *testing.T) {
 		assert.Empty(t, InfiniBandPartitionStatus("").Message())
 		assert.Empty(t, InfiniBandPartitionStatus("Mystery").Message())
 	})
-}
-
-func TestInfiniBandPartitionStatus_RecoveryMessage(t *testing.T) {
-	tests := []struct {
-		name   string
-		status InfiniBandPartitionStatus
-		want   string
-	}{
-		{
-			name:   "Provisioning",
-			status: InfiniBandPartitionStatusProvisioning,
-			want:   "InfiniBand Partition was found on Site, Being provisioned on Site",
-		},
-		{
-			name:   "Configuring",
-			status: InfiniBandPartitionStatusConfiguring,
-			want:   "InfiniBand Partition was found on Site, Being configured on Site",
-		},
-		{
-			name:   "Ready",
-			status: InfiniBandPartitionStatusReady,
-			want:   "InfiniBand Partition was found on Site, Ready for use",
-		},
-		{
-			name:   "Error",
-			status: InfiniBandPartitionStatusError,
-			want:   "InfiniBand Partition was found on Site, In error state",
-		},
-		{name: "unknown", status: InfiniBandPartitionStatus("Mystery")},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, tc.status.RecoveryMessage())
-		})
-	}
 }
 
 func TestInfiniBandPartition_Validate(t *testing.T) {

@@ -120,16 +120,6 @@ func (s InfiniBandPartitionStatus) Message() string {
 	return ""
 }
 
-// RecoveryMessage returns the status-history message recorded when inventory
-// recovers a Partition that REST does not currently track.
-func (s InfiniBandPartitionStatus) RecoveryMessage() string {
-	description := strings.TrimPrefix(s.Message(), "InfiniBand Partition is ")
-	if description == "" {
-		return ""
-	}
-	return "InfiniBand Partition was found on Site, " + strings.ToUpper(description[:1]) + description[1:]
-}
-
 // InfiniBandPartition represents entries in the InfiniBandPartition table
 type InfiniBandPartition struct {
 	bun.BaseModel `bun:"table:infiniband_partition,alias:ibp"`
@@ -156,15 +146,6 @@ type InfiniBandPartition struct {
 	Updated                 time.Time                 `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted                 *time.Time                `bun:"deleted,soft_delete"`
 	CreatedBy               uuid.UUID                 `bun:"type:uuid,notnull"`
-}
-
-// ControllerID returns the Site-facing Partition ID. Newly created Partitions
-// use the REST ID until inventory records a distinct controller ID.
-func (ibp *InfiniBandPartition) ControllerID() uuid.UUID {
-	if ibp.ControllerIBPartitionID != nil {
-		return *ibp.ControllerIBPartitionID
-	}
-	return ibp.ID
 }
 
 // Validate checks that the populated InfiniBandPartition is wire-safe.
@@ -231,7 +212,7 @@ func (ibp *InfiniBandPartition) toMetadataProto() *corev1.Metadata {
 // create time and carried with the entity thereafter).
 func (ibp *InfiniBandPartition) ToProto() *corev1.IBPartition {
 	return &corev1.IBPartition{
-		Id: &corev1.IBPartitionId{Value: ibp.ControllerID().String()},
+		Id: &corev1.IBPartitionId{Value: ibp.ID.String()},
 		Config: &corev1.IBPartitionConfig{
 			Name:                 ibp.Name,
 			TenantOrganizationId: ibp.Org,
@@ -294,7 +275,7 @@ func (ibp *InfiniBandPartition) FromProto(proto *corev1.IBPartition) {
 // delete this InfiniBand Partition.
 func (ibp *InfiniBandPartition) ToDeletionRequestProto() *corev1.IBPartitionDeletionRequest {
 	return &corev1.IBPartitionDeletionRequest{
-		Id: &corev1.IBPartitionId{Value: ibp.ControllerID().String()},
+		Id: &corev1.IBPartitionId{Value: ibp.ID.String()},
 	}
 }
 
