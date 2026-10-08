@@ -438,8 +438,8 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         nras_should_fail_parsing_flag.clone(),
         &mh,
         &mut txn,
-        ManagedHostState::PreAssignedMeasuring {
-            spdm_measuring_state: SpdmMeasuringState::PollResult,
+        |job_id| ManagedHostState::PreAssignedMeasuring {
+            spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
         },
     )
     .await;
@@ -699,9 +699,9 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         nras_should_fail_parsing_flag,
         &mh,
         &mut txn,
-        ManagedHostState::PostAssignedMeasuring {
+        |job_id| ManagedHostState::PostAssignedMeasuring {
             attestation_mode: AttestationMode::SpdmAttestation {
-                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
             },
         },
     )

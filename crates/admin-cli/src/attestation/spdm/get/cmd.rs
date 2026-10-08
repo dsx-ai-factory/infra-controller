@@ -22,7 +22,9 @@ use crate::rpc::ApiClient;
 pub(super) async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let attestation = api_client
         .0
-        .get_attestation_machine(args.machine_id)
+        .get_attestation(::rpc::common::Uuid {
+            value: args.job_id.to_string(),
+        })
         .await?;
 
     println!("{}", serde_json::to_string_pretty(&attestation)?);

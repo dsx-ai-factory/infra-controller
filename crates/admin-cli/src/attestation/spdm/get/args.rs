@@ -15,18 +15,18 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
 use clap::Parser;
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Get the SPDM attestation status for a machine:
+Get the SPDM attestation details for a job:
     $ nico-admin-cli attestation spdm get 12345678-1234-5678-90ab-cdef01234567
 
 ")]
 pub(crate) struct Args {
-    #[clap(help = "Machine ID")]
-    pub(super) machine_id: MachineId,
+    #[clap(help = "Attestation job ID")]
+    pub(super) job_id: Uuid,
 }

@@ -106,7 +106,7 @@ impl StateHandler for SpdmAttestationStateHandler {
             controller_state
         };
 
-        let SpdmObjectId(machine_id, device_id) = object_id;
+        let SpdmObjectId(machine_id, device_id, job_id) = object_id;
 
         match controller_state {
             SpdmAttestationState::FetchMetadata => {
@@ -135,8 +135,10 @@ impl StateHandler for SpdmAttestationStateHandler {
 
                 let metadata = SpdmMachineDeviceMetadata { firmware_version };
                 let mut txn = ctx.services.db_pool.begin().await?;
-                db::attestation::spdm::update_metadata(&mut txn, machine_id, device_id, &metadata)
-                    .await?;
+                db::attestation::spdm::update_metadata(
+                    &mut txn, machine_id, device_id, job_id, &metadata,
+                )
+                .await?;
                 Ok(
                     StateHandlerOutcome::transition(SpdmAttestationState::FetchCertificate)
                         .with_txn(txn),
@@ -162,6 +164,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                     &mut txn,
                     &object_id.0,
                     device_id,
+                    job_id,
                     &ca_certificate.into_model(),
                 )
                 .await?;
@@ -225,6 +228,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                             &mut txn,
                             &object_id.0,
                             device_id,
+                            job_id,
                             &evidence.into_model(),
                         )
                         .await?;
@@ -300,17 +304,20 @@ impl StateHandler for SpdmAttestationStateHandler {
             }
             SpdmAttestationState::Passed => {
                 let mut txn = ctx.services.db_pool.begin().await?;
-                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id).await?;
+                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
+                    .await?;
                 Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
             }
             SpdmAttestationState::Failed(_reason) => {
                 let mut txn = ctx.services.db_pool.begin().await?;
-                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id).await?;
+                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
+                    .await?;
                 Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
             }
             SpdmAttestationState::Cancelled => {
                 let mut txn = ctx.services.db_pool.begin().await?;
-                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id).await?;
+                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
+                    .await?;
                 if transition_to_cancelled {
                     Ok(
                         StateHandlerOutcome::transition(SpdmAttestationState::Cancelled)

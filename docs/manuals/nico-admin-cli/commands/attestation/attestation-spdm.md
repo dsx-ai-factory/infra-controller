@@ -41,9 +41,9 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`cancel`](./attestation-spdm-cancel.md) | Cancel attestation for a given machine id |
+| [`cancel`](./attestation-spdm-cancel.md) | Cancel an attestation job |
 | [`get`](./attestation-spdm-get.md) | Get SPDM attestation details for a given machine id |
-| [`list`](./attestation-spdm-list.md) | List SPDM attestation machine statuses |
+| [`list`](./attestation-spdm-list.md) | List SPDM attestation jobs by status |
 | [`trigger`](./attestation-spdm-trigger.md) | Trigger attestation for a given machine with id |
 
 ---

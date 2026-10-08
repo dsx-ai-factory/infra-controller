@@ -831,13 +831,18 @@ impl<'a> MockExploredHost<'a> {
         // if SPDM attestation is enabled, we need to drive it to completion
         if self.test_env.config.spdm.enabled {
             self.test_env
-                .run_machine_state_controller_iteration_until_state_matches(
+                .run_machine_state_controller_iteration_until_state_condition(
                     &host_machine_id,
                     10,
-                    ManagedHostState::HostInit {
-                        machine_state: MachineState::SpdmMeasuring {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
-                        },
+                    |machine| {
+                        matches!(
+                            machine.current_state(),
+                            ManagedHostState::HostInit {
+                                machine_state: MachineState::SpdmMeasuring {
+                                    spdm_measuring_state: SpdmMeasuringState::PollResult(_),
+                                },
+                            }
+                        )
                     },
                 )
                 .await;

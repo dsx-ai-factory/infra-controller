@@ -30,12 +30,22 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
         })
         .await?;
 
-    println!(
-        "Attestation triggered for machine {}",
-        res.machine_id
-            .map(|e| e.to_string())
-            .unwrap_or("No MachineId returned".to_string())
-    );
+    let machine_id = res
+        .machine_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    if let Some(result) = res.result {
+        let job_id = result
+            .job_id
+            .map(|id| id.value)
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "Attestation triggered for machine {machine_id}: {} device(s), job ID {job_id}",
+            result.devices_under_attestation
+        );
+    } else {
+        println!("No supported devices found for SPDM attestation on machine {machine_id}");
+    }
 
     Ok(())
 }

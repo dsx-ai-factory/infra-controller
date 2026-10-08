@@ -15,40 +15,40 @@
  * limitations under the License.
  */
 
-use ::rpc::forge::spdm_list_attestation_machines_request::Variant;
 use ::rpc::forge::{
-    SpdmAttestationStatus, SpdmListAttestationMachinesRequest,
-    SpdmListAttestationMachinesRequestSelector,
+    SpdmAttestationStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
 };
-use carbide_uuid::machine::MachineId;
+use uuid::Uuid;
 
 use crate::attestation::spdm::list::args::{Args, Selector};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
 pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    let variant = match (args.machine_id, args.selector) {
-        (Some(machine_id), None) => Some(Variant::MachineId(machine_id)),
-        (None, Some(Selector::InProgress)) => Some(Variant::Selector(
-            SpdmListAttestationMachinesRequestSelector::SpdmListInProgress.into(),
-        )),
-        (None, Some(Selector::Unsuccessful)) => Some(Variant::Selector(
-            SpdmListAttestationMachinesRequestSelector::SpdmListUnsuccessful.into(),
-        )),
-        (None, None) => None,
-        (Some(_), Some(_)) => unreachable!("clap prevents selecting both machine_id and selector"),
+    let selector = match args.selector {
+        Selector::InProgress => SpdmListAttestationRequestSelector::SpdmListInProgress,
+        Selector::Cancelled => SpdmListAttestationRequestSelector::SpdmListCancelled,
+        Selector::Failed => SpdmListAttestationRequestSelector::SpdmListFailed,
+        Selector::Passed => SpdmListAttestationRequestSelector::SpdmListPassed,
     };
 
-    let attestations: Vec<(MachineId, String)> = api_client
+    let attestations: Vec<(Uuid, String)> = api_client
         .0
-        .list_attestation_machines(SpdmListAttestationMachinesRequest { variant })
+        .list_attestation(SpdmListAttestationRequest {
+            selector: selector.into(),
+        })
         .await?
         .statuses
         .into_iter()
         .map(|elem| {
-            let machine_id = elem.machine_id.ok_or_else(|| {
+            let job_id = elem.job_id.ok_or_else(|| {
                 CarbideCliError::GenericError(
-                    "SPDM attestation status missing machine_id".to_string(),
+                    "SPDM attestation status missing job_id".to_string(),
+                )
+            })?;
+            let job_id = Uuid::try_from(job_id).map_err(|_| {
+                CarbideCliError::GenericError(
+                    "SPDM attestation status contains an invalid job_id".to_string(),
                 )
             })?;
             let att_status = SpdmAttestationStatus::try_from(elem.attestation_status)
@@ -57,9 +57,9 @@ pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult
                 ))?
                 .as_str_name()
                 .to_string();
-            Ok((machine_id, att_status))
+            Ok((job_id, att_status))
         })
-        .collect::<CarbideCliResult<Vec<(MachineId, String)>>>()?;
+        .collect::<CarbideCliResult<Vec<(Uuid, String)>>>()?;
 
     println!("{}", serde_json::to_string_pretty(&attestations)?);
 

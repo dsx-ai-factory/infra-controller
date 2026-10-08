@@ -17,9 +17,7 @@ use carbide_uuid::machine::MachineId;
 use model::machine::{FailureDetails, ManagedHostState};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
-    SpdmAttestationStatus, SpdmListAttestationMachinesRequest,
-    SpdmListAttestationMachinesRequestSelector, SpdmMachineAttestationStatus,
-    spdm_list_attestation_machines_request,
+    SpdmAttestationJobStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
 };
 use sqlx::{Postgres, Transaction};
 use tonic::Request;
@@ -34,13 +32,18 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
     nras_should_fail_parsing_flag: Arc<AtomicBool>,
     mh: &TestManagedHost,
     txn: &mut Transaction<'_, Postgres>,
-    poll_state: ManagedHostState,
+    poll_state: impl Fn(uuid::Uuid) -> ManagedHostState,
 ) {
     // first, let's get into a polling state
-    env.run_machine_state_controller_iteration_until_state_matches(
+    env.run_machine_state_controller_iteration_until_state_condition(
         &mh.host().id,
         10,
-        poll_state.clone(),
+        |machine| {
+            let Some(job_id) = spdm_poll_result_job_id(machine.current_state()) else {
+                return false;
+            };
+            machine.current_state() == &poll_state(job_id)
+        },
     )
     .await;
 
@@ -52,7 +55,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
 
     assert_eq!(1, statuses.len());
 
-    let machine_id = statuses[0].machine_id.expect("missing machine id");
+    let machine_id = mh.host().id.into();
 
     // check that attestation's status is InProgress
     assert_eq!(
@@ -71,7 +74,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         .expect("Could not get machine attestation status");
 
     assert_eq!(
-        rpc::forge::SpdmAttestationStatus::SpdmAttFailed,
+        model::attestation::spdm::SpdmAttestationStatus::Failed,
         attestation_status
     );
 
@@ -112,11 +115,24 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         .await
         .expect("Failed to trigger SPDM attestation")
         .into_inner();
-    assert_eq!(3, res.devices_under_attestation);
+    let result = res
+        .result
+        .expect("supported devices should produce an attestation result");
+    assert_eq!(3, result.devices_under_attestation);
+    let job_id = uuid::Uuid::try_from(
+        result
+            .job_id
+            .expect("supported devices should produce an attestation job ID"),
+    )
+    .expect("attestation job ID should be a UUID");
 
     // and make sure that the mh state controller has returned to PollResult state
-    env.run_machine_state_controller_iteration_until_state_matches(&mh.host().id, 5, poll_state)
-        .await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        5,
+        poll_state(job_id),
+    )
+    .await;
 
     // move the spdm state controller until it reaches the Passed state
     for _ in 0..10 {
@@ -127,19 +143,38 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         .expect("Could not get machine attestation status");
 
     assert_eq!(
-        rpc::forge::SpdmAttestationStatus::SpdmAttPassed,
+        model::attestation::spdm::SpdmAttestationStatus::Passed,
         attestation_status
     );
 }
 
+fn spdm_poll_result_job_id(state: &ManagedHostState) -> Option<uuid::Uuid> {
+    match state {
+        ManagedHostState::HostInit {
+            machine_state:
+                model::machine::MachineState::SpdmMeasuring {
+                    spdm_measuring_state: model::machine::SpdmMeasuringState::PollResult(job_id),
+                },
+        }
+        | ManagedHostState::PreAssignedMeasuring {
+            spdm_measuring_state: model::machine::SpdmMeasuringState::PollResult(job_id),
+        }
+        | ManagedHostState::PostAssignedMeasuring {
+            attestation_mode:
+                model::machine::AttestationMode::SpdmAttestation {
+                    spdm_measuring_state: model::machine::SpdmMeasuringState::PollResult(job_id),
+                },
+        } => Some(*job_id),
+        _ => None,
+    }
+}
+
 async fn list_machines_under_attestation(
     env: &TestEnv,
-) -> Result<Vec<SpdmMachineAttestationStatus>, tonic::Status> {
+) -> Result<Vec<SpdmAttestationJobStatus>, tonic::Status> {
     env.api
-        .list_attestation_machines(Request::new(SpdmListAttestationMachinesRequest {
-            variant: Some(spdm_list_attestation_machines_request::Variant::Selector(
-                SpdmListAttestationMachinesRequestSelector::SpdmListInProgress.into(),
-            )),
+        .list_attestation(Request::new(SpdmListAttestationRequest {
+            selector: SpdmListAttestationRequestSelector::SpdmListInProgress.into(),
         }))
         .await
         .map(|response| response.into_inner().statuses)
@@ -148,20 +183,10 @@ async fn list_machines_under_attestation(
 async fn fetch_machine_attestation_status(
     env: &TestEnv,
     machine_id: MachineId,
-) -> Result<SpdmAttestationStatus, tonic::Status> {
-    let mut statuses = env
-        .api
-        .list_attestation_machines(Request::new(SpdmListAttestationMachinesRequest {
-            variant: Some(spdm_list_attestation_machines_request::Variant::MachineId(
-                machine_id,
-            )),
-        }))
-        .await?
-        .into_inner()
-        .statuses;
-
-    Ok(statuses
-        .pop()
-        .expect("missing machine attestation status")
-        .attestation_status())
+) -> Result<model::attestation::spdm::SpdmAttestationStatus, tonic::Status> {
+    let mut txn = env.db_txn().await;
+    Ok(
+        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, &machine_id)
+            .await?,
+    )
 }

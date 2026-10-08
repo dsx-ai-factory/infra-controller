@@ -4,33 +4,32 @@ _[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › 
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-list - List SPDM attestation machine
-statuses
+nico-admin-cli-attestation-spdm-list - List SPDM attestation jobs by status
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation spdm list** \[**--machine-id**\]
-\[**--selector**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+**nico-admin-cli attestation spdm list** \[**--extended**\]
+\[**--sort-by**\] **--selector** *\<SELECTOR\>* \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
-List SPDM attestation machine statuses
+List SPDM attestation jobs by status
 
 ## OPTIONS
 
-**--machine-id** *\<MACHINE_ID\>*  
-Machine ID
-
 **--selector** *\<SELECTOR\>*  
-Filter attestation machines by selector\
+Filter attestation jobs by status\
 
 \
 *Possible values:*
 
 - in-progress
 
-- unsuccessful
+- cancelled
+
+- failed
+
+- passed
 
 **--extended**  
 Extended result output.
@@ -55,7 +54,7 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli attestation spdm list 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli attestation spdm list --selector in-progress
 ```
 
 ---

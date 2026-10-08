@@ -49,7 +49,7 @@ pub async fn trigger_attestation(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
-) -> Result<u64, StateHandlerError> {
+) -> Result<Option<(u64, uuid::Uuid)>, StateHandlerError> {
     // retrieve bmc info for a machine and create redfish client
     // get service root
     // - absent -> return NotSupported
@@ -72,7 +72,7 @@ pub async fn trigger_attestation(
 
     if service_root.component_integrity.is_none() {
         // let's treat 0 devices under attestation as NotSupported
-        return Ok(0);
+        return Ok(None);
     }
 
     // do we support attestation for a given machine type?
@@ -84,7 +84,7 @@ pub async fn trigger_attestation(
                 %machine_id,
                 "ServiceRoot.Product is None; not scheduling SPDM attestation"
             );
-            return Ok(0);
+            return Ok(None);
         }
     };
 
@@ -94,7 +94,7 @@ pub async fn trigger_attestation(
             %product,
             "ServiceRoot.Product is not supported; not scheduling SPDM attestation"
         );
-        return Ok(0);
+        return Ok(None);
     }
 
     let component_integrities_future = redfish_client.get_component_integrities();
@@ -116,7 +116,7 @@ pub async fn trigger_attestation(
 
     if components.is_empty() {
         // let's treat 0 devices under attestation as NotSupported
-        return Ok(0);
+        return Ok(None);
     }
 
     // The validation that list is not changed is done by SKU validation. SKU
@@ -126,9 +126,10 @@ pub async fn trigger_attestation(
     // Validating again is not needed.
     // Remove existing device list and over-write with this list.
     let time_now = Utc::now();
+    let job_id = uuid::Uuid::new_v4();
     let device_attestations = components
         .into_iter()
-        .map(|x| from_component_integrity(x.clone(), machine_id, &time_now, bmc_info))
+        .map(|x| from_component_integrity(x.clone(), machine_id, &time_now, bmc_info, &job_id))
         .collect_vec();
 
     let mut txn = db_pool.begin().await?;
@@ -137,6 +138,7 @@ pub async fn trigger_attestation(
         &mut txn,
         machine_id,
         device_attestations,
+        &job_id,
     )
     .await?;
 
@@ -148,7 +150,7 @@ pub async fn trigger_attestation(
         "SPDM attestation commenced; scheduled SPDM device attestations"
     );
 
-    Ok(records_inserted)
+    Ok(Some((records_inserted, job_id)))
 }
 
 // Rules:
@@ -207,6 +209,7 @@ fn from_component_integrity(
     machine_id: &MachineId,
     time_now: &DateTime<Utc>,
     bmc_info: &BmcInfo,
+    job_id: &uuid::Uuid,
 ) -> SpdmDeviceAttestation {
     let ca_certificate_link = integrity
         .spdm
@@ -234,6 +237,7 @@ fn from_component_integrity(
         ca_certificate: None,
         evidence_target,
         evidence: None,
+        job_id: *job_id,
         started_at: *time_now,
         cancelled_at: None,
         completed_at: None,
@@ -266,7 +270,7 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             FailureSource::StateMachineArea(StateMachineArea::HostInit) => {
                 Ok(StateHandlerOutcome::transition(ManagedHostState::HostInit {
                     machine_state: MachineState::SpdmMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
                     },
                 })
                 .with_txn(txn))
@@ -274,14 +278,14 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             FailureSource::StateMachineArea(StateMachineArea::AssignedInstance) => Ok(
                 StateHandlerOutcome::transition(ManagedHostState::PostAssignedMeasuring {
                     attestation_mode: AttestationMode::SpdmAttestation {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
                     },
                 })
                 .with_txn(txn),
             ),
             FailureSource::StateMachineArea(StateMachineArea::MainFlow) => Ok(
                 StateHandlerOutcome::transition(ManagedHostState::PreAssignedMeasuring {
-                    spdm_measuring_state: SpdmMeasuringState::PollResult,
+                    spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
                 })
                 .with_txn(txn),
             ),
@@ -296,15 +300,13 @@ pub(crate) async fn handle_spdm_trigger_state(
     services: &MachineStateHandlerServices,
     mh_snapshot: &mut ManagedHostStateSnapshot,
     host_machine_id: &MachineId,
-    next_spdm_state: ManagedHostState,
-    next_skip_state: ManagedHostState,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+) -> Result<Option<uuid::Uuid>, StateHandlerError> {
     // create redfish client
     let redfish_client = services
         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
         .await?;
 
-    let devices_scheduled = trigger_attestation(
+    let attestation_started = trigger_attestation(
         &services.db_pool,
         redfish_client,
         &mh_snapshot.host_snapshot.status.bmc_info,
@@ -315,29 +317,29 @@ pub(crate) async fn handle_spdm_trigger_state(
 
     // if 0 devices scheduled - this means it is unsupported
     // so we just proceed to the next state
-    if devices_scheduled == 0 {
+
+    if let Some((_, job_id)) = attestation_started {
+        Ok(Some(job_id))
+    } else {
         tracing::info!(
             machine_id = %host_machine_id,
             "No devices scheduled for SPDM attestation"
         );
-        Ok(StateHandlerOutcome::transition(next_skip_state))
-    } else {
-        Ok(StateHandlerOutcome::transition(next_spdm_state))
+        Ok(None)
     }
 }
 
 pub(crate) async fn handle_spdm_poll_state(
     db_pool: &PgPool,
     host_machine_id: &MachineId,
+    job_id: &uuid::Uuid,
     failure_source: FailureSource,
     next_skip_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let mut txn = db_pool.begin().await?;
 
-    // get attestation status for the entire machine
     let attestation_status =
-        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, host_machine_id)
-            .await?;
+        db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await?;
 
     // passed or cancelled -> just move to the next state
     // failed -> get states for all devices and log to the Failed state logging them there
@@ -347,8 +349,7 @@ pub(crate) async fn handle_spdm_poll_state(
         }
         SpdmAttestationStatus::Failed => {
             let attestation_states =
-                db::attestation::spdm::get_attestations_for_machine_id(&mut txn, host_machine_id)
-                    .await?;
+                db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await?;
             // here, move to failed state with a full details
             Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
                 details: FailureDetails {

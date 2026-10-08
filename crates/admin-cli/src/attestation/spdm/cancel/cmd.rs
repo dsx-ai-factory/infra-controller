@@ -22,7 +22,9 @@ use crate::rpc::ApiClient;
 pub(super) async fn cancel(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     api_client
         .0
-        .cancel_machine_attestation(args.machine_id)
+        .cancel_attestation(::rpc::common::Uuid {
+            value: args.job_id.to_string(),
+        })
         .await?;
     println!("Successfully submitted the command");
     Ok(())

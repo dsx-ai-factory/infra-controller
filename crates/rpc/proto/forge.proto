@@ -942,10 +942,10 @@ service Forge {
 
   // SPDM attestation APIs start
   rpc TriggerMachineAttestation(SpdmMachineAttestationTriggerRequest) returns (SpdmMachineAttestationTriggerResponse);
-  rpc CancelMachineAttestation(common.MachineId) returns (google.protobuf.Empty);
+  rpc CancelAttestation(common.UUID) returns (google.protobuf.Empty);
 
-  rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
-  rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
+  rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
+  rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);
   // SPDM attestation APIs end
 
   // SPIFFE Machine Identity APIs
@@ -1151,15 +1151,24 @@ enum SpdmAttestationStatus{
   SPDM_ATT_FAILED = 3;
 }
 
-message SpdmMachineAttestationStatus {
+message SpdmAttestationJobStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  common.MachineId machine_id = 1;
+  reserved 1;
+  reserved "machine_id";
   SpdmAttestationStatus attestation_status = 2;
+  common.UUID job_id = 3;
 }
 
 message SpdmMachineAttestationTriggerResponse {
+  reserved 2;
+  reserved "devices_under_attestation";
   common.MachineId machine_id = 1;
-  int32 devices_under_attestation = 2;
+  SpdmMachineAttestationTriggerResult result = 3;
+}
+
+message SpdmMachineAttestationTriggerResult {
+  int32 devices_under_attestation = 1;
+  common.UUID job_id = 2;
 }
 
 message SpdmAttestationDetails{
@@ -1173,7 +1182,7 @@ message SpdmAttestationDetails{
   optional google.protobuf.Timestamp completed_at = 9;
 }
 
-message SpdmGetAttestationMachineResponse {
+message SpdmGetAttestationResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated SpdmAttestationDetails attestations_details = 1;
 }
@@ -1183,21 +1192,24 @@ message SpdmMachineAttestationTriggerRequest {
   uint32 redfish_timeout_secs = 2;
 }
 
-enum SpdmListAttestationMachinesRequestSelector {
+enum SpdmListAttestationRequestSelector {
+  reserved 1;
+  reserved "SPDM_LIST_UNSUCCESSFUL";
   SPDM_LIST_IN_PROGRESS = 0;
-  SPDM_LIST_UNSUCCESSFUL = 1;
+  SPDM_LIST_CANCELLED = 2;
+  SPDM_LIST_FAILED = 3;
+  SPDM_LIST_PASSED = 4;
 }
 
-message SpdmListAttestationMachinesRequest {
-  oneof variant {
-    common.MachineId machine_id = 1;
-    SpdmListAttestationMachinesRequestSelector selector = 2;
-  }
+message SpdmListAttestationRequest {
+  reserved 1, 3;
+  reserved "machine_id", "job_id";
+  SpdmListAttestationRequestSelector selector = 2;
 }
 
-message SpdmListAttestationMachinesResponse {
+message SpdmListAttestationResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  repeated SpdmMachineAttestationStatus statuses = 1;
+  repeated SpdmAttestationJobStatus statuses = 1;
 }
 
 // Machine Identity - JWT-SVID token signing

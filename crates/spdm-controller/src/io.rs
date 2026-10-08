@@ -35,7 +35,7 @@ pub struct SpdmStateControllerIO {}
 
 #[async_trait::async_trait]
 impl StateControllerIO for SpdmStateControllerIO {
-    type ObjectId = SpdmObjectId; // tuple of machine id and device id
+    type ObjectId = SpdmObjectId; // tuple of machine ID, device ID, and job ID
     type State = SpdmDeviceAttestation;
     type ControllerState = SpdmAttestationState;
     type MetricsEmitter = SpdmMetricsEmitter;
@@ -60,7 +60,8 @@ impl StateControllerIO for SpdmStateControllerIO {
         object_id: &Self::ObjectId,
     ) -> Result<Option<Self::State>, DatabaseError> {
         Ok(Some(
-            load_snapshot_for_machine_and_device_id(txn, &object_id.0, &object_id.1).await?,
+            load_snapshot_for_machine_and_device_id(txn, &object_id.0, &object_id.1, &object_id.2)
+                .await?,
         ))
     }
 

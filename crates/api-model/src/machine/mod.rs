@@ -1952,7 +1952,7 @@ pub enum MeasuringState {
 #[serde(rename_all = "lowercase")]
 pub enum SpdmMeasuringState {
     TriggerMeasurements,
-    PollResult,
+    PollResult(uuid::Uuid), // the job id to poll
 }
 
 /// Tenant has requested network config update for the existing instance.
@@ -3379,7 +3379,7 @@ pub fn state_sla(
             AttestationMode::SpdmAttestation {
                 spdm_measuring_state,
             } => match spdm_measuring_state {
-                SpdmMeasuringState::PollResult => {
+                SpdmMeasuringState::PollResult(..) => {
                     StateSla::with_sla(slas::SPDM_ATTESTATION_RESULT_POLL, time_in_state)
                 }
                 SpdmMeasuringState::TriggerMeasurements => {
@@ -3390,7 +3390,7 @@ pub fn state_sla(
         ManagedHostState::PreAssignedMeasuring {
             spdm_measuring_state,
         } => match spdm_measuring_state {
-            SpdmMeasuringState::PollResult => {
+            SpdmMeasuringState::PollResult(..) => {
                 StateSla::with_sla(slas::SPDM_ATTESTATION_RESULT_POLL, time_in_state)
             }
             SpdmMeasuringState::TriggerMeasurements => {
@@ -5078,7 +5078,9 @@ mod tests {
                     scenario: "post-assignment SPDM polling uses the poll SLA",
                     input: stale(ManagedHostState::PostAssignedMeasuring {
                         attestation_mode: AttestationMode::SpdmAttestation {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
+                            spdm_measuring_state: SpdmMeasuringState::PollResult(uuid::uuid!(
+                                "123e4567-e89b-12d3-a456-426614174000"
+                            )),
                         },
                     }),
                     expect: (seconds(600), true),
@@ -5095,7 +5097,9 @@ mod tests {
                 Check {
                     scenario: "pre-assignment SPDM polling uses the poll SLA",
                     input: stale(ManagedHostState::PreAssignedMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::PollResult(uuid::uuid!(
+                            "123e4567-e89b-12d3-a456-426614174000"
+                        )),
                     }),
                     expect: (seconds(600), true),
                 },

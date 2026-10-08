@@ -5,16 +5,16 @@ _[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › 
 ## NAME
 
 nico-admin-cli-attestation-spdm-get - Get SPDM attestation details for a
-given machine id
+given job id
 
 ## SYNOPSIS
 
 **nico-admin-cli attestation spdm get** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*MACHINE_ID*\>
+\[**--sort-by**\] \[**-h**\|**--help**\] \<*JOB_ID*\>
 
 ## DESCRIPTION
 
-Get SPDM attestation details for a given machine id
+Get SPDM attestation details for a given job id
 
 ## OPTIONS
 
@@ -38,8 +38,8 @@ Sort output by specified field\
 **-h**, **--help**  
 Print help (see a summary with -h)
 
-\<*MACHINE_ID*\>  
-Machine ID
+\<*JOB_ID*\>  
+Attestation job ID
 
 ## Examples
 

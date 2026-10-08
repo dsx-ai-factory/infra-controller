@@ -91,6 +91,8 @@ pub mod spdm {
         pub evidence_target: Option<String>,
         // Collected Evidence.
         pub evidence: Option<Evidence>,
+        // job id
+        pub job_id: uuid::Uuid,
         // timestamps
         pub started_at: DateTime<Utc>,
         pub cancelled_at: Option<DateTime<Utc>>,
@@ -189,33 +191,36 @@ pub mod spdm {
 
     #[derive(thiserror::Error, Debug, Clone)]
     pub enum SpdmObjectIdParseError {
-        #[error("the object ID must have 2 parts but not as should be {0:?}")]
+        #[error("the object ID must have 3 parts but not as should be {0:?}")]
         WrongFormat(String),
         #[error("the machine ID parsing failed: {0}")]
         MachineIdParsingFailed(#[from] carbide_uuid::machine::MachineIdParseError),
+        #[error("the job ID parsing failed: {0}")]
+        JobIdParsingFailed(#[from] uuid::Error),
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, FromRow)]
-    pub struct SpdmObjectId(pub MachineId, pub String);
+    pub struct SpdmObjectId(pub MachineId, pub String, pub uuid::Uuid);
 
     impl FromStr for SpdmObjectId {
         type Err = SpdmObjectIdParseError;
         fn from_str(s: &str) -> Result<Self, Self::Err> {
             let values = s.split(',').collect_vec();
-            if values.len() != 2 {
+            if values.len() != 3 {
                 return Err(SpdmObjectIdParseError::WrongFormat(s.to_string()));
             }
 
             Ok(Self(
                 values[0].parse().map_err(SpdmObjectIdParseError::from)?,
                 values[1].to_string(),
+                uuid::Uuid::parse_str(values[2])?,
             ))
         }
     }
 
     impl Display for SpdmObjectId {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{},{}", self.0, self.1.clone())
+            write!(f, "{},{},{}", self.0, self.1, self.2)
         }
     }
 
@@ -277,6 +282,7 @@ pub mod spdm {
                 evidence_target: row.try_get("evidence_target")?,
                 ca_certificate: ca_certificate.map(|x| x.0),
                 evidence: evidence.map(|x| x.0),
+                job_id: row.try_get("job_id")?,
                 started_at: row.try_get("started_at")?,
                 cancelled_at: row.try_get("cancelled_at")?,
                 completed_at: row.try_get("completed_at")?,
@@ -366,6 +372,8 @@ mod test {
 
     // A valid serialized MachineId, reused across rows.
     const VALID_MACHINE_ID: &str = "fm100htv4fu8fpktl0e0qrg4dl58g2bc2g7naq0l6c15ruc22po1i5rfsq0";
+    const JOB_ID: uuid::Uuid = uuid::uuid!("d2697720-9e96-4f9a-8183-e7f7feb98327");
+    const JOB_ID_STR: &str = "d2697720-9e96-4f9a-8183-e7f7feb98327";
 
     fn machine_id() -> MachineId {
         VALID_MACHINE_ID.parse().expect("valid machine id")
@@ -373,9 +381,9 @@ mod test {
 
     #[test]
     fn spdm_object_id_round_trips() {
-        let spdm_object_id = SpdmObjectId(machine_id(), "Device-1".to_string());
+        let spdm_object_id = SpdmObjectId(machine_id(), "Device-1".to_string(), JOB_ID);
 
-        let expected_str = format!("{VALID_MACHINE_ID},Device-1");
+        let expected_str = format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR}");
         assert_eq!(expected_str, spdm_object_id.to_string());
 
         let parsed_object_id: SpdmObjectId = spdm_object_id.to_string().parse().unwrap();
@@ -387,19 +395,19 @@ mod test {
         value_scenarios!(
             run = |id| id.to_string();
             "simple device id" {
-                SpdmObjectId(machine_id(), "Device-1".to_string()) => format!("{VALID_MACHINE_ID},Device-1"),
+                SpdmObjectId(machine_id(), "Device-1".to_string(), JOB_ID) => format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR}"),
             }
 
             "empty device id" {
-                SpdmObjectId(machine_id(), String::new()) => format!("{VALID_MACHINE_ID},"),
+                SpdmObjectId(machine_id(), String::new(), JOB_ID) => format!("{VALID_MACHINE_ID},,{JOB_ID_STR}"),
             }
 
             "device id with internal comma" {
-                SpdmObjectId(machine_id(), "a,b".to_string()) => format!("{VALID_MACHINE_ID},a,b"),
+                SpdmObjectId(machine_id(), "a,b".to_string(), JOB_ID) => format!("{VALID_MACHINE_ID},a,b,{JOB_ID_STR}"),
             }
 
             "device id with spaces" {
-                SpdmObjectId(machine_id(), "HGX IRoT GPU 0".to_string()) => format!("{VALID_MACHINE_ID},HGX IRoT GPU 0"),
+                SpdmObjectId(machine_id(), "HGX IRoT GPU 0".to_string(), JOB_ID) => format!("{VALID_MACHINE_ID},HGX IRoT GPU 0,{JOB_ID_STR}"),
             }
         );
     }
@@ -410,14 +418,14 @@ mod test {
         check_cases(
             [
                 Case {
-                    scenario: "valid two parts",
-                    input: format!("{VALID_MACHINE_ID},Device-1"),
-                    expect: Yields(SpdmObjectId(machine_id(), "Device-1".to_string())),
+                    scenario: "valid three parts",
+                    input: format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR}"),
+                    expect: Yields(SpdmObjectId(machine_id(), "Device-1".to_string(), JOB_ID)),
                 },
                 Case {
                     scenario: "valid with empty device id",
-                    input: format!("{VALID_MACHINE_ID},"),
-                    expect: Yields(SpdmObjectId(machine_id(), String::new())),
+                    input: format!("{VALID_MACHINE_ID},,{JOB_ID_STR}"),
+                    expect: Yields(SpdmObjectId(machine_id(), String::new(), JOB_ID)),
                 },
                 Case {
                     scenario: "no comma is wrong format",
@@ -430,19 +438,29 @@ mod test {
                     expect: Fails,
                 },
                 Case {
-                    scenario: "three parts is wrong format",
-                    input: format!("{VALID_MACHINE_ID},Device-1,extra"),
+                    scenario: "two parts is wrong format",
+                    input: format!("{VALID_MACHINE_ID},Device-1"),
                     expect: Fails,
                 },
                 Case {
-                    scenario: "only a comma is wrong format",
-                    input: ",".to_string(),
-                    // two parts ("" and ""), but the first fails to parse as MachineId
+                    scenario: "four parts is wrong format",
+                    input: format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR},extra"),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "only commas is wrong format",
+                    input: ",,".to_string(),
+                    // Three parts, but the first fails to parse as MachineId.
                     expect: Fails,
                 },
                 Case {
                     scenario: "bad machine id",
-                    input: "not-a-machine-id,Device-1".to_string(),
+                    input: format!("not-a-machine-id,Device-1,{JOB_ID_STR}"),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "bad job id",
+                    input: format!("{VALID_MACHINE_ID},Device-1,not-a-job-id"),
                     expect: Fails,
                 },
             ],

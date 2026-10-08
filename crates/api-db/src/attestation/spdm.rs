@@ -31,14 +31,8 @@ pub async fn insert_device_attestations(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     devices: Vec<SpdmDeviceAttestation>,
+    job_id: &uuid::Uuid,
 ) -> DatabaseResult<u64> {
-    let query = "DELETE FROM spdm_machine_devices_attestation WHERE machine_id=$1";
-    sqlx::query(query)
-        .bind(machine_id)
-        .execute(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
     let device_ids = devices.iter().map(|x| &x.device_id).collect_vec();
     let nonces = devices.iter().map(|x| x.nonce).collect_vec();
     let states = devices
@@ -51,13 +45,14 @@ pub async fn insert_device_attestations(
         .collect_vec();
     let ca_certificate_links = devices.iter().map(|x| &x.ca_certificate_link).collect_vec();
     let evidence_targets = devices.iter().map(|x| &x.evidence_target).collect_vec();
+
     let started_at_timestamps = devices.iter().map(|x| &x.started_at).collect_vec();
 
-    let query = r#"INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, started_at)
+    let query = r#"INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, job_id, started_at)
         SELECT 
-            $1 as machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, started_at
+            $1 as machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, $8 as job_id, started_at
         FROM 
-            UNNEST($2::TEXT[], $3::uuid[], $4::JSONB[], $5::TEXT[], $6::TEXT[], $7::TEXT[], $8::timestamptz[])
+            UNNEST($2::TEXT[], $3::uuid[], $4::JSONB[], $5::TEXT[], $6::TEXT[], $7::TEXT[], $9::timestamptz[])
             AS t(device_id, nonce, state, state_version, ca_certificate_link, evidence_target, started_at)
         "#;
     let res = sqlx::query(query)
@@ -68,6 +63,7 @@ pub async fn insert_device_attestations(
         .bind(state_versions)
         .bind(ca_certificate_links)
         .bind(evidence_targets)
+        .bind(job_id)
         .bind(started_at_timestamps)
         .execute(txn)
         .await
@@ -76,17 +72,17 @@ pub async fn insert_device_attestations(
     Ok(res.rows_affected())
 }
 
-pub async fn cancel_machine_attestation(
+pub async fn cancel_attestation_job(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    job_id: &uuid::Uuid,
 ) -> DatabaseResult<()> {
     let current_time = chrono::Utc::now();
     let query = r#"UPDATE spdm_machine_devices_attestation
         SET cancelled_at = $2
-        WHERE machine_id = $1
+        WHERE job_id = $1
         "#;
     sqlx::query(query)
-        .bind(machine_id)
+        .bind(job_id)
         .bind(current_time)
         .execute(txn)
         .await
@@ -99,15 +95,17 @@ pub async fn set_completed_at(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_id: &str,
+    job_id: &uuid::Uuid,
 ) -> DatabaseResult<()> {
     let current_time = chrono::Utc::now();
     let query = r#"UPDATE spdm_machine_devices_attestation
-        SET completed_at = $3
-        WHERE machine_id = $1 and device_id = $2
+        SET completed_at = $4
+        WHERE machine_id = $1 and device_id = $2 and job_id = $3
         "#;
     sqlx::query(query)
         .bind(machine_id)
         .bind(device_id)
+        .bind(job_id)
         .bind(current_time)
         .execute(txn)
         .await
@@ -121,14 +119,16 @@ pub async fn update_metadata(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_id: &str,
+    job_id: &uuid::Uuid,
     metadata: &SpdmMachineDeviceMetadata,
 ) -> DatabaseResult<()> {
     let query = r#"UPDATE spdm_machine_devices_attestation
-        SET metadata = $3
-        WHERE machine_id = $1 AND device_id = $2"#;
+        SET metadata = $4
+        WHERE machine_id = $1 AND device_id = $2 AND job_id = $3"#;
     sqlx::query(query)
         .bind(machine_id)
         .bind(device_id)
+        .bind(job_id)
         .bind(sqlx::types::Json(metadata))
         .execute(txn)
         .await
@@ -142,14 +142,16 @@ pub async fn update_certificate(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_id: &str,
+    job_id: &uuid::Uuid,
     certificate: &CaCertificate,
 ) -> DatabaseResult<()> {
     let query = r#"UPDATE spdm_machine_devices_attestation
-        SET ca_certificate = $3
-        WHERE machine_id = $1 AND device_id = $2"#;
+        SET ca_certificate = $4
+        WHERE machine_id = $1 AND device_id = $2 AND job_id = $3"#;
     sqlx::query(query)
         .bind(machine_id)
         .bind(device_id)
+        .bind(job_id)
         .bind(sqlx::types::Json(certificate))
         .execute(txn)
         .await
@@ -163,14 +165,16 @@ pub async fn update_evidence(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_id: &str,
+    job_id: &uuid::Uuid,
     evidence: &Evidence,
 ) -> DatabaseResult<()> {
     let query = r#"UPDATE spdm_machine_devices_attestation
-        SET evidence = $3
-        WHERE machine_id = $1 AND device_id = $2"#;
+        SET evidence = $4
+        WHERE machine_id = $1 AND device_id = $2 AND job_id = $3"#;
     sqlx::query(query)
         .bind(machine_id)
         .bind(device_id)
+        .bind(job_id)
         .bind(sqlx::types::Json(evidence))
         .execute(txn)
         .await
@@ -186,7 +190,7 @@ pub async fn find_machine_ids_for_attestation(
 ) -> Result<Vec<SpdmObjectId>, DatabaseError> {
     let query = r#"
         SELECT
-            machine_id, device_id
+            machine_id, device_id, job_id
         FROM spdm_machine_devices_attestation
         WHERE
             completed_at is NULL
@@ -200,23 +204,17 @@ pub async fn find_machine_ids_for_attestation(
     Ok(object_ids)
 }
 
-pub enum ListSelector {
-    None,
-    Unsuccessful,
-    InProgress,
-}
-
 // list_all_attestation_statuses (selector)
 pub async fn list_all_attestation_statuses(
     txn: &mut PgConnection,
-    selector: ListSelector,
-) -> Result<Vec<(MachineId, SpdmAttestationStatus)>, DatabaseError> {
+    selector: SpdmAttestationStatus,
+) -> Result<Vec<(uuid::Uuid, SpdmAttestationStatus)>, DatabaseError> {
     let query = match selector {
-        ListSelector::None => {
+        SpdmAttestationStatus::InProgress => {
             r#"
         WITH machine_attestation_statuses AS (
             SELECT
-                machine_id,
+                job_id,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -228,19 +226,20 @@ pub async fn list_all_attestation_statuses(
                         THEN 'passed'
                 END AS attestation_status
             FROM spdm_machine_devices_attestation
-            GROUP BY machine_id
+            GROUP BY job_id
         )
         SELECT
-            machine_id,
+            job_id,
             attestation_status
-        FROM machine_attestation_statuses;
+        FROM machine_attestation_statuses
+        WHERE attestation_status = 'in_progress';
             "#
         }
-        ListSelector::Unsuccessful => {
+        SpdmAttestationStatus::Failed => {
             r#"
         WITH machine_attestation_statuses AS (
             SELECT
-                machine_id,
+                job_id,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -252,20 +251,20 @@ pub async fn list_all_attestation_statuses(
                         THEN 'passed'
                 END AS attestation_status
             FROM spdm_machine_devices_attestation
-            GROUP BY machine_id
+            GROUP BY job_id
         )
         SELECT
-            machine_id,
+            job_id,
             attestation_status
         FROM machine_attestation_statuses
         WHERE attestation_status = 'failed';
         "#
         }
-        ListSelector::InProgress => {
+        SpdmAttestationStatus::Cancelled => {
             r#"
         WITH machine_attestation_statuses AS (
             SELECT
-                machine_id,
+                job_id,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -277,14 +276,39 @@ pub async fn list_all_attestation_statuses(
                         THEN 'passed'
                 END AS attestation_status
             FROM spdm_machine_devices_attestation
-            GROUP BY machine_id
+            GROUP BY job_id
         )
         SELECT
-            machine_id,
+            job_id,
             attestation_status
         FROM machine_attestation_statuses
-        WHERE attestation_status = 'in_progress';
-        "#
+        WHERE attestation_status = 'cancelled';
+            "#
+        }
+        SpdmAttestationStatus::Passed => {
+            r#"
+        WITH machine_attestation_statuses AS (
+            SELECT
+                job_id,
+                CASE
+                    WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
+                        THEN 'in_progress'
+                    WHEN bool_or(state ? 'Failed')
+                        THEN 'failed'
+                    WHEN bool_and(state = '"Cancelled"'::jsonb)
+                        THEN 'cancelled'
+                    WHEN bool_and(state = '"Passed"'::jsonb)
+                        THEN 'passed'
+                END AS attestation_status
+            FROM spdm_machine_devices_attestation
+            GROUP BY job_id
+        )
+        SELECT
+            job_id,
+            attestation_status
+        FROM machine_attestation_statuses
+        WHERE attestation_status = 'passed';
+            "#
         }
     };
 
@@ -300,17 +324,14 @@ pub async fn list_all_attestation_statuses(
     let attestation_statuses = attestation_status_rows
         .iter()
         .map(|elem| {
-            let machine_id: MachineId = elem
-                .try_get("machine_id")
+            let job_id: uuid::Uuid = elem
+                .try_get("job_id")
                 .map_err(|e| DatabaseError::new(query, e))?;
             let status: String = elem
                 .try_get("attestation_status")
                 .map_err(|e| DatabaseError::new(query, e))?;
 
-            Ok((
-                machine_id,
-                convert_status_str_to_model_status(status.as_str())?,
-            ))
+            Ok((job_id, convert_status_str_to_model_status(status.as_str())?))
         })
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
@@ -320,6 +341,51 @@ pub async fn list_all_attestation_statuses(
 pub async fn list_single_machine_attestation_status(
     txn: &mut PgConnection,
     machine_id: &MachineId,
+) -> Result<SpdmAttestationStatus, DatabaseError> {
+    let query = r#"
+        WITH latest_device_attestations AS (
+            SELECT DISTINCT ON (machine_id, device_id)
+                machine_id,
+                device_id,
+                state
+            FROM spdm_machine_devices_attestation
+            WHERE machine_id = $1
+            ORDER BY machine_id, device_id, started_at DESC, job_id DESC
+        )
+        SELECT
+            CASE
+                WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
+                    THEN 'in_progress'
+                WHEN bool_or(state ? 'Failed')
+                    THEN 'failed'
+                WHEN bool_and(state = '"Cancelled"'::jsonb)
+                    THEN 'cancelled'
+                WHEN bool_and(state = '"Passed"'::jsonb)
+                    THEN 'passed'
+            END AS attestation_status
+        FROM latest_device_attestations
+        HAVING count(*) > 0
+    "#;
+
+    let status = sqlx::query_scalar::<_, String>(query)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    let Some(status) = status else {
+        return Err(DatabaseError::NotFoundError {
+            kind: "SPDM Attestation Record",
+            id: machine_id.to_string(),
+        });
+    };
+
+    convert_status_str_to_model_status(status.as_str())
+}
+
+pub async fn get_attestation_job_status(
+    txn: &mut PgConnection,
+    job_id: &uuid::Uuid,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
     let query = r#"
         SELECT
@@ -334,20 +400,20 @@ pub async fn list_single_machine_attestation_status(
                     THEN 'passed'
             END AS attestation_status
         FROM spdm_machine_devices_attestation
-        WHERE machine_id = $1
+        WHERE job_id = $1
         HAVING count(*) > 0
     "#;
 
     let status = sqlx::query_scalar::<_, String>(query)
-        .bind(machine_id)
+        .bind(job_id)
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
     let Some(status) = status else {
         return Err(DatabaseError::NotFoundError {
-            kind: "SPDM Attestation Record",
-            id: machine_id.to_string(),
+            kind: "SPDM Attestation Job",
+            id: job_id.to_string(),
         });
     };
 
@@ -387,11 +453,29 @@ pub async fn get_attestations_for_machine_id(
     Ok(attestation_details)
 }
 
+pub async fn get_attestations_for_job_id(
+    txn: &mut PgConnection,
+    job_id: &uuid::Uuid,
+) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
+    let query = r#"
+        SELECT machine_id, device_id, ca_certificate, state, metadata, evidence, started_at, cancelled_at, completed_at
+        FROM spdm_machine_devices_attestation
+        WHERE job_id = $1
+    "#;
+
+    sqlx::query_as(query)
+        .bind(job_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// this loads a device attestation from the DB
 pub async fn load_snapshot_for_machine_and_device_id(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_id: &String,
+    job_id: &uuid::Uuid,
 ) -> Result<SpdmDeviceAttestation, DatabaseError> {
     let query = r#"
         SELECT
@@ -418,12 +502,14 @@ pub async fn load_snapshot_for_machine_and_device_id(
             LIMIT 1
         ) AS mia ON true
         WHERE mda.machine_id = $1
-            AND mda.device_id  = $2;
+            AND mda.device_id = $2
+            AND mda.job_id = $3;
     "#;
 
     let res: SpdmDeviceAttestation = sqlx::query_as(query)
         .bind(machine_id)
         .bind(device_id)
+        .bind(job_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -458,13 +544,14 @@ pub async fn persist_outcome(
         UPDATE 
             spdm_machine_devices_attestation
         SET state_outcome = $1
-        WHERE machine_id = $2 AND device_id = $3
+        WHERE machine_id = $2 AND device_id = $3 AND job_id = $4
     "#;
 
     sqlx::query(query_device)
         .bind(sqlx::types::Json(outcome))
         .bind(object_id.0)
         .bind(object_id.1.clone())
+        .bind(object_id.2)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query_device, e))?
@@ -491,13 +578,14 @@ pub async fn persist_controller_state(
             UPDATE 
                 spdm_machine_devices_attestation
             SET state= $1, state_version=$2
-            WHERE machine_id = $3 AND device_id = $4 AND state_version = $5
+            WHERE machine_id = $3 AND device_id = $4 AND job_id = $5 AND state_version = $6
         "#;
     let rows_affected = sqlx::query(query)
         .bind(sqlx::types::Json(new_state))
         .bind(new_version)
         .bind(object_id.0)
         .bind(object_id.1.clone())
+        .bind(object_id.2)
         .bind(old_version)
         .execute(&mut *txn)
         .await
