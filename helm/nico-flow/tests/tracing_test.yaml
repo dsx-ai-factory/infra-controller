@@ -6,8 +6,9 @@ templates:
   - configmap.yaml
   - deployment.yaml
 tests:
-  - it: keeps export disabled with a configured endpoint
+  - it: explicitly disables export while retaining a configured endpoint
     set:
+      flowConfig.tracing.enabled: false
       extraEnv.flow:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://collector:4317
@@ -31,31 +32,29 @@ tests:
             value: grpc
         template: deployment.yaml
 
-  - it: enables export independently of endpoint and protocol
-    set:
-      flowConfig.tracing.enabled: true
+  - it: defaults the enable flag to true without configuring an endpoint
     asserts:
       - matchRegex:
           path: data["flowconfig.yaml"]
           pattern: 'tracing:\n  enabled: true'
         template: configmap.yaml
 
-  - it: defaults to disabled when reused values have no tracing block
+  - it: defaults to enabled when reused values have no tracing block
     set:
       flowConfig.tracing: null
     asserts:
       - matchRegex:
           path: data["flowconfig.yaml"]
-          pattern: 'tracing:\n  enabled: false'
+          pattern: 'tracing:\n  enabled: true'
         template: configmap.yaml
 
-  - it: defaults to disabled when the enable flag is null
+  - it: defaults to enabled when the enable flag is null
     set:
       flowConfig.tracing.enabled: null
     asserts:
       - matchRegex:
           path: data["flowconfig.yaml"]
-          pattern: 'tracing:\n  enabled: false'
+          pattern: 'tracing:\n  enabled: true'
         template: configmap.yaml
 
   - it: rejects a string enable flag

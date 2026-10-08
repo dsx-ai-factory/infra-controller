@@ -25,7 +25,7 @@ tests:
             leak_detection_interval: "1m"
             disable_leak_detection: false
             tracing:
-              enabled: false
+              enabled: true
 
   - it: renders overridden values
     set:
@@ -43,7 +43,7 @@ tests:
             leak_detection_interval: "2h"
             disable_leak_detection: true
             tracing:
-              enabled: false
+              enabled: true
 
   - it: rejects a bare-number duration
     set:
