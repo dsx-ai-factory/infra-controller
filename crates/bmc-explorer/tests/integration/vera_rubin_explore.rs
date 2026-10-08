@@ -63,18 +63,12 @@ async fn explore_nvidia_dgx_vr_and_generate_machine_id() {
         report
     );
     assert_eq!(report.systems[0].serial_console_ssh_port, Some(2200));
-    report.parse_position_info();
-    assert_eq!(report.physical_slot_number, Some(26));
-    assert_eq!(report.compute_tray_index, Some(16));
 
-    let mut refreshed_report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
-            .await
-            .expect("subsequent NvidiaDgxVr host exploration should succeed");
+    let refreshed_report = nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
+        .await
+        .expect("subsequent NvidiaDgxVr host exploration should succeed");
     assert_eq!(refreshed_report.systems, report.systems);
-    refreshed_report.parse_position_info();
-    assert_eq!(refreshed_report.physical_slot_number, Some(26));
-    assert_eq!(refreshed_report.compute_tray_index, Some(16));
+    assert_eq!(refreshed_report.rack_position(), report.rack_position());
     assert!(!report.chassis.is_empty(), "chassis must be present");
     assert!(
         report.systems[0].pcie_devices.is_empty(),

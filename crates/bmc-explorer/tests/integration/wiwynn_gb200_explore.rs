@@ -23,7 +23,7 @@ use crate::common;
 #[test]
 async fn chassis_position_remains_the_source_for_gb200() {
     let h = test_support::wiwynn_gb200_bmc_at_rack_position(11).await;
-    let mut report =
+    let report =
         nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
             .await
             .unwrap();
@@ -36,7 +36,7 @@ async fn chassis_position_remains_the_source_for_gb200() {
     assert_eq!(cbc.physical_slot_number, Some(10));
     assert_eq!(cbc.compute_tray_index, Some(0));
 
-    report.parse_position_info();
-    assert_eq!(report.physical_slot_number, Some(10));
-    assert_eq!(report.compute_tray_index, Some(0));
+    let position = report.rack_position();
+    assert_eq!(position.physical_slot_number, Some(10));
+    assert_eq!(position.compute_tray_index, Some(0));
 }

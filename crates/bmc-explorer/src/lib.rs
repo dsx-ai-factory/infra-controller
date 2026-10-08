@@ -414,11 +414,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        physical_slot_number: None,
-        compute_tray_index: None,
-        topology_id: None,
-        revision_id: None,
         remediation_error: None,
+        ..Default::default()
     })
 }
 
@@ -499,11 +496,8 @@ async fn build_delta_powershelf_report<B: Bmc>(
         }),
         secure_boot_status: None,
         lockdown_status: None,
-        physical_slot_number: None,
-        compute_tray_index: None,
-        topology_id: None,
-        revision_id: None,
         remediation_error: None,
+        ..Default::default()
     })
 }
 

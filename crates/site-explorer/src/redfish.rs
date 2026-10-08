@@ -490,11 +490,8 @@ impl RedfishClient {
             machine_setup_status,
             secure_boot_status,
             lockdown_status,
-            physical_slot_number: None,
-            compute_tray_index: None,
-            topology_id: None,
-            revision_id: None,
             remediation_error,
+            ..Default::default()
         })
     }
 

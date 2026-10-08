@@ -250,16 +250,21 @@ pub struct EndpointExplorationReport {
     pub power_shelf_id: Option<PowerShelfId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch_id: Option<SwitchId>,
-    // Merged from multiple chassis entries
+    // TODO: Remove the legacy cached position fields after release 2.5.
+    /// Legacy cached position; retained for compatibility with stored reports.
+    #[deprecated(note = "use rack_position() instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physical_slot_number: Option<i32>,
-    // Merged from multiple chassis entries
+    /// Legacy cached position; retained for compatibility with stored reports.
+    #[deprecated(note = "use rack_position() instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_tray_index: Option<i32>,
-    // Merged from multiple chassis entries
+    /// Legacy cached position; retained for compatibility with stored reports.
+    #[deprecated(note = "use rack_position() instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topology_id: Option<i32>,
-    // Merged from multiple chassis entries
+    /// Legacy cached position; retained for compatibility with stored reports.
+    #[deprecated(note = "use rack_position() instead")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<i32>,
     /// Transient remediation error detected during an otherwise successful exploration.
@@ -1043,11 +1048,8 @@ impl EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            physical_slot_number: None,
-            compute_tray_index: None,
-            topology_id: None,
-            revision_id: None,
             remediation_error: None,
+            ..Default::default()
         }
     }
 
@@ -1436,6 +1438,8 @@ impl EndpointExplorationReport {
 
     /// Computes rack position from normalized inventory without BMC requests.
     /// Chassis values take precedence over the canonical HGX GPU's position per field.
+    /// Deprecated cached fields supply values missing from older reports' inventory.
+    #[allow(deprecated)] // Read cached fields only as a compatibility fallback.
     pub fn rack_position(&self) -> RackPosition {
         let processor = self
             .systems
@@ -1453,18 +1457,31 @@ impl EndpointExplorationReport {
                 .chassis
                 .iter()
                 .find_map(|chassis| chassis.physical_slot_number)
-                .or_else(|| processor.and_then(|processor| processor.physical_slot_number)),
+                .or_else(|| processor.and_then(|processor| processor.physical_slot_number))
+                .or(self.physical_slot_number),
             compute_tray_index: self
                 .chassis
                 .iter()
                 .find_map(|chassis| chassis.compute_tray_index)
-                .or_else(|| processor.and_then(|processor| processor.compute_tray_index)),
-            topology_id: self.chassis.iter().find_map(|chassis| chassis.topology_id),
-            revision_id: self.chassis.iter().find_map(|chassis| chassis.revision_id),
+                .or_else(|| processor.and_then(|processor| processor.compute_tray_index))
+                .or(self.compute_tray_index),
+            topology_id: self
+                .chassis
+                .iter()
+                .find_map(|chassis| chassis.topology_id)
+                .or(self.topology_id),
+            revision_id: self
+                .chassis
+                .iter()
+                .find_map(|chassis| chassis.revision_id)
+                .or(self.revision_id),
         }
     }
 
     /// Fills report position fields from collected inventory, preserving existing values.
+    // TODO: Remove this compatibility method after release 2.5.
+    #[deprecated(note = "use rack_position() to compute position without mutating the report")]
+    #[allow(deprecated)] // Retain the legacy mutation contract for existing callers.
     pub fn parse_position_info(&mut self) {
         let position = self.rack_position();
         self.physical_slot_number = self.physical_slot_number.or(position.physical_slot_number);
@@ -2914,12 +2931,64 @@ mod tests {
                 revision_id: Some(2),
             }
         );
+    }
+
+    #[test]
+    fn rack_position_uses_legacy_values_only_when_inventory_has_no_value() {
+        let mut json = serde_json::to_value(processor_position_report()).unwrap();
+        json["PhysicalSlotNumber"] = serde_json::json!(9);
+        json["ComputeTrayIndex"] = serde_json::json!(8);
+        json["TopologyId"] = serde_json::json!(7);
+        json["RevisionId"] = serde_json::json!(2);
+        let report: EndpointExplorationReport = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            report.rack_position(),
+            RackPosition {
+                physical_slot_number: Some(26),
+                compute_tray_index: Some(16),
+                topology_id: Some(7),
+                revision_id: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_position_survives_a_report_round_trip() {
+        let report: EndpointExplorationReport = serde_json::from_value(serde_json::json!({
+            "EndpointType": "Bmc",
+            "PhysicalSlotNumber": 26, "ComputeTrayIndex": 16,
+            "TopologyId": 7, "RevisionId": 2
+        }))
+        .unwrap();
+        let restored: EndpointExplorationReport =
+            serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(
+            restored.rack_position(),
+            RackPosition {
+                physical_slot_number: Some(26),
+                compute_tray_index: Some(16),
+                topology_id: Some(7),
+                revision_id: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)] // Verify the legacy writer contract needed for rollback.
+    fn parse_position_info_preserves_existing_values_and_serializes_position() {
+        let mut report = processor_position_report();
         report.compute_tray_index = Some(9);
+        report.chassis = vec![Chassis {
+            topology_id: Some(7),
+            revision_id: Some(2),
+            ..Default::default()
+        }];
         report.parse_position_info();
-        assert_eq!(report.physical_slot_number, Some(3));
-        assert_eq!(report.compute_tray_index, Some(9));
-        assert_eq!(report.topology_id, Some(7));
-        assert_eq!(report.revision_id, Some(2));
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["PhysicalSlotNumber"], 26);
+        assert_eq!(json["ComputeTrayIndex"], 9);
+        assert_eq!(json["TopologyId"], 7);
+        assert_eq!(json["RevisionId"], 2);
     }
 
     #[test]
@@ -4261,12 +4330,8 @@ mod tests {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-
-            physical_slot_number: None,
-            compute_tray_index: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         };
 
         let inventory_map = report.get_inventory_map();
@@ -4429,11 +4494,8 @@ mod tests {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            physical_slot_number: None,
-            compute_tray_index: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         };
         report
             .generate_machine_id(false)
@@ -4535,9 +4597,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_position_info_first_wins() {
-        // Test that parse_position_info uses "first wins" strategy
-        let mut report = EndpointExplorationReport {
+    fn rack_position_uses_first_chassis_value_per_field() {
+        // Test that rack_position uses "first wins" strategy
+        let report = EndpointExplorationReport {
             chassis: vec![
                 Chassis {
                     id: "chassis_0".to_string(),
@@ -4559,22 +4621,22 @@ mod tests {
             ..Default::default()
         };
 
-        report.parse_position_info();
+        let position = report.rack_position();
 
         // First chassis has physical_slot_number=1, so we get 1 (not 2)
-        assert_eq!(report.physical_slot_number, Some(1));
+        assert_eq!(position.physical_slot_number, Some(1));
         // First chassis has no compute_tray_index, second has 5, so we get 5
-        assert_eq!(report.compute_tray_index, Some(5));
+        assert_eq!(position.compute_tray_index, Some(5));
         // First chassis has topology_id=10, so we get 10 (not 20)
-        assert_eq!(report.topology_id, Some(10));
+        assert_eq!(position.topology_id, Some(10));
         // First chassis has no revision_id, second has 3, so we get 3
-        assert_eq!(report.revision_id, Some(3));
+        assert_eq!(position.revision_id, Some(3));
     }
 
     #[test]
-    fn test_parse_position_info_all_none() {
+    fn rack_position_without_position_data() {
         // Test when no chassis has position info
-        let mut report = EndpointExplorationReport {
+        let report = EndpointExplorationReport {
             chassis: vec![Chassis {
                 id: "chassis_0".to_string(),
                 ..Default::default()
@@ -4582,28 +4644,28 @@ mod tests {
             ..Default::default()
         };
 
-        report.parse_position_info();
+        let position = report.rack_position();
 
-        assert_eq!(report.physical_slot_number, None);
-        assert_eq!(report.compute_tray_index, None);
-        assert_eq!(report.topology_id, None);
-        assert_eq!(report.revision_id, None);
+        assert_eq!(position.physical_slot_number, None);
+        assert_eq!(position.compute_tray_index, None);
+        assert_eq!(position.topology_id, None);
+        assert_eq!(position.revision_id, None);
     }
 
     #[test]
-    fn test_parse_position_info_empty_chassis() {
+    fn rack_position_without_inventory() {
         // Test when there are no chassis entries
-        let mut report = EndpointExplorationReport {
+        let report = EndpointExplorationReport {
             chassis: vec![],
             ..Default::default()
         };
 
-        report.parse_position_info();
+        let position = report.rack_position();
 
-        assert_eq!(report.physical_slot_number, None);
-        assert_eq!(report.compute_tray_index, None);
-        assert_eq!(report.topology_id, None);
-        assert_eq!(report.revision_id, None);
+        assert_eq!(position.physical_slot_number, None);
+        assert_eq!(position.compute_tray_index, None);
+        assert_eq!(position.topology_id, None);
+        assert_eq!(position.revision_id, None);
     }
 
     // is_power_shelf identifies a power shelf either by a chassis id containing

@@ -359,11 +359,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            physical_slot_number: None,
-            compute_tray_index: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }
     }
 }
