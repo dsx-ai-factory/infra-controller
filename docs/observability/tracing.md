@@ -104,8 +104,11 @@ the logical call, before lazy connection setup and its readiness retries; respon
 when that call returns. These are client-side call boundaries, not server receive times.
 
 The same fields appear in completion logs under the `rms_rpc_audit` target at DEBUG level.
-When both DEBUG audit logging and the API runtime tracing flag are disabled, payload
-encoding and redaction are skipped; transport propagation remains installed.
+The `rms_rpc` span sets `logfmt.suppress`, so the logfmt output carries that DEBUG record and
+no `level=SPAN` close line repeating the bodies. The admin UI log stream, when enabled, is a
+separate layer and still lists the span with its fields. When both DEBUG audit logging and the
+API runtime tracing flag are disabled, payload encoding and redaction are skipped; transport
+propagation remains installed.
 Bodies are redacted before being attached to a span or log: credentials, passwords, tokens,
 URLs, arbitrary attributes, config values, error text, embedded JSON, and binary fields are
 withheld. Only reviewed identifier, address, domain, and version string fields are retained;

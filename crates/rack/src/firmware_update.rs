@@ -291,6 +291,7 @@ pub fn build_new_node_info(
         bmc_endpoint,
         host_endpoint,
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     };
 
     identity.apply_to_node_info(&mut node);
