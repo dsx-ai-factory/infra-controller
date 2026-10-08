@@ -9978,8 +9978,10 @@ dependencies = [
 name = "rms-observability"
 version = "0.0.0"
 dependencies = [
+ "carbide-test-support",
  "chrono",
  "librms",
+ "logfmt",
  "prost",
  "prost-reflect",
  "serde_json",
