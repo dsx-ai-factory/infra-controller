@@ -190,7 +190,7 @@ Give the tenant its own config file, and set `api.org` to the tenant org in it. 
 
 Don't log in to the provider's config file. Login overwrites the provider's `auth.oidc` credentials there. A provider token in `auth.token` also outranks `auth.oidc.token`. In that case the tenant's login changes nothing that is sent.
 
-On Keycloak deployments, [Pointing nicocli at the Tenant org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
+On Keycloak deployments, [Pointing `nicocli` at the Tenant Org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
 
 To accept, send an empty PATCH body. Flags go before the account ID:
 
