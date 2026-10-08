@@ -89,6 +89,16 @@ type InfiniBandInterface struct {
 	CreatedBy             uuid.UUID            `bun:"type:uuid,notnull"`
 }
 
+// SitePartitionID returns the Site-facing ID of the associated Partition.
+// Callers should preload or assign InfiniBandPartition before constructing a
+// Site request; the REST foreign key is retained as a compatibility fallback.
+func (ibi *InfiniBandInterface) SitePartitionID() uuid.UUID {
+	if ibi.InfiniBandPartition != nil {
+		return ibi.InfiniBandPartition.ControllerID()
+	}
+	return ibi.InfiniBandPartitionID
+}
+
 // InfiniBandInterfaceCreateInput input parameters for Create method
 type InfiniBandInterfaceCreateInput struct {
 	InfiniBandInterfaceID *uuid.UUID

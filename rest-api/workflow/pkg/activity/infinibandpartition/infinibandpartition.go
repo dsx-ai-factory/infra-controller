@@ -374,7 +374,7 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 		partitionKey = controllerIbp.GetConfig().Pkey
 	}
 
-	statusMessage := "InfiniBand Partition was found on Site, Ready for use"
+	statusMessage := status.RecoveryMessage()
 
 	ibp, err := cdb.WithTxResult(ctx, mibp.dbSession, func(tx *cdb.Tx) (*cdbm.InfiniBandPartition, error) {
 		ibpDAO := cdbm.NewInfiniBandPartitionDAO(mibp.dbSession)

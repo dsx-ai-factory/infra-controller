@@ -115,15 +115,18 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	st3 := util.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, ipu)
 	st4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
 	st5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, ipu)
+	st6 := util.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, ipu)
 
 	ts1 := util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st1.ID, tn.ID)
 	assert.NotNil(t, ts1)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st3.ID, tnu.ID)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st4.ID, tnu.ID)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st5.ID, tnu.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st6.ID, tnu.ID)
 	util.TestBuildAllocation(t, dbSession, ip, tn, st3, "test-recovery-allocation-3")
 	util.TestBuildAllocation(t, dbSession, ip, tn, st4, "test-recovery-allocation-4")
 	util.TestBuildAllocation(t, dbSession, ip, tn, st5, "test-recovery-allocation-5")
+	util.TestBuildAllocation(t, dbSession, ip, tn, st6, "test-recovery-allocation-6")
 
 	ibp1 := util.TestBuildInfiniBandPartition(t, dbSession, "test-ibp-1", st1, tn, nil, cdbm.InfiniBandPartitionStatusPending, false)
 	assert.NotNil(t, ibp1)
@@ -165,6 +168,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	assert.NoError(t, err)
 
 	recoveredIbpID := uuid.New()
+	failedRecoveredIbpID := uuid.New()
 	terminalIbpID := uuid.New()
 	recoveredDescription := "recovered from Site inventory"
 	recoveredLabelValue := "recovered"
@@ -460,6 +464,54 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 			},
 		},
 		{
+			name: "test InfiniBand Partition inventory recovers failed partition with error history",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st6.ID,
+				infiniBandPartitionInventory: &corev1.InfiniBandPartitionInventory{
+					IbPartitions: []*corev1.IBPartition{
+						{
+							Id: &corev1.IBPartitionId{Value: failedRecoveredIbpID.String()},
+							Config: &corev1.IBPartitionConfig{
+								Name:                 "failed-site-only-ibp",
+								TenantOrganizationId: tn.Org,
+							},
+							Status: &corev1.IBPartitionStatus{
+								State: corev1.TenantState_FAILED,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := cdbm.NewInfiniBandPartitionDAO(dbSession).GetByID(ctx, nil, failedRecoveredIbpID, nil)
+				require.NoError(t, rerr)
+				require.NotNil(t, recovered)
+				assert.Equal(t, cdbm.InfiniBandPartitionStatusError, recovered.Status)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recovered.ID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusError), statusDetails[0].Status)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, In error state"), statusDetails[0].Message)
+				}
+			},
+		},
+		{
 			name: "test InfiniBand Partition inventory restores soft-deleted partition",
 			fields: fields{
 				dbSession:      dbSession,
@@ -503,6 +555,8 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 				assert.Nil(t, restored.Description)
 				assert.Nil(t, restored.Labels)
 				assert.Equal(t, restoredControllerID, *restored.ControllerIBPartitionID)
+				assert.Equal(t, restoredControllerID.String(), restored.ToProto().GetId().GetValue())
+				assert.Equal(t, restoredControllerID.String(), restored.ToDeletionRequestProto().GetId().GetValue())
 				assert.Equal(t, "0x333", *restored.PartitionKey)
 				assert.Nil(t, restored.PartitionName)
 				assert.Nil(t, restored.ServiceLevel)

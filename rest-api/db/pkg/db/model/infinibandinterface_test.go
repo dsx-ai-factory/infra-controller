@@ -36,6 +36,35 @@ func testInfiniBandInterfaceSetupSchema(t *testing.T, dbSession *db.Session) {
 	require.NoError(t, err)
 }
 
+func TestInfiniBandInterface_SitePartitionID(t *testing.T) {
+	restID := uuid.New()
+	controllerID := uuid.New()
+	tests := []struct {
+		name      string
+		partition *InfiniBandPartition
+		wantID    uuid.UUID
+	}{
+		{name: "REST ID fallback", wantID: restID},
+		{
+			name: "controller ID",
+			partition: &InfiniBandPartition{
+				ID:                      restID,
+				ControllerIBPartitionID: &controllerID,
+			},
+			wantID: controllerID,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ibifc := &InfiniBandInterface{
+				InfiniBandPartitionID: restID,
+				InfiniBandPartition:   tc.partition,
+			}
+			assert.Equal(t, tc.wantID, ibifc.SitePartitionID())
+		})
+	}
+}
+
 func TestInfiniBandInterfaceSQLDAO_GetByID(t *testing.T) {
 	ctx := context.Background()
 	type fields struct {

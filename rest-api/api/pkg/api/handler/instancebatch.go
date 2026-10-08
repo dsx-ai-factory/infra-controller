@@ -1043,6 +1043,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(bcih.dbSession)
 	var dbibic []cdbm.InfiniBandInterface
 	var dbnvlic []cdbm.NVLinkInterface
+	ibpMap := make(map[uuid.UUID]*cdbm.InfiniBandPartition)
 
 	// Validate InfiniBand interfaces (shared across all instances)
 	if len(apiRequest.InfiniBandInterfaces) > 0 {
@@ -1079,7 +1080,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		// Build map for quick lookup
-		ibpMap := make(map[uuid.UUID]*cdbm.InfiniBandPartition, len(ibpList))
+		ibpMap = make(map[uuid.UUID]*cdbm.InfiniBandPartition, len(ibpList))
 		for i := range ibpList {
 			ibpMap[ibpList[i].ID] = &ibpList[i]
 		}
@@ -1110,6 +1111,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 			dbibic = append(dbibic, cdbm.InfiniBandInterface{
 				InfiniBandPartitionID: ibp.ID,
+				InfiniBandPartition:   ibp,
 				Device:                ibic.Device,
 				Vendor:                ibic.Vendor,
 				DeviceInstance:        ibic.DeviceInstance,
@@ -1584,6 +1586,9 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError,
 					fmt.Sprintf("Failed to batch create InfiniBand interfaces: %v", iberr), nil)
 			}
+			for i := range ibCreated {
+				ibCreated[i].InfiniBandPartition = ibpMap[ibCreated[i].InfiniBandPartitionID]
+			}
 			createdIbIfcsAll = ibCreated
 			logger.Info().Int("count", len(createdIbIfcsAll)).Msg("batch created all InfiniBand interfaces")
 		}
@@ -1762,7 +1767,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				Vendor:         ibifc.Vendor,
 				DeviceInstance: uint32(ibifc.DeviceInstance),
 				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
-				IbPartitionId:  &corev1.IBPartitionId{Value: ibifc.InfiniBandPartitionID.String()},
+				IbPartitionId:  &corev1.IBPartitionId{Value: ibifc.SitePartitionID().String()},
 			}
 			if !ibifc.IsPhysical {
 				ibInterfaceConfig.FunctionType = corev1.InterfaceFunctionType_VIRTUAL_FUNCTION

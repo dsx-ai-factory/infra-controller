@@ -1791,7 +1791,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 						}
 					}
 
-					if hasInlineRoutingProfile || len(tt.expectedControllerVpcIDs) > 0 {
+					if hasInlineRoutingProfile || len(tt.expectedControllerVpcIDs) > 0 || len(tt.args.reqData.InfiniBandInterfaces) > 0 {
 						var batchReq *corev1.BatchInstanceAllocationRequest
 						for i := len(tsc.Calls) - 1; i >= 0; i-- {
 							call := tsc.Calls[i]
@@ -1812,6 +1812,17 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 									expectedControllerVpcID, ok := tt.expectedControllerVpcIDs[*reqIfc.VpcID]
 									require.True(t, ok)
 									assertInterfaceVpcSelection(t, instReq.Config.Network.Interfaces[j], expectedControllerVpcID, reqIfc.VpcIPFamilyMode())
+								}
+							}
+
+							if len(tt.args.reqData.InfiniBandInterfaces) > 0 {
+								require.NotNil(t, instReq.Config.Infiniband)
+								require.Len(t, instReq.Config.Infiniband.IbInterfaces, len(tt.args.reqData.InfiniBandInterfaces))
+								ibpDAO := cdbm.NewInfiniBandPartitionDAO(dbSession)
+								for j, reqIbIfc := range tt.args.reqData.InfiniBandInterfaces {
+									ibp, err := ibpDAO.GetByID(ec.Request().Context(), nil, uuid.MustParse(reqIbIfc.InfiniBandPartitionID), nil)
+									require.NoError(t, err)
+									assert.Equal(t, ibp.ControllerID().String(), instReq.Config.Infiniband.IbInterfaces[j].GetIbPartitionId().GetValue())
 								}
 							}
 						}
