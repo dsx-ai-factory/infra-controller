@@ -552,7 +552,9 @@ value explicitly for that Site.
 
 If Temporal or Keycloak isn't deployed, preflight uses the location `setup.sh`
 recorded after its last deploy, in the `nico-workload-databases` ConfigMap in
-the `postgres` namespace. Without a record, Keycloak's database is created in
+the `postgres` namespace. A recorded standalone location only counts while the
+StatefulSet or its volume is still there, because removing both removes the
+data. Without a record, Keycloak's database is created in
 `nico-pg-cluster`, since a missing Keycloak usually was never deployed. Temporal
 is different, because REST always deploys it. If the `postgres` StatefulSet or
 its `postgres-data-postgres-0` volume is still in the same namespace, Temporal's
