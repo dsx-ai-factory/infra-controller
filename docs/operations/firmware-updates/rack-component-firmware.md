@@ -70,7 +70,7 @@ The request supports these controls in addition to `siteId`:
 
 | Field | Purpose |
 |---|---|
-| `version` | Optional target passed to the component backend. A non-empty value is forwarded unchanged. For a rack-scale RMS component with an omitted, null, empty, or whitespace-only value, Core fetches the owning rack profile's `firmware_object.url`. See [Choose the firmware object format](#choose-the-firmware-object-format). |
+| `version` | Optional firmware input. Flow extracts component-specific values from layered JSON. A non-layered value that contains at least one non-whitespace character is forwarded unchanged. For a rack-scale RMS component with an omitted, null, empty, or whitespace-only value, Core fetches the owning rack profile's `firmware_object.url`. See [Choose the firmware object format](#choose-the-firmware-object-format). |
 | `targets` | Optional component subset for tray requests. Rack handlers do not forward this field, so do not send it with a rack request. |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
@@ -83,6 +83,14 @@ REST API does not assign it one universal schema. Flow preserves the string
 except when it unwraps the optional per-component-type mapping described below;
 the selected component manager or its backend validates and interprets the
 value.
+
+When using the rack profile's desired firmware, each Core firmware request must
+target a single rack. Flow splits rack, NVLink domain, and tray batch requests
+into one task per rack. The built-in firmware rule batches each component type
+within that rack's task. Batch requests can therefore omit `version` and use
+each rack profile's desired firmware for rack-scale RMS components. An empty
+or whitespace-only value for a selected component type in layered input uses
+the same per-rack resolution.
 
 The REST response remains asynchronous when `version` is omitted. Core resolves
 the desired firmware object when the Flow task reaches each rack-scale RMS
@@ -428,7 +436,7 @@ lower-level execution details.
 | No work starts after the REST response | Read the returned task. It may be waiting at the readiness gate or for an earlier rule stage. |
 | Task fails after about 30 minutes | Inspect the error for component IDs blocked by the readiness gate. Confirm tenant state and the persisted component operation status. |
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
-| Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that every target belongs to one rack and that its rack profile has a reachable `firmware_object.url` returning a non-empty response containing a JSON object. |
+| Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that the failed Core firmware request targets one rack. Verify that the rack profile has a configured, reachable `firmware_object.url` that returns a JSON object. |
 | Rack-scale update rejects an explicit `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that the selected firmware-download credential can access the referenced artifacts. |
 | Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |
