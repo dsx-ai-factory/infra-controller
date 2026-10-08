@@ -152,11 +152,6 @@ impl GnmiSampleProcessor {
         }
 
         for update in &notification.update {
-            let val = match update.val.as_ref() {
-                Some(v) => v,
-                None => continue,
-            };
-
             let update_elems: &[PathElem] = update
                 .path
                 .as_ref()
@@ -166,20 +161,40 @@ impl GnmiSampleProcessor {
             let combined: Vec<&PathElem> = prefix_elems.iter().chain(update_elems.iter()).collect();
 
             if let Some(iface) = find_elem_key_ref(&combined, "interface", "name") {
+                let Some(val) = update.val.as_ref() else {
+                    continue;
+                };
+
                 entities.insert(("interface", iface));
                 self.process_interface_metric(&combined, iface, val);
             } else if let Some(comp) = find_elem_key_ref(&combined, "component", "name") {
+                let Some(val) = update.val.as_ref() else {
+                    continue;
+                };
+
                 entities.insert(("component", comp));
                 self.process_component_metric(&combined, comp, val);
             } else if let Some(sensor) = find_elem_key_ref(&combined, "leak-sensor", "id") {
+                let is_state = leaf_matches(&combined, &["leak-sensor", "state", "state"]);
+
+                if update.val.is_none() && !is_state {
+                    continue;
+                }
+
                 entities.insert(("leak-sensor", sensor));
 
-                if leaf_matches(&combined, &["leak-sensor", "state", "state"]) {
-                    let current = leakage_state_to_state(typed_value_to_string(val).as_deref());
+                if is_state {
+                    // Missing sensor values replace retained readings with unknown.
+                    let value = update.val.as_ref().and_then(typed_value_to_string);
+                    let current = leakage_state_to_state(value.as_deref());
 
                     self.emit_state_set("leakage_state", "sensor", sensor, current, LEAKAGE_STATES);
                 }
             } else if combined.iter().any(|e| e.name == "platform-general") {
+                let Some(val) = update.val.as_ref() else {
+                    continue;
+                };
+
                 entities.insert(("platform-general", ""));
                 self.process_platform_general_metric(&combined, val);
             }
@@ -430,12 +445,7 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["asic", "state", "asic-temp"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp(
-                "component_asic_temperature_celsius",
-                comp_name,
-                v,
-                "celsius",
-            );
+            self.emit_comp("component_asic_temperature", comp_name, v, "celsius");
         } else if leaf_matches(elems, &["cpu", "utilization", "state", "avg"])
             && let Some(v) = typed_value_to_f64(val)
         {
@@ -728,7 +738,7 @@ const OTHER_SAMPLE_METRIC_PATHS: &[(&str, &str)] = &[
     ),
     (
         "components/component/asic/state/asic-temp",
-        "component_asic_temperature_celsius",
+        "component_asic_temperature",
     ),
     (
         "components/component/cpu/utilization/state/avg",
@@ -1685,14 +1695,20 @@ mod tests {
         let mut proc = test_processor();
         proc.data_sink = Some(sink.clone());
 
-        let cases = [("LEAK0", "ok"), ("LEAK1", "leak"), ("LEAK2", "unknown")];
+        let cases = [
+            ("LEAK0", Some(make_typed_value_string("ok")), "ok"),
+            ("LEAK1", Some(make_typed_value_string("leak")), "leak"),
+            ("LEAK2", Some(make_typed_value_string("unknown")), "unknown"),
+            ("absent", None, "unknown"),
+            ("empty", Some(proto::TypedValue::default()), "unknown"),
+        ];
 
         let notification = proto::Notification {
             timestamp: 0,
             prefix: None,
             update: cases
                 .iter()
-                .map(|(sensor, state)| proto::Update {
+                .map(|(sensor, value, _)| proto::Update {
                     path: Some(proto::Path {
                         elem: vec![
                             make_path_elem("platform-general", &[]),
@@ -1703,7 +1719,7 @@ mod tests {
                         ],
                         ..Default::default()
                     }),
-                    val: Some(make_typed_value_string(state)),
+                    val: value.clone(),
                     ..Default::default()
                 })
                 .collect(),
@@ -1725,7 +1741,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        for (sensor, state) in cases {
+        for (sensor, _, state) in cases {
             let sensor_samples = samples
                 .iter()
                 .copied()
@@ -1746,6 +1762,77 @@ mod tests {
                 LEAKAGE_STATES,
                 state,
             );
+        }
+    }
+
+    #[test]
+    fn absent_leak_value_replaces_exported_state() {
+        use crate::metrics::MetricsManager;
+        use crate::sink::PrometheusSink;
+
+        let metrics = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+
+        let mut proc = test_processor();
+
+        proc.data_sink = Some(Arc::new(
+            PrometheusSink::new(metrics.clone(), "test").expect("Prometheus sink"),
+        ));
+
+        let mut notification = proto::Notification {
+            prefix: Some(proto::Path {
+                elem: vec![
+                    make_path_elem("platform-general", &[]),
+                    make_path_elem("leak-sensors", &[]),
+                ],
+                ..Default::default()
+            }),
+            update: ["affected", "unaffected"]
+                .into_iter()
+                .map(|sensor| proto::Update {
+                    path: Some(proto::Path {
+                        elem: vec![
+                            make_path_elem("leak-sensor", &[("id", sensor)]),
+                            make_path_elem("state", &[]),
+                            make_path_elem("state", &[]),
+                        ],
+                        ..Default::default()
+                    }),
+                    val: Some(make_typed_value_string("leak")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        for expected in ["leak", "unknown"] {
+            proc.process_notification(&notification);
+
+            let exposition = metrics.export_telemetry().expect("telemetry");
+
+            for (sensor, current) in [("affected", expected), ("unaffected", "leak")] {
+                let series = exposition
+                    .lines()
+                    .filter(|line| line.starts_with("test_nvue_gnmi_leakage_state_state{"))
+                    .filter(|line| line.contains(&format!("sensor=\"{sensor}\"")))
+                    .collect::<Vec<_>>();
+
+                assert_eq!(series.len(), 3, "{sensor}: {exposition}");
+
+                for state in LEAKAGE_STATES {
+                    let sample = series
+                        .iter()
+                        .find(|line| line.contains(&format!("state=\"{state}\"")))
+                        .expect("state series");
+
+                    let expected_value = format!(" {}", u8::from(*state == current));
+
+                    assert!(sample.ends_with(&expected_value), "{sample}");
+                }
+            }
+
+            notification.update.truncate(1);
+
+            notification.update[0].val = None;
         }
     }
 
@@ -1839,33 +1926,51 @@ mod tests {
     }
 
     #[test]
-    fn test_process_notification_update_without_val_is_skipped() {
-        let proc = test_processor();
-        let notification = proto::Notification {
-            timestamp: 0,
-            prefix: Some(proto::Path {
-                elem: vec![
-                    make_path_elem("interfaces", &[]),
-                    make_path_elem("interface", &[("name", "nvl0")]),
-                ],
-                ..Default::default()
-            }),
-            update: vec![proto::Update {
-                path: Some(proto::Path {
-                    elem: vec![
-                        make_path_elem("state", &[]),
-                        make_path_elem("oper-status", &[]),
-                    ],
+    fn unmapped_updates_without_values_are_skipped() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut proc = test_processor();
+        proc.data_sink = Some(sink.clone());
+
+        for (element, keys, leaf) in [
+            (
+                "interface",
+                vec![("name", "nvl0")],
+                vec!["state", "oper-status"],
+            ),
+            (
+                "component",
+                vec![("name", "FAN-1")],
+                vec!["healthz", "state", "status"],
+            ),
+            ("platform-general", vec![], vec!["state", "contact"]),
+            (
+                "leak-sensor",
+                vec![("id", "LEAK0")],
+                vec!["state", "description"],
+            ),
+            ("leak-sensor", vec![], vec!["state", "state"]),
+        ] {
+            let notification = proto::Notification {
+                prefix: Some(proto::Path {
+                    elem: vec![make_path_elem(element, &keys)],
                     ..Default::default()
                 }),
-                val: None,
+                update: vec![proto::Update {
+                    path: Some(proto::Path {
+                        elem: leaf.iter().map(|name| make_path_elem(name, &[])).collect(),
+                        ..Default::default()
+                    }),
+                    val: None,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
+            };
 
-        let count = proc.process_notification(&notification);
-        assert_eq!(count, 0);
+            let count = proc.process_notification(&notification);
+
+            assert_eq!(count, 0, "{element}: {leaf:?}");
+            assert!(sink.events.lock().expect("captured events").is_empty());
+        }
     }
 
     #[test]
@@ -2582,7 +2687,7 @@ mod tests {
                 component_name: "ASIC1",
                 tail: &["asic", "state", "asic-temp"],
                 raw: 46,
-                metric_type: "component_asic_temperature_celsius",
+                metric_type: "component_asic_temperature",
                 unit: "celsius",
             },
             Case {
