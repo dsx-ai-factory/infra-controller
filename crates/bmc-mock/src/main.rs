@@ -146,6 +146,9 @@ async fn start_libvirt_app(
             ..MachineRouterOptions::default()
         },
     );
+    if let Some(path) = bmc_behaviour.account_state_file {
+        state.account_service_state.enable_persistence(path)?;
+    }
     actor.run(&state, &mut backend_tasks, stop).await?;
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
@@ -195,6 +198,9 @@ async fn start_mock_app(
             },
         )
     };
+    if let Some(path) = bmc_behaviour.account_state_file {
+        state.account_service_state.enable_persistence(path)?;
+    }
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
     } else {
