@@ -231,7 +231,7 @@ flow:
 ##
 ##   auto   (default) The database is created in nico-pg-cluster, the shared
 ##          HA cluster, but its location is left unchanged for an existing
-##          Site.
+##          Site. With postgresql.enabled: false, auto means false.
 ##   true   The database lives in nico-pg-cluster.
 ##   false  The database lives on the standalone postgres.postgres
 ##          StatefulSet. It's deprecated, and support for it will be removed

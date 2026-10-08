@@ -97,7 +97,8 @@ _SITE_VALUES_CFG="${TEST_TMP_DIR}/values.yaml"
 failures=0
 
 write_values() {
-    local component="$1" value="$2" temporal_value=auto keycloak_value=auto
+    local component="$1" value="$2" postgresql_enabled="${3:-true}"
+    local temporal_value=auto keycloak_value=auto
     if [[ "${component}" == "temporal" ]]; then
         temporal_value="${value}"
     else
@@ -110,6 +111,9 @@ temporal:
 keycloak:
   useHaPostgres: ${keycloak_value}
   namespace: kc-ns
+
+postgresql:
+  enabled: ${postgresql_enabled}
 EOF
 }
 
@@ -135,6 +139,7 @@ resolver_cases=(
     "StatefulSet without a deployed Temporal|temporal|auto|||statefulset||false|false|"
     "retained PVC without the StatefulSet or a deployed Temporal|temporal|auto|||pvc||false|false|"
     "deleted Keycloak recorded on nico-pg-cluster while the StatefulSet serves Temporal|keycloak|auto|||statefulset|keycloak=nico-pg-cluster|false|true|"
+    "Keycloak enabled for the first time while the StatefulSet serves Temporal|keycloak|auto|||statefulset||false|true|"
     "deleted Temporal recorded on the StatefulSet after it was removed|temporal|auto||||temporal=standalone|false|false|"
     "explicit true overrides the deployed database|temporal|true|postgres.postgres.svc.cluster.local.||statefulset||false|true|"
     "Temporal on an unrecognized host|temporal|auto|pg.example.com||||false||auto doesn't recognize pg.example.com, the PostgreSQL host the deployed temporal uses"
@@ -164,6 +169,19 @@ for row in "${resolver_cases[@]}"; do
     check_errors "${name}" "${ERRORS[*]:-}" "${expected_error}"
 done
 
+# On external Postgres the chart creates no nico-pg-cluster, so a new Site's
+# auto can't pick it.
+write_values temporal auto false
+ERRORS=()
+FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
+    FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
+    _resolve_use_ha_postgres temporal
+if [[ "${_USE_HA_POSTGRES}" != "false" ]]; then
+    echo "FAIL external Postgres: resolved '${_USE_HA_POSTGRES}', want 'false' (errors: ${ERRORS[*]:-none})" >&2
+    failures=$((failures + 1))
+fi
+check_errors "external Postgres" "${ERRORS[*]:-}" ""
+
 # The cutover check runs for an explicit true only. Same columns as above
 # without value and expected, plus the current uid/generation every Deployment
 # of the workload reports.
@@ -172,6 +190,7 @@ cutover_cases=(
     "migrated Site already on nico-pg-cluster|temporal|nico-pg-cluster.postgres.svc.cluster.local||statefulset||uid-t/9|false|"
     "Temporal cutover after a migration, Deployments unchanged|temporal|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/4|false|"
     "Keycloak cutover after a migration, Deployment unchanged|keycloak||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset|keycloak-migrated=keycloak=uid-k/2|uid-k/2|false|"
+    "explicit true for a Keycloak never deployed while the StatefulSet serves Temporal|keycloak|||statefulset|||false|"
     "Temporal on the StatefulSet without a migration|temporal|postgres.postgres.svc.cluster.local.||statefulset||uid-t/4|false|true moves temporal off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated"
     "Temporal restarted and stopped again after its migration|temporal|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/6|false|temporal/temporal-frontend changed after the migration"
     "unreadable cluster state|temporal||||||true|so it can't rule out moving temporal off the standalone postgres.postgres StatefulSet"
