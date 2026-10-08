@@ -105,6 +105,19 @@ impl RevisionData {
             })
             .collect()
     }
+
+    /// Return the rollback revision advertised by a transition issue, if any.
+    pub(crate) fn rollback_target(&self) -> Option<&str> {
+        self.transition
+            .as_ref()
+            .and_then(|transition| transition.issue.as_ref())
+            .into_iter()
+            .flat_map(|issues| issues.values())
+            .filter(|issue| issue.code.as_deref() == Some("rollback"))
+            .filter_map(|issue| issue.data.as_ref())
+            .find_map(|data| data.get("rollback_target"))
+            .map(String::as_str)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
