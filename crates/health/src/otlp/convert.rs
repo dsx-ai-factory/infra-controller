@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::time::SystemTime;
@@ -36,7 +37,7 @@ use super::resource::Resource;
 use crate::endpoint::SwitchEndpointRole;
 use crate::sink::{
     CollectorEvent, EventContext, HealthReport, HealthReportAlert, HealthReportSuccess,
-    LogSeverity, MetricSample,
+    LogSeverity, MetricSample, PrometheusSink,
 };
 
 /// Maximum alerts serialized into the `health_report.alerts` attribute.
@@ -490,6 +491,22 @@ pub(crate) fn build_queued_metrics_export_request(
     )
 }
 
+/// The labels each metric point of `context` carries besides its own: those
+/// the Prometheus sink puts on its series, custom endpoint labels included. A
+/// backend that keeps resource attributes off its series, like the
+/// collector's Prometheus exporter, would otherwise lose which endpoint,
+/// switch, or rack a point belongs to.
+fn point_identity(context: &EventContext) -> Vec<(Cow<'static, str>, String)> {
+    let mut identity = context.series_labels();
+    identity.extend(
+        context
+            .labels()
+            .iter()
+            .map(|(name, value)| (Cow::Owned(name.clone()), value.clone())),
+    );
+    identity
+}
+
 fn build_metrics_export_request_from_pairs<'a>(
     batch: impl IntoIterator<Item = (&'a EventContext, &'a MetricSample)>,
     observed_nanos: u64,
@@ -499,18 +516,38 @@ fn build_metrics_export_request_from_pairs<'a>(
         Vec<KeyValue>,
         Vec<OtlpMetric>,
         HashMap<(&'a str, &'a str, &'a str), usize>,
+        Vec<(Cow<'static, str>, String)>,
     );
 
     let mut by_endpoint: HashMap<(&str, &str), EndpointMetrics<'_>> = HashMap::new();
 
     for (context, sample) in batch {
-        // Switch identity rides once on the resource attributes (switch.id,
-        // switch.serial_number, switch.ip). VictoriaMetrics flattens resource
-        // attributes onto every series, so promoting them onto the datapoint too
-        // only duplicates the same value under a second (underscore) label name.
+        let (_, metrics, descriptor_indices, identity) = by_endpoint
+            .entry((&context.endpoint_key, context.collector_type))
+            .or_insert_with(|| {
+                (
+                    resource_attributes(context),
+                    Vec::new(),
+                    HashMap::new(),
+                    point_identity(context),
+                )
+            });
+
+        // A label the sample sets itself keeps the sample's value, compared
+        // as Prometheus names them, so the two cannot meet under one name.
+        let own_names: Vec<_> = sample
+            .labels
+            .iter()
+            .map(|(name, _)| PrometheusSink::normalize_label_name(name.clone()))
+            .collect();
         let attributes = sample
             .labels
             .iter()
+            .chain(
+                identity
+                    .iter()
+                    .filter(|(name, _)| !own_names.contains(name)),
+            )
             .map(|(k, v)| KeyValue::new(k.to_string(), v.clone()));
 
         let data_point = NumberDataPoint {
@@ -519,10 +556,6 @@ fn build_metrics_export_request_from_pairs<'a>(
             value: Some(number_data_point::Value::AsDouble(sample.value)),
             ..Default::default()
         };
-
-        let (_, metrics, descriptor_indices) = by_endpoint
-            .entry((&context.endpoint_key, context.collector_type))
-            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
 
         let metric_index =
             match descriptor_indices.entry((&sample.name, &sample.metric_type, &sample.unit)) {
@@ -563,7 +596,7 @@ fn build_metrics_export_request_from_pairs<'a>(
 
     let resource_metrics = by_endpoint
         .into_values()
-        .map(|(attrs, metrics, _)| ResourceMetrics {
+        .map(|(attrs, metrics, _, _)| ResourceMetrics {
             resource: Some(Resource {
                 attributes: otlp_attributes(attrs),
                 ..Default::default()
@@ -1836,8 +1869,13 @@ mod tests {
         assert_eq!(metrics[0].unit, "state");
     }
 
+    /// Switch identity and placement, and custom endpoint labels, ride on
+    /// each point under the Prometheus sink's label names, as well as on the
+    /// resource, so a backend that keeps resource attributes off the series
+    /// still tells switches apart. A label the sample sets itself keeps the
+    /// sample's value, also against a name it normalizes to.
     #[test]
-    fn switch_nmxt_identity_is_resource_only_not_on_datapoint() {
+    fn switch_identity_is_on_each_point_and_the_resource() {
         let switch_id = test_switch_id("switch-nmxt");
         let switch_id_attr = switch_id.to_string();
         let context = EventContext {
@@ -1848,7 +1886,10 @@ mod tests {
                 mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "nvue_gnmi",
-            labels: Default::default(),
+            labels: std::collections::BTreeMap::from([
+                ("site".to_string(), "rno-dev7".to_string()),
+                ("team".to_string(), "health".to_string()),
+            ]),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
                 id: Some(switch_id),
                 serial: "SN-SWITCH-001".to_string(),
@@ -1868,7 +1909,10 @@ mod tests {
             metric_type: "effective_ber".to_string(),
             unit: "ratio".to_string(),
             value: 0.5,
-            labels: vec![],
+            labels: vec![
+                (Cow::Borrowed("rack-id"), "from-sample".to_string()),
+                (Cow::Borrowed("site"), "from-sample".to_string()),
+            ],
             context: None,
         };
 
@@ -1889,12 +1933,28 @@ mod tests {
         let metric::Data::Gauge(gauge) = metrics[0].data.as_ref().expect("metric data") else {
             panic!("expected gauge data");
         };
-        // Identity must NOT be promoted onto the datapoint (VM duplicates it from the resource).
         let attrs = &gauge.data_points[0].attributes;
-        assert_eq!(attr_value(attrs, "switch_serial"), None);
-        assert_eq!(attr_value(attrs, "switch_id"), None);
+        assert_eq!(
+            attr_value(attrs, "switch_id"),
+            Some(switch_id_attr.as_str())
+        );
+        assert_eq!(attr_value(attrs, "serial_number"), Some("SN-SWITCH-001"));
+        assert_eq!(attr_value(attrs, "switch_slot_number"), Some("7"));
+        assert_eq!(attr_value(attrs, "switch_tray_index"), Some("3"));
+        assert_eq!(attr_value(attrs, "endpoint_key"), Some("11:22:33:44:55:66"));
+        assert_eq!(attr_value(attrs, "team"), Some("health"), "a custom label");
+        let named = |key: &str| attrs.iter().filter(|attr| attr.key == key).count();
+        assert_eq!(
+            (named("site"), attr_value(attrs, "site")),
+            (1, Some("from-sample")),
+            "the sample's label wins over a custom label of its name"
+        );
+        assert_eq!(
+            (named("rack_id"), attr_value(attrs, "rack-id")),
+            (0, Some("from-sample")),
+            "the sample's label wins over an identity label it normalizes to"
+        );
 
-        // It lives once, on the resource (dotted form).
         let resource_attrs = &resource_metrics
             .resource
             .as_ref()

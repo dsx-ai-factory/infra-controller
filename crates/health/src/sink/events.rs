@@ -69,6 +69,64 @@ pub struct EventContext {
 }
 
 impl EventContext {
+    /// The labels identifying where a series comes from, as every metric
+    /// export puts them on each series: the endpoint, the collector, and the
+    /// machine, switch, or power shelf and its placement when known.
+    pub fn series_labels(&self) -> Vec<(Cow<'static, str>, String)> {
+        let mut labels = vec![
+            (
+                Cow::Borrowed("endpoint_key"),
+                self.endpoint_key().to_string(),
+            ),
+            // An empty value means this inventory endpoint has no MAC address.
+            (
+                Cow::Borrowed("endpoint_mac"),
+                self.addr.mac.map(|mac| mac.to_string()).unwrap_or_default(),
+            ),
+            (Cow::Borrowed("endpoint_ip"), self.addr.ip.to_string()),
+            (
+                Cow::Borrowed("collector_type"),
+                self.collector_type.to_string(),
+            ),
+        ];
+
+        if let Some(machine_id) = self.machine_id() {
+            labels.push((Cow::Borrowed("machine_id"), machine_id.to_string()));
+        }
+        if let Some(system_uuid) = self.system_uuid() {
+            labels.push((Cow::Borrowed("system_uuid"), system_uuid.to_string()));
+        }
+        if let Some(switch_id) = self.switch_id() {
+            labels.push((Cow::Borrowed("switch_id"), switch_id.to_string()));
+        }
+        if let Some(power_shelf_id) = self.power_shelf_id() {
+            labels.push((Cow::Borrowed("power_shelf_id"), power_shelf_id.to_string()));
+        }
+        if let Some(serial) = self.serial_number() {
+            labels.push((Cow::Borrowed("serial_number"), serial.to_string()));
+        }
+        if let Some(rack_id) = self.rack_id() {
+            labels.push((Cow::Borrowed("rack_id"), rack_id.to_string()));
+        }
+        if let Some(slot) = self.slot_number() {
+            labels.push((Cow::Borrowed("machine_slot_number"), slot.to_string()));
+        }
+        if let Some(tray) = self.tray_index() {
+            labels.push((Cow::Borrowed("machine_tray_index"), tray.to_string()));
+        }
+        if let Some(domain) = self.nvlink_domain_uuid() {
+            labels.push((Cow::Borrowed("nvlink_domain_uuid"), domain.to_string()));
+        }
+        if let Some(slot) = self.switch_slot_number() {
+            labels.push((Cow::Borrowed("switch_slot_number"), slot.to_string()));
+        }
+        if let Some(tray) = self.switch_tray_index() {
+            labels.push((Cow::Borrowed("switch_tray_index"), tray.to_string()));
+        }
+
+        labels
+    }
+
     pub fn from_endpoint(endpoint: &BmcEndpoint, collector_type: &'static str) -> Self {
         Self {
             endpoint_key: endpoint.key(),
