@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Flow tracing configuration
+templates:
+  - configmap.yaml
+  - deployment.yaml
+tests:
+  - it: keeps export disabled with a configured endpoint
+    set:
+      extraEnv.flow:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://collector:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: false'
+        template: configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: http://collector:4317
+        template: deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_PROTOCOL
+            value: grpc
+        template: deployment.yaml
+
+  - it: enables export independently of endpoint and protocol
+    set:
+      tracing.enabled: true
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: true'
+        template: configmap.yaml
+
+  - it: defaults to disabled when reused values have no tracing block
+    set:
+      tracing: null
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: false'
+        template: configmap.yaml
+
+  - it: rejects a string enable flag
+    template: deployment.yaml
+    set:
+      tracing.enabled: invalid
+    asserts:
+      - failedTemplate:
+          errorMessage: tracing.enabled must be a boolean (true or false)

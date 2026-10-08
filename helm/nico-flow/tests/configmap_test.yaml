@@ -24,6 +24,8 @@ tests:
             disable_inventory: false
             leak_detection_interval: "1m"
             disable_leak_detection: false
+            tracing:
+              enabled: false
 
   - it: renders overridden values
     set:
@@ -40,6 +42,8 @@ tests:
             disable_inventory: true
             leak_detection_interval: "2h"
             disable_leak_detection: true
+            tracing:
+              enabled: false
 
   - it: rejects a bare-number duration
     set:
