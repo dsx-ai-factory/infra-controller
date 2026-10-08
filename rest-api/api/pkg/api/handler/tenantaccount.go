@@ -936,6 +936,11 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		}
 
 		for siteID := range siteUpdates {
+			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, siteID, ta.TenantID)
+			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if derr != nil {
+				return derr
+			}
 			ts, gerr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, *ta.TenantID, siteID, []string{"Site"})
 			if gerr != nil {
 				if errors.Is(gerr, cdb.ErrDoesNotExist) {
@@ -975,16 +980,37 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			if _, listed := siteIDs[ts.SiteID]; listed {
 				continue
 			}
-			if ts.Config.TargetedInstanceCreation == nil {
+			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, ts.SiteID, ta.TenantID)
+			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if derr != nil {
+				return derr
+			}
+			if ts.Config.TargetedInstanceCreation != nil {
+				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
+					TenantSiteID: ts.ID,
+					Config:       &cdbm.TenantSiteConfig{},
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
+			}
+			// Omitted overrides are revoked by replacement; check the remaining privileges before cleanup.
+			enabled, derr := common.TenantHasTargetedInstanceCreation(ctx, tx, utah.dbSession, &cdbm.Tenant{ID: *ta.TenantID}, &common.TenantPrivilegeScope{SiteID: &ts.SiteID})
+			if derr != nil {
+				return derr
+			}
+			if enabled {
 				continue
 			}
-			_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
-				TenantSiteID: ts.ID,
-				Config:       &cdbm.TenantSiteConfig{},
+			count, derr := cdbm.NewAllocationDAO(utah.dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{
+				TenantIDs: []uuid.UUID{*ta.TenantID}, SiteIDs: []uuid.UUID{ts.SiteID},
 			})
+			if derr == nil && count == 0 {
+				derr = tsDAO.Delete(ctx, tx, ts.ID)
+			}
 			if derr != nil {
-				logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				return derr
 			}
 		}
 

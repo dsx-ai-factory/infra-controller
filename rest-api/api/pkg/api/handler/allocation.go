@@ -1492,7 +1492,12 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 				logger.Error().Err(serr).Msg("error getting count of Tenant/Site associations")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Error deleting Allocation, DB error retrieving Tenant/Site associations", nil)
 			}
-			if tscount > 0 {
+			// Keep an explicitly set TargetedInstanceCreation value when deleting the last allocation.
+			if tscount > 0 && tss[0].Config.TargetedInstanceCreation == nil {
+				privileged, serr := common.TenantHasTargetedInstanceCreation(ctx, tx, dah.dbSession, a.Tenant, &common.TenantPrivilegeScope{SiteID: &a.SiteID})
+				if serr != nil || privileged {
+					return serr
+				}
 				derr := tsDAO.Delete(ctx, tx, tss[0].ID)
 				if derr != nil {
 					logger.Error().Err(derr).Msg("error deleting Tenant/Site association")

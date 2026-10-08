@@ -737,9 +737,17 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	)
 	site := testTenantAccountBuildSite(t, dbSession, ip, "test-capabilities-site", ipUser)
 	tenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, nil, ipUser)
+	unusedSite := testTenantAccountBuildSite(t, dbSession, ip, "unused-site", ipUser)
+	unusedTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, unusedSite, nil, ipUser)
+	allocatedSite := testTenantAccountBuildSite(t, dbSession, ip, "allocated-site", ipUser)
+	allocatedTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, allocatedSite, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)}, ipUser)
+	testTenantAccountBuildAllocation(t, dbSession, allocatedSite, tenant, "retained-allocation", ipUser)
+	otherIP := testTenantAccountBuildInfrastructureProvider(t, dbSession, "other-provider", "other-org", ipUser)
+	otherSite := testTenantAccountBuildSite(t, dbSession, otherIP, "other-provider-site", ipUser)
+	otherTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, otherSite, nil, ipUser)
 
 	handler := NewUpdateTenantAccountHandler(dbSession, &tmocks.Client{}, common.GetTestConfig())
-	sendUpdate := func(caps model.APITenantAccountSiteCapabilitiesUpdateRequest) (*httptest.ResponseRecorder, *model.APITenantAccount) {
+	sendUpdate := func(t *testing.T, caps model.APITenantAccountSiteCapabilitiesUpdateRequest) (*httptest.ResponseRecorder, *model.APITenantAccount) {
 		t.Helper()
 
 		body, err := json.Marshal(model.APITenantAccountUpdateRequest{SiteCapabilities: &caps})
@@ -776,7 +784,7 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 			TargetedInstanceCreation: cutil.GetPtr(false),
 		},
 	}
-	_, response := sendUpdate(siteOverrideCaps)
+	_, response := sendUpdate(t, siteOverrideCaps)
 	assert.Equal(t, []model.APITenantAccountSiteCapability{
 		{SiteIDs: []string{}, TargetedInstanceCreation: true},
 		{
@@ -795,13 +803,15 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, updatedTenantSite.Config.TargetedInstanceCreation)
 	assert.False(t, *updatedTenantSite.Config.TargetedInstanceCreation)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, unusedTenantSite.ID, nil)
+	require.NoError(t, err)
 
 	accountOnlyCaps := model.APITenantAccountSiteCapabilitiesUpdateRequest{
 		{
 			TargetedInstanceCreation: cutil.GetPtr(false),
 		},
 	}
-	_, response = sendUpdate(accountOnlyCaps)
+	_, response = sendUpdate(t, accountOnlyCaps)
 	assert.Equal(t, []model.APITenantAccountSiteCapability{
 		{SiteIDs: []string{}, TargetedInstanceCreation: false},
 	}, response.SiteCapabilities)
@@ -810,9 +820,31 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, updatedTenantAccount.Config.TargetedInstanceCreation)
 
-	updatedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, tenantSite.ID, nil)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, tenantSite.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, unusedTenantSite.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	updatedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, allocatedTenantSite.ID, nil)
 	require.NoError(t, err)
 	assert.Nil(t, updatedTenantSite.Config.TargetedInstanceCreation)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, otherTenantSite.ID, nil)
+	require.NoError(t, err)
+
+	overrideTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, unusedSite, nil, ipUser)
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retains explicit override %t without allocations", enabled), func(t *testing.T) {
+			sendUpdate(t, model.APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(false)},
+				{SiteIDs: []string{unusedSite.ID.String()}, TargetedInstanceCreation: &enabled},
+			})
+			updated, serr := tenantSiteDAO.GetByID(ctx, nil, overrideTenantSite.ID, nil)
+			require.NoError(t, serr)
+			assert.Equal(t, &enabled, updated.Config.TargetedInstanceCreation)
+		})
+	}
+	sendUpdate(t, accountOnlyCaps)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, overrideTenantSite.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "omitted site grant is revoked by replacement")
 }
 
 func TestTenantAccountHandler_GetByID(t *testing.T) {
