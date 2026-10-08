@@ -552,10 +552,15 @@ value explicitly for that Site.
 
 If Temporal or Keycloak isn't deployed, preflight uses the location `setup.sh`
 recorded after its last deploy, in the `nico-workload-databases` ConfigMap in
-the `postgres` namespace. Without a record, it looks for the `postgres`
-StatefulSet or its `postgres-data-postgres-0` volume in the same namespace. If
-either one is still there, the databases stay on the StatefulSet, so no data is
-left behind. Otherwise they're created in `nico-pg-cluster`.
+the `postgres` namespace. Without a record, Keycloak's database is created in
+`nico-pg-cluster`, since a missing Keycloak usually was never deployed. Temporal
+is different, because REST always deploys it. If the `postgres` StatefulSet or
+its `postgres-data-postgres-0` volume is still in the same namespace, Temporal's
+database stays there, so no data is left behind. Otherwise it's created in
+`nico-pg-cluster`.
+
+With `postgresql.enabled: false`, the chart creates no `nico-pg-cluster`, so
+`auto` resolves to `false`.
 
 Phase 7c only deploys the StatefulSet while either value resolves to `false`.
 So a new Site never gets it. While either database stays on it, preflight warns
