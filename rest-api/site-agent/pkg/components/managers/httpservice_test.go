@@ -10,6 +10,7 @@ import (
 
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,11 +98,52 @@ func TestNewStatusServeMux(t *testing.T) {
 
 func TestNewMetricsServeMux(t *testing.T) {
 	mux := newMetricsServeMux()
-	t.Run("registers metrics", func(t *testing.T) {
-		request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-		_, pattern := mux.Handler(request)
-		assert.Equal(t, "/metrics", pattern)
-	})
+	tests := []struct {
+		name            string
+		method          string
+		wantStatus      int
+		wantAllow       string
+		wantBody        string
+		wantCollections int
+	}{
+		{
+			name:            "GET collects metrics",
+			method:          http.MethodGet,
+			wantStatus:      http.StatusOK,
+			wantBody:        "site_agent_metrics_test 1\n",
+			wantCollections: 1,
+		},
+		{
+			name:       "POST is rejected before collection",
+			method:     http.MethodPost,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  "GET, HEAD",
+			wantBody:   "Method Not Allowed\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			collections := 0
+			metric := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "site_agent_metrics_test",
+				Help: "Metric used to verify Site Agent scrape dispatch.",
+			}, func() float64 {
+				collections++
+				return 1
+			})
+			require.NoError(t, prometheus.Register(metric))
+			t.Cleanup(func() { prometheus.Unregister(metric) })
+			request := httptest.NewRequest(test.method, "/metrics", nil)
+			response := httptest.NewRecorder()
+
+			mux.ServeHTTP(response, request)
+
+			assert.Equal(t, test.wantStatus, response.Code)
+			assert.Equal(t, test.wantAllow, response.Header().Get("Allow"))
+			assert.Contains(t, response.Body.String(), test.wantBody)
+			assert.Equal(t, test.wantCollections, collections)
+		})
+	}
 
 	excludedPaths := []string{
 		computils.SiteStatus,

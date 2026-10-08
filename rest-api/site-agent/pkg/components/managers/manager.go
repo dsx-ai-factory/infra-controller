@@ -197,7 +197,7 @@ func (Managers *Manager) Start() {
 
 func newMetricsServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("GET /metrics", promhttp.Handler())
 	return mux
 }
 
