@@ -198,6 +198,15 @@ struct Args {
 pub(super) struct BmcBehaviorArgs {
     #[clap(
         long,
+        value_name = "PATH",
+        conflicts_with_all = ["targz", "ip_router", "enable_ipmi_simulation"],
+        help = "Persist generated BMC usernames and passwords as plaintext JSON; omitted keeps accounts in memory",
+        long_help = "Persist generated BMC usernames and passwords as plaintext JSON at PATH. Load before serving; if absent, create from profile defaults. The parent directory must exist. Invalid or unreadable files fail startup. Account updates atomically replace the file with owner-only permissions; failed writes reject the update. Use a separate file per BMC with one process writing it. Supported with internal and libvirt backends, not archive or IPMI simulation mode. Omitted keeps accounts in memory."
+    )]
+    pub(super) account_state_file: Option<PathBuf>,
+
+    #[clap(
+        long,
         help_heading = "BMC behavior",
         conflicts_with_all = ["targz", "ip_router"],
         help = "Require Redfish authentication on generated routers (disabled by default); use the profile credentials to rotate its factory password through AccountService before ordinary reads"
@@ -433,4 +442,50 @@ pub(super) fn parse_args() -> eyre::Result<AppType> {
     let args = Args::parse();
     args.validate()?;
     Ok(args.app_type())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    use super::Args;
+
+    #[test]
+    fn account_persistence_requires_generated_redfish_without_ipmi() {
+        let args =
+            Args::try_parse_from(["bmc-mock", "--account-state-file", "accounts.json"]).unwrap();
+        assert_eq!(
+            args.bmc_behaviour.account_state_file.unwrap(),
+            std::path::PathBuf::from("accounts.json")
+        );
+        for incompatible in [
+            vec!["--targz", "mock.tar.gz"],
+            vec!["--ip-router", "127.0.0.2,mock.tar.gz"],
+            vec!["--enable-ipmi-simulation"],
+        ] {
+            let mut args = vec!["bmc-mock", "--account-state-file", "accounts.json"];
+            args.extend(incompatible);
+            assert_eq!(
+                Args::try_parse_from(args).unwrap_err().kind(),
+                ErrorKind::ArgumentConflict
+            );
+        }
+        let args = Args::try_parse_from([
+            "bmc-mock",
+            "--account-state-file",
+            "accounts.json",
+            "--libvirt-domain",
+            "mock",
+        ])
+        .unwrap();
+        args.validate().unwrap();
+        assert!(
+            Args::try_parse_from(["bmc-mock"])
+                .unwrap()
+                .bmc_behaviour
+                .account_state_file
+                .is_none()
+        );
+    }
 }
