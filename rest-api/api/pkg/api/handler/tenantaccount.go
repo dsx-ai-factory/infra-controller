@@ -720,6 +720,17 @@ func (utah UpdateTenantAccountHandler) Handle(c echo.Context) error {
 	return utah.handleTenantInviteAcceptance(c, ctx, logger, org, dbUser, taID, apiRequest)
 }
 
+// tenantAccountIssuedToTenant reports whether tn may accept the invitation ta. A linked
+// invitation belongs to the Tenant it names. An unlinked one belongs to the Tenant of the
+// org it was issued to: GET /service-account/current creates a Tenant without linking
+// earlier invitations, so a missing TenantID does not mean the invitation is foreign.
+func tenantAccountIssuedToTenant(ta *cdbm.TenantAccount, tn *cdbm.Tenant) bool {
+	if ta.TenantID == nil {
+		return ta.TenantOrg == tn.Org
+	}
+	return *ta.TenantID == tn.ID
+}
+
 func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Context, ctx context.Context, logger zerolog.Logger, org string, dbUser *cdbm.User, taID uuid.UUID, apiRequest model.APITenantAccountUpdateRequest) error {
 	taDAO := cdbm.NewTenantAccountDAO(utah.dbSession)
 
@@ -735,7 +746,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Org does not have tenant", nil)
 	}
 
-	if ta.TenantID == nil || *ta.TenantID != tn.ID {
+	if !tenantAccountIssuedToTenant(ta, tn) {
 		logger.Warn().Msg("tenant in tenant account does not match tenant in org")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest,
 			"Tenant in org does not match tenant in TenantAccount", nil)
@@ -761,7 +772,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 	// Values needed after the transaction closure
 	var uta *cdbm.TenantAccount
 	var ssds []cdbm.StatusDetail
-	// Handle database updates -- both tenant account and status detail
+	// Handle database updates for both tenant account and status detail
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
 		lockKey := fmt.Sprintf("tenant-account-invite-%s", taID.String())
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
@@ -775,7 +786,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 			logger.Warn().Err(derr).Msg("error retrieving TenantAccount DB entity within transaction")
 			return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve TenantAccount to update", nil)
 		}
-		if lockedTA.TenantID == nil || *lockedTA.TenantID != tn.ID {
+		if !tenantAccountIssuedToTenant(lockedTA, tn) {
 			logger.Warn().Msg("tenant in tenant account does not match tenant in org")
 			return cutil.NewAPIError(http.StatusBadRequest,
 				"Tenant in org does not match tenant in TenantAccount", nil)
@@ -785,11 +796,15 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 			return cutil.NewAPIError(http.StatusBadRequest, "Tenant Account status is not Invited", nil)
 		}
 
-		uta, derr = taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
+		updateInput := cdbm.TenantAccountUpdateInput{
 			TenantAccountID: taID,
 			TenantContactID: cutil.GetPtr(dbUser.ID),
 			Status:          cutil.GetPtr(cdbm.TenantAccountStatusReady),
-		})
+		}
+		if lockedTA.TenantID == nil {
+			updateInput.TenantID = &tn.ID
+		}
+		uta, derr = taDAO.Update(ctx, tx, updateInput)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating TenantAccount in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update TenantAccount", nil)

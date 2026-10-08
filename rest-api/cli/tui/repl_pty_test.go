@@ -70,8 +70,120 @@ func (r *cliRegressionRecorder) matching(method, path string) []cliRegressionReq
 	return matches
 }
 
+func TestTerminalEOFIsTransient(t *testing.T) {
+	tests := []struct {
+		name     string
+		terminal bool
+		hangup   bool
+		want     bool
+	}{
+		{
+			name:     "connected terminal preserves recovery across Ctrl+D",
+			terminal: true,
+			want:     true,
+		},
+		{
+			name:     "disconnected terminal ends recovery instead of spinning",
+			terminal: true,
+			hangup:   true,
+		},
+		{
+			name: "piped EOF ends recovery",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var input, peer *os.File
+			var err error
+			if test.terminal {
+				peer, input, err = pty.Open()
+			} else {
+				input, peer, err = os.Pipe()
+			}
+			require.NoError(t, err)
+			defer input.Close()
+			defer peer.Close()
+			if test.hangup {
+				require.NoError(t, peer.Close())
+			}
+			transient, checkErr := terminalEOFIsTransient(input)
+			require.NoError(t, checkErr)
+			assert.Equal(t, test.want, transient)
+		})
+	}
+}
+
 func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 	binaryPath := buildRegressionCLI(t)
+
+	t.Run("oversized boot input cannot reach REPL or parent shell", func(t *testing.T) {
+		recorder := &cliRegressionRecorder{}
+		server := httptest.NewServer(newInteractiveRegressionHandler(recorder))
+		defer server.Close()
+
+		configPath := writeRegressionConfig(t, server.URL)
+		command := exec.Command("/bin/sh", "-i")
+		markerPath := filepath.Join(t.TempDir(), "queued-input-executed")
+		completionPath := filepath.Join(t.TempDir(), "shell-check-complete")
+		command.Env = regressionEnvironment(map[string]string{
+			"NICO_TOKEN": ptyAuthToken,
+			"TERM":       "xterm-256color",
+			"PS1":        "regression-shell> ",
+			"HISTFILE":   "/dev/null",
+			"ENV":        "/dev/null",
+		})
+		terminal := startRegressionPTY(t, command)
+		defer terminal.close()
+		terminal.waitFor(t, "regression-shell> ")
+		terminal.send(t, shellQuoteCLIArg(binaryPath)+" --config "+shellQuoteCLIArg(configPath)+" tui\r")
+		terminal.waitFor(t, "Type a command or")
+		terminal.send(t, "scope site site-one\r")
+		terminal.waitFor(t, "Scope set: site =")
+		terminal.send(t, "instance create\r")
+		terminal.waitFor(t, "VPC:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Machine")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Instance name")
+		terminal.send(t, "oversized-script-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "n\r")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "#!ipxe\n")
+
+		// Short lines and paced writes avoid canonical terminal input limits.
+		used := len("#!ipxe")
+		for used+1000 <= maxIPXEScriptBytes {
+			terminal.send(t, strings.Repeat("#", 999)+"\n")
+			used += 1000
+			time.Sleep(time.Millisecond)
+		}
+		remaining := maxIPXEScriptBytes - used
+		if remaining > 0 {
+			terminal.send(t, strings.Repeat("#", remaining-1)+"\n")
+		}
+		// A dot at the end of the rejected line must not finish recovery.
+		// Both subsequent lines are script content, not commands to execute.
+		terminal.send(t, "xx.\n")
+		terminal.waitFor(t, "discarding remaining input")
+		terminal.sendBytes(t, []byte{KeyCtrlD})
+		terminal.send(t, "org set unintended-review-org\necho shell-ran > "+shellQuoteCLIArg(markerPath)+"\n.\n")
+		terminal.waitFor(t, "input exceeds")
+		terminal.send(t, "quit\r")
+		terminal.waitFor(t, "regression-shell> ")
+		terminal.send(t, "echo complete > "+shellQuoteCLIArg(completionPath)+"\r")
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(completionPath)
+			return err == nil
+		}, 3*time.Second, 10*time.Millisecond, "parent shell must finish processing queued input")
+		_, markerErr := os.Stat(markerPath)
+		assert.True(t, os.IsNotExist(markerErr), "rejected script ran in the parent shell: %v", markerErr)
+		assert.NotContains(t, terminal.transcript(), "Org set to:")
+		assert.NotContains(t, terminal.transcript(), "interactive session stopped after oversized input")
+		assert.Empty(t, recorder.matching(http.MethodPost, "/v2/org/acme/nico/instance"))
+		terminal.send(t, "exit 0\r")
+		terminal.waitForExit(t)
+	})
 
 	t.Run("interactive PTY exercises navigation scopes generated forms and secrets", func(t *testing.T) {
 		recorder := &cliRegressionRecorder{}
@@ -129,6 +241,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "VPC prefix name")
 		terminal.send(t, "tenant-ipv6-prefix\r")
 		terminal.waitFor(t, "IP block:")
+		terminal.waitFor(t, "tenant-ready-v6")
 		prefixPickerTranscript := terminal.transcript()
 		// The two spaces after the IPv4 block name keep this check distinct
 		// from the similarly named tenant-ready-v6 row.
@@ -167,6 +280,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "no-prefix-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "no Ready VPC prefixes available for selected VPC")
 
 		// A lone Escape must cancel a real selector without waiting forever.
@@ -201,6 +316,20 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "ethernet-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "n\r")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "(required)")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "{}\r")
+		terminal.waitFor(t, "(enter a script starting with #!ipxe or an absolute HTTP(S) URL)")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "https://example.test/boot.ipxe?token=boot-token\r")
+		terminal.waitFor(t, "User data (optional)")
+		terminal.send(t, "#cloud-config password=cloud-secret\r")
+		terminal.waitFor(t, "Enable phone home?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "Subnet for Ethernet interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Add another Ethernet interface (have 1)?")
@@ -220,7 +349,16 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "Instance created: ethernet-instance")
 		ethernetTranscript := terminal.transcript()[ethernetCommandStart:]
 		assert.NotContains(t, ethernetTranscript, "pending-subnet")
+		assert.NotContains(t, ethernetTranscript, "Allow override at instance creation?")
 		assert.Contains(t, ethernetTranscript, "--data")
+		assert.Contains(t, ethernetTranscript, "Boot data omitted; add an operating system or iPXE script before replaying this command.")
+		ethernetLogStart := strings.Index(ethernetTranscript, "INFO:")
+		require.NotEqual(t, -1, ethernetLogStart)
+		ethernetLog := ethernetTranscript[ethernetLogStart:]
+		assert.NotContains(t, ethernetLog, "ipxeScript")
+		assert.NotContains(t, ethernetLog, "userData")
+		assert.NotContains(t, ethernetLog, "boot-token")
+		assert.NotContains(t, ethernetLog, "cloud-secret")
 		assert.Contains(t, ethernetTranscript, `"interfaces":[{"isPhysical":true,"subnetId":"subnet-1"},{"isPhysical":false,"subnetId":"subnet-2","virtualFunctionId":7}]`)
 		assert.Contains(t, ethernetTranscript, `"infinibandInterfaces":[{"device":"ConnectX-7","deviceInstance":0,"isPhysical":true,"partitionId":"ib-partition-1"},{"device":"ConnectX-7","deviceInstance":2,"isPhysical":true,"partitionId":"ib-partition-2"}]`)
 
@@ -235,6 +373,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "fnn-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for DPU 0 physical interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
@@ -284,6 +424,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "fnn-fallback-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for Ethernet interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
@@ -314,10 +456,23 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "flat-instance\r")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "#!ipxe\r\rset token script-token\rchain https://example.test/boot.ipxe?token=${token}\r.\r")
+		terminal.waitFor(t, "User data (optional)")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Enable phone home?")
+		terminal.send(t, "n\r")
 		terminal.waitFor(t, "Instance created: flat-instance")
 		flatTranscript := terminal.transcript()[flatCommandStart:]
+		assert.NotContains(t, flatTranscript, "Select an existing operating system?")
 		assert.NotContains(t, flatTranscript, "Subnet for Ethernet interface:")
 		assert.NotContains(t, flatTranscript, "VPC prefix for Ethernet interface:")
+		flatLogStart := strings.Index(flatTranscript, "INFO:")
+		require.NotEqual(t, -1, flatLogStart)
+		flatLog := flatTranscript[flatLogStart:]
+		assert.NotContains(t, flatLog, "ipxeScript")
+		assert.NotContains(t, flatLog, "script-token")
+		assert.NotContains(t, flatLog, "userData")
 
 		// A Tenant without effective TargetedInstanceCreation at the selected
 		// Site must fail locally before the TUI offers the Machine picker.
@@ -532,6 +687,9 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"ethernet-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-1",
+				"ipxeScript":"https://example.test/boot.ipxe?token=boot-token",
+				"userData":"#cloud-config password=cloud-secret",
+				"phoneHomeEnabled":true,
 				"interfaces":[
 					{"subnetId":"subnet-1","isPhysical":true},
 					{"subnetId":"subnet-2","isPhysical":false,"virtualFunctionId":7}
@@ -550,6 +708,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"fnn-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-2",
+				"operatingSystemId":"os-1",
 				"interfaces":[
 					{"vpcPrefixId":"vpc-prefix-1","ipAddress":"10.0.0.11","device":"dual-dpu-network","deviceInstance":0,"isPhysical":true},
 					{"vpcPrefixId":"vpc-prefix-1","ipAddress":"10.0.0.13","device":"dual-dpu-network","deviceInstance":0,"isPhysical":false,"virtualFunctionId":3},
@@ -565,6 +724,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"fnn-fallback-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-2",
+				"operatingSystemId":"os-1",
 				"interfaces":[
 					{"vpcPrefixId":"vpc-prefix-1","isPhysical":true},
 					{"vpcPrefixId":"vpc-prefix-1","isPhysical":false,"virtualFunctionId":5}
@@ -574,7 +734,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		)
 		assert.JSONEq(
 			t,
-			`{"name":"flat-instance","machineId":"machine-1","vpcId":"vpc-flat","autoNetwork":true}`,
+			`{"name":"flat-instance","machineId":"machine-1","vpcId":"vpc-flat","autoNetwork":true,"ipxeScript":"#!ipxe\n\nset token script-token\nchain https://example.test/boot.ipxe?token=${token}","phoneHomeEnabled":false}`,
 			instanceRequests[3].Body,
 		)
 		assert.NotContains(t, instanceRequests[3].Body, "interfaces")
@@ -879,7 +1039,12 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 			]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/operating-system":
-			_, _ = io.WriteString(w, `[]`)
+			// The final flat-VPC instance has no registered OS to select.
+			if len(recorder.matching(http.MethodPost, "/v2/org/acme/nico/instance")) == 3 {
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			_, _ = io.WriteString(w, `[{"id":"os-1","name":"existing-os"}]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/sshkeygroup":
 			_, _ = io.WriteString(w, `[]`)

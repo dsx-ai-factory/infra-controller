@@ -1541,3 +1541,61 @@ async fn only_the_last_attempts_answer_counts() {
     let next = exchange(&metrics, &state, get(ROTATED_PATH)).await;
     assert_eq!((replayed.status, next.status), (200, 200));
 }
+
+/// The misses counted for a class with a one-second latency target, judged
+/// on each answer, after one request for `path` with a three-second budget.
+async fn slo_misses_after(path: &'static str) -> f64 {
+    let metrics = MetricsCapture::start();
+    let (addr, _bmc) = spawn_fake_bmc();
+    let state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        &format!(
+            r#"
+            [admission]
+            max_in_flight_per_bmc = 2
+
+            [admission.slo]
+            window = 1
+
+            [[class]]
+            name = "targeted"
+            match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}", "GET {SLOW_PATH}"]
+            upstream_timeout = "3s"
+            slo = {{ latency = "1s" }}
+            "#
+        ),
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    exchange(&metrics, &state, get(path)).await;
+    // The BMC's runtime weighs the answer once it sees the slot freed.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    metrics.counter_delta(
+        "carbide_bmc_proxy_slo_missed_total",
+        &[("class", "targeted")],
+    )
+}
+
+/// A request counts against its class's latency target from its arrival to
+/// the BMC's answer, or to its timeout when the BMC does not answer in time.
+#[tokio::test]
+async fn latency_counts_until_the_bmc_answers() {
+    check_cases_async(
+        [
+            Case {
+                scenario: "the BMC answers after 2.5 seconds",
+                input: BRIEFLY_SLOW_PATH,
+                expect: Yields(1.0),
+            },
+            Case {
+                scenario: "the BMC does not answer within the budget",
+                input: SLOW_PATH,
+                expect: Yields(1.0),
+            },
+        ],
+        |path| async move { Ok::<_, Infallible>(slo_misses_after(path).await) },
+    )
+    .await;
+}

@@ -694,6 +694,10 @@ The site agent bootstrap flow is:
 3. The received certs are written back into the `temporal-client-site-agent-certs` secret.
 4. The agent then connects to Temporal using those certs and starts polling its site-specific namespace and queue.
 
+The StatefulSet probes the agent on port `8080`. The agent checks Temporal and Core gRPC every `30s`, and Flow gRPC too when `FLOW_GRPC_ENABLED` is `true`. `/readyz` reports the latest results, so it succeeds only while its Temporal worker runs and every checked dependency is reachable. The same results back the `nico_rest_site_agent_temporal_connection_status`, `nico_rest_site_agent_carbide_health_status`, `nico_rest_site_agent_flow_grpc_health_status`, and `nico_rest_site_agent_health_status` metrics. `/healthz` fails once a Temporal connection attempt fails or the Temporal SDK stops the worker, and passes while an attempt is still in progress. It also fails once `site-registration` holds a `site-uuid` or `otp` the agent did not apply itself, as after a re-pair, because the agent reads that secret only at startup. Either way Kubernetes restarts the agent after three failed liveness probes, whether or not it is Ready. Until a site is configured below, the agent is not Ready and restarts after each failed connection attempt. So its pod shows `CrashLoopBackOff` between those restarts.
+
+Each agent pod also reports its own bootstrap, Temporal, and Core gRPC state as JSON at `/status`. [Check a Site Agent pod](../../docs/playbooks/stuck_objects/site_controller_health.md#check-a-site-agent-pod) shows how to reach one pod and describes each field.
+
 ### Manifests
 
 | File | Contents |
@@ -763,8 +767,10 @@ kubectl patch configmap nico-rest-site-agent-config -n nico-rest --type='json' -
   {\"op\": \"replace\", \"path\": \"/data/TEMPORAL_SUBSCRIBE_QUEUE\", \"value\": \"site\"}
 ]"
 
-kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
+kubectl delete pod -l app=nico-rest-site-agent -n nico-rest
 ```
+
+Deleting the pod applies the new configuration right away. A `kubectl rollout restart` would not, because a StatefulSet only replaces a pod that is Ready.
 
 ### Apply
 

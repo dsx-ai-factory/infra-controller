@@ -257,8 +257,6 @@ spec:
             - name: object-metrics
               containerPort: {{ .Values.service.perObjectStateMetrics.port }}
             {{- end }}
-            - name: profiler
-              containerPort: {{ .Values.service.profiler.port }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:

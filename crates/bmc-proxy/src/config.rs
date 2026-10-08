@@ -42,6 +42,12 @@ pub(crate) enum ConfigError {
     Figment(Box<figment::Error>),
     #[error("admission.{0}")]
     AdmissionBreaker(BreakerConfigError),
+    #[error(
+        "a class with a latency target needs admission.max_in_flight_per_bmc, the limit its slo shares out"
+    )]
+    SloWithoutLimit,
+    #[error("admission.slo min_in_flight must be at most admission.max_in_flight_per_bmc")]
+    SloFloorAboveLimit,
     #[error(transparent)]
     Classes(#[from] ClassTableError),
 }
@@ -90,6 +96,142 @@ pub(crate) struct AdmissionConfig {
     /// classes with a `breaker` of their own.
     #[serde(default)]
     pub(crate) breaker: Option<BreakerSettings>,
+    /// How the slots classes without a latency target may hold at a BMC
+    /// follow the classes with one.
+    #[serde(default)]
+    pub(crate) slo: SloConfig,
+}
+
+/// Most requests of a class with a latency target a decision weighs.
+const MAX_SLO_WINDOW: u32 = 1024;
+
+/// Longest a BMC's classes with a latency target may go unmeasured before
+/// the other classes get its whole limit back.
+const MAX_SLO_RESET_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// `[admission.slo]`: at each BMC, once a class with a latency target has
+/// had `window` requests answered, the proxy weighs them against its target.
+/// A miss cuts the slots the classes without a target may hold there to
+/// `decrease` of what they were, down to `min_in_flight`; a target met
+/// raises them by `increase`, up to `max_in_flight_per_bmc`. With no answer
+/// from a class with a target for `reset_after`, they get the whole limit
+/// back.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "SloDefinition")]
+pub(crate) struct SloConfig {
+    pub(crate) window: NonZeroU32,
+    pub(crate) increase: NonZeroU32,
+    pub(crate) decrease: f32,
+    pub(crate) min_in_flight: NonZeroU32,
+    pub(crate) reset_after: Duration,
+}
+
+impl Default for SloConfig {
+    fn default() -> Self {
+        Self {
+            window: NonZeroU32::new(20).expect("20 is not zero"),
+            increase: NonZeroU32::MIN,
+            decrease: 0.5,
+            min_in_flight: NonZeroU32::MIN,
+            reset_after: Duration::from_secs(60),
+        }
+    }
+}
+
+/// `[admission.slo]` as written in the config file.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SloDefinition {
+    window: Option<NonZeroU32>,
+    increase: Option<NonZeroU32>,
+    decrease: Option<f32>,
+    min_in_flight: Option<NonZeroU32>,
+    #[serde(with = "humantime_serde", default)]
+    reset_after: Option<Duration>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum SloConfigError {
+    #[error("slo window must be at most {MAX_SLO_WINDOW}")]
+    Window,
+    #[error("slo decrease must be above 0 and below 1")]
+    Decrease,
+    #[error("slo reset_after must be above zero and at most {MAX_SLO_RESET_AFTER:?}")]
+    ResetAfter,
+}
+
+impl TryFrom<SloDefinition> for SloConfig {
+    type Error = SloConfigError;
+
+    fn try_from(definition: SloDefinition) -> Result<Self, Self::Error> {
+        let defaults = Self::default();
+        let config = Self {
+            window: definition.window.unwrap_or(defaults.window),
+            increase: definition.increase.unwrap_or(defaults.increase),
+            decrease: definition.decrease.unwrap_or(defaults.decrease),
+            min_in_flight: definition.min_in_flight.unwrap_or(defaults.min_in_flight),
+            reset_after: definition.reset_after.unwrap_or(defaults.reset_after),
+        };
+        if config.window.get() > MAX_SLO_WINDOW {
+            return Err(SloConfigError::Window);
+        }
+        if !(config.decrease > 0.0 && config.decrease < 1.0) {
+            return Err(SloConfigError::Decrease);
+        }
+        if config.reset_after.is_zero() || config.reset_after > MAX_SLO_RESET_AFTER {
+            return Err(SloConfigError::ResetAfter);
+        }
+        Ok(config)
+    }
+}
+
+/// A class's latency target: at least `percentile` of its requests to a BMC
+/// answered, from their arrival at the proxy to the BMC's response headers,
+/// within `latency`.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "SloTargetDefinition")]
+pub(crate) struct SloTarget {
+    pub(crate) latency: Duration,
+    pub(crate) percentile: f64,
+}
+
+/// A class's `slo` as written in the config file.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SloTargetDefinition {
+    #[serde(with = "humantime_serde")]
+    latency: Duration,
+    #[serde(default = "default_slo_percentile")]
+    percentile: f64,
+}
+
+fn default_slo_percentile() -> f64 {
+    0.9
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum SloTargetError {
+    #[error("slo latency must be above zero")]
+    Latency,
+    #[error("slo percentile must be above 0 and at most 1")]
+    Percentile,
+}
+
+impl TryFrom<SloTargetDefinition> for SloTarget {
+    type Error = SloTargetError;
+
+    fn try_from(definition: SloTargetDefinition) -> Result<Self, Self::Error> {
+        if definition.latency.is_zero() {
+            return Err(SloTargetError::Latency);
+        }
+        if !(definition.percentile > 0.0 && definition.percentile <= 1.0) {
+            return Err(SloTargetError::Percentile);
+        }
+        Ok(Self {
+            latency: definition.latency,
+            percentile: definition.percentile,
+        })
+    }
 }
 
 /// Longest `cool_down` a breaker may set: a BMC back up is served again
@@ -386,6 +528,15 @@ impl Config {
         config
             .classes
             .resolve_breakers(config.admission.breaker.as_ref())?;
+        match config.admission.max_in_flight_per_bmc {
+            None if config.classes.iter().any(|class| class.slo.is_some()) => {
+                return Err(ConfigError::SloWithoutLimit);
+            }
+            Some(limit) if config.admission.slo.min_in_flight > limit => {
+                return Err(ConfigError::SloFloorAboveLimit);
+            }
+            _ => {}
+        }
         Ok(config)
     }
 }
@@ -870,6 +1021,70 @@ mod tests {
             "not counted" {
                 ("5xx", 429) => false,
                 ("503", 500) => false,
+            }
+        );
+    }
+
+    /// The `power` class's latency target, (latency in milliseconds,
+    /// percentile), and the `[admission.slo]` tuning, (window, increase,
+    /// decrease, min_in_flight, reset_after in seconds), in
+    /// [`with_power_class`].
+    #[allow(clippy::type_complexity)]
+    fn slo_of(
+        settings: (&str, &str),
+    ) -> Result<(Option<(u128, f64)>, (u32, u32, f32, u32, u64)), ()> {
+        let config = with_power_class(settings).map_err(drop)?;
+        let target = config
+            .classes
+            .classify(&http::Method::PATCH, "/redfish/v1/Chassis", &[])
+            .slo
+            .map(|slo| (slo.latency.as_millis(), slo.percentile));
+        let slo = config.admission.slo;
+        Ok((
+            target,
+            (
+                slo.window.get(),
+                slo.increase.get(),
+                slo.decrease,
+                slo.min_in_flight.get(),
+                slo.reset_after.as_secs(),
+            ),
+        ))
+    }
+
+    /// A class's `slo` sets its latency target, its percentile defaulted, and
+    /// `[admission.slo]` the tuning, each setting defaulted when left out. A
+    /// target needs the per-BMC limit it shares out, and fits in the class's
+    /// budget; settings out of bounds, or unknown, do not load.
+    #[test]
+    fn slo_settings_parse() {
+        const LIMIT: &str = "[admission]\nmax_in_flight_per_bmc = 4";
+        scenarios!(
+            run = slo_of;
+            "loaded" {
+                ("", "") => Yields((None, (20, 1, 0.5, 1, 60))),
+                (LIMIT, r#"slo = { latency = "2s" }"#) => Yields((Some((2000, 0.9)), (20, 1, 0.5, 1, 60))),
+                (
+                    "[admission]\nmax_in_flight_per_bmc = 4\n[admission.slo]\nwindow = 1024\nincrease = 2\ndecrease = 0.25\nmin_in_flight = 4\nreset_after = \"1h\"",
+                    r#"slo = { latency = "60s", percentile = 1.0 }"#,
+                ) => Yields((Some((60_000, 1.0)), (1024, 2, 0.25, 4, 3600))),
+            }
+
+            "rejected" {
+                ("", r#"slo = { latency = "2s" }"#) => Fails,
+                (LIMIT, r#"slo = { latency = "61s" }"#) => Fails,
+                (LIMIT, r#"slo = { latency = "0s" }"#) => Fails,
+                (LIMIT, r#"slo = { latency = "2s", percentile = 0.0 }"#) => Fails,
+                (LIMIT, r#"slo = { latency = "2s", percentile = 1.5 }"#) => Fails,
+                (LIMIT, "slo = { percentile = 0.9 }") => Fails,
+                (LIMIT, r#"slo = { latency = "2s", target = "1s" }"#) => Fails,
+                ("[admission]\nmax_in_flight_per_bmc = 4\n[admission.slo]\nmin_in_flight = 5", "") => Fails,
+                ("[admission.slo]\nwindow = 1025", "") => Fails,
+                ("[admission.slo]\ndecrease = 1.0", "") => Fails,
+                ("[admission.slo]\ndecrease = 0.0", "") => Fails,
+                ("[admission.slo]\nreset_after = \"0s\"", "") => Fails,
+                ("[admission.slo]\nreset_after = \"61m\"", "") => Fails,
+                ("[admission.slo]\nwindows = 2", "") => Fails,
             }
         );
     }

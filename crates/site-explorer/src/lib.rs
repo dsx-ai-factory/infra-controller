@@ -180,7 +180,7 @@ pub fn enrich_endpoint_exploration_report(
             );
         }
 
-        // Go through the chassis entries and get what at least one of them says.
+        // Derive position from the collected chassis and processor inventory.
         report.parse_position_info()
     } else {
         tracing::info!("Generating PowerShelfId for power shelf");

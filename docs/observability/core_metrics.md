@@ -48,6 +48,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_bmc_proxy_authorization_errors_total</td><td>counter</td><td>Number of BMC proxy authorization errors caused by missing authentication context, by authorization layer and HTTP method</td></tr>
 <tr><td>carbide_bmc_proxy_breaker_opened_total</td><td>counter</td><td>Number of times a request class&#39;s circuit breaker at a BMC opened: the BMC failed too many of the class&#39;s recent exchanges, by request class</td></tr>
 <tr><td>carbide_bmc_proxy_redirects_total</td><td>counter</td><td>Number of BMC redirect responses observed by configured mode, response status, target classification, and proxy disposition</td></tr>
+<tr><td>carbide_bmc_proxy_slo_missed_total</td><td>counter</td><td>Number of windows of requests in which a class with a latency target missed it at a BMC, each cutting the slots classes without a target may hold there, by request class</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_attempted_total</td><td>counter</td><td>Number of inbound TLS connection attempts</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_fail_total</td><td>counter</td><td>Number of failed inbound connections, by failure reason</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_success_total</td><td>counter</td><td>Number of successful TLS connections</td></tr>

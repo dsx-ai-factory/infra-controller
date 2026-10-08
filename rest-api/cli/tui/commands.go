@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -1357,7 +1358,7 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	err = promptOperatingSystemOptions(body)
+	err = promptOperatingSystemOptions(body, true)
 	if err != nil {
 		return err
 	}
@@ -1416,13 +1417,103 @@ func promptOperatingSystemType(s *Session, ctx context.Context) (string, error) 
 	return operatingSystemTypeTemplatedIPXE, nil
 }
 
+// maxIPXEScriptBytes bounds TUI input independently of server-side validation.
+const maxIPXEScriptBytes = 1 << 20
+
 func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
-	ipxeScript, err := PromptText("iPXE script or URL", true)
-	if err != nil {
-		return err
+	fmt.Println("Enter a URL on one line, or a script starting with #!ipxe; finish the script with a line containing only '.'")
+	for {
+		ipxeScript, err := promptTextWithLimit("iPXE script or URL", true, maxIPXEScriptBytes)
+		if err != nil {
+			return recoverIPXEInput(err, false)
+		}
+		if strings.HasPrefix(ipxeScript, "#!ipxe") {
+			var script strings.Builder
+			script.WriteString(ipxeScript)
+			for {
+				// Reserve the separator, but allow the terminator even when full.
+				remaining := maxIPXEScriptBytes - script.Len()
+				line, readErr := readPromptLineWithLimit(max(1, remaining-1))
+				if readErr != nil {
+					return recoverIPXEInput(
+						fmt.Errorf("reading iPXE script (maximum %d bytes): %w", maxIPXEScriptBytes, readErr),
+						false,
+					)
+				}
+				if line == "." {
+					break
+				}
+				if len(line)+1 > remaining {
+					return recoverIPXEInput(fmt.Errorf("iPXE %w: %d bytes", errPromptInputLimitExceeded, maxIPXEScriptBytes), true)
+				}
+				script.WriteByte('\n')
+				script.WriteString(line)
+			}
+			body["ipxeScript"] = script.String()
+			return nil
+		}
+		parsedURL, parseErr := url.ParseRequestURI(ipxeScript)
+		if parseErr == nil && (parsedURL.Scheme == "http" || parsedURL.Scheme == "https") && parsedURL.Hostname() != "" {
+			body["ipxeScript"] = ipxeScript
+			return nil
+		}
+		fmt.Println(Red("  (enter a script starting with #!ipxe or an absolute HTTP(S) URL)"))
 	}
-	body["ipxeScript"] = ipxeScript
-	return nil
+}
+
+func recoverIPXEInput(inputErr error, lineComplete bool) error {
+	if !errors.Is(inputErr, errPromptInputLimitExceeded) {
+		return inputErr
+	}
+	fmt.Println(Red("iPXE input is too large; discarding remaining input. Finish with a line containing only '.' to return to the command prompt."))
+	discardErr := discardIPXEInput(lineComplete)
+	if discardErr != nil {
+		return errors.Join(inputErr, discardErr)
+	}
+	return inputErr
+}
+
+// discardIPXEInput keeps rejected boot data away from the REPL and parent
+// shell without retaining it. A partial rejected line cannot be a terminator.
+func discardIPXEInput(lineComplete bool) error {
+	var one [1]byte
+	skipLine := !lineComplete
+	lineLength := 0
+	dotOnly := true
+	for {
+		n, err := os.Stdin.Read(one[:])
+		if n > 0 {
+			switch one[0] {
+			case '\r':
+			case '\n':
+				if !skipLine && lineLength == 1 && dotOnly {
+					return nil
+				}
+				skipLine = false
+				lineLength = 0
+				dotOnly = true
+			default:
+				lineLength = min(2, lineLength+1)
+				dotOnly = dotOnly && one[0] == '.'
+			}
+		}
+		if err != nil {
+			// Ctrl+D is a transient terminal EOF, not the end of a paste.
+			if errors.Is(err, io.EOF) {
+				transient, checkErr := terminalEOFIsTransient(os.Stdin)
+				if checkErr != nil {
+					return errors.Join(err, checkErr)
+				}
+				if transient {
+					continue
+				}
+			}
+			if errors.Is(err, io.EOF) && !skipLine && lineLength == 1 && dotOnly {
+				return nil
+			}
+			return fmt.Errorf("discarding oversized iPXE input: %w", err)
+		}
+	}
 }
 
 func promptTemplatedIPXEOperatingSystem(
@@ -1590,20 +1681,22 @@ func promptIPXETemplateArtifact(name string) (map[string]interface{}, error) {
 	return artifact, nil
 }
 
-func promptOperatingSystemOptions(body map[string]interface{}) error {
+func promptOperatingSystemOptions(body map[string]interface{}, includeAllowOverride bool) error {
 	userData, err := PromptText("User data (optional)", false)
 	if err != nil {
 		return err
 	}
-	allowOverride, err := PromptConfirm("Allow override at instance creation?")
-	if err != nil {
-		return err
+	if includeAllowOverride {
+		allowOverride, promptErr := PromptConfirm("Allow override at instance creation?")
+		if promptErr != nil {
+			return promptErr
+		}
+		body["allowOverride"] = allowOverride
 	}
 	phoneHomeEnabled, err := PromptConfirm("Enable phone home?")
 	if err != nil {
 		return err
 	}
-	body["allowOverride"] = allowOverride
 	body["phoneHomeEnabled"] = phoneHomeEnabled
 	if strings.TrimSpace(userData) != "" {
 		body["userData"] = strings.TrimSpace(userData)
@@ -3632,7 +3725,7 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	var osID *string
 	osList, osErr := s.Resolver.Fetch(ctx, "operating-system")
 	if osErr == nil && len(osList) > 0 {
-		useOS, confirmErr := PromptConfirm("Select an operating system?")
+		useOS, confirmErr := PromptConfirm("Select an existing operating system?")
 		if confirmErr != nil {
 			return confirmErr
 		}
@@ -3642,6 +3735,23 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 				return selectErr
 			}
 			osID = &osItem.ID
+		}
+	}
+	body := map[string]interface{}{
+		"name":      name,
+		"machineId": machine.ID,
+		"vpcId":     vpc.ID,
+	}
+	if osID != nil {
+		body["operatingSystemId"] = *osID
+	} else {
+		err = promptRawIPXEOperatingSystem(body)
+		if err != nil {
+			return err
+		}
+		err = promptOperatingSystemOptions(body, false)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -3672,14 +3782,6 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 		return err
 	}
 
-	body := map[string]interface{}{
-		"name":      name,
-		"machineId": machine.ID,
-		"vpcId":     vpc.ID,
-	}
-	if osID != nil {
-		body["operatingSystemId"] = *osID
-	}
 	if len(interfaces) > 0 {
 		body["interfaces"] = interfaces
 	}
@@ -3696,7 +3798,22 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("encoding instance create request: %w", err)
 	}
-	LogCmd(s, "instance", "create", "--data", shellQuoteCLIArg(string(bodyJSON)))
+	logBody := make(map[string]interface{}, len(body))
+	for key, value := range body {
+		if key == "userData" || key == "ipxeScript" {
+			continue
+		}
+		logBody[key] = value
+	}
+	logBodyJSON, err := json.Marshal(logBody)
+	if err != nil {
+		return fmt.Errorf("encoding instance create request for logging: %w", err)
+	}
+	_, hasBootScript := body["ipxeScript"]
+	if hasBootScript {
+		fmt.Println(Dim("Boot data omitted; add an operating system or iPXE script before replaying this command."))
+	}
+	LogCmd(s, "instance", "create", "--data", shellQuoteCLIArg(string(logBodyJSON)))
 	resp, _, err := s.Client.Do("POST", apiPath(s, "instance"), nil, nil, bodyJSON)
 	if err != nil {
 		return fmt.Errorf("creating instance: %w", err)

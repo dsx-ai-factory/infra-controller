@@ -186,6 +186,9 @@ pub struct InstanceNetworkAutoConfig {
 /// Struct to store instance network config updated request with current config.
 /// Current config is kept here to release these resources once instance moves to the new network
 /// resources.
+///
+/// These snapshots own only host networking. Service endpoints remain owned by
+/// live configuration even when older stored requests carry copies.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceNetworkConfigUpdate {
     // Current configuration which will be deallocated.
@@ -1092,6 +1095,60 @@ mod tests {
         // ambiguous and must fail before use.
         assert!(service_interface("192.0.2.0/30").validate().is_err());
         assert!(service_interface("192.0.2.1/31").validate().is_err());
+    }
+
+    /// Verifies external views omit service endpoints in both host modes, because
+    /// callers own only explicit host interfaces or automatic networking intent.
+    #[test]
+    fn external_view_filters_service_interfaces() {
+        // Hidden endpoints are the variable under test; the host and allocation fields
+        // provide a complete internal configuration without changing host behavior.
+        let mut config = InstanceNetworkConfig::for_segment_ids(
+            &[NetworkSegmentId::new()],
+            &[],
+            &[VpcId::new()],
+        );
+        config.service_interfaces = vec![InstanceServiceInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: NetworkSegmentId::new(),
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        }];
+        let auto_config = Some(InstanceNetworkAutoConfig {
+            vpc_id: VpcId::new(),
+        });
+
+        value_scenarios!(
+            run = |auto_config| {
+                // Project the same internal allocation with each supported host mode.
+                let mut config = config.clone();
+                config.auto_config = auto_config;
+                config.into_external_view()
+            };
+            "explicit host networking" {
+                // Explicit host interfaces remain visible while service endpoints are hidden.
+                None => InstanceNetworkConfig {
+                    service_interfaces: vec![],
+                    ..config.clone()
+                },
+            }
+            "automatic host networking" {
+                // Automatic intent also hides the resolved host interfaces from callers.
+                auto_config => InstanceNetworkConfig {
+                    auto_config,
+                    ..Default::default()
+                },
+            }
+        );
     }
 
     #[test]

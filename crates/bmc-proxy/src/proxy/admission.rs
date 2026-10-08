@@ -45,6 +45,14 @@
 //! waiting, or got its slot too late to use it, counts as one that succeeded:
 //! such requests dilute the failures, and one can be the request let through.
 //!
+//! A class with a latency target holds back the classes without one: at
+//! each BMC, every window of its answered requests that misses the target
+//! cuts the slots the others may hold there, down to a floor, and every
+//! window that meets it gives one back, up to the per-BMC limit; see
+//! [`Share`]. A request's latency runs from its arrival at the proxy to the
+//! BMC's response headers, or, without an answer, to its end; see
+//! [`Latency`].
+//!
 //! Each BMC in use has its own `nv_redfish_dispatcher` runtime, driven by a
 //! task of its own, as nico-api's admission drives one for its callers.
 //! BMCs are independent, so no scheduling state is shared between them, and
@@ -65,7 +73,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -88,7 +97,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::class::{ClassName, ClassTable, RequestClass};
-use crate::config::{AdmissionConfig, BreakerConfig};
+use crate::config::{AdmissionConfig, BreakerConfig, SloConfig, SloTarget};
+use crate::proxy::slo::{Share, Verdict};
 
 type Work = FutureWork<(), ExchangeFailed>;
 type ClassQueue = BoundedQueue<Work, Waiting, GaveUpFirst, Fifo>;
@@ -206,6 +216,23 @@ struct BreakerOpened {
     bmc_ip_address: String,
 }
 
+/// A class with a latency target missed it at a BMC over its last window of
+/// requests there, which cut the slots the classes without one may hold.
+/// Metric-only: the counter shows how often a BMC falls behind.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_slo_missed",
+    metric_name = "carbide_bmc_proxy_slo_missed_total",
+    component = "nico-bmc-proxy",
+    log = off,
+    metric = counter,
+    describe = "Number of windows of requests in which a class with a latency target missed it at a BMC, each cutting the slots classes without a target may hold there, by request class"
+)]
+struct SloMissed {
+    #[label]
+    class: ClassName,
+}
+
 /// The failure of an exchange the BMC failed, as its grant reports it to the
 /// BMC's circuit breaker.
 struct ExchangeFailed;
@@ -216,6 +243,51 @@ struct Waiting {
     claim: Weak<()>,
     /// How many requests the queue may hold for this one to join it.
     room: usize,
+    /// How long the request took, for a class with a latency target.
+    latency: Option<Arc<Latency>>,
+}
+
+/// How long a request of a class with a latency target took, from its
+/// arrival at the proxy: until the BMC answered, or until the request ended
+/// without an answer. Unset when the request could tell nothing of the BMC.
+/// Set once, before the request's grant ends, and read by the BMC's runtime
+/// when it does.
+struct Latency {
+    arrived: Instant,
+    taken: OnceLock<Option<Duration>>,
+}
+
+impl Latency {
+    fn new(arrived: Instant) -> Self {
+        Self {
+            arrived,
+            taken: OnceLock::new(),
+        }
+    }
+
+    fn measure(&self) {
+        self.taken.set(Some(self.arrived.elapsed())).ok();
+    }
+
+    fn leave_unmeasured(&self) {
+        self.taken.set(None).ok();
+    }
+
+    fn taken(&self) -> Option<Duration> {
+        self.taken.get().copied().flatten()
+    }
+}
+
+/// Measures a request that stops waiting for its slot. Dropped before the
+/// request's grant can end, so the BMC's runtime finds the latency set.
+struct Unanswered(Option<Arc<Latency>>);
+
+impl Drop for Unanswered {
+    fn drop(&mut self) {
+        if let Some(latency) = &self.0 {
+            latency.measure();
+        }
+    }
 }
 
 /// Admits a request while its class's queue holds fewer than the request's
@@ -249,6 +321,7 @@ struct SlotClass {
     max_in_flight: NonZeroU32,
     max_queued: NonZeroUsize,
     breaker: Option<CircuitBreakerConfig>,
+    slo: Option<SloTarget>,
 }
 
 /// A BMC in use: its class queues, and the runtime serving them.
@@ -260,6 +333,9 @@ struct Bmc {
     /// Stops the BMC's runtime.
     stop: CancellationToken,
     last_used: Instant,
+    /// The slots the classes without a latency target may hold, as the
+    /// runtime last set it, when some class has a target.
+    others_limit: Option<Arc<AtomicUsize>>,
 }
 
 impl Bmc {
@@ -298,6 +374,7 @@ pub(super) struct Admission {
     /// Every class whose requests take slots.
     classes: Vec<SlotClass>,
     max_in_flight_per_bmc: NonZeroUsize,
+    slo: SloConfig,
     bmcs: Mutex<HashMap<IpAddr, Bmc>>,
     /// The BMCs' runtimes.
     runtimes: Mutex<JoinSet<()>>,
@@ -327,12 +404,14 @@ impl Admission {
                 max_in_flight: class.max_in_flight.unwrap_or(NonZeroU32::MAX),
                 max_queued: class.max_queued,
                 breaker: class.breaker.as_ref().map(CircuitBreakerConfig::from),
+                slo: class.slo,
             })
             .collect();
         let admission = Arc::new(Self {
             max_in_flight_per_bmc: per_bmc.map_or(NonZeroUsize::MAX, |max| {
                 NonZeroUsize::try_from(max).expect("a u32 fits in a usize")
             }),
+            slo: config.slo,
             bmcs: Mutex::new(HashMap::new()),
             runtimes: Mutex::new(JoinSet::new()),
             shutdown: shutdown.clone(),
@@ -349,13 +428,14 @@ impl Admission {
         admission
     }
 
-    /// A slot at `bmc` for a request of `class`, waiting for it until
-    /// `deadline`, and held at most `hold_for` once granted. A class that
-    /// takes no slots gets one at once.
+    /// A slot at `bmc` for a request of `class` that `arrived` at the proxy,
+    /// waiting for it until `deadline`, and held at most `hold_for` once
+    /// granted. A class that takes no slots gets one at once.
     pub(super) async fn acquire(
         &self,
         bmc: IpAddr,
         class: &RequestClass,
+        arrived: Instant,
         deadline: Instant,
         hold_for: Duration,
     ) -> Result<Slot, Refused> {
@@ -367,7 +447,9 @@ impl Admission {
             return Ok(Slot::free());
         };
         let started = Instant::now();
-        let granted = self.wait_for_slot(bmc, index, deadline, hold_for).await;
+        let granted = self
+            .wait_for_slot(bmc, index, arrived, deadline, hold_for)
+            .await;
         match &granted {
             Ok(_) => emit(AdmissionGranted {
                 class: class.name.clone(),
@@ -385,17 +467,28 @@ impl Admission {
         &self,
         bmc: IpAddr,
         class: usize,
+        arrived: Instant,
         deadline: Instant,
         hold_for: Duration,
     ) -> Result<Slot, Refused> {
         let waiting = Arc::new(());
+        let latency = self.classes[class]
+            .slo
+            .is_some()
+            .then(|| Arc::new(Latency::new(arrived)));
         let (grant_tx, grant_rx) = oneshot::channel();
         self.enqueue(
             bmc,
             class,
-            Arc::downgrade(&waiting),
+            Waiting {
+                claim: Arc::downgrade(&waiting),
+                room: 0,
+                latency: latency.clone(),
+            },
             grant(grant_tx, hold_for),
         )?;
+        // Declared after `grant_rx`, so dropped before it.
+        let unanswered = Unanswered(latency);
         // A request that gives up drops `waiting`, and its queued grant,
         // dequeued later or evicted to make room, finds nobody to hand the
         // slot to. Shutdown comes first, so a request queued after it is
@@ -409,25 +502,27 @@ impl Admission {
                 // A slot that comes as the budget runs out leaves the
                 // exchange no time; refusing it tells the caller why.
                 if Instant::now() >= deadline {
+                    drop(unanswered);
                     return Err(Refused::Timeout);
                 }
+                let mut unanswered = unanswered;
                 Ok(Slot {
                     release: Some(release),
                     failed: false,
+                    latency: unanswered.0.take(),
                 })
             }
             () = tokio::time::sleep_until(deadline) => Err(Refused::Timeout),
         }
     }
 
-    /// Queues `grant`, for the request that holds `claim`, in the queue of
-    /// class `class` at `bmc`, starting the BMC's runtime on its first
-    /// request.
+    /// Queues `grant`, for the request `waiting`, in the queue of class
+    /// `class` at `bmc`, starting the BMC's runtime on its first request.
     fn enqueue(
         &self,
         bmc: IpAddr,
         class: usize,
-        claim: Weak<()>,
+        mut waiting: Waiting,
         grant: impl Future<Output = Result<Vec<()>, ExchangeFailed>> + Send + 'static,
     ) -> Result<(), Refused> {
         let mut bmcs = lock(&self.bmcs);
@@ -441,10 +536,7 @@ impl Admission {
         }
         // Requests queue one at a time under this lock. The runtime grants
         // and frees slots meanwhile, so the room can be off by a slot.
-        let waiting = Waiting {
-            claim,
-            room: self.room(bmc, class),
-        };
+        waiting.room = self.room(bmc, class);
         match bmc.queues[class].try_push(ScheduledWork::new(waiting, Box::pin(grant))) {
             EnqueueOutcome::Admitted | EnqueueOutcome::Evicted { .. } => Ok(()),
             EnqueueOutcome::Rejected(_) => Err(Refused::QueueFull),
@@ -453,7 +545,8 @@ impl Admission {
     }
 
     /// How many requests class `class`'s queue at `bmc` may hold: its
-    /// `max_queued`, and one for each slot free for the class now.
+    /// `max_queued`, and one for each slot free for the class now, within the
+    /// share of the classes without a latency target when it has none.
     fn room(&self, bmc: &Bmc, class: usize) -> usize {
         let in_flight: Vec<usize> = bmc
             .queues
@@ -462,18 +555,36 @@ impl Admission {
             .collect();
         let max_in_flight =
             usize::try_from(self.classes[class].max_in_flight.get()).unwrap_or(usize::MAX);
-        let free = max_in_flight.saturating_sub(in_flight[class]).min(
+        let mut free = max_in_flight.saturating_sub(in_flight[class]).min(
             self.max_in_flight_per_bmc
                 .get()
                 .saturating_sub(in_flight.iter().sum()),
         );
+        if let Some(others_limit) = &bmc.others_limit
+            && self.classes[class].slo.is_none()
+        {
+            let others_in_flight: usize = self
+                .classes
+                .iter()
+                .zip(&in_flight)
+                .filter(|(class, _)| class.slo.is_none())
+                .map(|(_, in_flight)| in_flight)
+                .sum();
+            free = free.min(
+                others_limit
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(others_in_flight),
+            );
+        }
         self.classes[class].max_queued.get().saturating_add(free)
     }
 
     /// The queues of the BMC at `address`, and its runtime started on its
     /// own task.
     fn start_bmc(&self, address: IpAddr) -> Bmc {
-        let (root, queues) = BmcClasses::new(address, &self.classes, self.max_in_flight_per_bmc);
+        let (root, queues) =
+            BmcClasses::new(address, &self.classes, self.max_in_flight_per_bmc, self.slo);
+        let others_limit = root.share.as_ref().map(Share::published);
         let runtime = Runtime::new(
             RuntimeConfig {
                 global_max_in_flight: NonZeroUsize::MAX,
@@ -493,6 +604,7 @@ impl Admission {
             runtime: handle,
             stop,
             last_used: Instant::now(),
+            others_limit,
         }
     }
 
@@ -631,6 +743,13 @@ struct BmcClasses {
     tiers: Vec<Tier>,
     max_in_flight: usize,
     in_flight: usize,
+    /// The slots classes without a latency target may hold, when some class
+    /// has one.
+    share: Option<Share>,
+    /// Slots held by classes without a latency target.
+    others_in_flight: usize,
+    /// When the runtime last polled the root.
+    now: std::time::Instant,
 }
 
 struct ClassAtBmc {
@@ -653,6 +772,7 @@ impl BmcClasses {
         address: IpAddr,
         classes: &[SlotClass],
         max_in_flight: NonZeroUsize,
+        slo: SloConfig,
     ) -> (Self, Vec<ClassProducer>) {
         let (nodes, queues) = classes
             .iter()
@@ -689,14 +809,42 @@ impl BmcClasses {
                 next: 0,
             })
             .collect();
+        let share = classes.iter().any(|class| class.slo.is_some()).then(|| {
+            Share::new(
+                slo,
+                max_in_flight.get(),
+                classes.iter().map(|class| class.slo),
+            )
+        });
         let root = Self {
             address,
             classes: nodes,
             tiers,
             max_in_flight: max_in_flight.get(),
             in_flight: 0,
+            share,
+            others_in_flight: 0,
+            now: std::time::Instant::now(),
         };
         (root, queues)
+    }
+}
+
+/// Whether class `class` may take another slot at `now`, as far as `share`,
+/// of which the classes without a latency target hold `others_in_flight`,
+/// goes. Free of the root, so it can run while its tiers are borrowed.
+fn within_share(
+    share: &mut Option<Share>,
+    in_flight: usize,
+    others_in_flight: usize,
+    now: std::time::Instant,
+    class: usize,
+) -> bool {
+    match share {
+        Some(share) if !share.has_target(class) => {
+            others_in_flight < share.limit(now, in_flight - others_in_flight)
+        }
+        _ => true,
     }
 }
 
@@ -704,11 +852,19 @@ impl Scheduler<Work> for BmcClasses {
     type Meta = Waiting;
 
     fn update_ready(&mut self, now: std::time::Instant) -> Readiness {
+        self.now = now;
         let mut ready = false;
         let mut next_update_at = None;
-        for class in &mut self.classes {
-            let readiness = class.node.update_ready(now);
-            ready |= readiness.ready;
+        for index in 0..self.classes.len() {
+            let readiness = self.classes[index].node.update_ready(now);
+            ready |= readiness.ready
+                && within_share(
+                    &mut self.share,
+                    self.in_flight,
+                    self.others_in_flight,
+                    now,
+                    index,
+                );
             next_update_at = next_update_at
                 .into_iter()
                 .chain(readiness.next_update_at)
@@ -730,11 +886,27 @@ impl Scheduler<Work> for BmcClasses {
             for turn in 0..turns {
                 let at = (tier.next + turn) % turns;
                 let index = tier.classes[at];
+                if !within_share(
+                    &mut self.share,
+                    self.in_flight,
+                    self.others_in_flight,
+                    self.now,
+                    index,
+                ) {
+                    continue;
+                }
                 if let Some(mut work) = self.classes[index].node.take_next() {
                     tier.next = (at + 1) % turns;
                     work.routing
                         .push(u32::try_from(index).expect("a BMC has fewer than 2^32 classes"));
                     self.in_flight += 1;
+                    if self
+                        .share
+                        .as_ref()
+                        .is_some_and(|share| !share.has_target(index))
+                    {
+                        self.others_in_flight += 1;
+                    }
                     return Some(work);
                 }
             }
@@ -743,14 +915,30 @@ impl Scheduler<Work> for BmcClasses {
     }
 
     fn on_complete(&mut self, mut completion: Completion<Waiting>) {
-        let Some(class) = completion
+        let Some(index) = completion
             .routing
             .pop()
-            .and_then(|index| self.classes.get_mut(usize::try_from(index).ok()?))
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|&index| index < self.classes.len())
         else {
             return;
         };
         self.in_flight = self.in_flight.saturating_sub(1);
+        if let Some(share) = &mut self.share {
+            if share.has_target(index) {
+                let latency = completion.meta.latency.as_ref().and_then(|at| at.taken());
+                if let Some(latency) = latency
+                    && share.record(index, latency, self.now) == Some(Verdict::Missed)
+                {
+                    emit(SloMissed {
+                        class: self.classes[index].name.clone(),
+                    });
+                }
+            } else {
+                self.others_in_flight = self.others_in_flight.saturating_sub(1);
+            }
+        }
+        let class = &mut self.classes[index];
         let was_open = matches!(class.node.state(), BreakerState::Open { .. });
         class.node.on_complete(completion);
         if !was_open && matches!(class.node.state(), BreakerState::Open { .. }) {
@@ -777,10 +965,16 @@ pub(super) struct Slot {
     release: Option<oneshot::Sender<bool>>,
     /// Whether the BMC failed the exchange.
     failed: bool,
+    /// How long the request took, for a class with a latency target:
+    /// measured when the slot is freed unless reported before.
+    latency: Option<Arc<Latency>>,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
+        if let Some(latency) = &self.latency {
+            latency.measure();
+        }
         if let Some(release) = self.release.take() {
             release.send(self.failed).ok();
         }
@@ -792,6 +986,22 @@ impl Slot {
         Self {
             release: None,
             failed: false,
+            latency: None,
+        }
+    }
+
+    /// Reports that the BMC answered now. Only the first report counts.
+    pub(super) fn answered(&self) {
+        if let Some(latency) = &self.latency {
+            latency.measure();
+        }
+    }
+
+    /// Reports that the exchange told nothing of the BMC's latency: the
+    /// proxy could not reach the BMC, or failed on its own.
+    pub(super) fn unmeasured(&self) {
+        if let Some(latency) = &self.latency {
+            latency.leave_unmeasured();
         }
     }
 
@@ -862,6 +1072,7 @@ mod tests {
         Admission, Bmc, BmcClasses, IDLE_BMC_SWEEP_INTERVAL, IDLE_BMC_TIMEOUT, MAX_BMCS, Refused,
         Slot,
     };
+    use crate::config::SloConfig;
     use crate::proxy::BmcProxyState;
     use crate::proxy::test_support::test_state_with_config;
 
@@ -908,8 +1119,12 @@ mod tests {
         hold_for: Duration,
     ) -> Result<Slot, Refused> {
         let class = state.config.classes.classify(&method, path, &[]);
-        let deadline = Instant::now() + class.upstream_timeout;
-        state.admission.acquire(at, class, deadline, hold_for).await
+        let arrived = Instant::now();
+        let deadline = arrived + class.upstream_timeout;
+        state
+            .admission
+            .acquire(at, class, arrived, deadline, hold_for)
+            .await
     }
 
     /// A slot as the proxy asks for one for a request without a body.
@@ -1275,7 +1490,7 @@ mod tests {
                 global_max_in_flight: NonZeroUsize::MIN,
                 clock: ClockConfig::Wallclock,
             },
-            BmcClasses::new(bmc(0), &[], NonZeroUsize::MIN).0,
+            BmcClasses::new(bmc(0), &[], NonZeroUsize::MIN, SloConfig::default()).0,
         );
         {
             let mut bmcs = state.admission.bmcs.lock().unwrap();
@@ -1288,6 +1503,7 @@ mod tests {
                         runtime: runtime.handle(),
                         stop: CancellationToken::new(),
                         last_used: Instant::now(),
+                        others_limit: None,
                     },
                 );
             }
@@ -1318,6 +1534,7 @@ mod tests {
             admission.acquire(
                 bmc(1),
                 class,
+                Instant::now(),
                 Instant::now() + Duration::from_secs(30),
                 Duration::from_secs(60),
             )
@@ -1697,6 +1914,179 @@ mod tests {
             ),
             (0.25, 7, 3, Duration::from_secs(42)),
         );
+    }
+
+    /// A class with a one-second latency target, judged on each answer,
+    /// under a per-BMC limit of 2, which a miss halves for the other classes.
+    const SLO: &str = r#"
+        [admission]
+        max_in_flight_per_bmc = 2
+
+        [admission.slo]
+        window = 1
+
+        [[class]]
+        name = "power"
+        match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
+        slo = { latency = "1s" }
+    "#;
+
+    /// How many requests of the default class get a slot at a BMC at once,
+    /// after a request of a class with a latency target there was answered
+    /// after `latency`; and the misses counted.
+    async fn others_granted_after(latency: Duration) -> (usize, f64) {
+        let metrics = MetricsCapture::start();
+        let state = proxy_with(SLO);
+        let power = granted(slot(&state, bmc(1), http::Method::PATCH, METRICS)).await;
+        tokio::time::sleep(latency).await;
+        power.answered();
+        drop(power);
+        // The runtime weighs the answer once it sees the slot freed, after
+        // any grant it hands out in the same poll.
+        tokio::time::sleep(WATCHED_FOR).await;
+        let _first = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
+        let mut second = pin!(slot(&state, bmc(1), http::Method::GET, METRICS));
+        let others = if waits(&mut second).await { 1 } else { 2 };
+        (
+            others,
+            metrics.counter_delta("carbide_bmc_proxy_slo_missed_total", &[("class", "power")]),
+        )
+    }
+
+    /// A class that misses its latency target at a BMC halves the slots the
+    /// other classes may hold there, and the miss is counted; one that meets
+    /// it leaves them the whole limit.
+    #[tokio::test(start_paused = true)]
+    async fn a_missed_target_holds_back_the_other_classes() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "the target is met",
+                    input: Duration::from_millis(100),
+                    expect: Yields((2, 0.0)),
+                },
+                Case {
+                    scenario: "the target is missed",
+                    input: Duration::from_secs(2),
+                    expect: Yields((1, 1.0)),
+                },
+            ],
+            |latency| async move { Ok::<_, Infallible>(others_granted_after(latency).await) },
+        )
+        .await;
+    }
+
+    /// After a missed target halves the slots of the classes without one,
+    /// their queues hold only `max_queued` beyond the slots still free to
+    /// them, and refuse the next request at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_cut_share_shrinks_the_queues_too() {
+        // Its miss is counted, so it holds the capture other tests count in.
+        let _metrics = MetricsCapture::start();
+        let state = proxy_with(&format!(
+            r#"
+            {SLO}
+
+            [[class]]
+            name = "default"
+            max_queued = 1
+            "#
+        ));
+        let power = granted(slot(&state, bmc(1), http::Method::PATCH, METRICS)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        drop(power);
+        tokio::time::sleep(WATCHED_FOR).await;
+        let _held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
+        let mut queued = pin!(slot(&state, bmc(1), http::Method::GET, METRICS));
+        assert!(waits(&mut queued).await, "one waits");
+        assert_eq!(
+            slot(&state, bmc(1), http::Method::GET, METRICS).await.err(),
+            Some(Refused::QueueFull),
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Ending {
+        /// The request waited for a slot until its budget ran out.
+        RefusedForWant,
+        /// The request's caller went away while it held its slot.
+        Abandoned,
+        /// The proxy could not reach the BMC.
+        Unreachable,
+    }
+
+    /// The misses counted for a class with a one-second target and a
+    /// two-second budget, one request at a time, after a request that ended
+    /// as `ending`, two seconds after it arrived.
+    async fn misses_after(ending: Ending) -> f64 {
+        let metrics = MetricsCapture::start();
+        let state = proxy_with(
+            r#"
+            [admission]
+            max_in_flight_per_bmc = 2
+
+            [admission.slo]
+            window = 1
+
+            [[class]]
+            name = "power"
+            match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
+            max_in_flight = 1
+            upstream_timeout = "2s"
+            slo = { latency = "1s" }
+            "#,
+        );
+        let request = || slot(&state, bmc(1), http::Method::PATCH, METRICS);
+        match ending {
+            Ending::RefusedForWant => {
+                let held = granted(request()).await;
+                held.answered();
+                assert_eq!(request().await.err(), Some(Refused::Timeout));
+                drop(held);
+            }
+            Ending::Abandoned => {
+                let held = granted(request()).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                drop(held);
+            }
+            Ending::Unreachable => {
+                let held = granted(request()).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                held.unmeasured();
+                drop(held);
+            }
+        }
+        tokio::time::sleep(WATCHED_FOR).await;
+        metrics.counter_delta("carbide_bmc_proxy_slo_missed_total", &[("class", "power")])
+    }
+
+    /// A request of a class with a latency target that got no answer counts
+    /// as taking as long as it lasted, whether it waited out its budget for
+    /// a slot or its caller went away; one that could not reach the BMC does
+    /// not count.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_without_an_answer_counts_as_late() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "it waited out its budget for a slot",
+                    input: Ending::RefusedForWant,
+                    expect: Yields(1.0),
+                },
+                Case {
+                    scenario: "its caller went away",
+                    input: Ending::Abandoned,
+                    expect: Yields(1.0),
+                },
+                Case {
+                    scenario: "the BMC was unreachable",
+                    input: Ending::Unreachable,
+                    expect: Yields(0.0),
+                },
+            ],
+            |ending| async move { Ok::<_, Infallible>(misses_after(ending).await) },
+        )
+        .await;
     }
 
     /// A body keeps its length and its end when it holds a slot, so the
