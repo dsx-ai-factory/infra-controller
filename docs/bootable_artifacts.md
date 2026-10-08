@@ -80,8 +80,9 @@ export BFB_CUSTOM_OUTPUT=/tmp/custom-installer.bfb
 cargo make --cwd pxe bfb-create-custom-kernel-initramfs
 ```
 
-The task runs the Rust `carbide-bfb` helper, which calls `mlx-mkbfb`, runs
-`mlx-mkbfb -c` on the generated BFB, and leaves the existing
+The task runs the Rust `carbide-bfb` helper, which inspects the carrier with
+`mlx-mkbfb -x`, replaces every supported boot-entry version it finds, calls
+`mlx-mkbfb`, runs `mlx-mkbfb -c` on the generated BFB, and leaves the existing
 `build-boot-artifacts-bfb` flow unchanged. If `BFB_CUSTOM_BASE_BFB` is not set,
 the task uses the repository's configured BF-Bundle release as the carrier.
 Prefer a minimal carrier BFB for boot-only recovery payloads when one is
@@ -94,7 +95,8 @@ Optional variables:
   image`.
 - `BFB_CUSTOM_BOOT_PATH`: optional BFB boot-path image value.
 - `BFB_CUSTOM_MLX_MKBFB`: override the `mlx-mkbfb` path. Defaults to the
-  downloaded BFB tool.
+  downloaded BFB tool. Supplying a local tool path skips the default tool
+  download.
 
 ### 3. Build iPXE Image
 

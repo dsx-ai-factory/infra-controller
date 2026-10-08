@@ -973,7 +973,7 @@ args = [
 [tasks.bfb-create-custom-kernel-initramfs]
 category = "iPXE Kernel"
 description = "Create a custom BFB from a kernel, initramfs, and boot arguments"
-dependencies = ["mkdir-static", "bfb-create-tmp", "bfbtools-download"]
+dependencies = ["mkdir-static", "bfb-create-tmp"]
 script = '''
   set -eu
 
@@ -987,6 +987,14 @@ script = '''
     /*) output="${BFB_CUSTOM_OUTPUT}" ;;
     *) output="${REPO_ROOT}/${BFB_CUSTOM_OUTPUT}" ;;
   esac
+
+  if [ "${BFB_CUSTOM_MLX_MKBFB}" = "/tmp/bfb-dump/mlx-mkbfb" ] && [ ! -f "${BFB_CUSTOM_MLX_MKBFB}" ]; then
+    wget -Nnv "https://raw.githubusercontent.com/Mellanox/bfscripts/master/mlx-mkbfb" -P /tmp/bfb-dump
+  fi
+
+  if [ "${BFB_CUSTOM_MLX_MKBFB}" = "/tmp/bfb-dump/mlx-mkbfb" ]; then
+    chmod 0755 "${BFB_CUSTOM_MLX_MKBFB}"
+  fi
 
   set -- \
     create-custom-kernel-initramfs \
