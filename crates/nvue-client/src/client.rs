@@ -384,6 +384,36 @@ impl NvueClient {
         }
     }
 
+    async fn poll_revision_to_terminal_state(
+        &self,
+        revision_id: &str,
+    ) -> Result<RevisionData, NvueClientError> {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Self::APPLY_CONFIG_REVISION_TIMEOUT;
+
+        loop {
+            let revision = self.get_revision(revision_id).await?;
+            if revision.is_terminal_for_apply() {
+                return Ok(revision);
+            }
+
+            let now = tokio::time::Instant::now();
+            if let Some(remaining) = deadline.checked_duration_since(now) {
+                tokio::time::sleep(remaining.min(Self::APPLY_CONFIG_REVISION_POLL_INTERVAL)).await;
+            } else {
+                return Err(NvueClientError::RevisionApplyFailed {
+                    revision_id: revision_id.to_owned(),
+                    reason: RevisionApplyFailureReason::Timeout {
+                        waited: now - started,
+                    },
+                    last_state: revision.state.clone(),
+                    progress: revision.transition_progress().map(str::to_owned),
+                    error_issues: Vec::new(),
+                });
+            }
+        }
+    }
+
     /// Perform all of the NVUE operations required to apply a new config. Under
     /// the hood, we create a new revision, patch it with this config, diff it
     /// against the "applied" revision, and then apply it if it differed.
