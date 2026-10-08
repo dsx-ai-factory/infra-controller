@@ -333,6 +333,12 @@ Two Services on one IP must not use the same protocol and port, so `unbound`
 and `nico-dns` cannot share an IP. Per-replica DNS and NTP endpoints stay
 separate, and sharing never collapses replicas.
 
+A shared IP merges the network scope of every Service on it. Firewalls, ACLs,
+and policers that match on the destination IP now apply to all of those
+Services, so filter by port and review the ACLs before sharing. In the
+eight-IP example, an ACL that limits the SSH console IP to administrators
+would also have to allow every host that uses the shared unbound resolver.
+
 ##### Eight-IP Example
 
 [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml)

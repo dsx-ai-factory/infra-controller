@@ -45,3 +45,12 @@ tests:
       - equal:
           path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
           value: nico-shared
+
+  - it: rejects a non-numeric port
+    set:
+      externalService:
+        enabled: true
+        port: ssh
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-ssh-console-rs: externalService.port must be a port number, got "ssh"'

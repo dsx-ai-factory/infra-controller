@@ -13,9 +13,11 @@ same helper; Helm includes the file contents when packaging each chart.
 {{- if hasKey .service "sharedIpAnnotation" -}}
 {{- $key = .service.sharedIpAnnotation -}}
 {{- end -}}
+{{- $operator := default dict .annotations -}}
 {{- $annotations := dict -}}
-{{- with $key -}}
-{{- $_ := set $annotations . $.group -}}
+{{- /* An operator value under either MetalLB spelling replaces the built-in one. */ -}}
+{{- if and $key (not (hasKey $operator "metallb.universe.tf/allow-shared-ip")) (not (hasKey $operator "metallb.io/allow-shared-ip")) -}}
+{{- $_ := set $annotations $key .group -}}
 {{- end -}}
-{{- mergeOverwrite $annotations (default dict .annotations) | toYaml -}}
+{{- mergeOverwrite $annotations $operator | toYaml -}}
 {{- end -}}

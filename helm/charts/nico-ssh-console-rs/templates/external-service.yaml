@@ -1,4 +1,8 @@
 {{- if .Values.externalService.enabled }}
+{{- $port := toString (.Values.externalService.port | default 22) }}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}$" $port) }}
+{{- fail (printf "nico-ssh-console-rs: externalService.port must be a port number, got %q" $port) }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -25,7 +29,7 @@ spec:
   selector:
     {{- include "nico-ssh-console-rs.selectorLabels" . | nindent 4 }}
   ports:
-    - port: {{ .Values.externalService.port | default 22 }}
+    - port: {{ $port }}
       targetPort: 22
       name: ssh
       protocol: TCP

@@ -585,7 +585,8 @@ externalService:
   # Service's primary family (the first entry) cannot be changed in place.
   ipFamilyPolicy: ""
   ipFamilies: []
-  # External gRPC port. The backend target port stays service.grpc.port.
+  # External gRPC port. The backend target port stays service.grpc.port, and
+  # clients must use the port set here.
   port: 443
   # Local preserves client source IPs. MetalLB only lets Local Services share
   # an IP with Services that select the same pods.

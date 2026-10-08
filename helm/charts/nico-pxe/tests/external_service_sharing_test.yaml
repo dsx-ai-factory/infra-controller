@@ -113,3 +113,33 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: 'externalService.port and externalService.alternatePort are both 80'
+
+  - it: rejects a non-numeric alternatePort instead of dropping the port 80 Service
+    set:
+      externalService:
+        enabled: true
+        alternatePort: abc
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.alternatePort must be a port number or 0, got "abc"'
+
+  - it: rejects a non-numeric port
+    set:
+      externalService:
+        enabled: true
+        port: http
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.port must be a port number, got "http"'
+
+  - it: skips the built-in sharing key when the operator uses the other MetalLB spelling
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.io/allow-shared-ip: "grp"
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.io/allow-shared-ip: grp

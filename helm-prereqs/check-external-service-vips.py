@@ -62,6 +62,18 @@ def check_vips(stream, metallb_stream=None):
                 except ValueError as error:
                     pool_errors.append(f"MetalLB pool entry {block!r} is invalid: {error}")
 
+    # Chart defaults for externalTrafficPolicy and external ports. MetalLB only shares a VIP
+    # between Services with the same policy and distinct protocol/port pairs, and Local
+    # Services share only when they select the same pods.
+    sharing_defaults = {
+        "nico-api": ("Local", {"TCP/443"}),
+        "nico-pxe": ("Local", {"TCP/8080", "TCP/80"}),
+        "nico-ssh-console-rs": ("Cluster", {"TCP/22"}),
+        "nico-dhcp": ("Cluster", {"UDP/67"}),
+        "nico-dns": ("Cluster", {"UDP/53", "TCP/53"}),
+        "unbound": ("Cluster", {"UDP/53", "TCP/53"}),
+        "nico-ntp": ("Local", {"UDP/123"}),
+    }
     seen_vips = {}
     for component, config in values.items():
         # Only an explicit false disables the owning chart in the site values.
@@ -88,7 +100,7 @@ def check_vips(stream, metallb_stream=None):
 
             families = None
             family_policy = None
-            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp", "unbound") and name == "externalService":
+            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp", "unbound", "nico-ssh-console-rs") and name == "externalService":
                 families = service.get("ipFamilies")
                 family_policy = service.get("ipFamilyPolicy")
                 if family_policy is None or family_policy == "":
@@ -110,6 +122,19 @@ def check_vips(stream, metallb_stream=None):
             # externalService honors type; the DHCPv6 template always renders LoadBalancer.
             if name == "externalService" and (service.get("type") or "LoadBalancer") != "LoadBalancer":
                 continue
+
+            policy, ports = sharing_defaults.get(component, ("Cluster", set()))
+            ports = set(ports)
+            if name == "externalService":
+                policy = str(service.get("externalTrafficPolicy") or policy)
+                if component in ("nico-api", "nico-ssh-console-rs", "nico-pxe") and service.get("port") not in (None, ""):
+                    ports = {f"TCP/{service['port']}"} | ({"TCP/80"} if component == "nico-pxe" else set())
+                if component == "nico-pxe" and "alternatePort" in service:
+                    ports.discard("TCP/80")
+                    if service["alternatePort"] not in (None, "", 0):
+                        ports.add(f"TCP/{service['alternatePort']}")
+            else:
+                policy, ports = "Local", {"UDP/547"}
 
             # Only DNS and NTP render per-pod annotations; other charts ignore that field.
             annotations = (service.get("perPodAnnotations")
@@ -158,12 +183,22 @@ def check_vips(stream, metallb_stream=None):
                             errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {families}")
                             continue
                         # Normalize addresses, but do not count annotation aliases as separate Services.
-                        if seen_vips.get(address, (None, None))[0] == owner:
+                        previous = seen_vips.get(address)
+                        if previous and previous[0] == owner:
                             continue
-                        if address in seen_vips and (group is None or seen_vips[address][1] != group):
+                        if previous and (group is None or previous[1] != group):
                             warnings.append(f"VIP {address} is shared by more than one service; sharing requires "
                                             "the same allow-shared-ip annotation value on every service that uses it")
-                        seen_vips[address] = (owner, group)
+                        elif previous and previous[2] != policy:
+                            warnings.append(f"VIP {address}: {previous[0]} and {owner} share one allow-shared-ip value, but "
+                                            f"MetalLB cannot share them (externalTrafficPolicy {previous[2]} vs {policy})")
+                        elif previous and previous[3] & ports:
+                            warnings.append(f"VIP {address}: {previous[0]} and {owner} share one allow-shared-ip value, but "
+                                            f"MetalLB cannot share them (overlapping ports {sorted(previous[3] & ports)})")
+                        elif previous and policy == "Local" and previous[0].split(".")[0] != component:
+                            warnings.append(f"VIP {address}: {previous[0]} and {owner} share one allow-shared-ip value, but "
+                                            "MetalLB only shares Local Services that select the same pods")
+                        seen_vips[address] = (owner, group, policy, ports | (previous[3] if previous else set()))
                         # Missing rendered pools retain the existing format-only validation behavior.
                         if pools and not any(first.version == address.version and first <= address <= last
                                              for first, last in pools):

@@ -23,3 +23,12 @@ tests:
       - equal:
           path: spec.ports[0]
           value: { port: 8443, targetPort: 1079, name: grpc, protocol: TCP }
+
+  - it: rejects a non-numeric port
+    set:
+      externalService:
+        enabled: true
+        port: https
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-api: externalService.port must be a port number, got "https"'

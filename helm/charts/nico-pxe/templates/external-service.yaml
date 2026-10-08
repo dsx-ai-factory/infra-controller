@@ -1,10 +1,18 @@
 {{- if .Values.externalService.enabled }}
 {{- $annotations := include "nico.sharedIpAnnotations" (dict "service" .Values.externalService "group" (include "nico-pxe.name" .) "annotations" .Values.externalService.annotations) | fromYaml }}
-{{- $port := int (.Values.externalService.port | default 8080) }}
+{{- $rawPort := toString (.Values.externalService.port | default 8080) }}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}$" $rawPort) }}
+{{- fail (printf "nico-pxe: externalService.port must be a port number, got %q" $rawPort) }}
+{{- end }}
+{{- $port := int $rawPort }}
 {{- /* An absent alternatePort keeps port 80, which DPU agents use; an explicit 0 omits the Service. */}}
 {{- $alternatePort := 80 }}
 {{- if hasKey .Values.externalService "alternatePort" }}
-{{- $alternatePort = int .Values.externalService.alternatePort }}
+{{- $rawAlternate := toString .Values.externalService.alternatePort }}
+{{- if not (regexMatch "^[0-9]{1,5}$" $rawAlternate) }}
+{{- fail (printf "nico-pxe: externalService.alternatePort must be a port number or 0, got %q" $rawAlternate) }}
+{{- end }}
+{{- $alternatePort = int $rawAlternate }}
 {{- end }}
 {{- if and $alternatePort (eq $alternatePort $port) }}
 {{- fail (printf "nico-pxe: externalService.port and externalService.alternatePort are both %d; use different ports or set alternatePort to 0" $alternatePort) }}
