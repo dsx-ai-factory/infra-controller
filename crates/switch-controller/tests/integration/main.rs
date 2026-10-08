@@ -20,4 +20,5 @@ mod common;
 mod health;
 mod maintenance;
 mod nvos_password_rotation;
+mod ready;
 mod state_controller;
