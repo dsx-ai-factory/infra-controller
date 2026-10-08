@@ -101,7 +101,9 @@ open an `rms_rpc` span and report decoded request/response bodies, the protobuf 
 message type, numeric `grpc_status_code`, UTC RFC 3339 `request_timestamp` and
 `response_timestamp`, and monotonic `elapsed_milliseconds`. Request time is the start of
 the logical call, before lazy connection setup and its readiness retries; response time is
-when that call returns. These are client-side call boundaries, not server receive times.
+when that call returns. `elapsed_milliseconds` spans that same interval, so it also includes
+NICo's own request-side redaction and span setup, but not response redaction. These are
+client-side call boundaries, not server receive times.
 
 The same fields appear in completion logs under the `rms_rpc_audit` target at DEBUG level.
 The `rms_rpc` span sets `logfmt.suppress`, so the logfmt output carries that DEBUG record and

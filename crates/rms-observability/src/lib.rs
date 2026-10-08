@@ -72,6 +72,14 @@ impl RpcObserver for NicoRmsObservability {
         request: &[u8],
         started: SystemTime,
     ) -> Result<Box<dyn RpcObservation>, RpcObserverError> {
+        // `started` was taken before this callback ran. Back-date the monotonic clock to it so
+        // `elapsed_milliseconds` spans the same interval as the two timestamps instead of
+        // omitting the body sanitization and span setup below.
+        let lag = SystemTime::now()
+            .duration_since(started)
+            .unwrap_or_default();
+        let entered = Instant::now();
+        let started_at = entered.checked_sub(lag).unwrap_or(entered);
         let request_body = sanitized_body(request_type, request);
         let request_timestamp = DateTime::<Utc>::from(started).to_rfc3339();
         let span = tracing::info_span!(
@@ -96,7 +104,7 @@ impl RpcObserver for NicoRmsObservability {
             request_type,
             request_body,
             request_timestamp,
-            started: Instant::now(),
+            started: started_at,
             completed: false,
         }))
     }
@@ -124,9 +132,10 @@ impl RpcObservation for NicoRmsObservation {
         code: tonic::Code,
         finished: SystemTime,
     ) -> Result<(), RpcObserverError> {
+        // Measured before sanitizing the response, which `finished` also precedes.
+        let elapsed_milliseconds = self.started.elapsed().as_secs_f64() * 1000.0;
         let response_body = response.map(|body| sanitized_body(response_type, body));
         let response_timestamp = DateTime::<Utc>::from(finished).to_rfc3339();
-        let elapsed_milliseconds = self.started.elapsed().as_secs_f64() * 1000.0;
         self.span
             .record("response_timestamp", response_timestamp.as_str());
         self.span
@@ -285,6 +294,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::io::Write;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use carbide_test_support::{Check, check_values};
     use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
@@ -733,7 +743,9 @@ mod tests {
                 password: "test-secret".to_string(),
                 ..Default::default()
             };
-            let started = SystemTime::now();
+            // The caller took `started` before invoking the observer, so the audited call began
+            // 50 ms ago by the time `start` runs.
+            let started = SystemTime::now() - Duration::from_millis(50);
             let mut observation = observer
                 .start(
                     "UpdateSwitchSystemPassword",
@@ -778,6 +790,13 @@ mod tests {
                 .unwrap()
                 .contains(REDACTED)
         );
+        // The first call started 50 ms before the observer was invoked.
+        assert!(
+            records[0]["fields"]["elapsed_milliseconds"]
+                .as_f64()
+                .unwrap()
+                >= 50.0
+        );
         for record in records {
             let fields = &record["fields"];
             let started =
@@ -787,7 +806,14 @@ mod tests {
                 DateTime::parse_from_rfc3339(fields["response_timestamp"].as_str().unwrap())
                     .unwrap();
             assert!(finished >= started);
-            assert!(fields["elapsed_milliseconds"].as_f64().unwrap() >= 0.0);
+            // The monotonic elapsed time covers the same interval as the two timestamps; the
+            // tolerance absorbs skew between the wall and monotonic clocks.
+            let timestamp_gap_ms = (finished - started).num_microseconds().unwrap() as f64 / 1000.0;
+            let elapsed_ms = fields["elapsed_milliseconds"].as_f64().unwrap();
+            assert!(
+                elapsed_ms + 1.0 >= timestamp_gap_ms,
+                "elapsed {elapsed_ms} ms is shorter than the {timestamp_gap_ms} ms between timestamps"
+            );
         }
     }
 
