@@ -25,6 +25,7 @@ use carbide_uuid::rack::RackId;
 
 use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
+use super::reconciliation::MetricReconciler;
 use super::subscriber::GnmiStreamMetrics;
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
@@ -35,9 +36,31 @@ pub(crate) struct GnmiSampleProcessor {
     pub(crate) event_context: EventContext,
     pub(crate) switch_id: String,
     pub(crate) diagnostic_stream: Option<&'static str>,
+    pub(super) reconciliation: Option<Arc<MetricReconciler>>,
 }
 
 impl GnmiSampleProcessor {
+    pub(super) fn new(
+        data_sink: Option<Arc<dyn DataSink>>,
+        event_context: EventContext,
+        switch_id: String,
+        diagnostic_stream: Option<&'static str>,
+        reconciliation_enabled: bool,
+    ) -> Self {
+        Self {
+            reconciliation: reconciliation_enabled.then(|| {
+                Arc::new(MetricReconciler::new(
+                    data_sink.clone(),
+                    event_context.clone(),
+                ))
+            }),
+            data_sink,
+            event_context,
+            switch_id,
+            diagnostic_stream,
+        }
+    }
+
     #[allow(deprecated)]
     pub(crate) fn process_subscribe_response(
         &self,
@@ -83,11 +106,14 @@ impl GnmiSampleProcessor {
 
         let mut entities: HashSet<(&str, &str)> = HashSet::new();
 
-        // SAMPLE renames gNMI leaves and sometimes expands one leaf into several
-        // series. Retained samples have no source path, so leaf deletes need the
-        // inverse path mapping below. Apply deletes before replacement updates.
+        // Apply live Deletes to tracked source keys and existing metric selectors
+        // before processing replacement updates.
         for path in &notification.delete {
             let combined = prefix_elems.iter().chain(&path.elem).collect::<Vec<_>>();
+
+            if let Some(reconciliation) = &self.reconciliation {
+                reconciliation.delete(&combined);
+            }
 
             let Some(sink) = &self.data_sink else {
                 continue;
@@ -160,6 +186,10 @@ impl GnmiSampleProcessor {
 
             let combined: Vec<&PathElem> = prefix_elems.iter().chain(update_elems.iter()).collect();
 
+            if let Some(reconciliation) = &self.reconciliation {
+                reconciliation.touch(&combined);
+            }
+
             if let Some(iface) = find_elem_key_ref(&combined, "interface", "name") {
                 let Some(val) = update.val.as_ref() else {
                     continue;
@@ -188,7 +218,14 @@ impl GnmiSampleProcessor {
                     let value = update.val.as_ref().and_then(typed_value_to_string);
                     let current = leakage_state_to_state(value.as_deref());
 
-                    self.emit_state_set("leakage_state", "sensor", sensor, current, LEAKAGE_STATES);
+                    self.emit_state_set(
+                        &combined,
+                        "leakage_state",
+                        "sensor",
+                        sensor,
+                        current,
+                        LEAKAGE_STATES,
+                    );
                 }
             } else if combined.iter().any(|e| e.name == "platform-general") {
                 let Some(val) = update.val.as_ref() else {
@@ -221,6 +258,7 @@ impl GnmiSampleProcessor {
 
         match classify_interface_leaf(leaf) {
             Some(InterfaceLeaf::OperStatus) => self.emit_state_set(
+                elems,
                 "interface_oper_status",
                 "interface_name",
                 iface_name,
@@ -229,13 +267,14 @@ impl GnmiSampleProcessor {
             ),
             Some(InterfaceLeaf::Numeric(metric_type)) => match typed_value_to_f64(val) {
                 Some(value) => {
-                    self.emit_iface(metric_type.name, iface_name, value, metric_type.unit)
+                    self.emit_iface(elems, metric_type.name, iface_name, value, metric_type.unit)
                 }
                 None => {
                     debug_unmapped_value(elems, val, metric_type.name, self.event_context.rack_id())
                 }
             },
             Some(InterfaceLeaf::PhysicalPortState) => self.emit_state_set(
+                elems,
                 "interface_physical_port_state",
                 "interface_name",
                 iface_name,
@@ -243,6 +282,7 @@ impl GnmiSampleProcessor {
                 PHYSICAL_PORT_STATES,
             ),
             Some(InterfaceLeaf::LogicalPortState) => self.emit_state_set(
+                elems,
                 "interface_logical_port_state",
                 "interface_name",
                 iface_name,
@@ -251,9 +291,13 @@ impl GnmiSampleProcessor {
             ),
             Some(InterfaceLeaf::Speed) => {
                 match link_speed_to_gbps(typed_value_to_string(val).as_deref()) {
-                    Some(value) => {
-                        self.emit_iface("interface_link_speed_active", iface_name, value, "gbps")
-                    }
+                    Some(value) => self.emit_iface(
+                        elems,
+                        "interface_link_speed_active",
+                        iface_name,
+                        value,
+                        "gbps",
+                    ),
                     None => debug_unmapped_value(
                         elems,
                         val,
@@ -264,9 +308,13 @@ impl GnmiSampleProcessor {
             }
             Some(InterfaceLeaf::Width) => {
                 match link_width_to_f64(typed_value_to_string(val).as_deref()) {
-                    Some(value) => {
-                        self.emit_iface("interface_link_width_active", iface_name, value, "lanes")
-                    }
+                    Some(value) => self.emit_iface(
+                        elems,
+                        "interface_link_width_active",
+                        iface_name,
+                        value,
+                        "lanes",
+                    ),
                     None => debug_unmapped_value(
                         elems,
                         val,
@@ -277,9 +325,13 @@ impl GnmiSampleProcessor {
             }
             Some(InterfaceLeaf::SupportedWidths) => {
                 match link_width_to_f64(typed_value_to_string(val).as_deref()) {
-                    Some(value) => {
-                        self.emit_iface("interface_supported_width", iface_name, value, "lanes")
-                    }
+                    Some(value) => self.emit_iface(
+                        elems,
+                        "interface_supported_width",
+                        iface_name,
+                        value,
+                        "lanes",
+                    ),
                     None => debug_unmapped_value(
                         elems,
                         val,
@@ -289,6 +341,7 @@ impl GnmiSampleProcessor {
                 }
             }
             Some(InterfaceLeaf::PhyManagerState) => self.emit_state_set(
+                elems,
                 "interface_phy_manager_state",
                 "interface_name",
                 iface_name,
@@ -298,6 +351,7 @@ impl GnmiSampleProcessor {
             Some(InterfaceLeaf::VlCapabilities) => {
                 if let Some(caps) = typed_value_to_string(val).none_if_empty() {
                     self.emit_entity_info(
+                        elems,
                         "interface_vl_capabilities_info",
                         iface_name,
                         "interface_name",
@@ -310,28 +364,34 @@ impl GnmiSampleProcessor {
         }
     }
 
-    fn emit_iface(&self, metric_type: &str, iface_name: &str, value: f64, unit: &str) {
+    fn emit_iface(
+        &self,
+        source: &[&PathElem],
+        metric_type: &str,
+        iface_name: &str,
+        value: f64,
+        unit: &str,
+    ) {
         self.emit_data_metric(
+            source,
             metric_type,
             iface_name,
             value,
             unit,
-            "interface_name",
-            iface_name,
+            ("interface_name", iface_name),
         );
     }
 
     /// The information value is excluded from the key so updates replace the prior sample.
     fn emit_entity_info(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         entity_id: &str,
         entity_label_name: &'static str,
         info_label_name: &'static str,
         info_label_value: &str,
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         let mut key = String::with_capacity(metric_type.len() + 1 + entity_id.len());
         key.push_str(metric_type);
         key.push(':');
@@ -342,9 +402,9 @@ impl GnmiSampleProcessor {
             (Cow::Borrowed(info_label_name), info_label_value.to_string()),
         ];
 
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+        self.emit_sample(
+            source,
+            MetricSample {
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -352,7 +412,7 @@ impl GnmiSampleProcessor {
                 value: 1.0,
                 labels,
                 context: None,
-            })),
+            },
         );
     }
 
@@ -367,7 +427,9 @@ impl GnmiSampleProcessor {
         // to `state/oper-status`)
         if leaf_matches(elems, &["healthz", "state", "status"]) {
             let current = component_health_to_state(typed_value_to_string(val).as_deref());
+
             self.emit_state_set(
+                elems,
                 "component_health_status",
                 "component_name",
                 comp_name,
@@ -377,11 +439,18 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["state", "temperature", "instant"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_temperature_celsius", comp_name, v, "celsius");
+            self.emit_comp(
+                elems,
+                "component_temperature_celsius",
+                comp_name,
+                v,
+                "celsius",
+            );
         } else if leaf_matches(elems, &["state", "last-reboot-reason"])
             && let Some(reason) = typed_value_to_string(val).none_if_empty()
         {
             self.emit_entity_info(
+                elems,
                 "component_last_reboot_reason",
                 comp_name,
                 "component_name",
@@ -391,7 +460,9 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["state", "oper-status"]) {
             // FAN-STATE (row 966) and CPU-STATE (row 1174) share this leaf.
             let current = oper_status_to_state(typed_value_to_string(val).as_deref());
+
             self.emit_state_set(
+                elems,
                 "component_oper_status",
                 "component_name",
                 comp_name,
@@ -401,11 +472,12 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["fan", "state", "speed"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_fan_speed", comp_name, v, "rpm");
+            self.emit_comp(elems, "component_fan_speed", comp_name, v, "rpm");
         } else if leaf_matches(elems, &["power-supply", "state", "output-current"])
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_output_current",
                 comp_name,
                 v,
@@ -415,6 +487,7 @@ impl GnmiSampleProcessor {
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_input_current",
                 comp_name,
                 v,
@@ -424,6 +497,7 @@ impl GnmiSampleProcessor {
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_input_voltage",
                 comp_name,
                 v,
@@ -432,11 +506,18 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["power-supply", "state", "output-power"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_power_supply_output_power", comp_name, v, "watts");
+            self.emit_comp(
+                elems,
+                "component_power_supply_output_power",
+                comp_name,
+                v,
+                "watts",
+            );
         } else if leaf_matches(elems, &["power-supply", "state", "output-voltage"])
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_output_voltage",
                 comp_name,
                 v,
@@ -445,22 +526,29 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["asic", "state", "asic-temp"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_asic_temperature", comp_name, v, "celsius");
+            self.emit_comp(elems, "component_asic_temperature", comp_name, v, "celsius");
         } else if leaf_matches(elems, &["cpu", "utilization", "state", "avg"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_cpu_utilization", comp_name, v, "percent");
+            self.emit_comp(elems, "component_cpu_utilization", comp_name, v, "percent");
         }
     }
 
-    fn emit_comp(&self, metric_type: &str, comp_name: &str, value: f64, unit: &str) {
+    fn emit_comp(
+        &self,
+        source: &[&PathElem],
+        metric_type: &str,
+        comp_name: &str,
+        value: f64,
+        unit: &str,
+    ) {
         self.emit_data_metric(
+            source,
             metric_type,
             comp_name,
             value,
             unit,
-            "component_name",
-            comp_name,
+            ("component_name", comp_name),
         );
     }
 
@@ -482,7 +570,7 @@ impl GnmiSampleProcessor {
         };
         if let Some((metric_type, info_label_name)) = info {
             if let Some(s) = typed_value_to_string(val).none_if_empty() {
-                self.emit_switch_info(metric_type, info_label_name, &s);
+                self.emit_switch_info(elems, metric_type, info_label_name, &s);
             }
             return;
         }
@@ -502,18 +590,16 @@ impl GnmiSampleProcessor {
         };
 
         match typed_value_to_f64(val) {
-            Some(v) => self.emit_switch(metric_type, v, unit),
+            Some(v) => self.emit_switch(elems, metric_type, v, unit),
             None => debug_unmapped_value(elems, val, metric_type, self.event_context.rack_id()),
         }
     }
 
     /// switch-level singleton series: no per-entity name, endpoint identity added by PrometheusSink.
-    fn emit_switch(&self, metric_type: &str, value: f64, unit: &str) {
-        let Some(sink) = &self.data_sink else { return };
-
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+    fn emit_switch(&self, source: &[&PathElem], metric_type: &str, value: f64, unit: &str) {
+        self.emit_sample(
+            source,
+            MetricSample {
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -521,24 +607,23 @@ impl GnmiSampleProcessor {
                 value,
                 labels: Vec::new(),
                 context: None,
-            })),
+            },
         );
     }
 
     /// switch-level info-metric: constant `1.0` sample carrying a single string label.
     fn emit_switch_info(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         info_label_name: &'static str,
         info_label_value: &str,
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         let labels = vec![(Cow::Borrowed(info_label_name), info_label_value.to_string())];
 
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+        self.emit_sample(
+            source,
+            MetricSample {
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -546,34 +631,29 @@ impl GnmiSampleProcessor {
                 value: 1.0,
                 labels,
                 context: None,
-            })),
+            },
         );
     }
 
     fn emit_data_metric(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         entity_id: &str,
         value: f64,
         unit: &str,
-        entity_label_name: &'static str,
-        entity_label_value: &str,
+        entity_label: (&'static str, &str),
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         let mut key = String::with_capacity(metric_type.len() + 1 + entity_id.len());
         key.push_str(metric_type);
         key.push(':');
         key.push_str(entity_id);
 
-        let labels = vec![(
-            Cow::Borrowed(entity_label_name),
-            entity_label_value.to_string(),
-        )];
+        let labels = vec![(Cow::Borrowed(entity_label.0), entity_label.1.to_string())];
 
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+        self.emit_sample(
+            source,
+            MetricSample {
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -581,7 +661,7 @@ impl GnmiSampleProcessor {
                 value,
                 labels,
                 context: None,
-            })),
+            },
         );
     }
 
@@ -589,14 +669,13 @@ impl GnmiSampleProcessor {
     /// label.
     fn emit_state_set(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         entity_label_name: &'static str,
         entity_id: &str,
         current_state: &str,
         all_states: &[&'static str],
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         for state in all_states {
             let mut key =
                 String::with_capacity(metric_type.len() + 1 + entity_id.len() + 1 + state.len());
@@ -611,9 +690,9 @@ impl GnmiSampleProcessor {
                 (Cow::Borrowed("state"), state.to_string()),
             ];
 
-            sink.handle_event(
-                &self.event_context,
-                &CollectorEvent::Metric(Box::new(MetricSample {
+            self.emit_sample(
+                source,
+                MetricSample {
                     key,
                     name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                     metric_type: metric_type.to_string(),
@@ -621,9 +700,22 @@ impl GnmiSampleProcessor {
                     value: if *state == current_state { 1.0 } else { 0.0 },
                     labels,
                     context: None,
-                })),
+                },
             );
         }
+    }
+
+    fn emit_sample(&self, source: &[&PathElem], sample: MetricSample) {
+        let Some(sink) = &self.data_sink else { return };
+
+        if let Some(reconciliation) = &self.reconciliation {
+            reconciliation.record(&sample, source);
+        }
+
+        sink.handle_event(
+            &self.event_context,
+            &CollectorEvent::Metric(Box::new(sample)),
+        );
     }
 }
 
@@ -1535,12 +1627,8 @@ mod tests {
             rack_id: None,
             labels: Default::default(),
         };
-        GnmiSampleProcessor {
-            data_sink: None,
-            event_context,
-            switch_id: "serial-abc".to_string(),
-            diagnostic_stream: None,
-        }
+
+        GnmiSampleProcessor::new(None, event_context, "serial-abc".to_string(), None, false)
     }
 
     fn test_switch_id(label: &str) -> SwitchId {
@@ -1590,9 +1678,10 @@ mod tests {
 
         let sink = Arc::new(CapturingSink::default());
         let switch_id = test_switch_id("switch-a");
-        let proc = GnmiSampleProcessor {
-            data_sink: Some(sink.clone()),
-            event_context: EventContext {
+
+        let proc = GnmiSampleProcessor::new(
+            Some(sink.clone()),
+            EventContext {
                 endpoint_key: "aa:bb:cc:dd:ee:ff".to_string(),
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
@@ -1614,9 +1703,11 @@ mod tests {
                 })),
                 rack_id: Some(RackId::new("RACK_2")),
             },
-            switch_id: "SN-SWITCH-001".to_string(),
-            diagnostic_stream: None,
-        };
+            "SN-SWITCH-001".to_string(),
+            None,
+            false,
+        );
+
         let notification = proto::Notification {
             timestamp: 0,
             prefix: Some(proto::Path {
@@ -1762,6 +1853,61 @@ mod tests {
                 LEAKAGE_STATES,
                 state,
             );
+        }
+    }
+
+    #[test]
+    fn sample_reconciliation_is_opt_in_and_preserves_live_deletes() {
+        use crate::metrics::MetricsManager;
+        use crate::sink::PrometheusSink;
+
+        for enabled in [false, true] {
+            let metrics = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+
+            let sink =
+                Arc::new(PrometheusSink::new(metrics.clone(), "test").expect("Prometheus sink"));
+
+            let processor = GnmiSampleProcessor::new(
+                Some(sink),
+                test_processor().event_context,
+                "serial-abc".to_string(),
+                None,
+                enabled,
+            );
+
+            let path = proto::Path {
+                elem: vec![
+                    make_path_elem("interfaces", &[]),
+                    make_path_elem("interface", &[("name", "nvl0")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("counters", &[]),
+                    make_path_elem("in-pkts", &[]),
+                ],
+                ..Default::default()
+            };
+
+            processor.process_notification(&proto::Notification {
+                update: vec![proto::Update {
+                    path: Some(path.clone()),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::UintVal(7)),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+            assert_eq!(processor.reconciliation.is_some(), enabled);
+            let before = metrics.export_telemetry().expect("telemetry");
+            assert!(before.contains("interface_in_packets_count{"), "{before}");
+
+            processor.process_notification(&proto::Notification {
+                delete: vec![path],
+                ..Default::default()
+            });
+
+            let after = metrics.export_telemetry().expect("telemetry");
+            assert!(!after.contains("interface_in_packets_count{"), "{after}");
         }
     }
 

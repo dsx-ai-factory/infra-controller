@@ -454,6 +454,23 @@ pub(super) fn build_sample_subscribe_request(
     }
 }
 
+/// Reads the same scope as a live subscription without stream delivery options.
+pub(super) fn build_snapshot_request(mut request: SubscribeRequest) -> SubscribeRequest {
+    if let Some(proto::subscribe_request::Request::Subscribe(list)) = &mut request.request {
+        list.mode = SubscriptionListMode::Once.into();
+        list.updates_only = false;
+
+        for subscription in &mut list.subscription {
+            subscription.mode = SubscriptionMode::TargetDefined.into();
+            subscription.sample_interval = 0;
+            subscription.suppress_redundant = false;
+            subscription.heartbeat_interval = 0;
+        }
+    }
+
+    request
+}
+
 /// Builds a fixed-STREAM request from one validated additional subscription.
 pub(super) fn build_extended_subscribe_request(
     config: &NvueGnmiSubscriptionConfig,
@@ -622,12 +639,37 @@ mod tests {
         GnmiSampleProcessor, NVUE_GNMI_SAMPLE_STREAM_ID,
     };
     use crate::collectors::nvue::gnmi::subscriber::{GnmiStreamMetrics, spawn_gnmi_collector};
-    use crate::config::NvueGnmiConfig;
+    use crate::config::{
+        NvueGnmiConfig, NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiResponseKeyLabel,
+        NvueGnmiSubscriptionConfig, NvueGnmiSubscriptionMode,
+    };
     use crate::endpoint::test_support::test_endpoint;
     use crate::endpoint::{BmcAddr, BmcCredentials};
     use crate::metrics::MetricsManager;
     use crate::otlp::convert::build_metrics_export_request;
-    use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
+    use crate::sink::{
+        CollectorEvent, CompositeDataSink, DataSink, EventContext, MetricSample, PrometheusSink,
+    };
+
+    #[test]
+    fn event_snapshot_requests_current_state() {
+        let Some(proto::subscribe_request::Request::Subscribe(list)) =
+            build_snapshot_request(build_on_change_subscribe_request(
+                &system_events_prefix(),
+                &system_events_subscribe_path(),
+            ))
+            .request
+        else {
+            panic!("subscription list");
+        };
+
+        assert_eq!(list.mode, proto::subscription_list::Mode::Once as i32);
+        assert_eq!(list.encoding, proto::Encoding::Json as i32);
+        assert!(!list.updates_only);
+        assert_eq!(list.prefix, Some(system_events_prefix()));
+        assert_eq!(list.subscription.len(), 1);
+        assert!(list.subscription[0].path.as_ref().unwrap().elem.is_empty());
+    }
 
     #[derive(Default)]
     struct RecordingMetricSink(StdMutex<Vec<(EventContext, MetricSample)>>);
@@ -669,13 +711,28 @@ mod tests {
     }
 
     impl ControlledSubscription {
+        async fn send(&self, response: proto::subscribe_response::Response) {
+            self.responses
+                .send(Ok(proto::SubscribeResponse {
+                    response: Some(response),
+                    ..Default::default()
+                }))
+                .await
+                .expect("subscription response receiver");
+        }
+
         fn stream_index(&self) -> usize {
             let Some(proto::subscribe_request::Request::Subscribe(list)) = &self.request.request
             else {
                 panic!("expected subscription list");
             };
 
-            if list.subscription[0].mode == SubscriptionMode::OnChange as i32 {
+            if list
+                .prefix
+                .as_ref()
+                .and_then(|path| path.elem.first())
+                .is_some_and(|elem| elem.name == "system-events")
+            {
                 2
             } else if list.subscription[0]
                 .path
@@ -896,6 +953,7 @@ mod tests {
             }
 
             let active_requests = self.active_requests.clone();
+            let keepalive = (!is_controlled).then(|| responses.clone());
 
             // Keep the server RPC alive until the client ends its request body.
             tokio::spawn(async move {
@@ -903,7 +961,7 @@ mod tests {
 
                 active_requests.fetch_sub(1, Ordering::SeqCst);
                 let _ = completed.send(());
-                drop(responses);
+                drop(keepalive);
             });
 
             if is_controlled || self.selected_updates.load(Ordering::SeqCst) {
@@ -1216,12 +1274,13 @@ mod tests {
 
         let sink = Arc::new(RecordingMetricSink::default());
 
-        let processor = GnmiSampleProcessor {
-            data_sink: Some(sink.clone()),
-            event_context: EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
-            switch_id: "test-switch".into(),
-            diagnostic_stream: Some("interfaces"),
-        };
+        let processor = GnmiSampleProcessor::new(
+            Some(sink.clone()),
+            EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
+            "test-switch".into(),
+            Some("interfaces"),
+            false,
+        );
 
         let stream_metrics = GnmiStreamMetrics {
             connection_state: IntGauge::new("test_connection", "test").expect("connection gauge"),
@@ -1488,6 +1547,335 @@ mod tests {
         wait_for_transport_shutdown(service, sockets).await;
     }
 
+    async fn wait_for_rpc_close(completed: &mut tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(2), completed)
+            .await
+            .expect("collector must release the subscription RPC")
+            .expect("request completion sender");
+    }
+
+    async fn next_snapshot(
+        subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
+        live: &ControlledSubscription,
+    ) -> ControlledSubscription {
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            snapshot.request,
+            build_snapshot_request(live.request.clone())
+        );
+
+        snapshot
+    }
+
+    async fn assert_snapshot_retry(
+        live: &ControlledSubscription,
+        subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
+        service: &TestGnmiService,
+        recording: &RecordingMetricSink,
+        metrics: &MetricsManager,
+    ) {
+        let mut incomplete = next_snapshot(subscriptions, live).await;
+
+        live.publish(recording, "concurrent-event").await;
+        incomplete
+            .send(proto::subscribe_response::Response::SyncResponse(false))
+            .await;
+
+        // A false sync must time out, release the entire RPC, and leave both rows exposed.
+        wait_for_rpc_close(&mut incomplete.completed).await;
+
+        let export = metrics.export_telemetry().unwrap();
+        assert!(export.contains("instance_id=\"removed-event\""));
+        assert!(export.contains("instance_id=\"concurrent-event\""));
+
+        for in_band_error in [true, false] {
+            let mut failed = next_snapshot(subscriptions, live).await;
+
+            if in_band_error {
+                failed.fail(tonic::Code::Internal).await;
+            } else {
+                drop(failed.responses);
+                wait_for_rpc_close(&mut failed.completed).await;
+            }
+
+            let export = metrics.export_telemetry().unwrap();
+            assert!(export.contains("instance_id=\"removed-event\""));
+        }
+
+        let mut snapshot = next_snapshot(subscriptions, live).await;
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 2);
+
+        assert!(
+            subscriptions.try_recv().is_err(),
+            "only one snapshot may be active"
+        );
+
+        snapshot
+            .send(proto::subscribe_response::Response::SyncResponse(true))
+            .await;
+
+        wait_for_rpc_close(&mut snapshot.completed).await;
+
+        let export = metrics.export_telemetry().unwrap();
+        assert!(!export.contains("instance_id=\"removed-event\""));
+        assert!(!export.contains("instance_id=\"concurrent-event\""));
+        assert!(export.contains("unrelated-interface"));
+    }
+
+    fn reconciliation_config(port: u16) -> NvueGnmiConfig {
+        let mut config = NvueGnmiConfig {
+            gnmi_port: port,
+            request_timeout: Duration::from_millis(500),
+            reconcile_interval: Some(Duration::from_millis(100)),
+            system_events_enabled: false,
+            dangerously_skip_tls_verification: true,
+            ..Default::default()
+        };
+
+        config.paths.components_enabled = false;
+        config.paths.interfaces_enabled = false;
+        config.paths.platform_general_enabled = false;
+        config.paths.leak_sensors_enabled = false;
+
+        config
+    }
+
+    async fn assert_event_reconciliation(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(4);
+        *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+        let mut endpoint = test_endpoint("55:66:77:88:99:cd".parse().unwrap());
+        endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+        let metrics = Arc::new(MetricsManager::new("test").unwrap());
+
+        let registry = Arc::new(
+            metrics
+                .create_collector_registry("reconciliation".into(), "test")
+                .unwrap(),
+        );
+
+        let recording = Arc::new(RecordingMetricSink::default());
+
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![
+                recording.clone(),
+                Arc::new(PrometheusSink::new(metrics.clone(), "test_sink").unwrap()),
+            ],
+            metrics.clone(),
+        ));
+
+        let mut config = reconciliation_config(port);
+        config.system_events_enabled = true;
+
+        sink.handle_event(
+            &crate::sink::EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
+            &CollectorEvent::Metric(Box::new(MetricSample {
+                key: "unrelated-interface".into(),
+                name: NVUE_GNMI_SAMPLE_STREAM_ID.into(),
+                metric_type: "interface_reading".into(),
+                unit: "count".into(),
+                value: 1.0,
+                labels: vec![(
+                    std::borrow::Cow::Borrowed("interface_name"),
+                    "unrelated-interface".into(),
+                )],
+                context: None,
+            })),
+        );
+
+        let collector = spawn_gnmi_collector(
+            &endpoint,
+            &config,
+            Arc::new(DelayedRefreshProvider::default()),
+            registry,
+            Some(sink),
+            None,
+        )
+        .unwrap();
+
+        let mut live = tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            live.request,
+            build_on_change_subscribe_request(
+                &system_events_prefix(),
+                &system_events_subscribe_path(),
+            )
+        );
+
+        live.publish(&recording, "removed-event").await;
+
+        assert_snapshot_retry(&live, &mut subscriptions, service, &recording, &metrics).await;
+
+        live.publish(&recording, "repopulated-event").await;
+
+        let export = metrics.export_telemetry().unwrap();
+        assert!(export.contains("instance_id=\"repopulated-event\""));
+
+        let mut interrupted = next_snapshot(&mut subscriptions, &live).await;
+        live.fail(tonic::Code::Unavailable).await;
+        wait_for_rpc_close(&mut interrupted.completed).await;
+
+        let export = metrics.export_telemetry().unwrap();
+        assert!(export.contains("instance_id=\"repopulated-event\""));
+
+        let replacement = tokio::time::timeout(Duration::from_secs(4), subscriptions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        replacement.publish(&recording, "after-reconnect").await;
+        let mut cancelled = next_snapshot(&mut subscriptions, &live).await;
+        tokio::time::timeout(Duration::from_secs(2), collector.stop())
+            .await
+            .unwrap();
+
+        wait_for_rpc_close(&mut cancelled.completed).await;
+
+        wait_for_transport_shutdown(service, sockets).await;
+    }
+
+    async fn assert_metric_reconciliation(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let timeout = Duration::from_secs(2);
+
+        for extended in [false, true] {
+            let (opened, mut subscriptions) = mpsc::channel(4);
+            *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+            let mut endpoint = test_endpoint("55:66:77:88:99:ce".parse().unwrap());
+            endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+            let metrics = Arc::new(MetricsManager::new("test").unwrap());
+
+            let registry = Arc::new(
+                metrics
+                    .create_collector_registry("metric_reconciliation".into(), "test")
+                    .unwrap(),
+            );
+
+            let recording = Arc::new(RecordingMetricSink::default());
+
+            let sink = Arc::new(CompositeDataSink::new(
+                vec![
+                    recording.clone(),
+                    Arc::new(PrometheusSink::new(metrics.clone(), "test_sink").unwrap()),
+                ],
+                metrics.clone(),
+            ));
+
+            let mut config = reconciliation_config(port);
+            config.paths.interfaces_enabled = !extended;
+
+            if extended {
+                config
+                    .additional_subscriptions
+                    .push(NvueGnmiSubscriptionConfig {
+                        name: "external_interfaces".into(),
+                        origin: "openconfig".into(),
+                        prefix: vec!["interfaces".into()],
+                        mode: NvueGnmiSubscriptionMode::OnChange,
+                        paths: vec![vec!["interface".into()]],
+                        metrics: vec![NvueGnmiMetricConfig {
+                            path: vec!["interface".into(), "state".into(), "oper-status".into()],
+                            metric_type: "external_status".into(),
+                            labels: vec![NvueGnmiResponseKeyLabel {
+                                name: "interface_name".into(),
+                                element: "interface".into(),
+                                key: "name".into(),
+                            }],
+                            output: NvueGnmiMetricOutput::StateSet {
+                                states: vec!["UP".into(), "DOWN".into()],
+                            },
+                        }],
+                        ..Default::default()
+                    });
+            }
+
+            let collector = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                Arc::new(DelayedRefreshProvider::default()),
+                registry,
+                Some(sink),
+                None,
+            )
+            .unwrap();
+
+            let live = tokio::time::timeout(timeout, subscriptions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            live.publish(&recording, "removed-reading").await;
+
+            let mut incomplete = next_snapshot(&mut subscriptions, &live).await;
+
+            incomplete
+                .send(proto::subscribe_response::Response::SyncResponse(false))
+                .await;
+
+            wait_for_rpc_close(&mut incomplete.completed).await;
+
+            assert!(
+                metrics
+                    .export_telemetry()
+                    .unwrap()
+                    .contains("removed-reading")
+            );
+
+            let mut snapshot = next_snapshot(&mut subscriptions, &live).await;
+
+            let emitted = recording.0.lock().unwrap().len();
+
+            snapshot
+                .send(proto::subscribe_response::Response::SyncResponse(true))
+                .await;
+
+            wait_for_rpc_close(&mut snapshot.completed).await;
+
+            tokio::time::timeout(timeout, async {
+                while metrics
+                    .export_telemetry()
+                    .unwrap()
+                    .contains("removed-reading")
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(recording.0.lock().unwrap().len(), emitted);
+
+            live.publish(&recording, "restored-reading").await;
+
+            let mut pending = tokio::time::timeout(timeout, subscriptions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            tokio::time::timeout(timeout, collector.stop())
+                .await
+                .unwrap();
+
+            wait_for_rpc_close(&mut pending.completed).await;
+
+            wait_for_transport_shutdown(service, sockets).await;
+        }
+    }
+
     #[tokio::test]
     async fn subscriptions_release_transport_and_recover_from_post_sync_errors() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -1636,6 +2024,8 @@ mod tests {
 
         assert_selective_output(&client, &service, &sockets).await;
         assert_post_sync_collector_recovery(port, &service, &sockets).await;
+        assert_event_reconciliation(port, &service, &sockets).await;
+        assert_metric_reconciliation(port, &service, &sockets).await;
 
         shutdown_sender.send(()).expect("stop server");
         server_task
@@ -2203,6 +2593,29 @@ mod tests {
 
         let request = build_extended_subscribe_request(&config)
             .expect("validated extended request should build");
+
+        let snapshot = build_snapshot_request(request.clone());
+
+        let Some(proto::subscribe_request::Request::Subscribe(snapshot)) = snapshot.request else {
+            panic!("snapshot subscription list");
+        };
+
+        let Some(proto::subscribe_request::Request::Subscribe(original)) = &request.request else {
+            panic!("live subscription list");
+        };
+
+        assert_eq!(snapshot.prefix, original.prefix);
+        assert_eq!(snapshot.encoding, original.encoding);
+        assert_eq!(snapshot.mode, i32::from(SubscriptionListMode::Once));
+        assert!(!snapshot.updates_only);
+
+        for (snapshot, live) in snapshot.subscription.iter().zip(&original.subscription) {
+            assert_eq!(snapshot.path, live.path);
+            assert_eq!(snapshot.mode, i32::from(SubscriptionMode::TargetDefined));
+            assert_eq!(snapshot.sample_interval, 0);
+            assert_eq!(snapshot.heartbeat_interval, 0);
+            assert!(!snapshot.suppress_redundant);
+        }
 
         let Some(proto::subscribe_request::Request::Subscribe(list)) = request.request else {
             panic!("extended request should contain a subscription list");
