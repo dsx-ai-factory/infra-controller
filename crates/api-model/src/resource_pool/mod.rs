@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod binding;
 pub mod common;
 pub mod define;
 
@@ -21,8 +22,11 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+pub use binding::{
+    ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection, ResourcePoolValueDomain,
+};
 use chrono::{DateTime, Utc};
-pub use define::{Range, ResourcePoolDef, ResourcePoolType};
+pub use define::{Range, ResourcePoolConfig, ResourcePoolDef, ResourcePoolType};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
@@ -138,6 +142,17 @@ pub enum ValueType {
     Ipv4,
     Ipv6,
     Ipv6Prefix,
+}
+
+impl From<ResourcePoolType> for ValueType {
+    fn from(pool_type: ResourcePoolType) -> Self {
+        match pool_type {
+            ResourcePoolType::Integer => Self::Integer,
+            ResourcePoolType::Ipv4 => Self::Ipv4,
+            ResourcePoolType::Ipv6 => Self::Ipv6,
+            ResourcePoolType::Ipv6Prefix => Self::Ipv6Prefix,
+        }
+    }
 }
 
 impl fmt::Display for ValueType {

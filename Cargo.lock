@@ -3093,6 +3093,7 @@ dependencies = [
  "carbide-test-support",
  "ctor",
  "sqlx",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
