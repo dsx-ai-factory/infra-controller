@@ -302,7 +302,8 @@ impl NvueClient {
 
     /// Return data about the specified revision.
     pub async fn get_revision(&self, revision_id: &str) -> Result<RevisionData, NvueClientError> {
-        let revision_path = format!("/nvue_v1/revision/{revision_id}");
+        let encoded_revision_id = urlencoding::encode(revision_id);
+        let revision_path = format!("/nvue_v1/revision/{encoded_revision_id}");
         let request = self.request(Method::GET, &revision_path)?.build()?;
         let response = self.execute("get_revision", request).await?;
 
