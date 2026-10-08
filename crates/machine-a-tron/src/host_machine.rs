@@ -787,6 +787,7 @@ impl MachineHandle {
 
     pub(super) fn persisted(&self) -> PersistedDevice {
         let live_state = self.0.live_state.read().unwrap();
+        let bmc_state = live_state.bmc_persistence.persisted();
         PersistedDevice {
             hw_type: self.0.host_info.hw_type,
             mat_id: self.0.mat_id,
@@ -805,7 +806,7 @@ impl MachineHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: live_state.active_host_firmware.clone(),
-            bmc_accounts: live_state.bmc_accounts_for_snapshot(),
+            bmc_state,
         }
     }
 

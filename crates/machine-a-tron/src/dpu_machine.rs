@@ -496,7 +496,7 @@ impl DpuMachineHandle {
     pub fn persisted(&self) -> PersistedDpuMachine {
         let live_state = self.0.live_state.read().unwrap();
         let installed_os = live_state.installed_os;
-        let bmc_accounts = live_state.bmc_accounts_for_snapshot();
+        let bmc_state = live_state.bmc_persistence.persisted();
         drop(live_state);
         PersistedDpuMachine {
             mat_id: self.0.mat_id,
@@ -508,7 +508,7 @@ impl DpuMachineHandle {
             settings: self.0.dpu_info.settings.clone(),
             installed_os,
             dpu_index: self.0.dpu_index,
-            bmc_accounts,
+            bmc_state,
         }
     }
 

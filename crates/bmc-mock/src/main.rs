@@ -135,9 +135,10 @@ async fn start_libvirt_app(
     let stop = CancellationToken::new();
     let guard = stop.clone().drop_guard();
     let (actor, callbacks) = bmc_mock::libvirt::LibvirtActor::new(libvirt.into_config(), guard);
+    let callbacks = Arc::new(callbacks);
     let (router, state) = bmc_mock::machine_router(
         &machine.machine_info(),
-        callbacks.into(),
+        callbacks.clone(),
         String::default(),
         bmc_behaviour.redfish_auth,
         MachineRouterOptions {
@@ -160,14 +161,29 @@ async fn start_libvirt_app(
         Some(listener.bind().await?),
         bmc_mock::tls::server_config(listener.cert_path)?,
     );
-    tokio::select! {
-        result = handle.wait() => result?,
+    let result: Result<(), Box<dyn std::error::Error>> = tokio::select! {
+        result = handle.wait() => result.map_err(Into::into),
+        result = async {
+            let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = terminate.recv() => Ok(()),
+            }
+        } => result.map_err(Into::into),
         result = backend_tasks.join_next(), if !backend_tasks.is_empty() => {
-            result.expect("backend task set is not empty")?;
-            return Err("BMC backend stopped unexpectedly".into());
+            match result.expect("backend task set is not empty") {
+                Ok(()) => Err("BMC backend stopped unexpectedly".into()),
+                Err(error) => Err(error.into()),
+            }
         }
-    }
+    };
+    // Stop accepting mutations before taking the final snapshot.
+    let server_result = handle.stop().await;
+    let persistence_result = callbacks.finish().await;
     backend_tasks.shutdown().await;
+    result?;
+    server_result?;
+    persistence_result?;
     Ok(())
 }
 
@@ -305,6 +321,7 @@ impl BmcBehaviorArgs {
 impl LibvirtArgs {
     fn into_config(self) -> bmc_mock::libvirt::Config {
         bmc_mock::libvirt::Config {
+            state_file: self.state_file,
             virsh_path: self.virsh_path,
             uri: self.libvirt_uri,
             domain: self

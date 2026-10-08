@@ -596,7 +596,7 @@ impl PowerShelfHandle {
             active_host_firmware: None,
             // Power shelves always accept factory-default logins, so there is
             // no rotated credential to persist (issue #5966).
-            bmc_accounts: None,
+            bmc_state: None,
         }
     }
 

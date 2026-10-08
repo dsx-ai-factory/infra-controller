@@ -27,14 +27,19 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
 
-use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
+use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
+use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{ActionError, BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType};
+
+mod persistence;
+use persistence::StateFile;
 
 /// Maximum duration of one virsh attempt, including output collection.
 const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -44,11 +49,14 @@ const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct LibvirtActor {
     actor: Actor<LibvirtMessage>,
     mailbox: ActorMailbox<LibvirtMessage>,
-    backend: LibvirtBackend,
+    config: Config,
+    refresh_pending: Arc<AtomicBool>,
+    power_state: Arc<RwLock<MockPowerState>>,
 }
 
 impl LibvirtActor {
@@ -57,20 +65,14 @@ impl LibvirtActor {
     pub fn new(config: Config, guard: DropGuard) -> (Self, LibvirtCallbacks) {
         let refresh_pending = Arc::new(AtomicBool::new(false));
         let power_state = Arc::new(RwLock::new(MockPowerState::Unknown));
-        let backend = LibvirtBackend {
-            config,
-            restore_boot_after_power_on: false,
-            system_state: None,
-            applied_state: AppliedState::default(),
-            refresh_pending: refresh_pending.clone(),
-            power_state: power_state.clone(),
-        };
         let (actor, mailbox) = Actor::new();
         (
             LibvirtActor {
                 actor,
                 mailbox: mailbox.clone(),
-                backend,
+                config,
+                refresh_pending: refresh_pending.clone(),
+                power_state: power_state.clone(),
             },
             LibvirtCallbacks {
                 mailbox,
@@ -82,19 +84,36 @@ impl LibvirtActor {
     }
 
     pub async fn run(
-        mut self,
+        self,
         bmc_state: &BmcState<LibvirtCallbacks>,
         tasks: &mut JoinSet<()>,
         stop: CancellationToken,
     ) -> eyre::Result<()> {
-        self.backend.init(bmc_state.system_state.clone()).await?;
+        let persistence = self
+            .config
+            .state_file
+            .as_ref()
+            .map(|path| StateFile::load(path.clone(), bmc_state))
+            .transpose()?;
+        let mut backend = LibvirtBackend {
+            persistence,
+            persistence_retry: None,
+            config: self.config,
+            restore_boot_after_power_on: false,
+            system_state: None,
+            applied_state: AppliedState::default(),
+            refresh_pending: self.refresh_pending,
+            power_state: self.power_state,
+        };
+        backend.init(bmc_state.system_state.clone()).await?;
+        backend.save_state()?;
         self.mailbox
             .send_at(
                 (Instant::now() + POWER_POLL_INTERVAL).into(),
                 LibvirtMessage::PollPower,
             )
             .expect("unstarted actor mailbox must be open");
-        let fut = self.actor.run(self.backend);
+        let fut = self.actor.run(backend);
         tasks.spawn(async move {
             stop.run_until_cancelled(fut).await;
         });
@@ -104,6 +123,8 @@ impl LibvirtActor {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Optional standalone BMC snapshot file. Loaded before actor startup and saved on Refresh.
+    pub state_file: Option<PathBuf>,
     pub virsh_path: PathBuf,
     pub uri: String,
     pub domain: String,
@@ -133,9 +154,13 @@ enum LibvirtMessage {
     PollPower,
     SendPowerCommand { reset_type: ResourceResetType },
     Refresh,
+    PersistState,
+    Stop(oneshot::Sender<Result<(), PersistenceError>>),
 }
 
 struct LibvirtBackend {
+    persistence: Option<StateFile>,
+    persistence_retry: Option<AlarmId>,
     config: Config,
     restore_boot_after_power_on: bool,
     system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
@@ -152,6 +177,30 @@ struct AppliedState {
 }
 
 impl LibvirtBackend {
+    fn save_state(&mut self) -> Result<(), PersistenceError> {
+        if let Some(persistence) = &mut self.persistence {
+            persistence.save()?;
+        }
+        Ok(())
+    }
+
+    fn persist(&mut self, mailbox: &ActorMailbox<LibvirtMessage>) {
+        if let Some(alarm) = self.persistence_retry.take() {
+            mailbox.cancel(alarm);
+        }
+        if let Err(error) = self.save_state() {
+            tracing::warn!(error = %error, "BMC state save failed; retrying");
+            self.persistence_retry = Some(
+                mailbox
+                    .send_at(
+                        (Instant::now() + PERSISTENCE_RETRY_INTERVAL).into(),
+                        LibvirtMessage::PersistState,
+                    )
+                    .expect("running actor mailbox must be open"),
+            );
+        }
+    }
+
     async fn init(&mut self, state: Arc<SystemState<LibvirtCallbacks>>) -> eyre::Result<()> {
         let controlled_system = state.controlled_system().ok_or(eyre::eyre!(
             "libvirt backend has no controlled ComputerSystem"
@@ -623,6 +672,16 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
         message: LibvirtMessage,
     ) -> ActorResult {
         match message {
+            LibvirtMessage::Stop(reply) => {
+                reply.send(self.save_state()).ok();
+                ActorResult::Stop
+            }
+            LibvirtMessage::PersistState => {
+                self.persistence_retry = None;
+                self.persist(mailbox);
+                ActorResult::Noop
+            }
+
             LibvirtMessage::PollPower => {
                 self.refresh_power_state().await;
                 mailbox
@@ -649,11 +708,23 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
             LibvirtMessage::Refresh => {
                 // Clear before reading state so changes during reconciliation queue another refresh.
                 self.refresh_pending.store(false, Ordering::SeqCst);
+                self.persist(mailbox);
                 self.refresh().await;
                 self.refresh_power_state().await;
                 ActorResult::Noop
             }
         }
+    }
+}
+
+impl LibvirtCallbacks {
+    /// Flushes the latest BMC state and stops the actor after the application stops HTTP requests.
+    /// The owner must still join its supervised task. A failed final save is returned to the owner.
+    pub async fn finish(&self) -> eyre::Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.mailbox.send(LibvirtMessage::Stop(reply))?;
+        result.await??;
+        Ok(())
     }
 }
 
@@ -881,6 +952,7 @@ esac
         let stop = CancellationToken::new();
         let (actor, callbacks) = LibvirtActor::new(
             Config {
+                state_file: None,
                 virsh_path: virsh,
                 uri: "test:///default".to_string(),
                 domain: "test-domain".to_string(),

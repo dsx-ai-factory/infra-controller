@@ -33,6 +33,44 @@ use crate::machine_state_machine::MachineStateError;
 use crate::mock_ssh_server;
 use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
 
+/// Snapshot access and startup fallback for an embedded BMC. No independent file writer.
+#[derive(Debug, Default)]
+pub(super) struct BmcPersistence {
+    saved: Option<bmc_mock::persistence::PersistedBmcState>,
+    source: Option<bmc_mock::persistence::BmcSnapshotSource>,
+}
+
+impl BmcPersistence {
+    pub(super) fn from_saved(saved: Option<bmc_mock::persistence::PersistedBmcState>) -> Self {
+        Self {
+            saved,
+            source: None,
+        }
+    }
+
+    pub(super) fn persisted(&self) -> Option<bmc_mock::persistence::PersistedBmcState> {
+        self.source
+            .as_ref()
+            .and_then(|source| source.persisted())
+            .or_else(|| self.saved.clone())
+    }
+
+    pub(super) fn restore<C: Callbacks>(
+        &self,
+        state: &BmcState<C>,
+    ) -> Result<(), bmc_mock::persistence::PersistenceError> {
+        if let Some(snapshot) = self.persisted() {
+            state.restore_persisted(&snapshot)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn attach<C: Callbacks>(&mut self, state: &BmcState<C>) {
+        self.saved = Some(state.persisted());
+        self.source = Some(state.snapshot_source());
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum BmcCommand {
     SetSystemPower {
@@ -210,3 +248,54 @@ impl BmcMockWrapperHandle {
 /// BmcMockRegistry is shared state that MachineATron's mock hosts can use to register their BMC
 /// mock routers, so that a single shared instance of BMC mock can delegate to them.
 pub type BmcMockRegistry = Arc<RwLock<HashMap<String, Router>>>;
+
+#[cfg(test)]
+mod persistence_tests {
+    use bmc_mock::mac_address_pool::{Config, MacAddressPool, PoolConfig};
+    use mac_address::MacAddress;
+
+    use super::*;
+
+    fn state() -> BmcState<bmc_mock::simulated::SimulatedCallbacks> {
+        let base = MacAddress::new([2, 0, 0, 0, 0, 1]);
+        let range = PoolConfig::new(base, 24).unwrap();
+        let mut pool = MacAddressPool::new(Config {
+            pool: Some(range),
+            ranges: None,
+        });
+        let info = MachineInfo::Host(bmc_mock::HostMachineInfo::new(
+            HardwareType::GenericAmi,
+            Vec::new(),
+            &mut pool,
+            range,
+        ));
+        bmc_mock::machine_router(
+            &info,
+            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+            "test".into(),
+            false,
+            Default::default(),
+        )
+        .1
+    }
+
+    #[test]
+    fn snapshot_survives_an_unstarted_or_dropped_bmc() {
+        let original = state();
+        original
+            .account_service_state
+            .change_factory_default_password("saved-password");
+        let snapshot = original.persisted();
+        let mut holder = BmcPersistence::from_saved(Some(snapshot.clone()));
+        assert_eq!(holder.persisted(), Some(snapshot.clone()));
+        let restored = state();
+        restored
+            .account_service_state
+            .change_factory_default_password("configured-password");
+        holder.restore(&restored).unwrap();
+        assert_eq!(restored.persisted(), snapshot);
+        holder.attach(&restored);
+        drop(restored);
+        assert_eq!(holder.persisted(), Some(snapshot));
+    }
+}

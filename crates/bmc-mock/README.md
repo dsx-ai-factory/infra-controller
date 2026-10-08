@@ -262,3 +262,32 @@ resource that is not a collection is a 400 `QueryNotSupportedOnResource`; a
 cover, is a 400 `QueryParameterValueFormatError`; a negative `$skip` or a
 `$top` below 1 is a 400 `QueryParameterOutOfRange`. Parameters without a `$`
 are ignored.
+
+## Standalone state persistence
+
+Use `--state-file PATH` with the libvirt backend to preserve BMC
+accounts across restarts. Each BMC needs its own file and a single writer; the
+parent directory must exist. Snapshots contain plaintext credentials and are
+atomically replaced with owner-only permissions. Missing files are initialized
+from the profile; corrupt, unsupported, or unreadable state fails startup.
+Internal, archive and IPMI simulation modes do not support this option.
+
+The libvirt application's `state_refresh_indication()` sends a notification
+to the existing libvirt actor. The actor exports current state and writes only when
+it differs from the last saved snapshot. Storage failures are retried without
+rejecting changes already applied in memory. Abrupt termination can lose
+unsaved changes; SIGINT and SIGTERM trigger a final save. There is no periodic
+state polling. Callers changing state through internal APIs must indicate the
+change themselves.
+
+Embedded callers such as machine-a-tron use `BmcState::persisted()` and
+`restore_persisted()` inside their own persistence lifecycle. `snapshot_source()`
+provides weak access without retaining the BMC or depending on its callback
+type. `persistence::atomic_write()` accepts bytes independently of snapshot
+format. The library does not attach file storage or actors to resource state.
+
+Snapshot readers ignore unknown fields so additive changes within a format
+version do not prevent rollback. Missing required fields, invalid account
+identities, and unsupported versions remain errors. MAT snapshots use
+`bmc_state`; the old `bmc_accounts` format is not migrated.
+Start with fresh persisted state when upgrading from that format.

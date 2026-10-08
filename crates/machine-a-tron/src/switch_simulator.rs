@@ -17,7 +17,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
@@ -52,13 +52,7 @@ struct SwitchLiveState {
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
-    /// BMC account passwords restored from the previous snapshot at startup,
-    /// re-applied onto a freshly built BMC mock so a rotated password survives a
-    /// machine-a-tron restart (issue #5966).
-    bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
-    /// Live BMC account service, so `persisted()` can export the current
-    /// passwords at shutdown rather than a stale mirror (issue #5966).
-    bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
+    bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
 }
 
 impl SwitchLiveState {
@@ -71,18 +65,7 @@ impl SwitchLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
-            bmc_credentials: None,
-            bmc_account_service: None,
-        }
-    }
-
-    /// Credentials to write into the next device snapshot: the current live BMC
-    /// passwords when the mock is running, else the passwords restored at
-    /// startup.
-    fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
-        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
-            Some(account_service) => Some(account_service.export_credentials()),
-            None => self.bmc_credentials.clone(),
+            bmc_persistence: Default::default(),
         }
     }
 }
@@ -209,7 +192,8 @@ impl SwitchActor {
         let (fsm, actions) = SwitchFsm::init(true);
         let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         let mut live_state = SwitchLiveState::new(&fsm);
-        live_state.bmc_credentials = persisted.bmc_accounts;
+        live_state.bmc_persistence =
+            crate::bmc_mock_wrapper::BmcPersistence::from_saved(persisted.bmc_state);
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
@@ -449,17 +433,11 @@ impl SwitchActor {
                 .change_factory_default_password(password);
         }
 
-        // Restore snapshot-saved passwords onto the freshly built BMC mock so a
-        // rotated password survives a restart (issue #5966).
-        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
-        if let Some(saved_credentials) = saved_credentials {
-            bmc_mock
-                .state()
-                .account_service_state
-                .restore_credentials(&saved_credentials);
+        {
+            let mut live_state = self.live_state.write().unwrap();
+            live_state.bmc_persistence.restore(bmc_mock.state())?;
+            live_state.bmc_persistence.attach(bmc_mock.state());
         }
-        self.live_state.write().unwrap().bmc_account_service =
-            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
 
         let bmc_handle = {
             self.app_context
@@ -681,6 +659,13 @@ impl SwitchHandle {
     }
 
     pub(crate) fn persisted(&self) -> PersistedDevice {
+        let bmc_state = self
+            .0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .persisted();
         PersistedDevice {
             hw_type: self.0.host_info.hw_type,
             mat_id: self.0.mat_id,
@@ -698,13 +683,8 @@ impl SwitchHandle {
                 base: self.0.host_info.hw_mac_addr_pool.base(),
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
+            bmc_state,
             active_host_firmware: None,
-            bmc_accounts: self
-                .0
-                .live_state
-                .read()
-                .unwrap()
-                .bmc_accounts_for_snapshot(),
         }
     }
 

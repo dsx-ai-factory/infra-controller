@@ -70,6 +70,7 @@ pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
+pub mod persistence;
 pub mod simulated;
 
 mod auth_router;
@@ -109,7 +110,7 @@ pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
 pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
-pub use redfish::account_service::{AccountServiceState, BmcAccountCredential};
+pub use redfish::account_service::AccountServiceState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
