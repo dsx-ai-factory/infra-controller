@@ -310,9 +310,14 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
                     carbide_config.rms.client_key.clone(),
                     carbide_config.rms.enforce_tls,
                 );
+                let audit_log_filter = dynamic_settings.log_filter.clone();
                 rms_observability::configure(
                     &mut rms_client_config,
                     Some(dynamic_settings.tracing_enabled.clone()),
+                    Some(Arc::new(move || {
+                        audit_log_filter
+                            .enables(rms_observability::AUDIT_TARGET, &tracing::Level::DEBUG)
+                    })),
                 );
                 let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
                 let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);

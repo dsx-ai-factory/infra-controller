@@ -27,38 +27,99 @@ use librms::{RpcObservation, RpcObserver, RpcObserverError};
 use prost_reflect::{DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor};
 use serde_json::Value;
 use tower::ServiceExt;
+use tracing::dispatcher::Dispatch;
+use tracing::instrument::{WithDispatch, WithSubscriber};
 
 const REDACTED: &str = "[REDACTED]";
 const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Target of the DEBUG audit event, for filter directives such as `rms_rpc_audit=debug`.
+pub const AUDIT_TARGET: &str = "rms_rpc_audit";
+
+/// Reports whether the binary's current log filter lets the audit event reach its log output.
+pub type AuditLogGate = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Enables propagation and auditing for all clients built from this config, including clones
 /// and connections rebuilt after certificate rotation. Existing TLS and retry settings are retained.
 /// Bodies appear in DEBUG logs and INFO spans subject to the binary's existing OTLP sampler.
 /// The optional shared flag enables observation during tracing sessions; `None` uses DEBUG logs
-/// alone. When both are disabled, payloads are not encoded or sanitized. Propagation stays active.
+/// alone. `audit_logging` answers whether the audit event is currently logged; binaries with
+/// several tracing layers must supply it, because the default check passes whenever any layer
+/// accepts DEBUG. When both are disabled, payloads are not encoded or sanitized. Propagation
+/// stays active.
 pub fn configure(
     config: &mut librms::client_config::RmsClientConfig,
     tracing_enabled: Option<Arc<AtomicBool>>,
+    audit_logging: Option<AuditLogGate>,
 ) {
-    let policy = Arc::new(NicoRmsObservability { tracing_enabled });
+    let policy = Arc::new(NicoRmsObservability {
+        tracing_enabled,
+        audit_logging,
+    });
     config.transport_layer = Some(policy.clone());
     config.rpc_observer = Some(policy);
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct NicoRmsObservability {
     tracing_enabled: Option<Arc<AtomicBool>>,
+    audit_logging: Option<AuditLogGate>,
+}
+
+impl std::fmt::Debug for NicoRmsObservability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NicoRmsObservability")
+            .field("tracing_enabled", &self.tracing_enabled)
+            .field("audit_logging", &self.audit_logging.is_some())
+            .finish()
+    }
 }
 
 impl RmsTransportLayer for NicoRmsObservability {
     fn layer(&self, transport: TransportService) -> TransportService {
-        trace_propagation::TraceInjectService::new(transport).boxed_clone()
+        // Injection runs first, under the caller's span; the transport then runs detached.
+        trace_propagation::TraceInjectService::new(DetachedFromCallerSpan(transport)).boxed_clone()
+    }
+}
+
+/// Runs the inner service without the caller's span or subscriber.
+///
+/// Hyper's executor spawns each connection task with `in_current_span()` when its `tracing`
+/// feature is enabled, as `kube-client` does in `nico-api`. A connection opened during the first
+/// RPC would otherwise keep that RPC's span open for the life of the connection, delaying its
+/// export and inflating its duration. Events from the inner call are dropped in exchange.
+#[derive(Clone)]
+struct DetachedFromCallerSpan<S>(S);
+
+impl<S, R> tower::Service<R> for DetachedFromCallerSpan<S>
+where
+    S: tower::Service<R>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = WithDispatch<S::Future>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), S::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        // `call` may do work before returning its future; the future is detached on each poll.
+        tracing::dispatcher::with_default(&Dispatch::none(), || self.0.call(request))
+            .with_subscriber(Dispatch::none())
     }
 }
 
 impl RpcObserver for NicoRmsObservability {
     fn enabled(&self) -> bool {
-        tracing::enabled!(target: "rms_rpc_audit", tracing::Level::DEBUG)
+        let audit_logging = match &self.audit_logging {
+            Some(gate) => gate(),
+            None => tracing::enabled!(target: AUDIT_TARGET, tracing::Level::DEBUG),
+        };
+        audit_logging
             || self
                 .tracing_enabled
                 .as_ref()
@@ -144,7 +205,7 @@ impl RpcObservation for NicoRmsObservation {
         self.span
             .record("elapsed_milliseconds", elapsed_milliseconds);
         tracing::debug!(
-            target: "rms_rpc_audit",
+            target: AUDIT_TARGET,
             parent: &self.span,
             backend = "rms",
             rpc_method = self.method,
@@ -858,12 +919,142 @@ mod tests {
             let enabled = Arc::new(AtomicBool::new(false));
             let observer = NicoRmsObservability {
                 tracing_enabled: Some(enabled.clone()),
+                ..Default::default()
             };
             assert!(!observer.enabled());
             enabled.store(true, Ordering::Relaxed);
             assert!(observer.enabled());
             enabled.store(false, Ordering::Relaxed);
             assert!(!observer.enabled());
+        });
+    }
+
+    struct Gates {
+        audit_logging: Option<bool>,
+        tracing: bool,
+    }
+
+    #[test]
+    fn observation_follows_the_audit_filter_not_any_layer_accepting_debug() {
+        let checks = [
+            Check {
+                scenario: "audit filter and tracing session both off",
+                input: Gates {
+                    audit_logging: Some(false),
+                    tracing: false,
+                },
+                expect: false,
+            },
+            Check {
+                scenario: "audit filter on",
+                input: Gates {
+                    audit_logging: Some(true),
+                    tracing: false,
+                },
+                expect: true,
+            },
+            Check {
+                scenario: "tracing session on with the audit filter off",
+                input: Gates {
+                    audit_logging: Some(false),
+                    tracing: true,
+                },
+                expect: true,
+            },
+            Check {
+                scenario: "no audit filter supplied defers to the subscriber",
+                input: Gates {
+                    audit_logging: None,
+                    tracing: false,
+                },
+                expect: true,
+            },
+        ];
+        // A DEBUG consumer unrelated to audit logging, like the API's span counter, makes
+        // `tracing::enabled!` true by itself.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            check_values(checks, |gates| {
+                NicoRmsObservability {
+                    tracing_enabled: Some(Arc::new(AtomicBool::new(gates.tracing))),
+                    audit_logging: gates
+                        .audit_logging
+                        .map(|enabled| Arc::new(move || enabled) as AuditLogGate),
+                }
+                .enabled()
+            });
+        });
+    }
+
+    struct CloseRecorder(Arc<Mutex<Vec<&'static str>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for CloseRecorder
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if let Some(span) = ctx.span(&id) {
+                self.0.lock().unwrap().push(span.name());
+            }
+        }
+    }
+
+    fn call_once<S>(mut service: S, span: &tracing::Span)
+    where
+        S: tower::Service<(), Error = std::convert::Infallible>,
+    {
+        use std::future::Future;
+
+        use tracing::Instrument;
+
+        let mut call = std::pin::pin!(span.in_scope(|| service.call(())).instrument(span.clone()));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(call.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn connection_tasks_do_not_retain_the_rpc_span() {
+        let checks = [
+            Check {
+                scenario: "a clone captured during the call keeps the span open",
+                input: false,
+                expect: false,
+            },
+            Check {
+                scenario: "a detached call closes the span with the RPC",
+                input: true,
+                expect: true,
+            },
+        ];
+        check_values(checks, |detached| {
+            let closed = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(CloseRecorder(closed.clone()));
+            tracing::subscriber::with_default(subscriber, || {
+                // Hyper's `tracing` executor captures `Span::current()` for each connection task
+                // it spawns; the clone stands in for that task.
+                let retained = Arc::new(Mutex::new(Vec::new()));
+                let capture = retained.clone();
+                let transport = tower::service_fn(move |()| {
+                    let capture = capture.clone();
+                    async move {
+                        capture.lock().unwrap().push(tracing::Span::current());
+                        Ok::<_, std::convert::Infallible>(())
+                    }
+                });
+                let span = tracing::info_span!("rms_rpc");
+                if detached {
+                    call_once(DetachedFromCallerSpan(transport), &span);
+                } else {
+                    call_once(transport, &span);
+                }
+                drop(span);
+                let closed_with_rpc = closed.lock().unwrap().contains(&"rms_rpc");
+                drop(retained);
+                closed_with_rpc
+            })
         });
     }
 }
