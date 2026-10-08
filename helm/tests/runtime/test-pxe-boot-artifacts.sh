@@ -40,8 +40,9 @@ cat >"${test_dir}/Dockerfile" <<'DOCKERFILE'
 ARG PXE_TEST_IMAGE
 FROM ${PXE_TEST_IMAGE}
 USER 0:0
-RUN mkdir -p /x86_64 /forge-boot-artifacts/blobs/internal/x86_64 \
+RUN mkdir -p /x86_64 /aarch64 /apt /machine-validation /forge-boot-artifacts/blobs/internal/x86_64 \
     && printf 'restricted artifact\n' >/x86_64/restricted.bin \
+    && printf 'legacy artifact\n' >/x86_64/qcow-imaging-test \
     && chmod 0700 /x86_64 && chmod 0600 /x86_64/restricted.bin \
     && printf 'bundled artifact\n' >/forge-boot-artifacts/blobs/internal/x86_64/bundled.bin \
     && chmod 0644 /forge-boot-artifacts/blobs/internal/x86_64/bundled.bin
@@ -59,7 +60,7 @@ kubectl create secret generic nico-pxe-certificate -n pxe-test \
   --from-literal=ca.crt=runtime-test --from-literal=tls.crt=runtime-test \
   --from-literal=tls.key=runtime-test
 
-for scenario in copied-restrictive bundled; do
+for scenario in copied-restrictive bundled kustomize; do
   cat >"${test_dir}/values.yaml" <<VALUES
 image:
   repository: pxe-boot-artifacts-test
@@ -88,21 +89,30 @@ initContainers:
 VALUES
     artifact=restricted.bin
     expected="restricted artifact"
-  else
+  elif [[ "$scenario" == bundled ]]; then
     artifact=bundled.bin
     expected="bundled artifact"
+  else
+    artifact=restricted.bin
+    expected="restricted artifact"
   fi
-  helm template pxe-test "$chart" -n pxe-test -f "${test_dir}/values.yaml" \
-    --show-only templates/deployment.yaml --show-only templates/rbac.yaml \
-    | kubectl apply -f -
+  if [[ "$scenario" == kustomize ]]; then
+    # Exercise the real optional ConfigMap and the component's four copy sidecars.
+    kubectl kustomize "${repo_root}/deploy/tests/pxe-with-boot-artifacts" \
+      | kubectl patch --local -f - --type=merge --patch '{}' -o json \
+      | jq --slurp --arg image "$fixture_image" '
+          map(select(.kind == "Deployment" and .metadata.name == "nico-pxe"))[0]
+          | .metadata.namespace = "pxe-test"
+          | .spec.template.spec.containers |= map(.image = $image | .imagePullPolicy = "Never")
+          | (.spec.template.spec.containers[] | select(.name == "nico-pxe")).env += [{name: "PXE_BIND_ADDRESS", value: "0.0.0.0"}]
+        ' | kubectl apply -f -
+  else
+    helm template pxe-test "$chart" -n pxe-test -f "${test_dir}/values.yaml" \
+      --show-only templates/deployment.yaml --show-only templates/rbac.yaml \
+      | kubectl apply -f -
+  fi
   kubectl rollout status deployment/nico-pxe -n pxe-test --timeout=120s
-  [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -- id -u)" == 10001 ]]
-  if [[ "$scenario" == copied-restrictive ]]; then
-    [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -- \
-      stat -c '%a %u %g' /custom-boot-path/blobs/internal/x86_64/restricted.bin)" == '640 0 10001' ]]
-    [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -- \
-      stat -c '%a %u %g' /custom-boot-path/blobs/internal/x86_64)" == '750 0 10001' ]]
-  fi
+  [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- id -u)" == 10001 ]]
   kubectl port-forward -n pxe-test deployment/nico-pxe :8080 >"${test_dir}/port-forward.log" 2>&1 &
   port_forward_pid=$!
   port=""
@@ -116,9 +126,19 @@ VALUES
   [[ -n "$port" ]]
   code="$(curl --silent --show-error --max-time 10 -o "${test_dir}/body" \
     --write-out '%{http_code}' "http://127.0.0.1:${port}/public/blobs/internal/x86_64/${artifact}")"
+  printf '%s: HTTP %s\n' "$scenario" "$code"
   [[ "$code" == 200 && "$(cat "${test_dir}/body")" == "$expected" ]]
+  if [[ "$scenario" != bundled ]]; then
+    serve_path=/forge-boot-artifacts
+    [[ "$scenario" != copied-restrictive ]] || serve_path=/custom-boot-path
+    [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
+      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == '640 0 10001' ]]
+    [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
+      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64")" == '750 0 10001' ]]
+  fi
   printf 'PASS %s: HTTP %s, exact artifact content, serving UID 10001\n' "$scenario" "$code"
   kill "$port_forward_pid"
   wait "$port_forward_pid" 2>/dev/null || true
   port_forward_pid=""
+  kubectl delete deployment/nico-pxe -n pxe-test --wait=true
 done

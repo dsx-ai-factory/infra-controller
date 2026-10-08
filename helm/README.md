@@ -492,12 +492,14 @@ helm unittest helm/nico-flow
 
 Test files live in `tests/` directories within each chart. CI runs these tests automatically on every PR.
 
-The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, and a
+The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
 locally built PXE runtime image containing the binary, templates, and coreutils.
 It creates and removes its own kind cluster and fixture image. It verifies HTTP
 serving as UID 10001 for root-owned `0600` artifacts copied with legacy commands
 and for artifacts bundled in the image, including a custom serving path and a
-later custom init container. It does not provision a host or call Core.
+later custom init container. It also exercises the Kustomize artifact-copy
+component without the optional legacy ConfigMap. It does not provision a host
+or call Core.
 
 ```bash
 PXE_TEST_IMAGE=nico-pxe:<local-tag> bash helm/tests/runtime/test-pxe-boot-artifacts.sh
