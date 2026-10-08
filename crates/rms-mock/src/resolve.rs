@@ -190,6 +190,7 @@ mod tests {
             bmc_endpoint: bmc,
             host_endpoint: host,
             node_descriptor: None,
+            additional_host_endpoints: Vec::new(),
         }
     }
 

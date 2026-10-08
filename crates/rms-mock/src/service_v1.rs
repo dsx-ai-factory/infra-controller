@@ -416,15 +416,16 @@ rack_manager_impl! {
     }
 
     unimplemented {
+        execute_cold_reboot(ExecuteColdRebootRequest) -> ExecuteColdRebootResponse,
+        batch_get_firmware_inventory(BatchGetFirmwareInventoryRequest) -> BatchGetFirmwareInventoryResponse,
+        compare_firmware_object(CompareFirmwareObjectRequest) -> CompareFirmwareObjectResponse,
+        batch_collect_switch_spdm_attestation_evidence(BatchCollectSwitchSpdmAttestationEvidenceRequest) -> BatchCollectSwitchSpdmAttestationEvidenceResponse,
         set_power_state(SetPowerStateRequest) -> SetPowerStateResponse,
         get_power_state(GetPowerStateRequest) -> GetPowerStateResponse,
-        sequence_rack_power(SequenceRackPowerRequest) -> SequenceRackPowerResponse,
         list_node_inventory(ListNodeInventoryRequest) -> ListNodeInventoryResponse,
         create_nodes(CreateNodesRequest) -> CreateNodesResponse,
         update_node(UpdateNodeRequest) -> UpdateNodeResponse,
         delete_node(DeleteNodeRequest) -> DeleteNodeResponse,
-        get_rack_power_on_sequence(GetRackPowerOnSequenceRequest) -> GetRackPowerOnSequenceResponse,
-        set_rack_power_on_sequence(SetRackPowerOnSequenceRequest) -> SetRackPowerOnSequenceResponse,
         list_racks(ListRacksRequest) -> ListRacksResponse,
         get_node_device_info(GetNodeDeviceInfoRequest) -> GetNodeDeviceInfoResponse,
         list_node_device_info_by_node_type(ListNodeDeviceInfoByNodeTypeRequest) -> ListNodeDeviceInfoByNodeTypeResponse,

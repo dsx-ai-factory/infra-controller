@@ -34,6 +34,8 @@ trace-propagation = { path = "../trace-propagation" }
 tracing = { workspace = true }
 
 [dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+logfmt = { path = "../logfmt" }
 tracing-subscriber = { workspace = true, features = ["json"] }
 prost = { workspace = true }
 

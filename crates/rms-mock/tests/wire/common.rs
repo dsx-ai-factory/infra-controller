@@ -93,6 +93,7 @@ pub(crate) fn node_info_in_rack(rack_id: &str, node_id: &str, mac: &str) -> rms:
         }),
         host_endpoint: None,
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     }
 }
 

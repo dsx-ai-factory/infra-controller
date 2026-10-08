@@ -23,7 +23,7 @@ use std::time::{Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 use librms::client::{RmsTransportLayer, TransportService};
-use librms::{RpcObservation, RpcObserver};
+use librms::{RpcObservation, RpcObserver, RpcObserverError};
 use prost_reflect::{DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -71,12 +71,14 @@ impl RpcObserver for NicoRmsObservability {
         request_type: &'static str,
         request: &[u8],
         started: SystemTime,
-    ) -> Box<dyn RpcObservation> {
+    ) -> Result<Box<dyn RpcObservation>, RpcObserverError> {
         let request_body = sanitized_body(request_type, request);
         let request_timestamp = DateTime::<Utc>::from(started).to_rfc3339();
         let span = tracing::info_span!(
             "rms_rpc",
             carbide.trace_root = true,
+            // Bodies are reported through the `rms_rpc_audit` event and OTLP, not a close line.
+            logfmt.suppress = true,
             rpc.system = "grpc",
             rpc.method = method,
             rpc.request_type = request_type,
@@ -88,7 +90,7 @@ impl RpcObserver for NicoRmsObservability {
             grpc_status_code = tracing::field::Empty,
             elapsed_milliseconds = tracing::field::Empty,
         );
-        Box::new(NicoRmsObservation {
+        Ok(Box::new(NicoRmsObservation {
             span,
             method,
             request_type,
@@ -96,7 +98,7 @@ impl RpcObserver for NicoRmsObservability {
             request_timestamp,
             started: Instant::now(),
             completed: false,
-        })
+        }))
     }
 }
 
@@ -121,7 +123,7 @@ impl RpcObservation for NicoRmsObservation {
         response: Option<&[u8]>,
         code: tonic::Code,
         finished: SystemTime,
-    ) {
+    ) -> Result<(), RpcObserverError> {
         let response_body = response.map(|body| sanitized_body(response_type, body));
         let response_timestamp = DateTime::<Utc>::from(finished).to_rfc3339();
         let elapsed_milliseconds = self.started.elapsed().as_secs_f64() * 1000.0;
@@ -148,30 +150,35 @@ impl RpcObservation for NicoRmsObservation {
             "RMS RPC completed",
         );
         self.completed = true;
+        Ok(())
     }
 }
 
 impl Drop for NicoRmsObservation {
     fn drop(&mut self) {
         if !self.completed {
-            self.finish("", None, tonic::Code::Cancelled, SystemTime::now());
+            let _ = self.finish("", None, tonic::Code::Cancelled, SystemTime::now());
         }
     }
 }
 
-fn descriptor_pool() -> &'static DescriptorPool {
-    static POOL: OnceLock<DescriptorPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        DescriptorPool::decode(librms::FILE_DESCRIPTOR_SET)
-            .expect("librms embeds a valid protobuf descriptor set")
-    })
+/// Marks a descriptor that cannot be walked, so the body is omitted rather than risk exposing it.
+struct MalformedDescriptor;
+
+fn descriptor_pool() -> Option<&'static DescriptorPool> {
+    static POOL: OnceLock<Option<DescriptorPool>> = OnceLock::new();
+    POOL.get_or_init(|| DescriptorPool::decode(librms::FILE_DESCRIPTOR_SET).ok())
+        .as_ref()
 }
 
 fn sanitized_body(message_type: &str, body: &[u8]) -> String {
     if body.len() > MAX_BODY_BYTES {
         return "[BODY OMITTED: exceeds 65536 bytes]".to_string();
     }
-    let Some(descriptor) = descriptor_pool().get_message_by_name(message_type) else {
+    let Some(pool) = descriptor_pool() else {
+        return "[BODY OMITTED: descriptors unavailable]".to_string();
+    };
+    let Some(descriptor) = pool.get_message_by_name(message_type) else {
         return "[BODY OMITTED: unknown message type]".to_string();
     };
     let Ok(message) = DynamicMessage::decode(descriptor.clone(), body) else {
@@ -180,7 +187,9 @@ fn sanitized_body(message_type: &str, body: &[u8]) -> String {
     let Ok(mut value) = serde_json::to_value(message) else {
         return "[BODY OMITTED: serialization failed]".to_string();
     };
-    redact_message(&descriptor, &mut value);
+    if redact_message(&descriptor, &mut value).is_err() {
+        return "[BODY OMITTED: malformed descriptor]".to_string();
+    }
     let serialized = value.to_string();
     if serialized.len() > MAX_BODY_BYTES {
         "[BODY OMITTED: exceeds 65536 bytes]".to_string()
@@ -189,89 +198,164 @@ fn sanitized_body(message_type: &str, body: &[u8]) -> String {
     }
 }
 
-fn redact_message(descriptor: &MessageDescriptor, value: &mut Value) {
-    let Value::Object(fields) = value else { return };
+fn redact_message(
+    descriptor: &MessageDescriptor,
+    value: &mut Value,
+) -> Result<(), MalformedDescriptor> {
+    let Value::Object(fields) = value else {
+        return Ok(());
+    };
     for field in descriptor.fields() {
         if let Some(value) = fields.get_mut(field.json_name()) {
-            redact_field(&field, value);
+            redact_field(&field, value)?;
         }
     }
+    Ok(())
 }
 
-fn redact_field(field: &FieldDescriptor, value: &mut Value) {
-    // Credentials and opaque strings are deliberately withheld, including JSON, config values,
-    // URLs (which may carry userinfo or signed queries), and error text echoing request secrets.
-    // An allowlist makes new string fields private until their semantics have been reviewed.
-    if matches!(field.name(), "credentials" | "auth" | "user_pass") {
+/// Fields whose whole value is withheld, whatever its type.
+const WITHHELD_FIELDS: &[&str] = &["credentials", "user_pass", "attributes"];
+
+/// String fields whose values are retained: identifiers, addresses, domains, and versions.
+/// Every other string field is withheld, including JSON, config values, URLs (which may carry
+/// userinfo or signed queries), and error text echoing request secrets. An allowlist makes a new
+/// string field private until its semantics have been reviewed; `exposed_string_fields` in the
+/// tests pins exactly which fields this retains.
+const VISIBLE_STRING_FIELDS: &[&str] = &[
+    "node_id",
+    "node_ids",
+    "rack_id",
+    "rack_ids",
+    "job_id",
+    "parent_job_id",
+    "child_job_ids",
+    "component_id",
+    "version",
+    "ip_address",
+    "mac_address",
+    "host_name",
+    "host_ip_addresses",
+    "host_mac_addresses",
+    "domain",
+    "primary_switch_node_id",
+];
+
+fn is_visible_string(field: &FieldDescriptor) -> bool {
+    matches!(field.kind(), Kind::String) && VISIBLE_STRING_FIELDS.contains(&field.name())
+}
+
+fn redact_field(field: &FieldDescriptor, value: &mut Value) -> Result<(), MalformedDescriptor> {
+    if WITHHELD_FIELDS.contains(&field.name()) {
         *value = Value::String(REDACTED.to_string());
-        return;
-    }
-    if field.is_map() && field.name() == "attributes" {
-        *value = Value::String(REDACTED.to_string());
-        return;
+        return Ok(());
     }
     if field.is_map() {
         if let (Kind::Message(entry), Value::Object(entries)) = (field.kind(), value) {
             let value_field = entry
                 .get_field_by_name("value")
-                .expect("protobuf map has a value field");
+                .ok_or(MalformedDescriptor)?;
             for value in entries.values_mut() {
-                redact_field(&value_field, value);
+                redact_field(&value_field, value)?;
             }
         }
-        return;
+        return Ok(());
     }
     if let Value::Array(values) = value {
         for value in values {
-            redact_scalar(field, value);
+            redact_scalar(field, value)?;
         }
+        Ok(())
     } else {
-        redact_scalar(field, value);
+        redact_scalar(field, value)
     }
 }
 
-fn redact_scalar(field: &FieldDescriptor, value: &mut Value) {
+fn redact_scalar(field: &FieldDescriptor, value: &mut Value) -> Result<(), MalformedDescriptor> {
     match field.kind() {
-        Kind::Message(descriptor) => redact_message(&descriptor, value),
+        Kind::Message(descriptor) => return redact_message(&descriptor, value),
         Kind::Bytes => *value = Value::String(REDACTED.to_string()),
-        Kind::String
-            if !matches!(
-                field.name(),
-                "node_id"
-                    | "node_ids"
-                    | "rack_id"
-                    | "rack_ids"
-                    | "job_id"
-                    | "parent_job_id"
-                    | "child_job_ids"
-                    | "component_id"
-                    | "firmware_id"
-                    | "firmware_object_id"
-                    | "version"
-                    | "ip_address"
-                    | "mac_address"
-                    | "host_name"
-                    | "host_ip_addresses"
-                    | "host_mac_addresses"
-                    | "domain"
-                    | "primary_switch_node_id"
-            ) =>
-        {
-            *value = Value::String(REDACTED.to_string())
-        }
+        Kind::String if !is_visible_string(field) => *value = Value::String(REDACTED.to_string()),
         _ => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use librms::protos::rack_manager as rms;
+    use std::collections::BTreeSet;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    use carbide_test_support::{Check, check_values};
+    use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
     use prost::Message;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
 
+    const OMITTED_INVALID: &str = "[BODY OMITTED: invalid protobuf]";
+    const OMITTED_UNKNOWN: &str = "[BODY OMITTED: unknown message type]";
+    const OMITTED_OVERSIZED: &str = "[BODY OMITTED: exceeds 65536 bytes]";
+
+    /// Every value any `sanitized_body` row plants, plus the markers the policy may substitute.
+    /// A row's expectation is the subset of these that survives into the sanitized body.
+    const PROBES: &[&str] = &[
+        "switch-01",
+        "job-42",
+        "test-user",
+        "test-password",
+        "test-session-token",
+        "test-new-password",
+        "test-secret",
+        REDACTED,
+        OMITTED_INVALID,
+        OMITTED_UNKNOWN,
+        OMITTED_OVERSIZED,
+    ];
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Capture {
+        fn output(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    struct Payload {
+        message_type: &'static str,
+        bytes: Vec<u8>,
+    }
+
+    fn payload(message_type: &'static str, message: &impl Message) -> Payload {
+        Payload {
+            message_type,
+            bytes: message.encode_to_vec(),
+        }
+    }
+
+    fn surviving_probes(input: Payload) -> Vec<&'static str> {
+        let body = sanitized_body(input.message_type, &input.bytes);
+        PROBES
+            .iter()
+            .copied()
+            .filter(|probe| body.contains(probe))
+            .collect()
+    }
+
     #[test]
-    fn redacts_nested_credentials_in_requests_and_inventory_responses() {
+    fn sanitized_body_keeps_identifiers_and_withholds_everything_else() {
         let node = rms::NodeInfo {
             node_id: "switch-01".to_string(),
             host_endpoint: Some(rms::Endpoint {
@@ -293,84 +377,351 @@ mod tests {
             }),
             ..Default::default()
         };
-        // Both directions use the same descriptor-driven policy, regardless of container depth.
-        let bodies = [
-            sanitized_body(
-                "rack_manager.CreateNodesRequest",
-                &rms::CreateNodesRequest {
-                    nodes: Some(rms::NodeSet {
-                        nodes: vec![node.clone()],
-                    }),
+        let checks = [
+            Check {
+                scenario: "credentials nested in a request container",
+                input: payload(
+                    "rack_manager.CreateNodesRequest",
+                    &rms::CreateNodesRequest {
+                        nodes: Some(rms::NodeSet {
+                            nodes: vec![node.clone()],
+                        }),
+                    },
+                ),
+                expect: vec!["switch-01", REDACTED],
+            },
+            Check {
+                scenario: "credentials in an inventory-style response message",
+                input: payload("rack_manager.NodeInfo", &node),
+                expect: vec!["switch-01", REDACTED],
+            },
+            Check {
+                scenario: "direct password field",
+                input: payload(
+                    "rack_manager.UpdateSwitchSystemPasswordRequest",
+                    &rms::UpdateSwitchSystemPasswordRequest {
+                        password: "test-new-password".to_string(),
+                        ..Default::default()
+                    },
+                ),
+                expect: vec![REDACTED],
+            },
+            Check {
+                scenario: "opaque status text and embedded JSON beside an identifier",
+                input: payload(
+                    "rack_manager.GetFirmwareJobStatusResponse",
+                    &rms::GetFirmwareJobStatusResponse {
+                        job_id: "job-42".to_string(),
+                        error_message: "failed with password test-new-password".to_string(),
+                        result_json: r#"{"password":"test-new-password"}"#.to_string(),
+                        ..Default::default()
+                    },
+                ),
+                expect: vec!["job-42", REDACTED],
+            },
+            Check {
+                scenario: "V2 message names resolve in the descriptor pool",
+                input: payload(
+                    "rack_manager_v2.ConfigureScaleUpFabricManagerRequest",
+                    &rms_v2::ConfigureScaleUpFabricManagerRequest {
+                        primary_switch_node_id: Some("switch-01".to_string()),
+                        ..Default::default()
+                    },
+                ),
+                expect: vec!["switch-01"],
+            },
+            Check {
+                scenario: "malformed protobuf never falls back to raw bytes",
+                input: Payload {
+                    message_type: "rack_manager.NodeInfo",
+                    bytes: vec![255],
+                },
+                expect: vec![OMITTED_INVALID],
+            },
+            Check {
+                scenario: "unknown message type never falls back to raw bytes",
+                input: Payload {
+                    message_type: "unknown.Type",
+                    bytes: b"test-secret".to_vec(),
+                },
+                expect: vec![OMITTED_UNKNOWN],
+            },
+            Check {
+                scenario: "oversized payload is omitted before decoding",
+                input: Payload {
+                    message_type: "rack_manager.NodeInfo",
+                    bytes: vec![b'x'; MAX_BODY_BYTES + 1],
+                },
+                expect: vec![OMITTED_OVERSIZED],
+            },
+        ];
+        check_values(checks, surviving_probes);
+    }
+
+    fn rms_messages() -> impl Iterator<Item = MessageDescriptor> {
+        descriptor_pool()
+            .expect("librms embeds a valid protobuf descriptor set")
+            .all_messages()
+            .filter(|message| {
+                !message.is_map_entry() && message.full_name().starts_with("rack_manager")
+            })
+    }
+
+    /// Names of the fields of `message` whose values `sanitized_body` leaves readable: allowlisted
+    /// string fields, and the keys of string-keyed maps, which the policy never rewrites.
+    fn exposed_string_fields(message: &MessageDescriptor) -> Vec<String> {
+        message
+            .fields()
+            .filter(|field| !WITHHELD_FIELDS.contains(&field.name()))
+            .filter_map(|field| match field.kind() {
+                Kind::Message(entry)
+                    if field.is_map()
+                        && matches!(entry.map_entry_key_field().kind(), Kind::String) =>
+                {
+                    Some(format!("{}{{key}}", field.name()))
                 }
-                .encode_to_vec(),
-            ),
-            sanitized_body("rack_manager.NodeInfo", &node.encode_to_vec()),
-        ];
-        for body in bodies {
-            assert!(body.contains("switch-01"));
-            assert!(body.contains(REDACTED));
-            for secret in ["test-user", "test-password", "test-session-token"] {
-                assert!(!body.contains(secret), "secret exposed in {body}");
-            }
-        }
+                _ if is_visible_string(&field) => Some(field.name().to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
-    #[test]
-    fn redacts_direct_passwords_and_opaque_status_text() {
-        let request = rms::UpdateSwitchSystemPasswordRequest {
-            password: "test-new-password".to_string(),
-            ..Default::default()
-        };
-        let request_body = sanitized_body(
-            "rack_manager.UpdateSwitchSystemPasswordRequest",
-            &request.encode_to_vec(),
-        );
-        assert!(!request_body.contains("test-new-password"));
-        let response = rms::GetFirmwareJobStatusResponse {
-            job_id: "job-42".to_string(),
-            error_message: "failed with password test-new-password".to_string(),
-            result_json: r#"{"password":"test-new-password"}"#.to_string(),
-            ..Default::default()
-        };
-        let body = sanitized_body(
+    /// Every RMS message that exposes a string, with the fields it exposes. Adding a message,
+    /// or adding or renaming a field that matches the allowlist, changes what is written to logs
+    /// and traces, so it must be reviewed here: extend the row only once the value is known to
+    /// be safe to record.
+    const EXPOSED_STRING_FIELDS: &[(&str, &[&str])] = &[
+        ("rack_manager.ApplyFirmwareObjectRequest", &["rack_id"]),
+        (
+            "rack_manager.ApplyStoredFirmwareObjectRequest",
+            &["rack_id"],
+        ),
+        (
+            "rack_manager.ApplyStoredSwitchSystemImageRequest",
+            &["rack_id"],
+        ),
+        ("rack_manager.ApplySwitchSystemImageRequest", &["rack_id"]),
+        (
+            "rack_manager.BatchCollectSwitchSpdmAttestationEvidenceRequest",
+            &["domain"],
+        ),
+        (
+            "rack_manager.BatchGetScaleUpFabricServiceStatusResponse",
+            &["service_statuses{key}"],
+        ),
+        (
+            "rack_manager.BatchResetSwitchFactoryDefaultRequest",
+            &["domain"],
+        ),
+        (
+            "rack_manager.BatchResetSwitchSdnFactoryDefaultRequest",
+            &["domain"],
+        ),
+        (
+            "rack_manager.BatchUpdateFirmwareByNodeTypeRequest",
+            &["rack_id"],
+        ),
+        ("rack_manager.ComponentInventoryInfo", &["component_id"]),
+        (
+            "rack_manager.ConfigureScaleUpFabricManagerRequest",
+            &["domain"],
+        ),
+        (
+            "rack_manager.ConfigureSwitchCertificateJobInfo",
+            &["node_id", "job_id"],
+        ),
+        (
+            "rack_manager.ConfigureSwitchCertificateRequest",
+            &["domain"],
+        ),
+        ("rack_manager.DeleteNodeRequest", &["node_id", "rack_id"]),
+        ("rack_manager.ExecuteColdRebootRequest", &["domain"]),
+        ("rack_manager.FirmwareInventoryInfo", &["version"]),
+        ("rack_manager.FirmwareObjectComponent", &["version"]),
+        (
+            "rack_manager.FirmwareObjectHistoryRecord",
+            &["rack_id", "node_ids"],
+        ),
+        ("rack_manager.FirmwareObjectSubcomponent", &["version"]),
+        ("rack_manager.FirmwareObjectSwitchSystemImage", &["version"]),
+        (
+            "rack_manager.GetConfigureSwitchCertificateJobStatusRequest",
+            &["job_id"],
+        ),
+        (
+            "rack_manager.GetConfigureSwitchCertificateJobStatusResponse",
+            &["job_id", "rack_id", "node_id"],
+        ),
+        ("rack_manager.GetFirmwareJobStatusRequest", &["job_id"]),
+        (
             "rack_manager.GetFirmwareJobStatusResponse",
-            &response.encode_to_vec(),
+            &["job_id", "rack_id", "node_id"],
+        ),
+        (
+            "rack_manager.GetFirmwareObjectHistoryRequest",
+            &["rack_ids"],
+        ),
+        ("rack_manager.GetJobStatusRequest", &["job_id"]),
+        (
+            "rack_manager.GetNodeDeviceInfoRequest",
+            &["rack_id", "node_id"],
+        ),
+        (
+            "rack_manager.GetNodeFirmwareInventoryRequest",
+            &["node_id", "rack_id"],
+        ),
+        ("rack_manager.GetPowerStateRequest", &["node_id", "rack_id"]),
+        (
+            "rack_manager.GetPowerStateResponse",
+            &["node_id", "rack_id"],
+        ),
+        ("rack_manager.GetRackFirmwareInventoryRequest", &["rack_id"]),
+        ("rack_manager.GetScaleUpFabricStatusRequest", &["domain"]),
+        (
+            "rack_manager.GetSwitchSystemImageJobStatusRequest",
+            &["job_id"],
+        ),
+        (
+            "rack_manager.GetSwitchSystemImageJobStatusResponse",
+            &["job_id", "rack_id", "node_id"],
+        ),
+        ("rack_manager.GetVersionResponse", &["version"]),
+        (
+            "rack_manager.JobStatus",
+            &[
+                "job_id",
+                "parent_job_id",
+                "child_job_ids",
+                "rack_id",
+                "node_id",
+            ],
+        ),
+        (
+            "rack_manager.ListNodeDeviceInfoByNodeTypeRequest",
+            &["rack_id"],
+        ),
+        ("rack_manager.ListRacksResponse", &["rack_ids"]),
+        (
+            "rack_manager.ListSwitchFirmwareRequest",
+            &["rack_id", "node_id"],
+        ),
+        (
+            "rack_manager.ListSwitchSystemImagesRequest",
+            &["rack_id", "node_id"],
+        ),
+        (
+            "rack_manager.NetworkInterface",
+            &["ip_address", "mac_address", "host_name"],
+        ),
+        ("rack_manager.NodeBatchResponse", &["job_id"]),
+        ("rack_manager.NodeDeviceInfo", &["node_id"]),
+        ("rack_manager.NodeFirmwareInventory", &["node_id"]),
+        ("rack_manager.NodeFirmwareJobInfo", &["node_id", "job_id"]),
+        ("rack_manager.NodeFirmwareManifestComparison", &["node_id"]),
+        ("rack_manager.NodeInfo", &["node_id", "rack_id"]),
+        (
+            "rack_manager.NodeInventoryInfo",
+            &[
+                "node_id",
+                "ip_address",
+                "mac_address",
+                "rack_id",
+                "host_mac_addresses",
+                "host_ip_addresses",
+            ],
+        ),
+        ("rack_manager.NodeOperationResult", &["node_id"]),
+        ("rack_manager.NodePowerState", &["node_id"]),
+        (
+            "rack_manager.PushSwitchFirmwareRequest",
+            &["rack_id", "node_id"],
+        ),
+        ("rack_manager.ScaleUpFabricSwitchStatus", &["node_id"]),
+        ("rack_manager.SetPowerStateRequest", &["node_id", "rack_id"]),
+        (
+            "rack_manager.SwitchSpdmAttestationTargetResult",
+            &["node_id"],
+        ),
+        ("rack_manager.SwitchSpdmComponentResult", &["component_id"]),
+        (
+            "rack_manager.SwitchSystemImageUpdateJobInfo",
+            &["node_id", "job_id"],
+        ),
+        (
+            "rack_manager.UpdateFirmwareRequest",
+            &["node_id", "rack_id"],
+        ),
+        ("rack_manager.UpdateFirmwareResponse", &["job_id"]),
+        ("rack_manager.UpdateNodeRequest", &["node_id", "rack_id"]),
+        (
+            "rack_manager_v2.ConfigureScaleUpFabricManagerRequest",
+            &["primary_switch_node_id", "domain"],
+        ),
+        (
+            "rack_manager_v2.ConfigureScaleUpFabricManagerResponse",
+            &["job_id"],
+        ),
+        (
+            "rack_manager_v2.NodeSystemValidationJobInfo",
+            &["node_id", "job_id"],
+        ),
+    ];
+
+    #[test]
+    fn exposed_string_fields_match_the_reviewed_snapshot() {
+        let checks = EXPOSED_STRING_FIELDS.iter().map(|(message, fields)| Check {
+            scenario: message,
+            input: *message,
+            expect: fields.iter().map(|field| field.to_string()).collect(),
+        });
+        check_values(checks, |message| {
+            exposed_string_fields(
+                &descriptor_pool()
+                    .and_then(|pool| pool.get_message_by_name(message))
+                    .unwrap_or_else(|| panic!("{message} is no longer in the descriptor set")),
+            )
+        });
+        // The rows above only cover messages already listed, so also catch a new one.
+        let exposing: BTreeSet<String> = rms_messages()
+            .filter(|message| !exposed_string_fields(message).is_empty())
+            .map(|message| message.full_name().to_string())
+            .collect();
+        let reviewed: BTreeSet<String> = EXPOSED_STRING_FIELDS
+            .iter()
+            .map(|(message, _)| message.to_string())
+            .collect();
+        assert_eq!(
+            exposing, reviewed,
+            "messages exposing strings are unreviewed"
         );
-        assert!(body.contains("job-42"));
-        assert!(!body.contains("test-new-password"));
     }
 
     #[test]
-    fn invalid_unknown_and_oversized_payloads_never_fall_back_to_raw_bytes() {
-        let cases = [
-            ("rack_manager.NodeInfo", vec![255]),
-            ("unknown.Type", b"test-secret".to_vec()),
-            ("rack_manager.NodeInfo", vec![b'x'; MAX_BODY_BYTES + 1]),
-        ];
-        for (message_type, payload) in cases {
-            let body = sanitized_body(message_type, &payload);
-            assert!(body.starts_with("[BODY OMITTED:"));
-            assert!(!body.contains("test-secret"));
-        }
+    fn policy_field_names_still_exist_in_the_descriptor_set() {
+        // A name that matches no field is a stale entry: the proto renamed or dropped the field,
+        // so the policy no longer says what its author reviewed.
+        let allowlisted = VISIBLE_STRING_FIELDS.iter().map(|name| (*name, true));
+        let withheld = WITHHELD_FIELDS.iter().map(|name| (*name, false));
+        let checks = allowlisted
+            .chain(withheld)
+            .map(|(name, string_only)| Check {
+                scenario: name,
+                input: (name, string_only),
+                expect: true,
+            });
+        check_values(checks, |(name, string_only)| {
+            rms_messages().any(|message| {
+                message.fields().any(|field| {
+                    field.name() == name && (!string_only || matches!(field.kind(), Kind::String))
+                })
+            })
+        });
     }
+
     #[test]
     fn completion_and_cancellation_emit_redacted_records_with_timestamps() {
-        use std::io::Write;
-        use std::sync::Mutex;
-
-        #[derive(Clone)]
-        struct Writer(Arc<Mutex<Vec<u8>>>);
-        impl Write for Writer {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = Writer(output.clone());
+        let capture = Capture::default();
+        let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
             .json()
             .with_max_level(tracing::Level::DEBUG)
@@ -383,28 +734,36 @@ mod tests {
                 ..Default::default()
             };
             let started = SystemTime::now();
-            let mut observation = observer.start(
-                "UpdateSwitchSystemPassword",
-                "rack_manager.UpdateSwitchSystemPasswordRequest",
-                &request.encode_to_vec(),
-                started,
-            );
-            observation.finish(
-                "rack_manager.UpdateSwitchSystemPasswordResponse",
-                Some(&[]),
-                tonic::Code::Ok,
-                SystemTime::now(),
-            );
+            let mut observation = observer
+                .start(
+                    "UpdateSwitchSystemPassword",
+                    "rack_manager.UpdateSwitchSystemPasswordRequest",
+                    &request.encode_to_vec(),
+                    started,
+                )
+                .unwrap();
+            observation
+                .finish(
+                    "rack_manager.UpdateSwitchSystemPasswordResponse",
+                    Some(&[]),
+                    tonic::Code::Ok,
+                    SystemTime::now(),
+                )
+                .unwrap();
             drop(observation);
             // Dropping an in-flight observation produces exactly one cancellation record.
-            drop(observer.start(
-                "GetVersion",
-                "rack_manager.GetVersionRequest",
-                &[],
-                SystemTime::now(),
-            ));
+            drop(
+                observer
+                    .start(
+                        "GetVersion",
+                        "rack_manager.GetVersionRequest",
+                        &[],
+                        SystemTime::now(),
+                    )
+                    .unwrap(),
+            );
         });
-        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let output = capture.output();
         assert!(!output.contains("test-secret"));
         let records: Vec<Value> = output
             .lines()
@@ -431,6 +790,39 @@ mod tests {
             assert!(fields["elapsed_milliseconds"].as_f64().unwrap() >= 0.0);
         }
     }
+
+    #[test]
+    fn logfmt_writes_the_audit_event_but_not_a_span_close_line() {
+        // The close line would repeat both bodies on every call at INFO, outside the DEBUG gate.
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let layer = logfmt::layer().with_writer(Arc::new(move || Box::new(writer.clone())));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let observer = NicoRmsObservability::default();
+            let mut observation = observer
+                .start(
+                    "GetVersion",
+                    "rack_manager.GetVersionRequest",
+                    &[],
+                    SystemTime::now(),
+                )
+                .unwrap();
+            observation
+                .finish(
+                    "rack_manager.GetVersionResponse",
+                    Some(&[]),
+                    tonic::Code::Ok,
+                    SystemTime::now(),
+                )
+                .unwrap();
+            drop(observation);
+        });
+        let output = capture.output();
+        assert!(output.contains("RMS RPC completed"), "{output}");
+        assert!(!output.contains("level=SPAN"), "{output}");
+    }
+
     #[test]
     fn runtime_tracing_flag_enables_observation_without_debug_logs() {
         let subscriber = tracing_subscriber::fmt()

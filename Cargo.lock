@@ -7026,8 +7026,8 @@ dependencies = [
 
 [[package]]
 name = "librms"
-version = "0.0.14"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?rev=16bcaf2e5494f69e068c5fff97435f97f5324169#16bcaf2e5494f69e068c5fff97435f97f5324169"
+version = "0.10.2"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.2#f6f8f10851bd14f5fc54f9202537c8c865e02bbf"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7044,7 +7044,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic",
- "tonic-client-wrapper 1.0.0",
+ "tonic-client-wrapper 1.1.0",
  "tonic-prost",
  "tonic-prost-build",
  "tower",
@@ -9762,8 +9762,10 @@ dependencies = [
 name = "rms-observability"
 version = "0.0.0"
 dependencies = [
+ "carbide-test-support",
  "chrono",
  "librms",
+ "logfmt",
  "prost",
  "prost-reflect",
  "serde_json",
@@ -11814,8 +11816,8 @@ dependencies = [
 
 [[package]]
 name = "tonic-client-wrapper"
-version = "1.0.0"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?rev=16bcaf2e5494f69e068c5fff97435f97f5324169#16bcaf2e5494f69e068c5fff97435f97f5324169"
+version = "1.1.0"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.2#f6f8f10851bd14f5fc54f9202537c8c865e02bbf"
 dependencies = [
  "async-trait",
  "heck",

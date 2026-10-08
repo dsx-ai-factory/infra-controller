@@ -701,6 +701,26 @@ pub struct MockRmsClient {
 
 #[async_trait::async_trait]
 impl RmsApi for MockRmsClient {
+    async fn batch_get_firmware_inventory(
+        &self,
+        _cmd: rms::BatchGetFirmwareInventoryRequest,
+    ) -> Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError> {
+        Err(
+            tonic::Status::unimplemented("BatchGetFirmwareInventory is not supported by this mock")
+                .into(),
+        )
+    }
+
+    async fn compare_firmware_object(
+        &self,
+        _cmd: rms::CompareFirmwareObjectRequest,
+    ) -> Result<rms::CompareFirmwareObjectResponse, RackManagerError> {
+        Err(
+            tonic::Status::unimplemented("CompareFirmwareObject is not supported by this mock")
+                .into(),
+        )
+    }
+
     async fn batch_get_node_device_info(
         &self,
         cmd: rms::BatchGetNodeDeviceInfoRequest,
@@ -853,13 +873,6 @@ impl RmsApi for MockRmsClient {
             .unwrap_or(Ok(rms::BatchGetPowerStateResponse::default()))
     }
 
-    async fn sequence_rack_power(
-        &self,
-        _cmd: rms::SequenceRackPowerRequest,
-    ) -> Result<rms::SequenceRackPowerResponse, RackManagerError> {
-        Ok(rms::SequenceRackPowerResponse::default())
-    }
-
     async fn list_node_inventory(
         &self,
     ) -> Result<rms::ListNodeInventoryResponse, RackManagerError> {
@@ -914,20 +927,6 @@ impl RmsApi for MockRmsClient {
         _cmd: rms::DeleteNodeRequest,
     ) -> Result<rms::DeleteNodeResponse, RackManagerError> {
         Ok(rms::DeleteNodeResponse::default())
-    }
-
-    async fn get_rack_power_on_sequence(
-        &self,
-        _cmd: rms::GetRackPowerOnSequenceRequest,
-    ) -> Result<rms::GetRackPowerOnSequenceResponse, RackManagerError> {
-        Ok(rms::GetRackPowerOnSequenceResponse::default())
-    }
-
-    async fn set_rack_power_on_sequence(
-        &self,
-        _cmd: rms::SetRackPowerOnSequenceRequest,
-    ) -> Result<rms::SetRackPowerOnSequenceResponse, RackManagerError> {
-        Ok(rms::SetRackPowerOnSequenceResponse::default())
     }
 
     async fn list_racks(&self) -> Result<rms::ListRacksResponse, RackManagerError> {
