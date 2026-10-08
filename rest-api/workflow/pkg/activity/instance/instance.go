@@ -1183,7 +1183,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	instancesToTerminate := []*cdbm.Instance{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if instanceInventory.InventoryPage == nil || instanceInventory.InventoryPage.TotalPages == 0 || (instanceInventory.InventoryPage.CurrentPage == instanceInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(instanceInventory.GetInventoryPage()) {
 		for _, instance := range existingInstanceIDMap {
 			found := false
 
