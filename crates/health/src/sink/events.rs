@@ -72,7 +72,7 @@ impl EventContext {
     /// The labels identifying where a series comes from, as every metric
     /// export puts them on each series: the endpoint, the collector, and the
     /// machine, switch, or power shelf and its placement when known.
-    pub fn series_labels(&self) -> Vec<(Cow<'static, str>, String)> {
+    pub(crate) fn series_labels(&self) -> Vec<(Cow<'static, str>, String)> {
         let mut labels = vec![
             (
                 Cow::Borrowed("endpoint_key"),

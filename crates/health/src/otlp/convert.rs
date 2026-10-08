@@ -516,22 +516,17 @@ fn build_metrics_export_request_from_pairs<'a>(
         Vec<KeyValue>,
         Vec<OtlpMetric>,
         HashMap<(&'a str, &'a str, &'a str), usize>,
-        Vec<(Cow<'static, str>, String)>,
     );
 
     let mut by_endpoint: HashMap<(&str, &str), EndpointMetrics<'_>> = HashMap::new();
 
     for (context, sample) in batch {
-        let (_, metrics, descriptor_indices, identity) = by_endpoint
+        let (_, metrics, descriptor_indices) = by_endpoint
             .entry((&context.endpoint_key, context.collector_type))
-            .or_insert_with(|| {
-                (
-                    resource_attributes(context),
-                    Vec::new(),
-                    HashMap::new(),
-                    point_identity(context),
-                )
-            });
+            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
+        // Built from each point's own context: points grouped under one
+        // endpoint key can still carry different labels or metadata.
+        let identity = point_identity(context);
 
         // A label the sample sets itself keeps the sample's value, compared
         // as Prometheus names them, so the two cannot meet under one name.
@@ -596,7 +591,7 @@ fn build_metrics_export_request_from_pairs<'a>(
 
     let resource_metrics = by_endpoint
         .into_values()
-        .map(|(attrs, metrics, _, _)| ResourceMetrics {
+        .map(|(attrs, metrics, _)| ResourceMetrics {
             resource: Some(Resource {
                 attributes: otlp_attributes(attrs),
                 ..Default::default()
@@ -1867,6 +1862,55 @@ mod tests {
             "carbide_hardware_health_nvue_gnmi_interface_oper_status_state"
         );
         assert_eq!(metrics[0].unit, "state");
+    }
+
+    /// Points grouped under one endpoint key each carry the labels of their
+    /// own context, not those of the first point in the group.
+    #[test]
+    fn each_point_carries_its_own_contexts_labels() {
+        let context = |team: &str| EventContext {
+            endpoint_key: "11:22:33:44:55:66".to_string(),
+            addr: BmcAddr {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                port: Some(443),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
+            },
+            collector_type: "nvue_gnmi",
+            labels: std::collections::BTreeMap::from([("team".to_string(), team.to_string())]),
+            metadata: None,
+            rack_id: None,
+        };
+        let sample = |key: &str| MetricSample {
+            key: key.to_string(),
+            name: "switch_nmxt".to_string(),
+            metric_type: "effective_ber".to_string(),
+            unit: "ratio".to_string(),
+            value: 0.5,
+            labels: vec![],
+            context: None,
+        };
+
+        let request = build_metrics_export_request(
+            &[
+                (context("a"), sample("first")),
+                (context("b"), sample("second")),
+            ],
+            EXPORT_NANOS,
+            "carbide_hardware_health",
+        );
+        let metric::Data::Gauge(gauge) = request.resource_metrics[0].scope_metrics[0].metrics[0]
+            .data
+            .as_ref()
+            .expect("metric data")
+        else {
+            panic!("expected gauge data");
+        };
+        let teams: Vec<_> = gauge
+            .data_points
+            .iter()
+            .map(|point| attr_value(&point.attributes, "team"))
+            .collect();
+        assert_eq!(teams, [Some("a"), Some("b")]);
     }
 
     /// Switch identity and placement, and custom endpoint labels, ride on
