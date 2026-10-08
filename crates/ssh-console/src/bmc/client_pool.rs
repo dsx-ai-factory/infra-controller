@@ -270,7 +270,7 @@ impl BmcPoolMetrics {
                     move |observer| {
                         members.read().expect("lock poisoned").iter().for_each(|(machine_id, handle)| {
                             let state = handle.connection_state.load();
-                            observer.observe(state as _, &[
+                            observer.observe(1, &[
                                 KeyValue::new("machine_id", machine_id.to_string()),
                                 KeyValue::new("value", format!("{state:?}")),
                             ])
