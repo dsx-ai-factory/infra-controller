@@ -37,10 +37,16 @@ sanitization between tenants. NVIDIA Cloud Partners (NCPs) and infrastructure
 operators use it to stand up and operate AI factory-scale infrastructure
 through APIs instead of runbooks.
 
-<div align="center">
-  <img src="docs/static/nico_arch_diagram.svg" alt="NICo architecture: the Site Controller services on Kubernetes, the agents on managed hosts and DPUs, and the off-the-shelf dependencies around them" width="100%">
-  <p><em>A NICo site: the Site Controller services (green) on a Kubernetes cluster, the agents on managed hosts and DPUs, and the off-the-shelf dependencies (white) they rely on.</em></p>
-</div>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/static/readme/hero-dark.svg">
+  <img src="docs/static/readme/hero-light.svg" alt="NICo at a glance: providers, tenants, and platform control planes call the REST and gRPC APIs. The NICo Site Controller runs on Kubernetes and manages racks of hosts through their BMCs and BlueField DPUs." width="100%">
+</picture>
+
+<details>
+<summary><b>Full component diagram</b>: every Site Controller service, host agent, and off-the-shelf dependency</summary>
+<br>
+<img src="docs/static/nico_arch_diagram.svg" alt="Detailed NICo architecture diagram showing the Site Controller services (green), the agents on managed hosts and DPUs, and the off-the-shelf dependencies (white)" width="100%">
+</details>
 
 AI factories need rack-level management, host lifecycle automation, and
 workload isolation that general-purpose tools do not provide as one integrated
@@ -59,6 +65,7 @@ host, so the layers above it can treat bare metal as a reliable building block.
 <table>
   <tr>
     <td width="33%" valign="top">
+      <img src="docs/static/readme/icon-readiness.svg" width="40" height="40" alt="">
       <h3>Hardware Readiness</h3>
       Discovers BMCs over the out-of-band network with Redfish, pairs DPUs to
       hosts, validates each machine against its expected SKU, runs burn-in and
@@ -66,12 +73,14 @@ host, so the layers above it can treat bare metal as a reliable building block.
       is offered to tenants.
     </td>
     <td width="33%" valign="top">
+      <img src="docs/static/readme/icon-dpu.svg" width="40" height="40" alt="">
       <h3>DPU Lifecycle</h3>
       Installs the DPU OS, provisions Host-Based Networking (HBN) with
       Containerized Cumulus, manages DPU BMC, NIC, UEFI, and ATF firmware, and
       runs the DPU agent that continuously applies the desired network state.
     </td>
     <td width="33%" valign="top">
+      <img src="docs/static/readme/icon-isolation.svg" width="40" height="40" alt="">
       <h3>Network Isolation</h3>
       Enforces per-tenant boundaries on every plane without touching physical
       switches: VXLAN/EVPN and VRFs on Ethernet, UFM P_Key partitions on
@@ -80,6 +89,7 @@ host, so the layers above it can treat bare metal as a reliable building block.
   </tr>
   <tr>
     <td valign="top">
+      <img src="docs/static/readme/icon-trust.svg" width="40" height="40" alt="">
       <h3>Trust and Attestation</h3>
       Treats every host as untrusted by default. Verifies measured boot PCRs
       and TPM signatures, locks down UEFI during tenant use, manages BMC and
@@ -87,6 +97,7 @@ host, so the layers above it can treat bare metal as a reliable building block.
       security decisions.
     </td>
     <td valign="top">
+      <img src="docs/static/readme/icon-firmware.svg" width="40" height="40" alt="">
       <h3>Firmware Upgrades</h3>
       Keeps the fleet on a site-wide firmware baseline. Operators declare the
       expected host and DPU versions, NICo detects drift, and it schedules
@@ -94,6 +105,7 @@ host, so the layers above it can treat bare metal as a reliable building block.
       active tenants.
     </td>
     <td valign="top">
+      <img src="docs/static/readme/icon-provisioning.svg" width="40" height="40" alt="">
       <h3>Provisioning and Sanitization</h3>
       Boots any iPXE-installable OS, allocates IP addresses, and configures
       BGP, DHCP, and DNS. When a tenant leaves, securely erases NVMe, GPU, and
@@ -167,17 +179,10 @@ from "racked and cabled" to "ready for tenants". Day 1 isolates and provisions
 a host for a tenant. Day 2 keeps the fleet healthy and returns released hosts
 to the pool.
 
-```mermaid
-flowchart LR
-    day0["<b>Day 0: Bring-Up</b><br/><br/>Redfish discovery<br/>SKU validation and burn-in<br/>Firmware baseline<br/>DPU OS and HBN provisioning<br/>Attestation<br/>IP, DHCP, and DNS setup"]
-    day1["<b>Day 1: Provision</b><br/><br/>Network isolation<br/>UEFI and BMC lockdown<br/>iPXE OS install<br/>Hand off to the tenant"]
-    day2["<b>Day 2: Operate</b><br/><br/>Health monitoring<br/>Firmware upgrades<br/>Tenant release<br/>Sanitize and re-attest"]
-    day0 --> day1 --> day2
-    day2 -. "released hosts return to the pool" .-> day1
-    style day0 fill:#eef6e3,stroke:#76B900
-    style day1 fill:#eef6e3,stroke:#76B900
-    style day2 fill:#eef6e3,stroke:#76B900
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/static/readme/lifecycle-dark.svg">
+  <img src="docs/static/readme/lifecycle-light.svg" alt="The NICo lifecycle: Day 0 bring-up (discovery, validation, firmware baseline, DPU provisioning, attestation, network setup), Day 1 provisioning (isolation, lockdown, iPXE install, hand off), and Day 2 operations (health, firmware upgrades, release, sanitize and re-attest), with released hosts returning to the pool." width="100%">
+</picture>
 
 **Day 0: Discovery, Validation, and Ingestion.** After a host is racked and
 cabled, NICo discovers it over Redfish, links each DPU to its host, validates
@@ -223,15 +228,10 @@ NICo sits below Kubernetes and platform layers. It exposes REST and gRPC APIs
 that higher-level systems consume directly, and it does not dictate how
 scheduling, tenancy policy, or workloads are managed above it.
 
-```mermaid
-flowchart TB
-    isv["ISV or NCP control plane"]
-    paas["Kubernetes, BMaaS, or VMaaS"]
-    nico["NICo: Site Controller, REST API, Flow"]
-    hw["BlueField DPUs, host servers, BMCs, and fabrics"]
-    isv --> paas --> nico --> hw
-    style nico fill:#76B900,stroke:#5a8f00,color:#fff
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/static/readme/layers-dark.svg">
+  <img src="docs/static/readme/layers-light.svg" alt="Where NICo fits: below ISV or NCP control planes and Kubernetes, BMaaS, or VMaaS layers, and above the BlueField DPUs, host servers, BMCs, and fabrics." width="100%">
+</picture>
 
 ## How It Is Built
 
