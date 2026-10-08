@@ -108,9 +108,13 @@ client-side call boundaries, not server receive times.
 The same fields appear in completion logs under the `rms_rpc_audit` target at DEBUG level.
 The `rms_rpc` span sets `logfmt.suppress`, so the logfmt output carries that DEBUG record and
 no `level=SPAN` close line repeating the bodies. The admin UI log stream, when enabled, is a
-separate layer and still lists the span with its fields. When both DEBUG audit logging and the
-API runtime tracing flag are disabled, payload encoding and redaction are skipped; transport
-propagation remains installed.
+separate layer and still lists the span with its fields. In nico-api, DEBUG audit logging is on
+when the current runtime log filter, including changes made through dynamic settings, allows
+`rms_rpc_audit` at DEBUG; another layer accepting DEBUG does not count. When that filter and
+the API runtime tracing flag are both off, payload encoding and redaction are skipped;
+transport propagation remains installed. The transport runs without the caller's span, so
+connections it opens do not keep the `rms_rpc` span open after the call returns, and the
+client's own events are not recorded.
 Bodies are redacted before being attached to a span or log: credentials, passwords, tokens,
 URLs, arbitrary attributes, config values, error text, embedded JSON, and binary fields are
 withheld. Only reviewed identifier, address, domain, and version string fields are retained;
