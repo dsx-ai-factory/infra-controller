@@ -733,8 +733,9 @@ _DB_RECORD_CONFIGMAP="nico-workload-databases"
 
 # Sets _DB_LOCATION to where the component's database is now: nico-pg-cluster,
 # standalone, new, or other. The deployed workload decides first, then the
-# location setup.sh recorded, then whether the standalone StatefulSet or its
-# volume is still there. Phase 7c reattaches a retained volume. Sets
+# location setup.sh recorded, then, for Temporal only, whether the standalone
+# StatefulSet or its volume is still there. Phase 7c reattaches a retained
+# volume. Sets
 # _DB_LOCATION_ERROR for other, and leaves _DB_LOCATION empty with an error
 # when the cluster can't be read.
 _db_location() {
@@ -774,7 +775,10 @@ _db_location() {
             _DB_LOCATION="${_recorded}"
             ;;
         "")
-            if [[ -n "${_standalone}" ]]; then
+            # REST always deploys Temporal, so a missing release next to the
+            # StatefulSet means it was deleted. Keycloak is optional, so a
+            # missing Deployment usually means it was never deployed.
+            if [[ "${_component}" == "temporal" && -n "${_standalone}" ]]; then
                 _DB_LOCATION=standalone
             else
                 _DB_LOCATION=new
@@ -791,8 +795,9 @@ _db_location() {
 # Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
 # _USE_HA_POSTGRES as true or false. `auto` keeps the database where
 # _db_location finds it, so it never moves an existing database, and a new Site
-# gets nico-pg-cluster. Records an error and leaves _USE_HA_POSTGRES empty when
-# it can't decide.
+# gets nico-pg-cluster. With postgresql.enabled false, the chart creates no
+# nico-pg-cluster, so `auto` means false. Records an error and leaves
+# _USE_HA_POSTGRES empty when it can't decide.
 _resolve_use_ha_postgres() {
     local _component="$1" _value
     _USE_HA_POSTGRES=""
@@ -809,6 +814,10 @@ _resolve_use_ha_postgres() {
             ;;
     esac
 
+    if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+        _USE_HA_POSTGRES=false
+        return 0
+    fi
     _db_location "${_component}"
     case "${_DB_LOCATION}" in
         nico-pg-cluster|new)
