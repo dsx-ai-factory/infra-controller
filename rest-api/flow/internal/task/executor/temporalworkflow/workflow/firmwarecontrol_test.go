@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 	temporalworkflow "go.temporal.io/sdk/workflow"
@@ -174,17 +176,42 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 	layeredReqInfo.RuleDefinition.Steps = append(layeredReqInfo.RuleDefinition.Steps[:1],
 		switchStep, layeredReqInfo.RuleDefinition.Steps[1])
 	legacySelection := temporalworkflow.DefaultVersion
+	parallelReqInfo := baseReqInfo
+	parallelReqInfo.Components = append(firmwareTestComponents("comp1", "comp2"), task.WorkflowComponent{
+		ComponentID: "ps1", Type: devicetypes.ComponentTypePowerShelf,
+	})
+	computeStep := createFirmwareTestRuleDef().Steps[0]
+	powerShelfStep := computeStep
+	powerShelfStep.ComponentType = devicetypes.ComponentTypePowerShelf
+	parallelReqInfo.RuleDefinition = &operationrules.RuleDefinition{
+		Version: "v1", Steps: []operationrules.SequenceStep{computeStep, powerShelfStep},
+	}
+	postFailureReqInfo := baseReqInfo
+	postFailureReqInfo.RuleDefinition = createFirmwareTestRuleDef()
+	postFailureReqInfo.RuleDefinition.Steps = postFailureReqInfo.RuleDefinition.Steps[:1]
+	postFailureReqInfo.RuleDefinition.Steps[0].PostOperation = []operationrules.ActionConfig{{
+		Name:       operationrules.ActionPowerControl,
+		Parameters: map[string]any{operationrules.ParamOperation: "power_on"},
+	}}
 
 	testCases := map[string]struct {
-		reqInfo       task.ExecutionInfo
-		info          *operations.FirmwareControlTaskInfo
-		activityError error
-		expectError   bool
-		versions      map[devicetypes.ComponentType]string
-		selection     *temporalworkflow.Version
-		computeStatus report.Status
-		powerCalls    int
-		history       string
+		reqInfo         task.ExecutionInfo
+		info            *operations.FirmwareControlTaskInfo
+		activityError   error
+		expectError     bool
+		versions        map[devicetypes.ComponentType]string
+		selection       *temporalworkflow.Version
+		computeStatus   report.Status
+		powerCalls      int
+		history         string
+		statusResponses []map[string]operations.FirmwareUpdateStatus
+		wantProgress    []firmwareStepProgress
+		checkProgress   bool
+		legacyProgress  bool
+		parallelFailure bool
+		wantFinal       []firmwareStepProgress
+		postFailure     bool
+		wantStepErrors  map[string]string
 	}{
 		"legacy history schedules omitted component": {
 			reqInfo: task.ExecutionInfo{
@@ -295,6 +322,106 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 			activityError: nil,
 			expectError:   false,
 		},
+		"persists firmware component progress": {
+			reqInfo: baseReqInfo,
+			info:    baseInfo,
+			statusResponses: []map[string]operations.FirmwareUpdateStatus{
+				{
+					"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+					"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateVerifying),
+				},
+				{
+					"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+					"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateCompleted),
+				},
+			},
+			wantProgress: []firmwareStepProgress{
+				{
+					StageNumber:         1,
+					ComponentType:       "Compute",
+					CompletedComponents: 1,
+				},
+				{
+					StageNumber:         1,
+					ComponentType:       "Compute",
+					CompletedComponents: 2,
+				},
+			},
+			checkProgress: true,
+		},
+		"waits for compute progress after parallel powershelf failure": {
+			reqInfo:         parallelReqInfo,
+			info:            baseInfo,
+			expectError:     true,
+			parallelFailure: true,
+			wantStepErrors:  map[string]string{"Compute": "", "PowerShelf": "ps1"},
+			statusResponses: []map[string]operations.FirmwareUpdateStatus{
+				{
+					"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+					"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateVerifying),
+				},
+				{
+					"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+					"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateCompleted),
+				},
+			},
+			wantFinal: []firmwareStepProgress{
+				{StageNumber: 1, ComponentType: "Compute", CompletedComponents: 2},
+				{StageNumber: 1, ComponentType: "PowerShelf", FailedComponents: 1},
+			},
+		},
+		"parallel failures retain their own errors": {
+			reqInfo: parallelReqInfo, info: baseInfo, expectError: true, parallelFailure: true,
+			statusResponses: []map[string]operations.FirmwareUpdateStatus{{
+				"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+				"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateFailed),
+			}},
+			wantFinal: []firmwareStepProgress{
+				{StageNumber: 1, ComponentType: "Compute", CompletedComponents: 1, FailedComponents: 1},
+				{StageNumber: 1, ComponentType: "PowerShelf", FailedComponents: 1},
+			},
+			wantStepErrors: map[string]string{"Compute": "comp2", "PowerShelf": "ps1"},
+		},
+		"post-operation failure retains completed firmware counters": {
+			reqInfo: postFailureReqInfo, info: baseInfo, expectError: true, postFailure: true,
+			wantFinal:      []firmwareStepProgress{{StageNumber: 1, ComponentType: "Compute", CompletedComponents: 2}},
+			wantStepErrors: map[string]string{"Compute": "post-operation failed"},
+		},
+		"timeout leaves unresolved components uncounted": {
+			reqInfo: baseReqInfo, info: baseInfo, expectError: true,
+			statusResponses: []map[string]operations.FirmwareUpdateStatus{{
+				"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+				"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateVerifying),
+			}},
+			wantFinal:      []firmwareStepProgress{{StageNumber: 1, ComponentType: "Compute", CompletedComponents: 1}},
+			wantStepErrors: map[string]string{"Compute": "timed out"},
+		},
+		"persists terminal counters when firmware fails": {
+			reqInfo:     baseReqInfo,
+			info:        baseInfo,
+			expectError: true,
+			statusResponses: []map[string]operations.FirmwareUpdateStatus{
+				{
+					"comp1": firmwareStatus("comp1", operations.FirmwareUpdateStateCompleted),
+					"comp2": firmwareStatus("comp2", operations.FirmwareUpdateStateFailed),
+				},
+			},
+			wantProgress: []firmwareStepProgress{
+				{
+					StageNumber:         1,
+					ComponentType:       "Compute",
+					CompletedComponents: 1,
+					FailedComponents:    1,
+				},
+			},
+			checkProgress: true,
+		},
+		"legacy history retains reports without component progress": {
+			reqInfo:        baseReqInfo,
+			info:           baseInfo,
+			checkProgress:  true,
+			legacyProgress: true,
+		},
 	}
 
 	for name, tc := range testCases {
@@ -307,6 +434,13 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 			env := testSuite.NewTestWorkflowEnvironment()
 
 			env.RegisterWorkflowWithOptions(genericComponentStepWorkflow, temporalworkflow.RegisterOptions{Name: nameGenericComponentStepWorkflow})
+			if tc.legacyProgress {
+				env.OnGetVersion(
+					firmwareReportCountersChangeID,
+					temporalworkflow.DefaultVersion,
+					temporalworkflow.Version(1),
+				).Return(temporalworkflow.DefaultVersion).Twice()
+			}
 
 			registerTaskUpdateActivities(env)
 			env.RegisterActivityWithOptions(mockFirmwareControl, activity.RegisterOptions{
@@ -342,15 +476,37 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 					env.OnActivity(mockFirmwareControl, mock.Anything, target, expectedInfo).Return(nil).Once()
 				}
 			}
+			var statusMu sync.Mutex
+			statusCall := 0
 			env.OnActivity(mockGetFirmwareStatus, mock.Anything, mock.Anything).Return(
 				func(_ context.Context, target common.Target) (*activitypkg.GetFirmwareStatusResult, error) {
+					if tc.parallelFailure && target.Type == devicetypes.ComponentTypePowerShelf {
+						return &activitypkg.GetFirmwareStatusResult{
+							Statuses: map[string]operations.FirmwareUpdateStatus{
+								"ps1": firmwareStatus("ps1", operations.FirmwareUpdateStateFailed),
+							},
+						}, nil
+					}
+					if len(tc.statusResponses) > 0 {
+						statusMu.Lock()
+						defer statusMu.Unlock()
+						responseIndex := min(statusCall, len(tc.statusResponses)-1)
+						statusCall++
+						return &activitypkg.GetFirmwareStatusResult{
+							Statuses: tc.statusResponses[responseIndex],
+						}, nil
+					}
 					statuses := make(map[string]operations.FirmwareUpdateStatus)
 					for _, id := range target.Identifiers {
 						statuses[id] = operations.FirmwareUpdateStatus{ComponentID: id, State: operations.FirmwareUpdateStateCompleted}
 					}
 					return &activitypkg.GetFirmwareStatusResult{Statuses: statuses}, nil
 				})
-			env.OnActivity(mockPowerControl, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+			var powerErr error
+			if tc.postFailure {
+				powerErr = temporal.NewNonRetryableApplicationError("post-operation power failure", "test", nil)
+			}
+			env.OnActivity(mockPowerControl, mock.Anything, mock.Anything, mock.Anything).Return(powerErr).Maybe()
 			env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(
 				func(_ context.Context, target common.Target) (map[string]operations.PowerStatus, error) {
 					statuses := make(map[string]operations.PowerStatus, target.Len())
@@ -361,9 +517,28 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 				}).Maybe()
 
 			var finalReport json.RawMessage
-			env.OnActivity(activitypkg.NameUpdateTaskReport, mock.Anything, mock.Anything).Return(nil)
-			env.OnActivity(activitypkg.NameUpdateTaskStatus, mock.Anything, mock.Anything).Return(nil).
-				Run(func(args mock.Arguments) { finalReport = args.Get(1).(*task.TaskStatusUpdate).Report })
+			var reportMu sync.Mutex
+			var reportSnapshots [][]byte
+			env.OnActivity(activitypkg.NameUpdateTaskStatus, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, update *task.TaskStatusUpdate) error {
+					if len(update.Report) == 0 {
+						return nil
+					}
+					reportMu.Lock()
+					defer reportMu.Unlock()
+					finalReport = append([]byte(nil), update.Report...)
+					reportSnapshots = append(reportSnapshots, append([]byte(nil), update.Report...))
+					return nil
+				},
+			)
+			env.OnActivity(activitypkg.NameUpdateTaskReport, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, update *task.TaskReportUpdate) error {
+					reportMu.Lock()
+					defer reportMu.Unlock()
+					reportSnapshots = append(reportSnapshots, append([]byte(nil), update.Report...))
+					return nil
+				},
+			)
 			env.ExecuteWorkflow(firmwareControl, tc.reqInfo, tc.info)
 
 			assert.True(t, env.IsWorkflowCompleted())
@@ -398,6 +573,75 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 				env.AssertActivityCalled(t, activitypkg.NameGetPowerStatus, mock.Anything, common.Target{
 					Type: devicetypes.ComponentTypeCompute, IdentifierType: common.IdentifierTypeManagerID, Identifiers: []string{"comp1"},
 				})
+			}
+			if tc.checkProgress || tc.wantFinal != nil {
+				rep, err := report.Unmarshal(finalReport)
+				require.NoError(t, err)
+				require.NotNil(t, rep)
+				wantStatus := report.StatusCompleted
+				if tc.expectError {
+					wantStatus = report.StatusFailed
+				}
+				require.NotEmpty(t, rep.Stages)
+				require.Equal(t, wantStatus, rep.Stages[0].Status)
+				wantFinal := tc.wantFinal
+				if wantFinal == nil {
+					last := firmwareStepProgress{StageNumber: 1, ComponentType: "Compute"}
+					if len(tc.wantProgress) > 0 {
+						last = tc.wantProgress[len(tc.wantProgress)-1]
+					}
+					wantFinal = []firmwareStepProgress{last}
+				}
+				var gotFinal []firmwareStepProgress
+				for _, step := range rep.Stages[0].Steps {
+					if wantError, ok := tc.wantStepErrors[step.ComponentType]; ok {
+						require.NotEmpty(t, step.StartedAt)
+						require.NotEmpty(t, step.FinishedAt)
+						if wantError == "" {
+							require.Equal(t, report.StatusCompleted, step.Status)
+							require.Empty(t, step.Error)
+						} else {
+							require.Equal(t, report.StatusFailed, step.Status)
+							require.Contains(t, step.Error, wantError)
+						}
+					}
+					gotFinal = append(gotFinal, firmwareStepProgress{
+						StageNumber: rep.Stages[0].Number, ComponentType: step.ComponentType,
+						CompletedComponents: step.CompletedComponents, FailedComponents: step.FailedComponents,
+					})
+				}
+				require.ElementsMatch(t, wantFinal, gotFinal)
+			}
+			if tc.checkProgress {
+				reportMu.Lock()
+				snapshots := append([][]byte(nil), reportSnapshots...)
+				reportMu.Unlock()
+
+				var gotProgress []firmwareStepProgress
+				for _, raw := range snapshots {
+					rep, err := report.Unmarshal(raw)
+					require.NoError(t, err)
+					for _, stage := range rep.Stages {
+						if stage.Number != 1 {
+							continue
+						}
+						for _, step := range stage.Steps {
+							progress := firmwareStepProgress{
+								StageNumber:         stage.Number,
+								ComponentType:       step.ComponentType,
+								CompletedComponents: step.CompletedComponents,
+								FailedComponents:    step.FailedComponents,
+							}
+							if progress.CompletedComponents == 0 && progress.FailedComponents == 0 {
+								continue
+							}
+							if len(gotProgress) == 0 || gotProgress[len(gotProgress)-1] != progress {
+								gotProgress = append(gotProgress, progress)
+							}
+						}
+					}
+				}
+				require.Equal(t, tc.wantProgress, gotProgress)
 			}
 		})
 	}

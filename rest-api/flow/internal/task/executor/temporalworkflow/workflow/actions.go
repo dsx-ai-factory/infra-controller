@@ -421,6 +421,7 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 			}
 
 			latestStatuses = result.Statuses
+			reportFirmwareProgress(ctx, target, result.Statuses)
 			allTerminal := true
 			failedComponents := make([]string, 0)
 			for _, componentID := range targetIDs {

@@ -26895,8 +26895,8 @@ components:
       examples:
         - id: 550e8400-e29b-41d4-a716-446655440000
           status: Running
-          description: Power on rack components
-          message: 'Processing 3 of 5 components'
+          description: Update rack firmware
+          message: Firmware update in progress
           ruleId: 7c9e6679-7425-40de-944b-e07fc1f90ae7
           report:
             version: 1
@@ -26909,6 +26909,8 @@ components:
                   - componentType: Compute
                     status: completed
                     totalComponents: 4
+                    succeededComponents: 4
+                    failedComponents: 0
                     startedAt: '2026-06-08T18:00:00Z'
                     finishedAt: '2026-06-08T18:00:42Z'
               - number: 2
@@ -26918,10 +26920,14 @@ components:
                   - componentType: NVLSwitch
                     status: running
                     totalComponents: 2
+                    succeededComponents: 0
+                    failedComponents: 0
                     startedAt: '2026-06-08T18:00:42Z'
                   - componentType: PowerShelf
                     status: skipped
                     totalComponents: 0
+                    succeededComponents: 0
+                    failedComponents: 0
     TaskStats:
       title: TaskStats
       type: object
@@ -27843,9 +27849,13 @@ components:
       type: object
       description: |
         Execution state of one rule sequence step. Pairs 1:1 with the rule's ordered steps within the containing stage and shares its index.
+        Unresolved components (`totalComponents - succeededComponents - failedComponents`) have no reported terminal outcome, even if the step has failed or timed out.
       required:
         - componentType
         - status
+        - totalComponents
+        - succeededComponents
+        - failedComponents
       properties:
         componentType:
           type: string
@@ -27855,14 +27865,15 @@ components:
         totalComponents:
           type: integer
           description: |
-            Count of components of `componentType` this step targets. Surfaced here because the task representation does not include the per-type component map.
-        completedComponents:
+            Count of components of `componentType` this step targets, including zero for skipped steps.
+        succeededComponents:
           type: integer
           description: |
-            Reserved for a future best-effort activity contract that reports per-component outcomes. Not written under the current fail-fast contract and omitted by the producer.
+            Number of requested components reported as successfully completed, combining the latest successful poll of the current batch with outcomes from completed batches. May decrease if a component is absent from a later poll. Zero when no successful outcomes have been reported.
         failedComponents:
           type: integer
-          description: Reserved (see `completedComponents`).
+          description: |
+            Number of requested components reported as `Failed`, using the same counting rules as `succeededComponents`. Zero when no failed outcomes have been reported.
         startedAt:
           type: string
           format: date-time

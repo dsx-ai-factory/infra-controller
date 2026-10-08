@@ -49,6 +49,7 @@ func genericComponentStepWorkflow(
 	activityOpts := buildActivityOptions(step)
 	ctx = workflow.WithActivityOptions(ctx, activityOpts)
 	maxParallel := versionedMaxParallel(ctx, step.MaxParallel)
+	ctx = withFirmwareProgressReporter(ctx, step, target)
 
 	// 1. Execute pre-operation actions
 	if shouldDo, actions := step.DoPreOperations(); shouldDo {
