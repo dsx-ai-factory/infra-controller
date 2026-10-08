@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -163,12 +164,12 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name: "successful creation",
+			name: "successful creation with a 256-character BMC username and 255-character password",
 			requestBody: model.APIExpectedSwitchCreateRequest{
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr("admin"),
-				DefaultBmcPassword: cutil.GetPtr("password"),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("u", 256)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				SwitchSerialNumber: "SWITCH123",
 				NvOsUsername:       cutil.GetPtr("nvos-admin"),
 				NvOsPassword:       cutil.GetPtr("nvos-password"),
@@ -802,6 +803,9 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 		name                 string
 		id                   string
 		requestBody          model.APIExpectedSwitchUpdateRequest
+		rawRequestBody       string
+		initialBmcIPAddress  *string
+		expectedBmcIPAddress *string
 		setupContext         func(c echo.Context)
 		expectedStatus       int
 		expectedBmcMac       string
@@ -824,14 +828,16 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testES.ID.String())
 			},
-			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"metadata.labels", "switch_serial_number"},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"metadata.labels", "switch_serial_number"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
 		},
 		{
-			name: "BMC password is encrypted without resubmitting its username",
+			name: "255-character BMC password is encrypted without resubmitting its username",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr("bmc-patch-secret"),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("b", 255)),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -842,10 +848,10 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			expectedPaths:  []string{"bmc_password"},
 		},
 		{
-			name: "BMC username is encrypted without resubmitting its password",
+			name: "512-character BMC username is encrypted without resubmitting its password",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr("bmc-patch-admin"),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("v", 512)),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -960,8 +966,57 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testES.ID.String())
 			},
-			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"bmc_ip_address"},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"bmc_ip_address"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.42"),
+		},
+		{
+			name:           "omitted BMC IP address preserves the stored address",
+			id:             testES.ID.String(),
+			rawRequestBody: `{"labels":{"env":"omitted-bmc-ip"}}`,
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"metadata.labels"},
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "empty BMC IP address clears the stored address",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
+				BmcIpAddress: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:      http.StatusOK,
+			expectedPaths:       []string{"bmc_ip_address"},
+			initialBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+		},
+		{
+			name: "Core rejection rolls back clearing the BMC IP address",
+			id:   testES.ID.String(),
+			requestBody: model.APIExpectedSwitchUpdateRequest{
+				BmcIpAddress: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testES.ID.String())
+			},
+			expectedStatus:       http.StatusBadRequest,
+			expectedPaths:        []string{"bmc_ip_address"},
+			expectedErrorMsg:     "BMC IP update rejected",
+			initialBmcIPAddress:  cutil.GetPtr("192.168.1.100"),
+			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
+			coreError:            swe.WrapErr(status.Error(codes.InvalidArgument, "BMC IP update rejected")),
 		},
 		{
 			name: "successful update with NvosMacAddresses",
@@ -1052,7 +1107,17 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.initialBmcIPAddress != nil {
+				_, err := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
+					ExpectedSwitchID: testES.ID,
+					BmcIpAddress:     tt.initialBmcIPAddress,
+				})
+				require.NoError(t, err)
+			}
 			reqBody, _ := json.Marshal(tt.requestBody)
+			if tt.rawRequestBody != "" {
+				reqBody = []byte(tt.rawRequestBody)
+			}
 			url := "/v2/org/" + org + "/nico/expected-switch/" + tt.id
 			req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader(reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -1104,6 +1169,9 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				require.NotNil(t, capturedPatch)
 				require.NotNil(t, capturedPatch.UpdateMask)
 				assert.Equal(t, tt.expectedPaths, capturedPatch.UpdateMask.Paths)
+				if tt.requestBody.BmcIpAddress != nil {
+					assert.Equal(t, *tt.requestBody.BmcIpAddress, capturedPatch.ExpectedSwitch.BmcIpAddress)
+				}
 				if tt.requestBody.DefaultBmcUsername != nil {
 					assert.Equal(t, *tt.requestBody.DefaultBmcUsername, capturedPatch.ExpectedSwitch.BmcUsername)
 					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcUsername)
@@ -1130,13 +1198,18 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				}
 			}
 
-			// Verify BmcIpAddress round-trips through the update response when set
-			if tt.expectedStatus == http.StatusOK && tt.requestBody.BmcIpAddress != nil {
-				var response model.APIExpectedSwitch
-				err := json.Unmarshal(rec.Body.Bytes(), &response)
-				assert.Nil(t, err)
-				if assert.NotNil(t, response.BmcIpAddress, "BmcIpAddress should not be nil in response") {
-					assert.Equal(t, *tt.requestBody.BmcIpAddress, *response.BmcIpAddress, "BmcIpAddress in response should match request")
+			if tt.initialBmcIPAddress != nil {
+				stored, err := esDAO.Get(ctx, nil, testES.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedBmcIPAddress, stored.BmcIpAddress)
+				if rec.Code == http.StatusOK {
+					var response map[string]json.RawMessage
+					err = json.Unmarshal(rec.Body.Bytes(), &response)
+					require.NoError(t, err)
+					require.Contains(t, response, "bmcIpAddress")
+					expectedJSON, err := json.Marshal(tt.expectedBmcIPAddress)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(expectedJSON), string(response["bmcIpAddress"]))
 				}
 			}
 

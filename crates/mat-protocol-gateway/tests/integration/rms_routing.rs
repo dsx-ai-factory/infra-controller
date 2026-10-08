@@ -32,14 +32,15 @@ use librms::protos::rack_manager::{
 use librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use mat_protocol_gateway::{ExitReason, RMS_VERSION};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use tonic::transport::Channel;
 
 use crate::common::{
     FakeController, FakeMachineATron, GUID_A, GUID_B, SWITCH_A, SWITCH_B, TRAY_A, WAIT, counts,
-    devices_a, devices_b, finished, free_loopback_address, gateway_config, node, nodes, probe,
-    rms_client, spawn_run, wait_until, wait_until_ready,
+    devices_a, devices_b, finished, gateway_config, node, nodes, probe, rms_client, spawn_run,
+    wait_until, wait_until_ready,
 };
 
 /// Status and body of `/readyz`; `None` while nothing answers.
@@ -107,12 +108,16 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         FakeMachineATron::start_with_racks("mat-a", &[GUID_A], &["rack-001"], devices_a()).await;
     let mat_b =
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_until_ready(&http, listen).await;
     let mut rms = rms_client(listen).await;
 
@@ -487,12 +492,15 @@ async fn a_rack_reported_by_two_instances_blocks_readiness_and_routing_until_one
         devices_b(),
     )
     .await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
 
     wait_until("the gateway explains the conflict", || async {
         readyz(&http, listen)
@@ -540,15 +548,19 @@ async fn a_source_that_stops_answering_keeps_its_racks_until_stale_after_then_an
         FakeMachineATron::start_with_racks("mat-a", &[GUID_A], &["rack-001"], devices_a()).await;
     let mat_b =
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let mut config = gateway_config(controller.serve().await, listen);
     // The stale state is asserted before it expires, so give the assertion room on a loaded host.
     config.ownership.stale_after = Duration::from_secs(2);
     config.validate().unwrap();
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_until_ready(&http, listen).await;
     let mut rms = rms_client(listen).await;
 
@@ -624,14 +636,15 @@ async fn a_source_down_at_startup_blocks_readiness_and_routing_until_it_answers(
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
     mat_b.set_available(false);
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let mut config = gateway_config(controller.serve().await, listen);
     // Expiry must outlast the bounded assertion phase. Its transition is tested separately.
     config.ownership.stale_after = WAIT * 10;
     config.validate().unwrap();
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
 
     tokio::time::timeout(WAIT, async {
         wait_until("the gateway names the pending source", || async {
@@ -683,11 +696,12 @@ async fn a_source_down_at_startup_stops_blocking_after_stale_after_and_can_recov
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
     mat_b.set_available(false);
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
 
     wait_until_ready(&http, listen).await;
 

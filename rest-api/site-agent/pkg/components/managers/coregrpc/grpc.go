@@ -32,6 +32,7 @@ func (coregrpc *API) CreateGrpcClient() error {
 		ClientCertPath: ManagerAccess.Conf.EB.CoreGrpc.ClientCertPath,
 		ClientKeyPath:  ManagerAccess.Conf.EB.CoreGrpc.ClientKeyPath,
 		ClientMetrics:  makeGrpcClientMetrics(),
+		OnRPCFinish:    coregrpc.UpdateGrpcClientState,
 	}
 
 	logger.Info().Interface("GrpcConfig", ManagerAccess.Data.EB.Managers.CoreGrpc.Client.Config).Msg("Creating Core gRPC client")
@@ -82,14 +83,13 @@ func isGrpcUp(c codes.Code) bool {
 
 // UpdateGrpcClientState updates the Core gRPC client state
 func (coregrpc *API) UpdateGrpcClientState(err error) {
-	defer computils.UpdateState(ManagerAccess.Data.EB)
 	if err == nil {
 		ManagerAccess.Data.EB.Managers.CoreGrpc.State.GrpcSucc.Inc()
 		ManagerAccess.Data.EB.Managers.CoreGrpc.State.HealthStatus.Store(uint64(computils.CompHealthy))
 		return
 	}
 	ManagerAccess.Data.EB.Managers.CoreGrpc.State.GrpcFail.Inc()
-	ManagerAccess.Data.EB.Managers.CoreGrpc.State.Err = err.Error()
+	ManagerAccess.Data.EB.Managers.CoreGrpc.State.Err.Store(err.Error())
 	log.Error().Err(err).Msg("Core gRPC: Failed to send request to server")
 	st, ok := status.FromError(err)
 	if ok {

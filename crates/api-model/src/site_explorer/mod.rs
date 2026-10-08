@@ -198,7 +198,10 @@ pub struct EndpointExplorationReport {
     /// `Managers` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managers: Vec<Manager>,
-    /// `Systems` reported by Redfish
+    /// ComputerSystems reported by Redfish, with the primary system first.
+    /// Additional systems are ordered by ID and contain resource fields only;
+    /// their linked BIOS, EthernetInterfaces, BootOptions and PCIe inventory
+    /// have not been explored. Empty linked inventory does not imply absence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub systems: Vec<ComputerSystem>,
     /// `Chassis` reported by Redfish
@@ -266,10 +269,41 @@ pub struct EndpointExplorationReport {
 }
 
 impl EndpointExplorationReport {
-    /// model does a best effort to find a model name within the report
+    /// Returns the system selected for endpoint identity and host management.
+    /// The first entry is primary; an empty report has no primary system.
+    pub fn primary_system(&self) -> Option<&ComputerSystem> {
+        self.systems.first()
+    }
+
+    /// Builds a PoweredOff health alert from the primary system's power state.
+    /// Transitional states are allowed during graceful power resets; additional
+    /// systems do not determine the host's power health.
+    pub fn power_state_alert(&self, address: IpAddr) -> Option<health_report::HealthProbeAlert> {
+        let system = self.primary_system().filter(|system| {
+            !matches!(
+                system.power_state,
+                PowerState::On | PowerState::PoweringOn | PowerState::PoweringOff
+            )
+        })?;
+        Some(health_report::HealthProbeAlert {
+            id: "PoweredOff".parse().unwrap(),
+            target: Some(address.to_string()),
+            in_alert_since: None,
+            message: format!(
+                "System \"{}\" power state is \"{:?}\"",
+                system.id, system.power_state
+            ),
+            tenant_message: None,
+            classifications: vec![health_report::HealthAlertClassification::prevent_allocations()],
+        })
+    }
+
+    /// Returns the primary system model, falling back to DPU or chassis identification.
     pub fn model(&self) -> Option<String> {
         // Prefer Systems, not Chassis; at least for Lenovo, Chassis has what is more of a SKU instead of the actual model name.
-        let system_with_model = self.systems.iter().find(|&x| x.model.is_some());
+        let system_with_model = self
+            .primary_system()
+            .filter(|system| system.model.is_some());
         Some(match system_with_model {
             Some(system) => match &system.model {
                 Some(model) => model.to_owned(),
@@ -2774,6 +2808,153 @@ mod tests {
     use super::*;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    #[test]
+    fn component_power_state_does_not_create_host_power_alert() {
+        for component_state in [PowerState::Off, PowerState::Unknown] {
+            let report = EndpointExplorationReport {
+                systems: vec![
+                    ComputerSystem {
+                        id: "System_0".into(),
+                        power_state: PowerState::On,
+                        ..Default::default()
+                    },
+                    ComputerSystem {
+                        id: "HGX_Baseboard_0".into(),
+                        power_state: component_state,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            assert!(
+                report
+                    .power_state_alert("192.0.2.1".parse().unwrap())
+                    .is_none()
+            );
+        }
+        let report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "System_0".into(),
+                power_state: PowerState::Off,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let alert = report
+            .power_state_alert("192.0.2.1".parse().unwrap())
+            .unwrap();
+        assert_eq!(alert.id.to_string(), "PoweredOff");
+        assert_eq!(alert.target.as_deref(), Some("192.0.2.1"));
+        assert!(alert.message.contains("System_0"));
+    }
+
+    #[test]
+    fn primary_power_state_alert() {
+        let address = "192.0.2.1".parse().unwrap();
+        assert!(
+            EndpointExplorationReport::default()
+                .power_state_alert(address)
+                .is_none()
+        );
+        for (power_state, expected_alert) in [
+            (PowerState::On, false),
+            (PowerState::PoweringOn, false),
+            (PowerState::PoweringOff, false),
+            (PowerState::Off, true),
+            (PowerState::Paused, true),
+            (PowerState::Hibernating, true),
+            (PowerState::Sleeping, true),
+            (PowerState::Unknown, true),
+        ] {
+            let report = EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".into(),
+                    power_state,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                report.power_state_alert(address).is_some(),
+                expected_alert,
+                "{power_state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn additional_systems_do_not_change_host_identity_or_model() {
+        let primary = ComputerSystem {
+            id: "System_0".into(),
+            manufacturer: Some("NVIDIA".into()),
+            model: Some("host model".into()),
+            serial_number: Some("host serial".into()),
+            ethernet_interfaces: vec![EthernetInterface {
+                id: Some("eth0".into()),
+                mac_address: Some("94:6d:ae:53:cb:9b".parse().unwrap()),
+                interface_enabled: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut single = EndpointExplorationReport {
+            systems: vec![primary.clone()],
+            ..Default::default()
+        };
+        single.generate_machine_id(true).unwrap();
+        assert!(single.machine_id.is_some());
+        let mut multiple = EndpointExplorationReport {
+            systems: vec![
+                primary,
+                ComputerSystem {
+                    id: "HGX_Baseboard_0".into(),
+                    manufacturer: Some("other vendor".into()),
+                    model: Some("GPU model".into()),
+                    serial_number: Some("GPU serial".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        multiple.generate_machine_id(true).unwrap();
+        assert_eq!(multiple.machine_id, single.machine_id);
+        assert_eq!(multiple.model(), single.model());
+        assert_eq!(multiple.primary_system().unwrap().id, "System_0");
+        assert_eq!(multiple.all_mac_addresses(), single.all_mac_addresses());
+        assert_eq!(
+            multiple.complete_boot_interfaces().collect::<Vec<_>>(),
+            single.complete_boot_interfaces().collect::<Vec<_>>()
+        );
+        let encoded = serde_json::to_string(&multiple).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EndpointExplorationReport>(&encoded).unwrap(),
+            multiple
+        );
+    }
+
+    #[test]
+    fn host_model_uses_primary_or_chassis_without_falling_back_to_component_systems() {
+        value_scenarios!(run = |primary_model: Option<&str>| {
+            let report = EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".into(), model: primary_model.map(str::to_string),
+                    ..Default::default()
+                }, ComputerSystem {
+                    id: "HGX_Baseboard_0".into(), model: Some("GPU model".into()),
+                    ..Default::default()
+                }], chassis: vec![Chassis {
+                    model: Some("host chassis".into()), ..Default::default()
+                }], ..Default::default()
+            };
+            report.model()
+        };
+            "model source" {
+                Some("host model") => Some("host model".to_string()),
+                None => Some("host chassis".to_string()),
+            }
+        );
+    }
 
     /// A class is the key an operator writes profiles against, so whatever the
     /// BMC reports has to reduce to a name the API will accept, including when

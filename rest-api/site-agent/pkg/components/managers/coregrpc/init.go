@@ -68,7 +68,7 @@ func (coregrpc *API) GetState() []string {
 	strs = append(strs, fmt.Sprintln(" GRPC Succeeded:", state.GrpcSucc.Load()))
 	strs = append(strs, fmt.Sprintln(" GRPC Failed:", state.GrpcFail.Load()))
 	strs = append(strs, fmt.Sprintln(" GRPC Status:", computils.CompStatus(state.HealthStatus.Load())))
-	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err))
+	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err.Load()))
 
 	return strs
 }

@@ -1,0 +1,472 @@
+# machine-a-tron-250racks.yaml - 250 GB200 NVL72 racks, 25 racks per pod
+# across ten pods (Controller Mode with the protocol gateway).
+#
+# mat-0 simulates rack-001 to rack-025 through mat-9 simulating rack-226 to
+# rack-250. Each rack expands to 18 compute trays (one host with 2 DPUs
+# each), 9 NVLink switch trays and 8 power shelves: 71 BMCs and 54 NICo
+# machines per rack, so each pod serves 1,775 BMCs and 1,350 machines. The
+# mat-k8s-controller publishes every BMC as a Service externalIP, and its
+# protocol gateway serves one RMS mock and one UFM API for all ten pods.
+#
+# Install order:
+#   1. nico-core with helm-prereqs/values/nico-core-simulation.yaml, with
+#      [networks.simulated-oob] widened to a /17 for 17,750 BMC addresses
+#      (DHCP Address Space in docs/development/machine-a-tron-deployment.md).
+#      Its simulated-oob and simulated-underlay segments are the relay
+#      targets below. Point nico-api.rms.apiUrl at the gateway Service (refer
+#      to docs/development/machine-a-tron-rms-mock.md):
+#      https://nico-machine-a-tron-mat-k8s-controller-gateway.nico-mat.svc.cluster.local:8443
+#   2. The labeled nico-mat namespace and the machine-a-tron-pull Secret
+#      (Cluster Prerequisites in docs/development/machine-a-tron-deployment.md).
+#   3. helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
+#        -n nico-mat --qps 15 --burst-limit 30 --set createNamespace=false \
+#        -f helm-prereqs/values/machine-a-tron-250racks.yaml
+#
+# The site BMC root password comes from the site credentials Secret, not this
+# file. Expect in NICo: 250 racks, 4,500 hosts, 9,000 DPUs, 2,250 switches and
+# 2,000 power shelves (17,750 BMCs), each BMC reachable on its simulated-oob
+# address. Each pod is limited to 4 CPUs and 6Gi of memory (requests 1 CPU, 2Gi).
+#
+# Each pod declares an expected rack group (protocol NVLINK_V5, topology
+# gb200_nvl72r1_c2g4) for a rack no group declares yet, before its expected
+# rack, and nico-api derives the rack profile GB200_NVL72R1_C2G4_WIWYNN from
+# that declaration. An existing group is used as is. rack_profile_id must
+# name the profile derived from the rack's group, which machine-a-tron checks
+# at startup. The nico-api chart ships that profile.
+
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+global:
+  # Pre-created with the nico.nvidia.com/managed label (install step 2).
+  namespaceOverride: nico-mat
+  imagePullSecrets:
+    - name: machine-a-tron-pull
+
+certificate:
+  uris:
+    - spiffe://nico.local/nico-system/sa/machine-a-tron
+
+extraEnv:
+  - name: RUST_LOG
+    value: info
+
+machineATron:
+  configureBmcProxyHost: ""  # Not used in controller mode
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  nicoApiUrl: https://nico-api.nico-system.svc.cluster.local:1079
+  registerExpectedMachines: true
+
+# Per-pod MAC pools: pod N gets 02:00:0N and 02:01:0N, so MACs and the UFM
+# inventory id derived from the range base stay unique across pods.
+macAddressPool:
+  enabled: true
+  basePrefix: "02:00"
+
+hwMacAddressRanges:
+  enabled: true
+  basePrefix: "02:01"
+
+# Controller mode: one Service per BMC with the BMC IP as externalIP, plus the
+# protocol gateway in the controller pod fronting all ten instances.
+mat-k8s-controller:
+  enabled: true
+  # REQUIRED: the mat-k8s-controller image, which also carries the gateway
+  # binary. Set it here or on the command line with
+  #   --set mat-k8s-controller.image.repository=<registry>/mat-k8s-controller
+  #   --set mat-k8s-controller.image.tag=<tag>
+  image:
+    repository: ""
+    tag: ""
+  config:
+    insecureSkipVerify: true  # For self-signed certs
+  gateway:
+    enabled: true
+    # Ten sources to poll and route: limits twice the subchart defaults.
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 512Mi
+
+# The chart's default startupProbe (120 x 30s) already covers 25 racks per pod:
+# one rack registers 36 records, 25 x 36 = 900 records x 2s = 30 min.
+#
+# A restart discards the mock state and repeats the 30 min registration, so
+# the kubelet tolerates a stalled redfish port for 240 x 30s = 2 h before it
+# restarts the pod.
+livenessProbe:
+  tcpSocket:
+    port: redfish
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 240
+  successThreshold: 1
+  timeoutSeconds: 10
+
+# 25 racks (1,775 BMCs, 1,350 machines) per pod. The chart applies this block
+# to every pod.
+resources:
+  limits:
+    cpu: "4"
+    memory: 6Gi
+  requests:
+    cpu: "1"
+    memory: 2Gi
+
+# Rack groups use the chart's snake_case keys. bmc_dhcp_relay_address is the
+# simulated-oob gateway. underlay_dhcp_relay_address is the simulated-underlay
+# gateway: NICo predicts DPU OOB on an underlay segment, so DPU OOB and switch
+# NVOS DHCP relay there (both segments in nico-core-simulation.yaml).
+# mat-1 to mat-9 declare no machine groups. machines: {} makes the chart
+# render the bare [machines] table the binary requires.
+pods:
+  mat-0:
+    machines:
+      # the chart's own mat-0 example deep-merges in without this
+      rack-machines: null
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-001
+          - rack-002
+          - rack-003
+          - rack-004
+          - rack-005
+          - rack-006
+          - rack-007
+          - rack-008
+          - rack-009
+          - rack-010
+          - rack-011
+          - rack-012
+          - rack-013
+          - rack-014
+          - rack-015
+          - rack-016
+          - rack-017
+          - rack-018
+          - rack-019
+          - rack-020
+          - rack-021
+          - rack-022
+          - rack-023
+          - rack-024
+          - rack-025
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-1:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-026
+          - rack-027
+          - rack-028
+          - rack-029
+          - rack-030
+          - rack-031
+          - rack-032
+          - rack-033
+          - rack-034
+          - rack-035
+          - rack-036
+          - rack-037
+          - rack-038
+          - rack-039
+          - rack-040
+          - rack-041
+          - rack-042
+          - rack-043
+          - rack-044
+          - rack-045
+          - rack-046
+          - rack-047
+          - rack-048
+          - rack-049
+          - rack-050
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-2:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-051
+          - rack-052
+          - rack-053
+          - rack-054
+          - rack-055
+          - rack-056
+          - rack-057
+          - rack-058
+          - rack-059
+          - rack-060
+          - rack-061
+          - rack-062
+          - rack-063
+          - rack-064
+          - rack-065
+          - rack-066
+          - rack-067
+          - rack-068
+          - rack-069
+          - rack-070
+          - rack-071
+          - rack-072
+          - rack-073
+          - rack-074
+          - rack-075
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-3:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-076
+          - rack-077
+          - rack-078
+          - rack-079
+          - rack-080
+          - rack-081
+          - rack-082
+          - rack-083
+          - rack-084
+          - rack-085
+          - rack-086
+          - rack-087
+          - rack-088
+          - rack-089
+          - rack-090
+          - rack-091
+          - rack-092
+          - rack-093
+          - rack-094
+          - rack-095
+          - rack-096
+          - rack-097
+          - rack-098
+          - rack-099
+          - rack-100
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-4:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-101
+          - rack-102
+          - rack-103
+          - rack-104
+          - rack-105
+          - rack-106
+          - rack-107
+          - rack-108
+          - rack-109
+          - rack-110
+          - rack-111
+          - rack-112
+          - rack-113
+          - rack-114
+          - rack-115
+          - rack-116
+          - rack-117
+          - rack-118
+          - rack-119
+          - rack-120
+          - rack-121
+          - rack-122
+          - rack-123
+          - rack-124
+          - rack-125
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-5:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-126
+          - rack-127
+          - rack-128
+          - rack-129
+          - rack-130
+          - rack-131
+          - rack-132
+          - rack-133
+          - rack-134
+          - rack-135
+          - rack-136
+          - rack-137
+          - rack-138
+          - rack-139
+          - rack-140
+          - rack-141
+          - rack-142
+          - rack-143
+          - rack-144
+          - rack-145
+          - rack-146
+          - rack-147
+          - rack-148
+          - rack-149
+          - rack-150
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-6:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-151
+          - rack-152
+          - rack-153
+          - rack-154
+          - rack-155
+          - rack-156
+          - rack-157
+          - rack-158
+          - rack-159
+          - rack-160
+          - rack-161
+          - rack-162
+          - rack-163
+          - rack-164
+          - rack-165
+          - rack-166
+          - rack-167
+          - rack-168
+          - rack-169
+          - rack-170
+          - rack-171
+          - rack-172
+          - rack-173
+          - rack-174
+          - rack-175
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-7:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-176
+          - rack-177
+          - rack-178
+          - rack-179
+          - rack-180
+          - rack-181
+          - rack-182
+          - rack-183
+          - rack-184
+          - rack-185
+          - rack-186
+          - rack-187
+          - rack-188
+          - rack-189
+          - rack-190
+          - rack-191
+          - rack-192
+          - rack-193
+          - rack-194
+          - rack-195
+          - rack-196
+          - rack-197
+          - rack-198
+          - rack-199
+          - rack-200
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-8:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-201
+          - rack-202
+          - rack-203
+          - rack-204
+          - rack-205
+          - rack-206
+          - rack-207
+          - rack-208
+          - rack-209
+          - rack-210
+          - rack-211
+          - rack-212
+          - rack-213
+          - rack-214
+          - rack-215
+          - rack-216
+          - rack-217
+          - rack-218
+          - rack-219
+          - rack-220
+          - rack-221
+          - rack-222
+          - rack-223
+          - rack-224
+          - rack-225
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
+  mat-9:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
+        ids:
+          - rack-226
+          - rack-227
+          - rack-228
+          - rack-229
+          - rack-230
+          - rack-231
+          - rack-232
+          - rack-233
+          - rack-234
+          - rack-235
+          - rack-236
+          - rack-237
+          - rack-238
+          - rack-239
+          - rack-240
+          - rack-241
+          - rack-242
+          - rack-243
+          - rack-244
+          - rack-245
+          - rack-246
+          - rack-247
+          - rack-248
+          - rack-249
+          - rack-250
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"

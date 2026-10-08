@@ -6,9 +6,11 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -349,6 +351,8 @@ func TestAllocationSQLDAO_GetAll(t *testing.T) {
 	defer dbSession.Close()
 
 	testAllocationSetupSchema(t, dbSession)
+	err := dbSession.DB.ResetModel(ctx, (*IPBlock)(nil))
+	require.NoError(t, err)
 	ip := testAllocationBuildInfrastructureProvider(t, dbSession, "testIP")
 	site1 := testAllocationBuildSite(t, dbSession, ip, "testSite1")
 	site2 := testAllocationBuildSite(t, dbSession, ip, "testSite2")
@@ -824,6 +828,79 @@ func TestAllocationSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("join sort queries survive an added column", func(t *testing.T) {
+		dbSession.DB.SetMaxOpenConns(1)
+		dbSession.DB.SetMaxIdleConns(1)
+		hook := &testProjectionQueryHook{}
+		dbSession.DB.AddQueryHook(hook)
+		migration := util.GetTestDBSession(t, false)
+		defer migration.Close()
+
+		cases := []struct {
+			field    string
+			firstID  uuid.UUID
+			query    string
+			prepared testPreparedQuery
+		}{
+			{field: allocationOrderByInstanceTypeName, firstID: allocationsTenant1[0].ID},
+			{field: allocationOrderByIPBlockName, firstID: allocationsTenant1[1].ID},
+			{field: allocationOrderByConstraintValue, firstID: allocationsTenant1[0].ID},
+		}
+		for _, afterColumnAddition := range []bool{false, true} {
+			if afterColumnAddition {
+				_, err := migration.DB.ExecContext(ctx, "ALTER TABLE allocation ADD COLUMN test_added_column text")
+				require.NoError(t, err)
+			}
+			for i := range cases {
+				tc := &cases[i]
+				t.Run(fmt.Sprintf("%s/after_column_addition=%t", tc.field, afterColumnAddition), func(t *testing.T) {
+					got, total, err := aDAO.GetAll(ctx, nil,
+						AllocationFilterInput{AllocationIDs: []uuid.UUID{allocationsTenant1[0].ID, allocationsTenant1[1].ID}},
+						paginator.PageInput{OrderBy: &paginator.OrderBy{Field: tc.field, Order: paginator.OrderAscending}}, nil)
+					require.NoError(t, err)
+					require.Len(t, got, 2)
+					assert.Equal(t, 2, total)
+					assert.Equal(t, tc.firstID, got[0].ID)
+					projection, _, found := strings.Cut(hook.query, " FROM ")
+					require.True(t, found)
+					testAssertNamedModelColumns(t, dbSession, Allocation{}, projection)
+					for _, allocation := range got {
+						expected := allocationsTenant1[0]
+						if allocation.ID == allocationsTenant1[1].ID {
+							expected = allocationsTenant1[1]
+						}
+						switch tc.field {
+						case allocationOrderByInstanceTypeName:
+							assert.Contains(t, projection, "it.name AS instance_type_name")
+							if expected.ID == allocationsTenant1[0].ID {
+								expected.InstanceTypeName = it.Name
+							}
+						case allocationOrderByIPBlockName:
+							assert.Contains(t, projection, "ipb.name AS ip_block_name")
+							if expected.ID == allocationsTenant1[1].ID {
+								expected.IPBlockName = ipb.Name
+							}
+						case allocationOrderByConstraintValue:
+							assert.Contains(t, projection, "ac2.constraint_value AS constraint_value")
+							expected.ConstraintValue = "5"
+							if expected.ID == allocationsTenant1[1].ID {
+								expected.ConstraintValue = "10"
+							}
+						}
+						assert.Equal(t, expected, allocation)
+					}
+					prepared := testGetPreparedQuery(t, ctx, dbSession, hook.query)
+					if afterColumnAddition {
+						assert.Equal(t, tc.query, hook.query)
+						assert.Equal(t, tc.prepared, prepared)
+					} else {
+						tc.query, tc.prepared = hook.query, prepared
+					}
+				})
+			}
+		}
+	})
 }
 
 func TestAllocationSQLDAO_Update(t *testing.T) {

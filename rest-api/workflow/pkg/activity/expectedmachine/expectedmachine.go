@@ -182,6 +182,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				ChassisSerialNumber:      reported.ChassisSerialNumber,
 				SkuID:                    reported.SkuID,
 				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
+				Interfaces:               reported.Interfaces,
 				BmcIpAddress:             reported.BmcIpAddress,
 				Labels:                   reported.Labels,
 				MachineID:                reported.MachineID,
@@ -209,6 +210,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			!util.PtrsEqual(cur.SkuID, reported.SkuID) ||
 			!util.PtrsEqual(cur.MachineID, reported.MachineID) ||
 			!reflect.DeepEqual(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers) ||
+			!reflect.DeepEqual(cur.Interfaces, reported.Interfaces) ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
 			!reflect.DeepEqual(cur.Labels, reported.Labels) ||
 			!util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled) {
@@ -240,6 +242,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					SkuID:                    reported.SkuID,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
+					Interfaces:               reported.Interfaces,
 					BmcIpAddress:             reported.BmcIpAddress,
 					Labels:                   labels,
 					IsDpfEnabled:             reported.IsDpfEnabled,
@@ -256,7 +259,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// Delete any Expected Machine present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedIDs.
-	if expectedMachineInventory.InventoryPage == nil || expectedMachineInventory.InventoryPage.TotalPages == 0 || (expectedMachineInventory.InventoryPage.CurrentPage == expectedMachineInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
 		for _, em := range existingExpectedMachines {
 			if _, keep := reportedIDs[em.ID]; keep {
 				continue

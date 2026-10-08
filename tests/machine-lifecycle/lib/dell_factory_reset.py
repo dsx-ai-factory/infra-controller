@@ -19,6 +19,8 @@ from typing import Literal
 
 import requests
 
+from lib import network
+
 REDFISH_TIMEOUT_SECONDS = 60
 GRACEFUL_SHUTDOWN_SECONDS = 300
 
@@ -34,9 +36,9 @@ class DellFactoryResetMethods:
         self.host_bmc_password = host_bmc_password
 
     def reset_bios(self):
-        url = (
-            "https://%s/redfish/v1/Systems/System.Embedded.1/Bios/Actions/Bios.ResetBios"
-            % self.host_bmc_ip
+        url = network.redfish_url(
+            self.host_bmc_ip,
+            "/redfish/v1/Systems/System.Embedded.1/Bios/Actions/Bios.ResetBios",
         )
         payload = {}
         headers = {"content-type": "application/json"}
@@ -69,7 +71,9 @@ class DellFactoryResetMethods:
         for _ in range(10):
             try:
                 response = requests.get(
-                    "https://%s/redfish/v1/Systems/System.Embedded.1" % self.host_bmc_ip,
+                    network.redfish_url(
+                        self.host_bmc_ip, "/redfish/v1/Systems/System.Embedded.1"
+                    ),
                     verify=False,
                     timeout=REDFISH_TIMEOUT_SECONDS,
                     auth=(self.host_bmc_username, self.host_bmc_password),
@@ -90,9 +94,9 @@ class DellFactoryResetMethods:
         data = self._get_server_status()
         print("\n- INFO, Current server power state is: %s" % data["PowerState"])
         if data["PowerState"] == "On":
-            url = (
-                "https://%s/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset"
-                % self.host_bmc_ip
+            url = network.redfish_url(
+                self.host_bmc_ip,
+                "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset",
             )
             payload = {"ResetType": "GracefulShutdown"}
             headers = {"content-type": "application/json"}
@@ -128,7 +132,9 @@ class DellFactoryResetMethods:
                 )
             while True:
                 response = requests.get(
-                    "https://%s/redfish/v1/Systems/System.Embedded.1" % self.host_bmc_ip,
+                    network.redfish_url(
+                        self.host_bmc_ip, "/redfish/v1/Systems/System.Embedded.1"
+                    ),
                     verify=False,
                     timeout=REDFISH_TIMEOUT_SECONDS,
                     auth=(self.host_bmc_username, self.host_bmc_password),
@@ -162,7 +168,9 @@ class DellFactoryResetMethods:
                         )
                         time.sleep(15)
                         response = requests.get(
-                            "https://%s/redfish/v1/Systems/System.Embedded.1" % self.host_bmc_ip,
+                            network.redfish_url(
+                                self.host_bmc_ip, "/redfish/v1/Systems/System.Embedded.1"
+                            ),
                             verify=False,
                             timeout=REDFISH_TIMEOUT_SECONDS,
                             auth=(self.host_bmc_username, self.host_bmc_password),
@@ -215,9 +223,9 @@ class DellFactoryResetMethods:
                     f"Extended Info: {response.json()}"
                 )
         elif data["PowerState"] == "Off":
-            url = (
-                f"https://{self.host_bmc_ip}/redfish/v1/Systems/System.Embedded.1/Actions/"
-                f"ComputerSystem.Reset"
+            url = network.redfish_url(
+                self.host_bmc_ip,
+                "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset",
             )
             payload = {"ResetType": "On"}
             headers = {"content-type": "application/json"}
@@ -255,7 +263,9 @@ class DellFactoryResetMethods:
 
     def unlock_idrac(self):
         print("Unlocking iDRAC")
-        url = f"https://{self.host_bmc_ip}/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+        url = network.redfish_url(
+            self.host_bmc_ip, "/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+        )
         payload = {"Attributes": {"Lockdown.1.SystemLockdown": "Disabled"}}
         headers = {"Content-Type": "application/json"}
         try:
@@ -276,7 +286,9 @@ class DellFactoryResetMethods:
 
     def disable_host_header_check(self):
         print("Disabling host header check")
-        url = f"https://{self.host_bmc_ip}/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+        url = network.redfish_url(
+            self.host_bmc_ip, "/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+        )
         payload = {"Attributes": {"WebServer.1.HostHeaderCheck": "Disabled"}}
         headers = {"Content-Type": "application/json"}
         response = requests.patch(
@@ -299,9 +311,9 @@ class DellFactoryResetMethods:
     def factory_reset_bmc(
         self, level: Literal["Default", "ResetAllWithRootDefaults", "All"] = "Default"
     ):
-        url = (
-            f"https://{self.host_bmc_ip}/redfish/v1/Managers/iDRAC.Embedded.1/Actions/"
-            f"Oem/DellManager.ResetToDefaults"
+        url = network.redfish_url(
+            self.host_bmc_ip,
+            "/redfish/v1/Managers/iDRAC.Embedded.1/Actions/Oem/DellManager.ResetToDefaults",
         )
         payload = {"ResetType": level}
         headers = {"content-type": "application/json"}
@@ -330,7 +342,9 @@ class DellFactoryResetMethods:
 
     def change_bmc_password(self, password: str):
         print("Changing iDRAC root password")
-        url = f"https://{self.host_bmc_ip}/redfish/v1/Managers/iDRAC.Embedded.1/Accounts/2"
+        url = network.redfish_url(
+            self.host_bmc_ip, "/redfish/v1/Managers/iDRAC.Embedded.1/Accounts/2"
+        )
         payload = {"Password": password}
         headers = {"Content-Type": "application/json"}
         try:

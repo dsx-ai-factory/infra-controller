@@ -1065,12 +1065,52 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		assert.NotNil(t, mit)
 	}
 
+	// machineLockedElsewhere reports whether another transaction is holding the Machine's advisory lock
+	machineLockedElsewhere := func(t *testing.T, machineID string) bool {
+		t.Helper()
+		other, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { _ = other.Rollback() }()
+		lockErr := other.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+		if errors.Is(lockErr, cdb.ErrXactAdvisoryLockFailed) {
+			return true
+		}
+		require.NoError(t, lockErr)
+		return false
+	}
+
 	tests := []struct {
 		name         string
 		instancetype *cdbm.InstanceType
 		request      *cam.APIInstanceCreateRequest
 		expectErr    bool
+		wantErr      error
 	}{
+		{
+			name:         "missing SpectrumX capabilities must not fall back to incompatible machines",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+					Device:         "ConnectX-8",
+					DeviceInstance: cutil.GetPtr(0),
+				}},
+			},
+			expectErr: true,
+			wantErr:   ErrSpectrumXMachineSelection,
+		},
+		{
+			name:         "SpectrumX request without available candidates preserves capacity error",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				MachineLabelSelector: map[string]string{"failure-domain": "missing"},
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+					Device:         "ConnectX-8",
+					DeviceInstance: cutil.GetPtr(0),
+				}},
+			},
+			expectErr: true,
+			wantErr:   ErrInstanceTypeMachineNotFound,
+		},
 		{
 			name:         "error when no Machine matches label selector",
 			instancetype: inst1,
@@ -1102,12 +1142,16 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
 			if err == nil {
 				require.NotNil(t, s)
 				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, tx, s.ID, nil, false)
 				require.NoError(t, getErr)
 				assert.True(t, persisted.IsAssigned)
 				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
+				assert.True(t, machineLockedElsewhere(t, s.ID), "selected Machine must stay locked until the transaction ends")
 				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{s.ID}}, cdbp.PageInput{})
 				require.NoError(t, historyErr)
 				require.Len(t, details, 1)
@@ -1120,7 +1164,7 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		})
 	}
 
-	t.Run("rechecks labels after a concurrent update", func(t *testing.T) {
+	t.Run("rechecks labels after a concurrent update, unlocks the rejected Machine", func(t *testing.T) {
 		concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-label-update", site1, ip, tnuser)
 		machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
 		_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
@@ -1184,6 +1228,8 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		case result := <-resultCh:
 			require.Nil(t, result.machine)
 			require.Error(t, result.err)
+			// allocationTx is still open, so a lock held through it would block this attempt
+			assert.False(t, machineLockedElsewhere(t, machine.ID), "rejected Machine must be unlocked before the transaction ends")
 		case <-time.After(5 * time.Second):
 			t.Fatal("Machine selection did not resume after the concurrent label update committed")
 		}

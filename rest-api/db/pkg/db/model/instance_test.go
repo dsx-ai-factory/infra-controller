@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,11 +36,8 @@ func testInstanceInitDB(t *testing.T) *db.Session {
 
 // reset the tables needed for Instance tests
 func testInstanceSetupSchema(t *testing.T, dbSession *db.Session) {
-	// create Allocation table
-	err := dbSession.DB.ResetModel(context.Background(), (*Allocation)(nil))
-	assert.Nil(t, err)
 	// create Tenant table
-	err = dbSession.DB.ResetModel(context.Background(), (*Tenant)(nil))
+	err := dbSession.DB.ResetModel(context.Background(), (*Tenant)(nil))
 	assert.Nil(t, err)
 	// create Infrastructure Provider table
 	err = dbSession.DB.ResetModel(context.Background(), (*InfrastructureProvider)(nil))
@@ -47,12 +45,17 @@ func testInstanceSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create Site table
 	err = dbSession.DB.ResetModel(context.Background(), (*Site)(nil))
 	assert.Nil(t, err)
+	// create Allocation table
+	err = dbSession.DB.ResetModel(context.Background(), (*Allocation)(nil))
+	assert.Nil(t, err)
 	// create InstanceType table
 	err = dbSession.DB.ResetModel(context.Background(), (*InstanceType)(nil))
 	assert.Nil(t, err)
 	// create NetworkSecurityGroup table
 	err = dbSession.DB.ResetModel(context.Background(), (*NetworkSecurityGroup)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*NVLinkLogicalPartition)(nil))
+	require.NoError(t, err)
 	// create Vpc table
 	err = dbSession.DB.ResetModel(context.Background(), (*Vpc)(nil))
 	assert.Nil(t, err)
@@ -77,6 +80,12 @@ func testInstanceSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create Instance table
 	err = dbSession.DB.ResetModel(context.Background(), (*Instance)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*Domain)(nil))
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*Subnet)(nil))
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*MachineInterface)(nil))
+	require.NoError(t, err)
 	// create Interface table
 	err = dbSession.DB.ResetModel(context.Background(), (*Interface)(nil))
 	assert.Nil(t, err)
@@ -1694,6 +1703,79 @@ func TestInstanceSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("result columns survive an added column", func(t *testing.T) {
+		dbSession.DB.SetMaxOpenConns(1)
+		dbSession.DB.SetMaxIdleConns(1)
+		hook := &testProjectionQueryHook{}
+		dbSession.DB.AddQueryHook(hook)
+		migration := util.GetTestDBSession(t, false)
+		defer migration.Close()
+
+		cases := []struct {
+			name     string
+			field    string
+			firstID  uuid.UUID
+			query    string
+			prepared testPreparedQuery
+		}{
+			{name: "default order", firstID: instanceGroup1[0].ID},
+			{name: "InfiniBand order", field: instanceOrderByHasInfiniBandExt, firstID: instanceGroup2[0].ID},
+		}
+		for _, afterColumnAddition := range []bool{false, true} {
+			if afterColumnAddition {
+				_, err := migration.DB.ExecContext(ctx, "ALTER TABLE instance ADD COLUMN test_added_column text")
+				require.NoError(t, err)
+			}
+			for i := range cases {
+				tc := &cases[i]
+				t.Run(fmt.Sprintf("%s/after_column_addition=%t", tc.name, afterColumnAddition), func(t *testing.T) {
+					page := paginator.PageInput{}
+					if tc.field != "" {
+						page.OrderBy = &paginator.OrderBy{Field: tc.field, Order: paginator.OrderDescending}
+					}
+					got, total, err := isd.GetAll(ctx, nil,
+						InstanceFilterInput{InstanceIDs: []uuid.UUID{instanceGroup1[0].ID, instanceGroup2[0].ID}},
+						page, []string{VpcRelationName, InstanceTypeRelationName})
+					require.NoError(t, err)
+					require.Len(t, got, 2)
+					assert.Equal(t, 2, total)
+					assert.Equal(t, tc.firstID, got[0].ID)
+					projection, _, found := strings.Cut(hook.query, " FROM ")
+					require.True(t, found)
+					testAssertNamedModelColumns(t, dbSession, Instance{}, projection)
+					if tc.field != "" {
+						assert.Contains(t, projection, "mc.type AS mc_type")
+					}
+					for _, instance := range got {
+						expected := instanceGroup1[0]
+						expectedVpc, expectedInstanceType := vpc, instanceType
+						if instance.ID == instanceGroup2[0].ID {
+							expected = instanceGroup2[0]
+							expectedVpc, expectedInstanceType = vpc2, instanceType2
+						} else if tc.field != "" {
+							expected.MCType = string(MachineCapabilityTypeInfiniBand)
+						}
+						require.NotNil(t, instance.Vpc)
+						require.NotNil(t, instance.InstanceType)
+						assert.Equal(t, expectedVpc.ID, instance.Vpc.ID)
+						assert.Equal(t, expectedVpc.Name, instance.Vpc.Name)
+						assert.Equal(t, expectedInstanceType.ID, instance.InstanceType.ID)
+						assert.Equal(t, expectedInstanceType.Name, instance.InstanceType.Name)
+						instance.Vpc, instance.InstanceType = nil, nil
+						assert.Equal(t, expected, instance)
+					}
+					prepared := testGetPreparedQuery(t, ctx, dbSession, hook.query)
+					if afterColumnAddition {
+						assert.Equal(t, tc.query, hook.query)
+						assert.Equal(t, tc.prepared, prepared)
+					} else {
+						tc.query, tc.prepared = hook.query, prepared
+					}
+				})
+			}
+		}
+	})
 }
 
 // TODO: Remove this once the migration to drop allocation_id and allocation_constraint_id columns is complete.

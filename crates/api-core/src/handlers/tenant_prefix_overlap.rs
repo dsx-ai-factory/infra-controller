@@ -399,8 +399,9 @@ pub(super) async fn validate_retained_host(
     Ok(())
 }
 
-/// Returns the direct source VPCs whose prefixes or VNIs the receiver imports,
-/// including the receiver itself. This follows the renderer's directional rules.
+/// Returns source VPCs whose prefixes or VNIs must remain reserved for this
+/// receiver, including itself. Direction matches rendering, but admission keeps
+/// deleting peerings until their DPUs acknowledge permission removal.
 pub(super) async fn receiver_sources(
     runtime_config: &CarbideConfig,
     txn: &mut PgConnection,
@@ -477,10 +478,12 @@ pub(super) fn instance_network_is_nonexpanding(
             let previous_interface = InstanceNetworkConfig {
                 interfaces: vec![retained.clone()],
                 auto_config: previous.auto_config,
+                service_interfaces: vec![],
             };
             let requested_interface = InstanceNetworkConfig {
                 interfaces: vec![requested.clone()],
                 auto_config: candidate.auto_config,
+                service_interfaces: vec![],
             };
             !previous_interface.is_network_config_update_requested(&requested_interface)
         })

@@ -31,8 +31,8 @@ use model::extension_service::{
 };
 use serde_json::{Map, Value, json};
 
-/// Builds the complete, detached DPUService definition owned by one extension
-/// service. The DPF SDK alone converts this definition to the checked CR type.
+/// Builds the complete, detached DPUService data owned by one extension
+/// service. The DPF SDK alone converts this data to the checked CR type.
 ///
 /// The service is deliberately detached until an instance lifecycle operation
 /// applies `placement_label_key=enabled` to a DPU.  Its `nodeSelector` is an
@@ -51,12 +51,13 @@ pub fn project_dpu_service(
             extension_service_id.to_string(),
         )]),
         helm_chart: projected_helm_chart(&identity, data),
-        deploy_in_cluster: false,
+        deploy_in_cluster: data.deploy_in_cluster,
         security: DetachedDpuServiceSecurity {
             privileged: data.security.privileged,
             spiffe: data.security.spiffe.is_some(),
         },
         service_daemon_set: Some(projected_service_daemon_set(&identity, data)),
+        service_id: data.service_id.clone(),
     }
 }
 
@@ -219,6 +220,7 @@ pub fn verify_dpu_service_ownership(
     existing: &DpuServiceObservation,
     extension_service_id: ExtensionServiceId,
     namespace: &str,
+    expected_service_id: Option<&str>,
 ) -> Result<(), DpuServiceOwnershipConflict> {
     let identity = DpfHelmChartIdentity::from_service_id(extension_service_id);
 
@@ -243,7 +245,11 @@ pub fn verify_dpu_service_ownership(
         !existing.dpu_cluster_selector_present,
         "spec.dpuClusterSelector",
     )?;
-    immutable_absent(existing.service_id.is_none(), "spec.serviceID")?;
+    immutable_field_matches(
+        existing.service_id.as_deref(),
+        expected_service_id,
+        "spec.serviceID",
+    )?;
     immutable_absent(!existing.interfaces_present, "spec.interfaces")?;
     immutable_absent(!existing.config_ports_present, "spec.configPorts")?;
     immutable_field_matches(
@@ -430,12 +436,14 @@ mod tests {
             repo_url: "oci://registry.example.com/charts".to_owned(),
             chart_name: "tenant-service".to_owned(),
             chart_version: "1.2.3".to_owned(),
+            deploy_in_cluster: Some(false),
             security: DpfHelmChartServiceSecurity {
                 privileged: true,
                 spiffe: None,
             },
             values,
             service_daemon_set: None,
+            service_id: Some("tenant-service-v1".to_owned()),
         }
     }
 
@@ -453,7 +461,7 @@ mod tests {
                 release_name: Some(projected.helm_chart.release_name.clone()),
                 values: projected.helm_chart.values.clone(),
             },
-            deploy_in_cluster: Some(projected.deploy_in_cluster),
+            deploy_in_cluster: projected.deploy_in_cluster,
             dpu_cluster_selector_present: false,
             interfaces_present: false,
             paused: None,
@@ -476,21 +484,22 @@ mod tests {
                         .map(update_strategy_json),
                 }
             }),
-            service_id: None,
+            service_id: projected.service_id.clone(),
             config_ports_present: false,
         }
     }
 
+    /// Verifies caller identity and DPU-only deployment reach the detached service data.
     #[test]
     fn projection_builds_the_detached_dpu_service_contract() {
-        let projected = project_dpu_service(
-            service_id(),
-            NAMESPACE,
-            &data(Some(Map::from_iter([(
-                "image".to_owned(),
-                json!({"tag": "1.2.3", "repository": "registry.example.com/tenant/service"}),
-            )]))),
-        );
+        // Supply explicit identity and deployment fields alongside ordinary chart values.
+        let mut service_data = data(Some(Map::from_iter([(
+            "image".to_owned(),
+            json!({"tag": "1.2.3", "repository": "registry.example.com/tenant/service"}),
+        )])));
+        service_data.service_id = Some("tenant-service-v1".to_owned());
+        service_data.deploy_in_cluster = Some(false);
+        let projected = project_dpu_service(service_id(), NAMESPACE, &service_data);
 
         assert_eq!(
             projected.name,
@@ -501,7 +510,8 @@ mod tests {
             projected.labels.get(DPF_HELM_CHART_OWNER_LABEL),
             Some(&SERVICE_ID.to_owned())
         );
-        assert!(!projected.deploy_in_cluster);
+        assert_eq!(projected.deploy_in_cluster, Some(false));
+        assert_eq!(projected.service_id.as_deref(), Some("tenant-service-v1"));
         assert_eq!(
             projected.helm_chart.release_name,
             "extsvc-00000000-0000-0000-0000-000000000001"
@@ -532,7 +542,7 @@ mod tests {
     fn projection_omits_absent_values_and_all_attachment_bound_fields() {
         let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
         assert!(projected.helm_chart.values.is_none());
-        assert!(!projected.deploy_in_cluster);
+        assert_eq!(projected.deploy_in_cluster, Some(false));
     }
 
     /// Verifies typed daemon-set fields round-trip into a replacement patch
@@ -546,6 +556,8 @@ mod tests {
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "deployInCluster":false,
                 "security":{"privileged":true,"spiffe":{}},
                 "serviceDaemonSet":{
                     "labels":{"app":"old","remove-me":"value"},
@@ -592,6 +604,8 @@ mod tests {
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "deployInCluster":false,
                 "security":{"privileged":true},
                 "serviceDaemonSet":{
                     "labels":{"app":"new"},
@@ -630,15 +644,18 @@ mod tests {
         );
     }
 
+    /// Verifies updates omit immutable DPF DPUService ID as well as Kubernetes
+    /// object identity, deployment mode, and attachment-owned fields.
     #[test]
-    fn mutable_patch_has_no_identity_or_attachment_fields() {
-        let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
+    fn mutable_patch_omits_immutable_identity_and_attachment_fields() {
+        let service_data = data(None);
+        let projected = project_dpu_service(service_id(), NAMESPACE, &service_data);
         let patch = dpu_service_mutable_patch(&projected, None);
 
         assert_eq!(patch["spec"]["helmChart"]["values"], Value::Null);
+        assert!(patch["spec"].get("serviceID").is_none());
         assert!(patch["metadata"].is_null());
         assert!(patch["spec"].get("deployInCluster").is_none());
-        assert!(patch["spec"].get("serviceID").is_none());
         assert!(patch["spec"].get("interfaces").is_none());
         assert!(patch["spec"].get("configPorts").is_none());
         assert!(patch["spec"].get("dpuClusterSelector").is_none());
@@ -706,7 +723,12 @@ mod tests {
     fn ownership_and_immutable_contract_is_enforced_without_value_diagnostics() {
         let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
         assert_eq!(
-            verify_dpu_service_ownership(&observation(&projected), service_id(), NAMESPACE),
+            verify_dpu_service_ownership(
+                &observation(&projected),
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref()
+            ),
             Ok(())
         );
 
@@ -716,14 +738,24 @@ mod tests {
             "someone-else".to_owned(),
         );
         assert_eq!(
-            verify_dpu_service_ownership(&wrong_owner, service_id(), NAMESPACE),
+            verify_dpu_service_ownership(
+                &wrong_owner,
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref()
+            ),
             Err(DpuServiceOwnershipConflict::OwnershipLabel)
         );
 
         let mut wrong_release_name = observation(&projected);
         wrong_release_name.helm_chart.release_name = Some("other".to_owned());
-        let conflict =
-            verify_dpu_service_ownership(&wrong_release_name, service_id(), NAMESPACE).unwrap_err();
+        let conflict = verify_dpu_service_ownership(
+            &wrong_release_name,
+            service_id(),
+            NAMESPACE,
+            projected.service_id.as_deref(),
+        )
+        .unwrap_err();
         assert_eq!(
             conflict,
             DpuServiceOwnershipConflict::ImmutableField {
@@ -732,22 +764,15 @@ mod tests {
         );
         assert!(!conflict.to_string().contains("other"));
 
-        let mut attached = wrong_release_name;
-        attached.helm_chart.release_name =
-            Some("extsvc-00000000-0000-0000-0000-000000000001".to_owned());
-        attached.service_id = Some("DPF-assigned-service-id".to_owned());
-        assert_eq!(
-            verify_dpu_service_ownership(&attached, service_id(), NAMESPACE),
-            Err(DpuServiceOwnershipConflict::ImmutableField {
-                field: "spec.serviceID",
-            })
-        );
-
-        let mut wrong_deployment_mode = attached;
-        wrong_deployment_mode.service_id = None;
+        let mut wrong_deployment_mode = observation(&projected);
         wrong_deployment_mode.deploy_in_cluster = Some(true);
         assert_eq!(
-            verify_dpu_service_ownership(&wrong_deployment_mode, service_id(), NAMESPACE),
+            verify_dpu_service_ownership(
+                &wrong_deployment_mode,
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref()
+            ),
             Err(DpuServiceOwnershipConflict::ImmutableField {
                 field: "spec.deployInCluster",
             })
@@ -762,7 +787,12 @@ mod tests {
             "nodeSelectorTerms": [{"matchExpressions": []}],
         }));
         assert_eq!(
-            verify_dpu_service_ownership(&wrong_placement, service_id(), NAMESPACE),
+            verify_dpu_service_ownership(
+                &wrong_placement,
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref()
+            ),
             Err(DpuServiceOwnershipConflict::ImmutableField {
                 field: "spec.serviceDaemonSet.nodeSelector",
             })
@@ -778,7 +808,12 @@ mod tests {
         // NICo must not repair an immutable conflict, but the object is still
         // ours and must remain deletable during extension-service cleanup.
         assert_eq!(
-            verify_dpu_service_ownership(&modified_but_owned, service_id(), NAMESPACE),
+            verify_dpu_service_ownership(
+                &modified_but_owned,
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref()
+            ),
             Err(DpuServiceOwnershipConflict::ImmutableField {
                 field: "spec.deployInCluster",
             })

@@ -182,8 +182,8 @@ func GetListOfComponents(
 		}
 	}
 
-	// Always include BMCs relation
-	conf.Relations = []string{"BMCs", "Rack"}
+	// Include the relations required to convert components into the public model.
+	conf.Relations = []string{"BMCs", "Rack", "Rack.NVLDomain"}
 
 	q, err := dbquery.New(ctx, conf)
 	if err != nil {

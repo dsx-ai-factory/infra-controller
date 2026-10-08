@@ -58,7 +58,6 @@ use carbide_rack_controller::context::RackStateHandlerServices;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -74,7 +73,6 @@ use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
 use db::machine::{update_dpu_asns, update_dpu_loopback_ips_v6};
 use db::resource_pool::DefineResourcePoolError;
-use db::work_lock_manager::WorkLockManagerHandle;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
 use itertools::Itertools;
@@ -98,12 +96,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
-use crate::cfg::file::{CarbideConfig, InitialObjectsConfig, ListenMode, VmaasConfig};
+use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
+use crate::cfg::file::{
+    CarbideConfig, DpfExtraService, InitialObjectsConfig, ListenMode, VmaasConfig,
+};
 use crate::cfg::load::all_configuration_files;
 use crate::dpa::handler::start_svpc_handler;
-use crate::dynamic_settings::DynamicSettings;
 use crate::handlers::machine_validation::apply_config_on_startup;
-use crate::listener::{AdminUiRoutesBuilder, ApiListenMode};
+use crate::listener::ApiListenMode;
 use crate::logging::log_limiter::LogLimiter;
 use crate::logging::service_health_metrics::{
     ServiceHealthContext, start_export_service_health_metrics,
@@ -248,23 +248,35 @@ fn create_redfish_pool(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Enter api-core's private service runtime with fully prepared resources.
+///
+/// `admin_ui_routes_builder` is how the admin web UI's pages (everything under
+/// `/admin`) get plugged in, particularly via `Box::new(carbide_api_web::routes)`.
+/// It's passed in rather than called directly to avoid a dependency cycle — see
+/// [`AdminUiRoutesBuilder`] for why.
+///
+/// The admin UI is only mounted if the `enable_admin_ui` config flag is true (the default).
+///
+/// Returns the effective API listener address after startup completes.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn start_runtime(
-    join_set: &mut JoinSet<()>,
-    carbide_config: Arc<CarbideConfig>,
-    initial_objects: Option<InitialObjectsConfig>,
-    meter: Meter,
-    per_object_prometheus_registry: Option<prometheus::Registry>,
-    dynamic_settings: DynamicSettings,
-    credential_manager: Arc<dyn CredentialManager>,
-    certificate_provider: Arc<dyn CertificateProvider>,
-    db_pool: PgPool,
-    work_lock_manager_handle: WorkLockManagerHandle,
-    secrets_context: Option<crate::secrets::SecretsContext>,
-    admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
-    cancel_token: CancellationToken,
-) -> eyre::Result<SocketAddr> {
+pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<SocketAddr> {
+    // Destructure inputs
+    let RuntimeInputs {
+        carbide_config,
+        initial_objects,
+        meter,
+        per_object_metrics,
+        join_set,
+        runtime_prelude: RuntimePrelude { dynamic_settings },
+        credential_manager,
+        certificate_provider,
+        db_pool,
+        work_lock_manager_handle,
+        secrets_context,
+        admin_ui_routes_builder,
+        cancel_token,
+    } = runtime_inputs;
+
     let (shared_redfish_pool, bmc_credential_ops) =
         create_redfish_pool(&carbide_config, credential_manager.clone())?;
     // Ordinary BMC traffic goes through nico-bmc-proxy when configured,
@@ -690,7 +702,7 @@ pub(crate) async fn start_runtime(
             api_service.clone(),
             site_explorer_machine_info_provider,
             meter.clone(),
-            per_object_prometheus_registry,
+            per_object_metrics,
             ipmi_tool.clone(),
             seed_data,
             cancel_token.clone(),
@@ -703,7 +715,7 @@ pub(crate) async fn start_runtime(
     // top-level binary always supplies the builder; the decision to use it lives
     // here, next to the parsed config.
     let admin_ui_routes_builder = if carbide_config.enable_admin_ui {
-        admin_ui_routes_builder
+        Some(admin_ui_routes_builder)
     } else {
         tracing::info!("admin web UI disabled via enable_admin_ui=false");
         None
@@ -866,11 +878,47 @@ async fn initialize_dpf_sdk(
         carbide_config.vmaas_config.as_ref(),
         carbide_config.dpu_config.num_of_vfs,
     )?;
-    let effective_interfaces = carbide_dpf::build_effective_dpu_interfaces(
+
+    // BF3 interface vector drops pf1hpf from the static interface list
+    // because the flavor hides port 2. However, if user has configured
+    // pf1 explicitly for VMaaS, we accept it for compatibility, but log
+    // a warning regards this.
+    if let Some(identity) = carbide_config
+        .vmaas_config
+        .as_ref()
+        .and_then(|config| config.bridging.as_ref())
+        .and_then(|bridging| {
+            bridging
+                .host_representor_intercept_bridging
+                .values()
+                .find_map(|interface| {
+                    let identity = interface.dpf_interface?;
+                    (identity.pf_id == 1).then_some(identity)
+                })
+        })
+    {
+        tracing::warn!(
+            controller_id = identity.controller_id,
+            pf_id = identity.pf_id,
+            "VMaaS intercept-bridging configuration added PF1 for BF3 although the BF3 flavor hides port 2"
+        );
+    }
+
+    // Build interfaces vector for each deployment type.
+    // For Astra we only build the static interfaces vector here, and
+    // the function resolve_initialization_inventory() adds the required
+    // xplane patch interfaces before it applies DPF CRs. In theory, we
+    // could have augmented the patch interfaces here also.
+    let bf3_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf3,
         carbide_config.dpu_config.num_of_vfs,
         intercept_bridging.as_ref(),
     );
-
+    let bf4_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf4Generic,
+        carbide_config.dpu_config.num_of_vfs,
+        intercept_bridging.as_ref(),
+    );
     let astra_interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
 
     let service_vpc_slots =
@@ -913,11 +961,26 @@ async fn initialize_dpf_sdk(
             let services = carbide_config
                 .dpf
                 .resolved_services_for(deployment, deployment_type);
+            // Warn when an Astra deployment has Weave services but no ewethers config.
+            if deployment_type == DpuDeploymentType::Bf4Astra
+                && carbide_config.ewethers_config.is_none()
+                && services.extra.keys().any(|service| {
+                    matches!(
+                        service,
+                        DpfExtraService::DocaWeaveDhcpAgent
+                            | DpfExtraService::DocaWeaveFlowController
+                    )
+                })
+            {
+                tracing::warn!(
+                    deployment = %deployment.deployment_name,
+                    "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
+                );
+            }
             let interfaces = match deployment_type {
                 DpuDeploymentType::Bf4Astra => &astra_interfaces,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => &effective_interfaces,
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
+                DpuDeploymentType::Bf4Generic => &bf4_interfaces,
             };
             let (service_vpc_slots, additional_managed_sf) = match deployment_type {
                 DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
@@ -938,6 +1001,7 @@ async fn initialize_dpf_sdk(
                     interfaces,
                     service_vpc_slots,
                     &carbide_config.node_auth,
+                    carbide_config.ewethers_config.as_ref(),
                 ))
                 .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
                 .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
@@ -1030,14 +1094,46 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
-    for (name, config) in init_configs {
-        sdk.create_initialization_objects(&config)
+    for (name, config) in &init_configs {
+        sdk.create_initialization_objects(config)
             .await
             .map_err(|err| eyre::eyre!("failed to initialize {name} DPF deployment: {err}"))?;
     }
 
+    // Cleanup stale PF1 interfaces for BF3. For scoped deployment this is
+    // unconditional, for unscoped we only cleanup if BF4 is not present.
+    let bf4_configured = carbide_config.dpf.deployments.bf4_generic.is_some()
+        || carbide_config.dpf.deployments.bf4_astra.is_some();
+    let cleanup_configs = init_configs
+        .iter()
+        .filter(|(_, config)| {
+            matches!(
+                config.deployment_type(),
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+            )
+        })
+        .map(|(_, config)| config)
+        .collect::<Vec<_>>();
+    if let Err(error) = sdk
+        .cleanup_stale_pf1_interfaces(&cleanup_configs, bf4_configured)
+        .await
+    {
+        tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
+    }
+
+    // Get astra config route prefixes for dpu device registration.
+    let astra_config = carbide_config
+        .ewethers_config
+        .as_ref()
+        .map(|config| config.astra.clone())
+        .unwrap_or_default();
+
     Ok(Some(Arc::new(DpfSdkOps::new(
         Arc::new(sdk),
+        carbide_dpf::AstraRoutePrefixes {
+            rail_route_prefix_len: astra_config.underlay_rail_route_prefix_len,
+            software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
+        },
         db_pool,
         join_set,
     )?)))
@@ -1814,6 +1910,13 @@ async fn initialize_and_start_controllers<'a>(
                 vpc_isolation_behavior: carbide_config.vpc_isolation_behavior,
             },
         ))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
+    StateController::<crate::vpc_peering_controller::VpcPeeringDeletion>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(crate::vpc_peering_controller::VpcPeeringDeletion))
         .build_and_spawn(join_set, cancel_token.clone())?;
 
     StateController::<VpcPrefixStateControllerIO>::builder()

@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 
 use carbide_network::ip::IdentifyAddressFamily;
+use carbide_uuid::site_prefix::SitePrefixId;
 pub use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
@@ -39,6 +40,7 @@ use model::vpc_prefix::{
 use sqlx::{FromRow, PgConnection, QueryBuilder, Row};
 
 use super::{ColumnInfo, DatabaseError, ObjectColumnFilter};
+use crate::db_read::DbReader;
 use crate::vpc::increment_vpc_version;
 use crate::{ConditionalWrite, ControllerStateNotCurrent};
 
@@ -679,6 +681,21 @@ pub async fn count_network_prefixes_by_vpc_prefix_id(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(network_prefix_count.max(0) as usize)
+}
+
+/// Counts all physically retained VPC prefixes with this exact parent, including
+/// soft-deleted children that still own address space.
+pub async fn count_vpc_prefixes_by_site_prefix_id(
+    db: impl DbReader<'_>,
+    site_prefix_id: SitePrefixId,
+) -> Result<usize, DatabaseError> {
+    let query = "SELECT count(*) FROM network_vpc_prefixes WHERE site_prefix_id = $1";
+    let vpc_prefix_count: i64 = sqlx::query_scalar(query)
+        .bind(site_prefix_id)
+        .fetch_one(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(vpc_prefix_count.max(0) as usize)
 }
 
 /// Reports whether one VPC retains address space from a tenant-managed root.

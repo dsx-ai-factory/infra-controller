@@ -180,41 +180,53 @@ func TestLogCmd_NoScope(t *testing.T) {
 	}
 }
 
-func TestCmdInstanceListRendersIPAddresses(t *testing.T) {
+func TestCmdInstanceList(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       map[string]interface{}
+		addresses string
+		prefixes  string
+	}{
+		{
+			name: "with-addresses",
+			raw: map[string]interface{}{
+				"interfaces": []interface{}{
+					map[string]interface{}{"ipAddresses": []interface{}{"192.0.2.10"}, "ipPrefixes": []interface{}{"192.0.2.0/24"}},
+					map[string]interface{}{"ipAddresses": []interface{}{"2001:db8::10"}, "ipPrefixes": []interface{}{"2001:db8::/64"}},
+				},
+			},
+			addresses: "192.0.2.10, 2001:db8::10",
+			prefixes:  "192.0.2.0/24, 2001:db8::/64",
+		},
+		{
+			name:      "without-addresses",
+			raw:       map[string]interface{}{"interfaces": []interface{}{}},
+			addresses: "-",
+			prefixes:  "-",
+		},
+		{
+			name: "prefix-only",
+			raw: map[string]interface{}{
+				"interfaces": []interface{}{
+					map[string]interface{}{"ipAddresses": []interface{}{}, "ipPrefixes": []interface{}{"2001:db8:2::/64"}},
+				},
+			},
+			addresses: "-",
+			prefixes:  "2001:db8:2::/64",
+		},
+	}
+	items := make([]NamedItem, len(tests))
+	for i, test := range tests {
+		items[i] = NamedItem{
+			Name: test.name, ID: test.name, Status: "Ready",
+			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
+			Raw:   test.raw,
+		}
+	}
 	cache := NewCache()
 	cache.Set("vpc", []NamedItem{{Name: "VPC One", ID: "vpc-1"}})
 	cache.Set("site", []NamedItem{{Name: "Site One", ID: "site-1"}})
-	cache.Set("instance", []NamedItem{
-		{
-			Name: "with-addresses", ID: "instance-1", Status: "Ready",
-			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
-			Raw: map[string]interface{}{
-				"interfaces": []interface{}{
-					map[string]interface{}{"ipAddresses": []interface{}{"192.0.2.10"}},
-					map[string]interface{}{"ipAddresses": []interface{}{"2001:db8::10"}},
-				},
-			},
-		},
-		{
-			Name: "without-addresses", ID: "instance-2", Status: "Ready",
-			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
-			Raw:   map[string]interface{}{"interfaces": []interface{}{}},
-		},
-		{
-			Name: "auto-network", ID: "instance-3", Status: "Ready",
-			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
-			Raw: map[string]interface{}{
-				"interfaces": []interface{}{},
-				"status": map[string]interface{}{
-					"network": map[string]interface{}{
-						"interfaces": []interface{}{
-							map[string]interface{}{"ipAddresses": []interface{}{"198.51.100.10"}},
-						},
-					},
-				},
-			},
-		},
-	})
+	cache.Set("instance", items)
 	session := &Session{Cache: cache}
 	session.Resolver = NewResolver(cache)
 
@@ -224,32 +236,30 @@ func TestCmdInstanceListRendersIPAddresses(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 
-	lines := strings.Split(output, "\n")
-	var header, populated, empty, autoNetwork string
-	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "NAME"):
-			header = line
-		case strings.HasPrefix(line, "with-addresses"):
-			populated = line
-		case strings.HasPrefix(line, "without-addresses"):
-			empty = line
-		case strings.HasPrefix(line, "auto-network"):
-			autoNetwork = line
+	rows := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			rows[fields[0]] = line
 		}
 	}
+	header := rows["NAME"]
 	require.NotEmpty(t, header)
-	require.NotEmpty(t, populated)
-	require.NotEmpty(t, empty)
-	require.NotEmpty(t, autoNetwork)
 
 	ipAddressesColumn := strings.Index(header, "IP ADDRESSES")
+	ipPrefixesColumn := strings.Index(header, "IP PREFIXES")
 	statusColumn := strings.Index(header, "STATUS")
 	require.Greater(t, ipAddressesColumn, 0)
-	require.Greater(t, statusColumn, ipAddressesColumn)
-	assert.Equal(t, "192.0.2.10, 2001:db8::10", strings.TrimSpace(populated[ipAddressesColumn:statusColumn]))
-	assert.Equal(t, "-", strings.TrimSpace(empty[ipAddressesColumn:statusColumn]))
-	assert.Equal(t, "198.51.100.10", strings.TrimSpace(autoNetwork[ipAddressesColumn:statusColumn]))
+	require.Greater(t, ipPrefixesColumn, ipAddressesColumn)
+	require.Greater(t, statusColumn, ipPrefixesColumn)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := rows[test.name]
+			require.NotEmpty(t, row)
+			assert.Equal(t, test.addresses, strings.TrimSpace(row[ipAddressesColumn:ipPrefixesColumn]))
+			assert.Equal(t, test.prefixes, strings.TrimSpace(row[ipPrefixesColumn:statusColumn]))
+		})
+	}
 }
 
 func TestShellQuoteCLIArg(t *testing.T) {

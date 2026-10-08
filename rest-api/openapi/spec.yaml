@@ -3284,7 +3284,7 @@ paths:
                     message: Another power operation is already in progress for the VPC
                     data: null
         '412':
-          description: Deletion was rejected because certain preconditions were not satisfied.
+          description: Deletion was rejected because a Site precondition was not satisfied. Core cannot delete the VPC while it still has peerings, including peerings in Deleting. Delete the peerings and wait for them to disappear, then retry. The VPC's REST status is unchanged when Core rejects the request.
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
@@ -3293,6 +3293,8 @@ paths:
         Delete a specific VPC by ID.
 
         Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+
+        First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
@@ -3827,21 +3829,47 @@ paths:
         - VPC Peering
       operationId: delete-vpc-peering
       description: |-
-        Delete a VPC peering by ID.
+        Request deletion of a VPC peering by ID.
+
+        The peering remains visible with status `Deleting` while Core waits for affected DPUs to apply the removal of peering permissions. Poll this peering's GET endpoint until it returns `404` before deleting either VPC. REST removes the record after Site inventory confirms the peering is gone, so completion can take longer than the DPU update.
+
+        Repeating DELETE while the REST record still exists returns `202` if Core accepts the request or has already removed the peering. Once the REST record is gone, DELETE returns `404`.
+
+        A Site precondition failure returns `412` and leaves the peering's REST status unchanged. This can happen when a concurrent network update prevents deletion from being accepted. Retry the request; contact support if it continues to fail.
 
         Tenant Admin can delete only peerings where both VPCs belong to their tenant.
         Provider Admin can delete only multi-tenant peerings in sites they provide.
 
         User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Deletion request was accepted. The peering remains in Deleting until Site inventory confirms removal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                accepted:
+                  value:
+                    message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The peering's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                precondition-failed:
+                  value:
+                    source: nico
+                    message: Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.
+                    data: null
   '/v2/org/{org}/nico/vpc-prefix':
     parameters:
       - schema:
@@ -4027,10 +4055,20 @@ paths:
       summary: Delete VPC Prefix
       operationId: delete-vpc-prefix
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The VPC Prefix's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific VPC Prefix by ID.
 
@@ -5636,7 +5674,7 @@ paths:
         description: |-
           Expected Rack update request.
 
-          Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
+          Provide a non-null value for at least one of rackId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
         required: true
       responses:
         '200':
@@ -5707,6 +5745,7 @@ paths:
                   siteId: f97df110-f4de-492e-8849-4a6af68026b0
                   rackGroupId: nvl5-gp1-jhb01
                   topology: gb200_nvl72r1_c2g4
+                  protocol: NVLINK_V6
                   racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01}]}, {rackId: rack-02, members: []}]
                   name: NVL rack group 1
                   description: Production NVL rack group in row A
@@ -5840,6 +5879,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp1-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
                       name: NVL rack group 1
                       description: Production NVL rack group in row A
@@ -5852,6 +5892,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp2-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
                       name: NVL rack group 2
                       description: Production NVL rack group in row A
@@ -8988,6 +9029,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Insufficient compatible Machines are available, or another resource conflict prevents batch creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -9393,6 +9437,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A resource conflict prevents the update.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -10565,10 +10612,26 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The Operating System ID is invalid, an Image Operating System has an associated Site that is not Registered, or the Operating System is being used by one or more Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                operating-system-in-use:
+                  value:
+                    source: nico
+                    message: Operating System is being used by one or more Instances and cannot be deleted
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       description: |-
         Delete an Operating System by ID
+
+        An Operating System being used by one or more Instances cannot be deleted. Delete the associated Instances before retrying.
 
         If the Operating System has `infrastructureProviderId` set, then org must have an Infrastructure Provider entity and its ID should match the Operating System Infrastructure Provider ID. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -21285,7 +21348,7 @@ components:
         slaacEnabled:
           type: boolean
           readOnly: true
-          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -21543,7 +21606,7 @@ components:
         slaacEnabled:
           type: boolean
           default: false
-          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -21968,7 +22031,7 @@ components:
     VpcPeeringStatus:
       title: VpcPeeringStatus
       type: string
-      description: Status values for VPC peering objects
+      description: Status values for VPC peering objects. Deleting means removal is pending; wait until the peering's GET endpoint returns 404 before deleting either VPC.
       enum:
         - Pending
         - Configuring
@@ -24766,7 +24829,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. A nonempty list is validated against the individual Machine capabilities persisted by inventory reconciliation, not Instance Type capability summaries. The selected Machine must satisfy every attachment; Instance Type placement considers only compatible Machines. Invalid explicit-machine selectors return 400. If available Instance Type candidates are all incompatible, the 400 response identifies SpectrumX capabilities as the reason. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -24942,7 +25005,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its individual persisted capabilities, not Instance Type capability summaries. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. The response identifies SpectrumX when filtering reduces otherwise sufficient capacity below the requested count, and identifies both SpectrumX and topology constraints when filtering removes candidates and no single NVLink domain has enough compatible Machines. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -25141,9 +25204,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
-          type: array
+          type:
+            - array
+            - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance''s SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
@@ -25607,11 +25672,12 @@ components:
           description: ID of the SpectrumX Partition the attachment should associate with
         device:
           type: string
-          description: 'SpectrumX device to attach over, matching the device description reported for the Machine''s SpectrumX interfaces'
+          description: 'Exact, case-sensitive name of a persisted Machine capability with type `Network` and device type `SpectrumX`. Generic network and DPU capabilities do not satisfy this selector.'
         deviceInstance:
           type: integer
           minimum: 0
-          description: 'Index of the device, used to identify which interface card to attach the Partition to'
+          maximum: 4294967295
+          description: 'Zero-based interface index within the matching SpectrumX device-description group. Must be strictly less than the persisted capability count on the Machine.'
         attachmentType:
           type: string
           enum:
@@ -29283,6 +29349,56 @@ components:
             - boolean
             - 'null'
           description: When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
+    ExpectedMachineInterface:
+      title: ExpectedMachineInterface
+      type: object
+      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
+      examples:
+        - macAddress: '02:00:00:00:00:10'
+          nicType: CX9
+          fixedIp: '192.0.2.10'
+          primary: true
+          role: Host
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        nicType:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
+        fixedIp:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
+        fixedMask:
+          type: [string, 'null']
+          description: Optional legacy mask string, forwarded unchanged. Omission or null clears it when replacing the declaration.
+        fixedGateway:
+          type: [string, 'null']
+          description: Optional IPv4 or IPv6 gateway. Omission, null, or an empty string clears it when replacing the declaration.
+        primary:
+          type: [boolean, 'null']
+          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs and DpuBmc must omit it; HostBmc also accepts false.
+        networkSegmentType:
+          type: [string, 'null']
+          enum: [Tenant, Admin, Underlay, HostInband, null]
+          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection.
+        role:
+          type: [string, 'null']
+          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, null]
+          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; Unspecified resets it to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
+        ipAllocation:
+          type: [string, 'null']
+          enum: [Unspecified, Dynamic, Fixed, Retained, null]
+          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+      required:
+        - macAddress
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -29299,6 +29415,10 @@ components:
           fallbackDPUSerialNumbers:
             - DPU-001
             - DPU-002
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           skuId: lenovo.sr650v2.cpu.1
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
@@ -29332,6 +29452,11 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type: array
+          description: Expected host NIC declarations in their configured order
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -29435,6 +29560,10 @@ components:
           fallbackDPUSerialNumbers:
             - DPU-001
             - DPU-002
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
@@ -29475,6 +29604,13 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type:
+            - array
+            - 'null'
+          description: Optional expected host NIC declarations. Omission or null creates an empty list.
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -29489,7 +29625,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -29592,6 +29728,10 @@ components:
           skuId: sku-xyz789
           rackId: rack-02
           isDpfEnabled: false
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           manufacturer: Lenovo
           labels:
             environment: staging
@@ -29645,6 +29785,13 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type:
+            - array
+            - 'null'
+          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -29660,7 +29807,7 @@ components:
             - string
             - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
         name:
           type:
             - string
@@ -29861,7 +30008,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30004,7 +30151,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30123,7 +30270,7 @@ components:
       title: ExpectedRackCreateRequest
       type: object
       description: |-
-        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
+        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. For protocol NVLINK_V6, a topology beginning with `gb` followed by digits and `_` is normalized to the `vr_` topology family for profile derivation, and Core records a warning. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
 
         The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
@@ -30221,7 +30368,7 @@ components:
       description: |-
         Request data to update an existing Expected Rack.
 
-        Provide a non-null value for at least one of `rackId`, `rackProfileId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
+        Provide a non-null value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
 
         For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
@@ -30293,6 +30440,7 @@ components:
           rackGroupId: nvl5-gp1-jhb01
           siteId: f97df110-f4de-492e-8849-4a6af68026b0
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -30336,6 +30484,11 @@ components:
         topology:
           type: string
           description: External group-level NVLink topology identifier.
+        protocol:
+          type:
+            - string
+            - 'null'
+          description: Rack fabric protocol. Null only for declarations created before protocol became required.
         racks:
           type: array
           description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
@@ -30375,6 +30528,7 @@ components:
         - siteId: f97df110-f4de-492e-8849-4a6af68026b0
           rackGroupId: nvl5-gp1-jhb01
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -30408,6 +30562,11 @@ components:
           minLength: 1
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -30438,6 +30597,7 @@ components:
         - siteId
         - rackGroupId
         - topology
+        - protocol
     ExpectedRackGroupList:
       title: ExpectedRackGroupList
       type: object
@@ -30449,6 +30609,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp1-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
               name: NVL rack group 1
               description: Production NVL rack group in row A
@@ -30461,6 +30622,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp2-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
               name: NVL rack group 2
               description: Production NVL rack group in row A
@@ -30495,6 +30657,7 @@ components:
           properties:
             rackGroupId: {type: 'null'}
             topology: {type: 'null'}
+            protocol: {type: 'null'}
             racks: {type: 'null'}
             name: {type: 'null'}
             description: {type: 'null'}
@@ -30506,7 +30669,7 @@ components:
 
         For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 
-        Provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all six fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
+        Provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all seven fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
 
         The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.
 
@@ -30515,6 +30678,7 @@ components:
         - `location.region`, `location.datacenter`, `location.room`, `location.position`
       examples:
         - topology: gb300_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}, {rackId: rack-03, members: []}]
           name: NVL rack group 1 (updated)
           description: Production NVL rack group in row A, expanded membership
@@ -30547,6 +30711,13 @@ components:
           minLength: 1
           maxLength: 128
           description: Optional replacement topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -30574,7 +30745,7 @@ components:
           propertyNames:
             pattern: '^[\x00-\x7F]+$'
           description: |-
-            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, or `description`.
     ExpectedRackGroupRack:
       type: object
       additionalProperties: false
@@ -30768,14 +30939,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies)
         defaultBmcPassword:
           type:
             - string
             - 'null'
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies)
         switchSerialNumber:
           type: string
           minLength: 1
@@ -30807,7 +30977,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -30930,16 +31100,15 @@ components:
             - string
             - 'null'
           minLength: 1
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         switchSerialNumber:
           type:
             - string
@@ -30976,7 +31145,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -32544,6 +32713,8 @@ components:
         - repoURL
         - chartName
         - chartVersion
+        - serviceID
+        - deployInCluster
         - security
       properties:
         repoURL:
@@ -32559,6 +32730,15 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
+        serviceID:
+          type: string
+          minLength: 1
+          description: Required immutable DPF workload identity. Its value must be unique case-insensitively among active NICo-managed DPF Helm services.
+        deployInCluster:
+          type: boolean
+          enum:
+            - false
+          description: Required DPF deployment location. NICo currently accepts only an explicit false value, which deploys the chart on DPUs.
         security:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
@@ -32669,7 +32849,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string

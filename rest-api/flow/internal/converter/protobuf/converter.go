@@ -945,32 +945,57 @@ func StringQueryInfoTo(info *dbquery.StringQueryInfo) *pb.StringQueryInfo {
 	}
 }
 
-// OrderByFrom converts a protobuf OrderBy to an internal OrderBy
-func OrderByFrom(ob *pb.OrderBy) *dbquery.OrderBy {
+// RackOrderByFrom converts and validates a rack OrderBy.
+func RackOrderByFrom(ob *pb.OrderBy) (*dbquery.OrderBy, error) {
 	if ob == nil {
-		return nil
+		return nil, nil
 	}
 
-	var column string
-	rackField := ob.GetRackField()
-	componentField := ob.GetComponentField()
-
-	if rackField != pb.RackOrderByField_RACK_ORDER_BY_FIELD_UNSPECIFIED {
-		column = rackOrderByFieldToColumn(rackField)
-	} else if componentField != pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_UNSPECIFIED {
-		column = componentOrderByFieldToColumn(componentField)
-	} else {
-		return nil
+	field, ok := ob.GetField().(*pb.OrderBy_RackField)
+	if !ok {
+		return nil, errors.New("rack order by field is required")
 	}
 
+	column := rackOrderByFieldToColumn(field.RackField)
 	if column == "" {
-		return nil
+		return nil, fmt.Errorf("unsupported rack order by field: %v", field.RackField)
 	}
 
-	return &dbquery.OrderBy{
+	return validatedOrderBy(&dbquery.OrderBy{
+		Column:       column,
+		Direction:    dbquery.OrderDirection(ob.GetDirection()),
+		IsExpression: field.RackField == pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL,
+	})
+}
+
+// ComponentOrderByFrom converts and validates a component OrderBy.
+func ComponentOrderByFrom(ob *pb.OrderBy) (*dbquery.OrderBy, error) {
+	if ob == nil {
+		return nil, nil
+	}
+
+	field, ok := ob.GetField().(*pb.OrderBy_ComponentField)
+	if !ok {
+		return nil, errors.New("component order by field is required")
+	}
+
+	column := componentOrderByFieldToColumn(field.ComponentField)
+	if column == "" {
+		return nil, fmt.Errorf("unsupported component order by field: %v", field.ComponentField)
+	}
+
+	return validatedOrderBy(&dbquery.OrderBy{
 		Column:    column,
 		Direction: dbquery.OrderDirection(ob.GetDirection()),
+	})
+}
+
+func validatedOrderBy(orderBy *dbquery.OrderBy) (*dbquery.OrderBy, error) {
+	if err := orderBy.Validate(); err != nil {
+		return nil, err
 	}
+
+	return orderBy, nil
 }
 
 // QueryType represents the type of query (rack or component)

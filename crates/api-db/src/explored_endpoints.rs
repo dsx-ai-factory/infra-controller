@@ -32,6 +32,9 @@ use sqlx::{FromRow, PgConnection, Row};
 use crate::db_read::DbReader;
 use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 #[derive(Debug)]
 struct DbExploredEndpoint {
     /// The IP address of the node we explored
@@ -148,7 +151,13 @@ pub async fn find_by_ips(
     db: impl DbReader<'_>,
     ips: Vec<IpAddr>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address=ANY($1)";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address=ANY($1)";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(ips)
@@ -172,9 +181,14 @@ pub async fn find_by_dpu_serial_numbers(
     db: impl DbReader<'_>,
     serials: Vec<String>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints \
-                 WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1) \
-                 AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1)
+          AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(serials)
@@ -186,7 +200,12 @@ pub async fn find_by_dpu_serial_numbers(
 
 /// find_all returns all explored endpoints that site explorer has been able to probe
 pub async fn find_all(txn: impl DbReader<'_>) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .fetch_all(txn)
@@ -212,8 +231,13 @@ pub async fn find_preingest_not_waiting_not_error(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     const QUERY: &str = concatcp!(
-        "SELECT * FROM explored_endpoints
-                        WHERE ",
+        "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE ",
         PREINGEST_NOT_WAITING_NOT_ERROR_WHERE
     );
 
@@ -267,7 +291,13 @@ pub async fn find_preingest_installing(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     const QUERY: &str = concatcp!(
-        "SELECT * FROM explored_endpoints WHERE ",
+        "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE ",
         PREINGEST_INSTALLING_WHERE
     );
 
@@ -302,8 +332,13 @@ pub async fn count_preingest_installing(txn: impl DbReader<'_>) -> Result<i64, D
 pub async fn find_all_preingestion_complete(
     txn: &mut PgConnection,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query =
-        "SELECT * FROM explored_endpoints WHERE preingestion_state->'state' = '\"complete\"'";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE preingestion_state->'state' = '\"complete\"'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .fetch_all(txn)
@@ -317,7 +352,13 @@ pub async fn find_all_by_ip(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address = $1";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address = $1";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
@@ -542,7 +583,13 @@ pub async fn clear_last_known_error(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address = $1 FOR UPDATE";
     let Some(row) = sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
         .fetch_optional(&mut *txn)
@@ -982,14 +1029,19 @@ pub async fn find_by_mac_address(
     mac: MacAddress,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = r#"
-            SELECT * FROM explored_endpoints
-            WHERE (
-                jsonb_path_query_array(exploration_report, '$.Systems[*].EthernetInterfaces[*].MACAddress')
-                ||
-                jsonb_path_query_array(exploration_report, '$.Managers[*].EthernetInterfaces[*].MACAddress')
-                ||
-                jsonb_path_query_array(exploration_report, '$.Chassis[*].NetworkAdapters[*].PortMacAddresses[*]')
-            ) @> to_jsonb(ARRAY[$1]);
+        SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE (
+            jsonb_path_query_array(exploration_report, '$.Systems[*].EthernetInterfaces[*].MACAddress')
+            ||
+            jsonb_path_query_array(exploration_report, '$.Managers[*].EthernetInterfaces[*].MACAddress')
+            ||
+            jsonb_path_query_array(exploration_report, '$.Chassis[*].NetworkAdapters[*].PortMacAddresses[*]')
+        ) @> to_jsonb(ARRAY[$1]);
         "#;
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         // NOTE: Don't just pass mac here, do our own string conversion. Postgres's string

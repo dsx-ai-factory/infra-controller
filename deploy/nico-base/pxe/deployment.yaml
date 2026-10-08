@@ -91,8 +91,6 @@ spec:
             - name: spiffe
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
-            - name: boot-artifacts
-              mountPath: /forge-boot-artifacts/blobs/internal
       volumes:
         # Legacy Rocket mount: the current PXE binary reads configuration from
         # environment variables only, so the pod must not wait for this map.
@@ -104,5 +102,3 @@ spec:
         - name: spiffe
           secret:
             secretName: nico-pxe-certificate
-        - name: boot-artifacts
-          emptyDir: {}

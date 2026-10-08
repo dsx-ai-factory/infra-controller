@@ -1,6 +1,8 @@
 # Switch State Diagram
 
-This document describes the Finite State Machine (FSM) for Switches in NICo: lifecycle from creation through configuration, validation, ready, optional rack-level reprovisioning, operator maintenance, and deletion.
+This document describes the Finite State Machine (FSM) for Switches in NICo:
+lifecycle from creation through configuration, validation, ready, optional
+rack-level reprovisioning, operator maintenance, decommissioning, and deletion.
 
 ## High-Level Overview
 
@@ -15,6 +17,8 @@ stateDiagram-v2
     state "Validating" as Validating
     state "BomValidating" as BomValidating
     state "Ready" as Ready
+    state "Decommissioning" as Decommissioning
+    state "Decommissioned (terminal)" as Decommissioned
     state "Maintenance" as Maintenance
     state "ReProvisioning (rack-level)" as ReProvisioning
     state "Error" as Error
@@ -31,6 +35,7 @@ stateDiagram-v2
     BomValidating --> Ready : BOM validation complete
 
     Ready --> Deleting : marked for deletion
+    Ready --> Decommissioning : decommission requested
     Ready --> Maintenance : switch_maintenance_requested
     Ready --> ReProvisioning : rack-level switch_reprovisioning_requested
 
@@ -43,6 +48,7 @@ stateDiagram-v2
     ReProvisioning --> Ready : rack maintenance cycle complete
     ReProvisioning --> Error : firmware, NVOS, or fabric manager failure
 
+    Decommissioning --> Decommissioned : factory reset and credential deletion complete
     Deleting --> [*] : final delete
 ```
 
@@ -56,7 +62,8 @@ stateDiagram-v2
 | **FetchInfo** | Controller fetches rack placement info (slot and tray) from the component manager backend and persists it on the switch record. Warn-and-continue on lookup failure. |
 | **Validating** | Switch is being validated. Sub-state: `ValidationComplete`. |
 | **BomValidating** | BOM (Bill of Materials) validation. Sub-state: `BomValidationComplete`. |
-| **Ready** | Switch is ready for use. Can be deleted, enter operator maintenance, or enter rack-level reprovisioning. |
+| **Ready** | Switch is ready for use. Can be deleted, enter decommissioning, enter operator maintenance, or enter rack-level reprovisioning. |
+| **Decommissioning** | Switch is being removed from managed service. NICo suppresses discovery and DHCP, factory-resets NVOS and the BMC, and deletes managed credentials. Ends in terminal sub-state `Decommissioned`. |
 | **Maintenance** | Operator-requested maintenance in progress. Operation is carried in `operation`: `PowerOn`, `PowerOff`, `Reset`, or `ReconfigureCertificate`. Certificate reconfiguration uses `configure_certificate` sub-states (`Start` → `WaitForComplete { job_id }`). |
 | **ReProvisioning** | Rack-driven maintenance in progress. Sub-states: `WaitingForRackFirmwareUpgrade`, `WaitingForNVOSUpgrade`, `WaitingForNMXCConfigure`. The rack state machine sets per-switch status fields and clears `switch_reprovisioning_requested` when the cycle completes. |
 | **Error** | Switch is in error (for example firmware upgrade failed, certificate job failed, or NVOS MAC conflict). Can transition to `Deleting` or `Maintenance`; otherwise waits for manual intervention. |
@@ -80,6 +87,7 @@ stateDiagram-v2
 | Validating (`ValidationComplete`) | BomValidating (`BomValidationComplete`) | Validation complete |
 | BomValidating (`BomValidationComplete`) | Ready | BOM validation complete |
 | Ready | Deleting | `deleted` set (marked for deletion) |
+| Ready | Decommissioning (`SuppressingSiteExplorer`) | `decommission_requested` is set |
 | Ready | Maintenance | `switch_maintenance_requested` is set |
 | Ready | ReProvisioning (`WaitingForRackFirmwareUpgrade`) | `switch_reprovisioning_requested` with `initiator` prefixed `rack-` |
 | Ready | Error | Unknown `switch_reprovisioning_requested` initiator |
@@ -98,6 +106,20 @@ stateDiagram-v2
 | ReProvisioning (any sub-state) | Ready | Parent rack entered `Error`; rack-level reprovision request cleared |
 | Error | Deleting | `deleted` set (marked for deletion) |
 | Error | Maintenance | `switch_maintenance_requested` is set |
+| Decommissioning (`SuppressingSiteExplorer`) | Decommissioning (`FactoryResetNvos`) | Site Explorer acknowledges the BMC suppression |
+| Decommissioning (`FactoryResetNvos`) | Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | RMS returns a reset job ID; the controller persists it for polling |
+| Decommissioning (`FactoryResetNvos`) | Decommissioning (`NvosFactoryResetOutcomeUnknown { error }`) | Submission returns `OperationOutcomeUnknown`; operator recovery is required |
+| Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | Same sub-state | RMS reports `Pending`, or a transient polling error occurs; poll the same job again |
+| Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | Same sub-state | RMS reports `Failed`; handler reports `ManualInterventionRequired` |
+| Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | Decommissioning (`SuppressingNvosDhcp`) | RMS reports `Completed` |
+| Decommissioning (`NvosFactoryResetOutcomeUnknown { error }`) | Same sub-state | Handler reports `ManualInterventionRequired`; no automatic reset resubmission |
+| Decommissioning (`SuppressingNvosDhcp`) | Decommissioning (`RebootingSwitch`) | NVOS DHCP suppression is recorded |
+| Decommissioning (`RebootingSwitch`) | Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Redfish accepts `ForceRestart` |
+| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Decommissioning (`SuppressingBmcDhcp`) | DHCP acknowledges the NVOS suppression |
+| Decommissioning (`SuppressingBmcDhcp`) | Decommissioning (`FactoryResetBmc`) | BMC DHCP suppression is recorded |
+| Decommissioning (`FactoryResetBmc`) | Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Redfish accepts the BMC factory-reset request |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | DHCP acknowledges the BMC suppression |
+| Decommissioning (`DeletingManagedCredentials`) | Decommissioning (`Decommissioned`) | Managed BMC and NVOS credentials and convergence records are deleted |
 | Deleting | *(end)* | Final delete committed |
 
 ## Rack-Level Re-Provisioning
@@ -119,9 +141,28 @@ The `Maintenance` state is entered when `switch_maintenance_requested` is posted
 - **Reset** — force-restarts the switch.
 - **ReconfigureCertificate** — reinstalls or rotates NVOS mTLS certificates via component manager / RMS. Uses the same async certificate flow as bring-up; see [Switch Certificate Configuration](switch_configure_certificate.md).
 
+## Decommissioning
+
+Managed-switch decommissioning requires the RMS switch backend and starts only
+from `Ready`. After Site Explorer acknowledges suppression, the controller
+submits the NVOS factory reset, persists the returned job ID, and polls that
+job until RMS reports `Completed`. It then suppresses NVOS DHCP, requests a
+switch reboot through Redfish, and waits for DHCP suppression acknowledgement
+before resetting the BMC and deleting managed credentials.
+
+Transient handler errors leave the switch in its current sub-state for a
+later retry. A failed RMS reset job reports `ManualInterventionRequired`
+while retaining the job ID in `WaitingForNvosFactoryReset`. An ambiguous
+submission outcome enters `NvosFactoryResetOutcomeUnknown`, which requires
+operator recovery and does not automatically resubmit the reset.
+
+Refer to
+[Decommission Managed Switches](../../decommissioning/switches.md) for the
+operator procedure and intended post-reset state.
+
 ## Implementation
 
 - **State type**: `SwitchControllerState` in `crates/api-model/src/switch/mod.rs`.
-- **Handlers**: `crates/switch-controller/src/` — one module per top-level state (`created`, `initializing`, `configuring`, `fetch_info`, `validating`, `bom_validating`, `ready`, `maintenance`, `reprovisioning`, `error_state`, `deleting`).
+- **Handlers**: `crates/switch-controller/src/` — one module per top-level state (`created`, `initializing`, `configuring`, `fetch_info`, `validating`, `bom_validating`, `ready`, `decommissioning`, `maintenance`, `reprovisioning`, `error_state`, `deleting`).
 - **Certificate configuration design**: [switch_configure_certificate.md](switch_configure_certificate.md).
 - **Orchestration**: `SwitchStateHandler` in `handler.rs` delegates to the handler for the current `controller_state`.

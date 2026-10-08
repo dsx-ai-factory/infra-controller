@@ -21,6 +21,7 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/config"
+	flowmetrics "github.com/NVIDIA/infra-controller/rest-api/flow/internal/metrics"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	svc "github.com/NVIDIA/infra-controller/rest-api/flow/internal/service"
@@ -35,6 +36,7 @@ import (
 
 const (
 	defaultServicePort                 = 50051
+	defaultMetricsPort                 = 9360
 	componentMgrCfgEnvVar              = "COMPONENT_MANAGER_CONFIG"
 	allowedServiceIdentitiesFileEnvVar = "FLOW_AUTHORIZATION_ALLOWED_SERVICE_IDENTITIES_FILE"
 	authorizationModeEnvVar            = "FLOW_AUTHORIZATION_MODE"
@@ -58,6 +60,7 @@ const (
 
 var (
 	port                     int
+	metricsPort              int
 	componentMgrConfig       string
 	devMode                  bool
 	allowedServiceIdentities []string
@@ -93,7 +96,8 @@ func init() {
 		_ = serveCmd.InheritedFlags().MarkHidden(name)
 	}
 
-	serveCmd.Flags().IntVarP(&port, "listen-port", "p", defaultServicePort, "Port for the gRPC server") //nolint:lll
+	serveCmd.Flags().IntVarP(&port, "listen-port", "p", defaultServicePort, "Port for the gRPC server")                 //nolint:lll
+	serveCmd.Flags().IntVar(&metricsPort, "metrics-port", defaultMetricsPort, "Port for the Prometheus metrics server") //nolint:lll
 	// Component manager config: priority is CLI flag > env var > service default config.
 	serveCmd.Flags().StringVarP(&componentMgrConfig, "component-config", "c", "", "Path to component manager config file (YAML)")               //nolint:lll
 	serveCmd.Flags().BoolVar(&devMode, "dev-mode", false, "Enable developer options (gRPC reflection, debug logging). Not for production use.") //nolint:lll
@@ -343,6 +347,7 @@ func doServe() {
 		}()
 	}
 
+	metricsRegistry, rpcMetrics := flowmetrics.NewRegistry()
 	service, err := svc.New(
 		ctx,
 		svc.Config{
@@ -352,6 +357,7 @@ func doServe() {
 			FlowConfig:       flowConfig,
 			CMConfig:         cmConfig,
 			ProviderRegistry: providerRegistry,
+			Metrics:          rpcMetrics,
 			DataCipher:       dataCipher,
 			DevMode:          devMode,
 			Authorization:    authorization,
@@ -366,6 +372,27 @@ func doServe() {
 	if err != nil {
 		log.Fatal().Msgf("failed to create the new gRPC server: %v", err)
 	}
+
+	metricsServer, err := flowmetrics.NewServer(fmt.Sprintf(":%d", metricsPort), metricsRegistry)
+	if err != nil {
+		log.Fatal().Err(err).Int("port", metricsPort).Msg("failed to bind the metrics server")
+	}
+	metricsDone := make(chan struct{})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("failed to shut down the metrics server")
+		}
+		<-metricsDone
+	}()
+	go func() {
+		defer close(metricsDone)
+		log.Info().Int("port", metricsPort).Msg("Flow metrics server is running")
+		if err := metricsServer.Serve(); err != nil {
+			log.Error().Err(err).Msg("Flow metrics server stopped unexpectedly")
+		}
+	}()
 
 	log.Info().Msg("New Flow service is created\n")
 	log.Info().Msgf("DB config: %+v", dbConf)

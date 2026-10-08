@@ -2,7 +2,7 @@ suite: boot artifact init containers
 templates:
   - deployment.yaml
 tests:
-  - it: should mount writable boot-artifacts storage without init containers
+  - it: should preserve image-bundled boot artifacts without init containers
     asserts:
       - isKind:
           of: Deployment
@@ -11,16 +11,16 @@ tests:
       - equal:
           path: spec.template.spec.securityContext.fsGroup
           value: 10001
-      - contains:
+      - notContains:
           path: spec.template.spec.volumes
           content:
             name: boot-artifacts
-            emptyDir: {}
-      - contains:
+          any: true
+      - notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /forge-boot-artifacts/blobs/internal
+          any: true
 
   - it: should render boot artifact init containers with auto-injected volume mount
     set:
@@ -36,7 +36,7 @@ tests:
           path: spec.template.spec.initContainers
       - lengthEqual:
           path: spec.template.spec.initContainers
-          count: 2
+          count: 3
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: boot-artifacts-x86-64
@@ -58,6 +58,18 @@ tests:
           path: spec.template.spec.initContainers[1].securityContext.runAsUser
       - notExists:
           path: spec.template.spec.initContainers[1].securityContext.runAsNonRoot
+      - equal:
+          path: spec.template.spec.initContainers[2].name
+          value: boot-artifacts-permissions
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.runAsUser
+          value: 0
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.runAsNonRoot
+          value: false
+      - matchRegex:
+          path: spec.template.spec.initContainers[2].command[2]
+          pattern: 'chmod -R g\+rX /forge-boot-artifacts/blobs/internal'
 
   - it: should build image from repository + tag when provided (new fields win)
     set:
@@ -104,6 +116,9 @@ tests:
 
   - it: should use configurable serve path
     set:
+      bootArtifactContainers:
+        - name: boot-artifacts
+          image: registry.example.com/boot-artifacts:latest
       bootArtifacts:
         servePath: /custom-boot-path
     asserts:
@@ -123,11 +138,6 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: '-s /forge-boot-artifacts'
-      - contains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: boot-artifacts
-            mountPath: /forge-boot-artifacts/blobs/internal
 
   - it: should merge bootArtifactContainers and initContainers
     set:
@@ -142,13 +152,16 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.template.spec.initContainers
-          count: 2
+          count: 3
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: boot-artifacts-x86-64
       - equal:
           path: spec.template.spec.initContainers[1].name
           value: custom-init
+      - equal:
+          path: spec.template.spec.initContainers[2].name
+          value: boot-artifacts-permissions
 
   - it: should reject empty split and fallback images
     set:

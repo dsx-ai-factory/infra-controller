@@ -94,46 +94,36 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username exceeds 255 characters",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: false,
 		},
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
-			obj: APIExpectedSwitchCreateRequest{
-				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 17)),
-				DefaultBmcPassword: &validPassword,
-				SwitchSerialNumber: validSwitchSerial,
-			},
-			expectErr: true,
-		},
-		// Boundary tests for BMC password (max 20 characters)
-		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: true,
@@ -217,6 +207,16 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchCreateRequest{
@@ -519,44 +519,33 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username exceeds 255 characters",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword: &validPassword,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
-			obj: APIExpectedSwitchUpdateRequest{
-				SwitchSerialNumber: &validSwitchSerial,
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 17)),
-				DefaultBmcPassword: &validPassword,
-				Labels:             map[string]string{"env": "test"},
-			},
-			expectErr: true,
-		},
-		// Boundary tests for BMC password (max 20 characters)
-		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
@@ -583,6 +572,14 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchUpdateRequest{
@@ -613,7 +610,7 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 				SwitchSerialNumber: &validSwitchSerial,
 				BmcIpAddress:       &emptyString,
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "nil BmcIpAddress (default)",

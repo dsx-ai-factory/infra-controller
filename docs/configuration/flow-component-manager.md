@@ -1,4 +1,4 @@
-# Flow Component Managers
+# Flow Component Managers <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 This page configures Flow’s component-manager implementations and API providers. Configure Core’s downstream hardware backends separately in [RMS Configuration](rms.md).
 

@@ -64,17 +64,28 @@ pub(in crate::bmc) async fn spawn(
     let machine_id = connection_details.machine_id;
     let bmc_vendor = connection_details.bmc_vendor;
 
-    let bmc_ssh_client = make_authenticated_client(&connection_details).await?;
+    let bmc_ssh_client = cancel_token
+        .run_until_cancelled(make_authenticated_client(&connection_details))
+        .await
+        .ok_or(SpawnError::Cancelled(CancelPhase::ClientCreation))??;
     let connected_since = Utc::now();
 
     // Channel to send data to/from the BMC
-    let mut ssh_client_channel = bmc_ssh_client
-        .channel_open_session()
+    let mut ssh_client_channel = cancel_token
+        .run_until_cancelled(bmc_ssh_client.channel_open_session())
         .await
+        .ok_or(SpawnError::Cancelled(CancelPhase::ChannelOpenSession))?
         .map_err(|error| SpawnError::OpeningSession { error })?;
 
     tracing::info!(%machine_id, "BMC SSH connection has established");
-    trigger_and_await_sol_console(machine_id, &mut ssh_client_channel, bmc_vendor).await?;
+    cancel_token
+        .run_until_cancelled(trigger_and_await_sol_console(
+            machine_id,
+            &mut ssh_client_channel,
+            bmc_vendor,
+        ))
+        .await
+        .ok_or(SpawnError::Cancelled(CancelPhase::TriggeringSolConsole))??;
     tracing::info!(%machine_id, "SOL console setup completed");
 
     let mut output_ringbuf: LocalRb<Array<u8, 1024>> = ringbuf::LocalRb::default();
@@ -200,6 +211,21 @@ pub(in crate::bmc) enum SpawnError {
     ConsoleActivation(#[from] ConsoleActivateError),
     #[error("error proxying message to BMC: {error}")]
     MessageProxying { error: MessageProxyError },
+    #[error("cancelled during {0:?}")]
+    Cancelled(CancelPhase),
+}
+
+impl SpawnError {
+    pub(in crate::bmc) fn is_cancelled(&self) -> bool {
+        matches!(self, SpawnError::Cancelled(_))
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::bmc) enum CancelPhase {
+    ClientCreation,
+    ChannelOpenSession,
+    TriggeringSolConsole,
 }
 
 #[derive(thiserror::Error, Debug)]

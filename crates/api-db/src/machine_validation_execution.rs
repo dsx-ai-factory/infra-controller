@@ -91,7 +91,12 @@ pub async fn find_run_items_by_run_id(
 ) -> DatabaseResult<Vec<MachineValidationRunItem>> {
     const QUERY: &str = "
         SELECT
-            run_item.*,
+            run_item.id, run_item.run_id, run_item.test_id, run_item.test_version,
+            run_item.display_name, run_item.context, run_item.component, run_item.state,
+            run_item.order_index, run_item.attempt, run_item.max_attempts,
+            run_item.timeout_seconds, run_item.plugin, run_item.plugin_full_host_approved,
+            run_item.started_at, run_item.ended_at, run_item.last_heartbeat_at,
+            run_item.skip_reason, run_item.failure_reason,
             current_attempt.id AS current_attempt_id
         FROM machine_validation_run_items run_item
         LEFT JOIN LATERAL (
@@ -138,7 +143,12 @@ pub async fn find_run_items_by_ids(
 
     const QUERY: &str = "
         SELECT
-            run_item.*,
+            run_item.id, run_item.run_id, run_item.test_id, run_item.test_version,
+            run_item.display_name, run_item.context, run_item.component, run_item.state,
+            run_item.order_index, run_item.attempt, run_item.max_attempts,
+            run_item.timeout_seconds, run_item.plugin, run_item.plugin_full_host_approved,
+            run_item.started_at, run_item.ended_at, run_item.last_heartbeat_at,
+            run_item.skip_reason, run_item.failure_reason,
             current_attempt.id AS current_attempt_id
         FROM machine_validation_run_items run_item
         LEFT JOIN LATERAL (
@@ -162,7 +172,11 @@ pub async fn find_attempt_by_id(
     txn: impl DbReader<'_>,
     id: &MachineValidationAttemptId,
 ) -> DatabaseResult<MachineValidationAttempt> {
-    const QUERY: &str = "SELECT * FROM machine_validation_attempts WHERE id=$1";
+    const QUERY: &str = "SELECT
+            id, run_item_id, attempt_number, state, command, args, container_image,
+            execute_in_host, exit_code, failure_classification, started_at, ended_at,
+            last_heartbeat_at, stdout_summary, stderr_summary
+        FROM machine_validation_attempts WHERE id=$1";
 
     sqlx::query_as::<_, MachineValidationAttempt>(QUERY)
         .bind(id)
@@ -201,7 +215,11 @@ pub async fn find_attempts_by_run_item_id(
     run_item_id: &MachineValidationRunItemId,
 ) -> DatabaseResult<Vec<MachineValidationAttempt>> {
     const QUERY: &str = "
-        SELECT * FROM machine_validation_attempts
+        SELECT
+            id, run_item_id, attempt_number, state, command, args, container_image,
+            execute_in_host, exit_code, failure_classification, started_at, ended_at,
+            last_heartbeat_at, stdout_summary, stderr_summary
+        FROM machine_validation_attempts
         WHERE run_item_id=$1
         ORDER BY attempt_number";
 

@@ -314,9 +314,28 @@ API PATCH /v2/org/{org}/nico/domain/nvlink/firmware the `domainIds/items/` reque
 API PATCH /v2/org/{org}/nico/domain/nvlink/firmware added the pattern `\S` to the request property `domainIds/items/`
 API PATCH /v2/org/{org}/nico/domain/nvlink/power the `domainIds/items/` request property's minLength was increased from `0` to `1`
 API PATCH /v2/org/{org}/nico/domain/nvlink/power added the pattern `\S` to the request property `domainIds/items/`
+
 # Rack and Tray domain references now use the Domain external ID (rack group ID),
 # not an internal UUID or the observed NMX-C cluster UUID.
 GET /v2/org/{org}/nico/rack the `items/nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
 GET /v2/org/{org}/nico/rack/{id} the `nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
 GET /v2/org/{org}/nico/tray the `items/nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
 GET /v2/org/{org}/nico/tray/{id} the `nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
+
+# Peering deletion now waits for DPU acknowledgement and inventory removal.
+# Return 202 with MessageResponse, not 204; callers poll GET for completion.
+API DELETE /v2/org/{org}/nico/vpc-peering/{id} removed the success response with the status `204`
+
+# VPC Prefix deletion has always returned 202; remove the vestigial 204 response.
+API DELETE /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} removed the success response with the status `204`
+
+# Expected rack group declarations need their protocol to derive the correct rack profile.
+# New declarations must provide it; legacy stored declarations remain readable with null.
+API POST /v2/org/{org}/nico/expected-rack-group added the new required request property `protocol`
+API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/protocol`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/protocol`
+
+API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
+API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`

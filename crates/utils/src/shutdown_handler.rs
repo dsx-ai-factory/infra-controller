@@ -16,20 +16,22 @@
  */
 
 use std::fmt::Display;
+use std::io;
 
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-/// Start a task that will wait for SIGINT or SIGTERM, and will cancel the given CancellationToken
-/// when either of them occur.
-pub(super) fn start(join_set: &mut JoinSet<()>, cancel_token: CancellationToken) {
-    // Register the signals before returning
-    let signal_future = shutdown_signal();
+/// Start a task that will wait for SIGINT or SIGTERM, returning a CancellationToken which will be
+/// cancelled when either of them occur.
+pub fn start() -> io::Result<CancellationToken> {
+    // Create a cancellation token that will be signalled when a sigterm/sigint is handled
+    let cancel_token = CancellationToken::new();
 
-    join_set
-        .build_task()
-        .name("shutdown signal handler")
-        .spawn(async move {
+    // Register the signals before returning
+    let signal_future = shutdown_signal()?;
+
+    tokio::spawn({
+        let cancel_token = cancel_token.clone();
+        async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {}
                 signal = signal_future => {
@@ -37,10 +39,10 @@ pub(super) fn start(join_set: &mut JoinSet<()>, cancel_token: CancellationToken)
                     cancel_token.cancel();
                 }
             }
-        })
-        // Safety: tokio::task::Builder::spawn always returns Ok, runtime issues cause panics
-        // instead of Err.
-        .expect("signal handler should spawn successfully");
+        }
+    });
+
+    Ok(cancel_token)
 }
 
 enum ShutdownCause {
@@ -57,18 +59,17 @@ impl Display for ShutdownCause {
     }
 }
 
-fn shutdown_signal() -> impl Future<Output = ShutdownCause> {
-    use tokio::signal::unix::{SignalKind, signal};
+fn shutdown_signal() -> io::Result<impl Future<Output = ShutdownCause>> {
+    use tokio::signal::unix;
 
     // Register the signals before returning
-    let mut terminate =
-        signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
-    let mut interrupt = signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+    let mut terminate = unix::signal(unix::SignalKind::terminate())?;
+    let mut interrupt = unix::signal(unix::SignalKind::interrupt())?;
 
-    async move {
+    Ok(async move {
         tokio::select! {
             _ = interrupt.recv() => ShutdownCause::Int,
             _ = terminate.recv() => ShutdownCause::Term,
         }
-    }
+    })
 }

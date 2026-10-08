@@ -454,7 +454,7 @@ You can combine common options as needed:
 The `setup.sh` script installs all prerequisites and NICo components in sequential phases:
 
 When upgrading a deployment that previously bundled PSM and NSM, complete the
-[preserve-or-overwrite steps](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm)
+[preserve-or-overwrite steps](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm)
 before continuing.
 
 <Anchor id="setup-script-phases"/>

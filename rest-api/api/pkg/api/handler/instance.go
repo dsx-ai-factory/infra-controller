@@ -1441,6 +1441,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				if errors.As(err, &ibSelErr) {
 					return cutil.NewAPIError(http.StatusBadRequest, ibSelErr.Error(), ibSelErr.ValidationError())
 				}
+				if errors.Is(err, common.ErrSpectrumXMachineSelection) {
+					return cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+				}
 				if err == common.ErrInstanceTypeMachineNotFound {
 					return cutil.NewAPIError(http.StatusBadRequest,
 						"No Machines are available for specified Instance Type", nil)
@@ -1455,6 +1458,15 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		logger.Info().Str("MachineID", machine.ID).
 			Interface("MachineLabelSelector", apiRequest.MachineLabelSelector).
 			Msg("selected Machine for Instance creation")
+
+		// Instance Type placement already validated each candidate. Explicit
+		// placement validates the selected machine using the same DB projection.
+		if apiRequest.MachineID != nil {
+			apiErr := common.ValidateMachineSpectrumXAttachments(ctx, tx, cih.dbSession, machine.ID, apiRequest.SpectrumXAttachments)
+			if apiErr != nil {
+				return apiErr
+			}
+		}
 
 		mcDAO := cdbm.NewMachineCapabilityDAO(cih.dbSession)
 
@@ -3534,6 +3546,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	// Omission preserves attachments; an empty replacement must allow removal
+	// even after the corresponding capability disappears from inventory.
+	apiErr = common.ValidateMachineSpectrumXAttachments(ctx, nil, uih.dbSession, machine.ID, apiRequest.SpectrumXAttachments)
+	if apiErr != nil {
+		return apiErr.Send(c)
+	}
+
 	// Values populated inside the transaction closure that are needed for the response.
 	var ui *cdbm.Instance
 	var newdbIfcs []cdbm.Interface
@@ -4416,7 +4435,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			description = *ui.Description
 		}
 
-		interfaceConfigs := make([]*corev1.InstanceInterfaceConfig, len(newdbIfcs))
+		interfaceConfigs := []*corev1.InstanceInterfaceConfig{}
 		for i := range newdbIfcs {
 			ifc := &newdbIfcs[i]
 			if ifc.Status == cdbm.InterfaceStatusDeleting {
@@ -4472,7 +4491,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				interfaceConfig.RoutingProfile = ifc.InlineRoutingProfile.ToProto()
 			}
 
-			interfaceConfigs[i] = interfaceConfig
+			interfaceConfigs = append(interfaceConfigs, interfaceConfig)
 		}
 
 		// Populate InfiniBand Interface details for Site Controller request

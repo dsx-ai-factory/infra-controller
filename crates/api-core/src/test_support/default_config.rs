@@ -326,7 +326,8 @@ pub fn get() -> CarbideConfig {
             svpc_enabled: true,
             astra_enabled: false,
             subnet_ip: Ipv4Addr::UNSPECIFIED,
-            subnet_mask: 0_i32,
+            subnet_mask: EwEthersConfig::default_subnet_mask(),
+            astra: Default::default(),
             monitor_run_interval: std::time::Duration::from_secs(10),
             svpc: SvpcConfig {
                 mqtt_endpoint: "mqtt.forge".to_string(),

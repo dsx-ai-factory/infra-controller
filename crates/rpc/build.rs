@@ -164,6 +164,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .field_attribute("machine_discovery.BlockDevice.device_type", "#[serde(default)]")
         .field_attribute("machine_discovery.NvmeDevice.serial", "#[serde(default)]")
         .field_attribute(
+            "machine_discovery.LldpSwitchData.id",
+            "#[serde(default, skip_serializing_if = \"String::is_empty\")]",
+        )
+        .field_attribute(
+            "machine_discovery.LldpSwitchData.remote_port",
+            "#[serde(default, skip_serializing_if = \"String::is_empty\")]",
+        )
+        .field_attribute(
             "forge.InstanceTypeMachineCapabilityFilterAttributes.capability_type",
             "#[serde(deserialize_with = \"MachineCapabilityType::from_string\", serialize_with = \"MachineCapabilityType::serialize_from_enum_i32\")]",
         )

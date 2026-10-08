@@ -22,11 +22,14 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub async fn get_by_ek_sha256(
     txn: &mut PgConnection,
     ek_sha256: &[u8],
 ) -> DatabaseResult<Option<EkCertVerificationStatus>> {
-    let query = "SELECT * FROM ek_cert_verification_status WHERE ek_sha256 = ($1)";
+    let query = "SELECT ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id FROM ek_cert_verification_status WHERE ek_sha256 = ($1)";
 
     sqlx::query_as(query)
         .bind(ek_sha256)
@@ -38,7 +41,7 @@ pub async fn get_by_ek_sha256(
 pub async fn get_by_unmatched_ca(
     txn: &mut PgConnection,
 ) -> DatabaseResult<Vec<EkCertVerificationStatus>> {
-    let query = "SELECT * FROM ek_cert_verification_status WHERE signing_ca_found = FALSE";
+    let query = "SELECT ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id FROM ek_cert_verification_status WHERE signing_ca_found = FALSE";
 
     sqlx::query_as(query)
         .fetch_all(txn)
@@ -50,7 +53,7 @@ pub async fn get_by_issuer(
     txn: &mut PgConnection,
     issuer: &[u8],
 ) -> DatabaseResult<Vec<EkCertVerificationStatus>> {
-    let query = "SELECT * FROM ek_cert_verification_status WHERE issuer = ($1)";
+    let query = "SELECT ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id FROM ek_cert_verification_status WHERE issuer = ($1)";
 
     sqlx::query_as(query)
         .bind(issuer)
@@ -63,7 +66,7 @@ pub async fn get_by_machine_id(
     txn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> DatabaseResult<Option<EkCertVerificationStatus>> {
-    let query = "SELECT * FROM ek_cert_verification_status WHERE machine_id = ($1)";
+    let query = "SELECT ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id FROM ek_cert_verification_status WHERE machine_id = ($1)";
 
     sqlx::query_as(query)
         .bind(machine_id)
@@ -78,7 +81,7 @@ pub async fn update_ca_verification_status(
     signing_ca_found: bool,
     ca_id: Option<i32>,
 ) -> DatabaseResult<Vec<EkCertVerificationStatus>> {
-    let query = "UPDATE ek_cert_verification_status SET signing_ca_found=$1, ca_id=$2 WHERE ek_sha256=$3 RETURNING *";
+    let query = "UPDATE ek_cert_verification_status SET signing_ca_found=$1, ca_id=$2 WHERE ek_sha256=$3 RETURNING ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id";
     sqlx::query_as(query)
         .bind(signing_ca_found)
         .bind(ca_id)
@@ -92,7 +95,7 @@ pub async fn unmatch_ca_verification_status(
     txn: &mut PgConnection,
     ca_id: i32,
 ) -> DatabaseResult<Option<EkCertVerificationStatus>> {
-    let query = "UPDATE ek_cert_verification_status SET signing_ca_found=false, ca_id=null WHERE ca_id=$1 RETURNING *";
+    let query = "UPDATE ek_cert_verification_status SET signing_ca_found=false, ca_id=null WHERE ca_id=$1 RETURNING ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id";
     sqlx::query_as(query)
         .bind(ca_id)
         .fetch_optional(txn)
@@ -104,7 +107,7 @@ pub async fn delete_ca_verification_status_by_machine_id(
     txn: &mut PgConnection,
     machine_id: &MachineId,
 ) -> DatabaseResult<Option<EkCertVerificationStatus>> {
-    let query = "DELETE FROM ek_cert_verification_status WHERE machine_id=$1 RETURNING *";
+    let query = "DELETE FROM ek_cert_verification_status WHERE machine_id=$1 RETURNING ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id";
     sqlx::query_as(query)
         .bind(machine_id)
         .fetch_optional(txn)
@@ -123,8 +126,7 @@ pub async fn insert(
     issuer_access_info: &str,
     machine_id: MachineId,
 ) -> DatabaseResult<Option<EkCertVerificationStatus>> {
-    let query =
-        "INSERT INTO ek_cert_verification_status VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *";
+    let query = "INSERT INTO ek_cert_verification_status VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ek_sha256, serial_num, signing_ca_found, issuer, issuer_access_info, machine_id";
 
     sqlx::query_as(query)
         .bind(ek_sha256)

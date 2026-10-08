@@ -1069,50 +1069,38 @@ func cmdInstanceList(s *Session, args []string) error {
 	fmt.Fprintf(os.Stderr, "%d items\n", len(items))
 	defer printLabelHint(os.Stderr, items, merged)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tIP ADDRESSES\tSTATUS\tVPC\tSITE\tLABELS\tID")
+	fmt.Fprintln(tw, "NAME\tIP ADDRESSES\tIP PREFIXES\tSTATUS\tVPC\tSITE\tLABELS\tID")
 	for _, item := range items {
-		ipAddresses := strings.Join(instanceIPAddresses(item.Raw), ", ")
+		ipAddresses := strings.Join(instanceInterfaceValues(item.Raw, "ipAddresses"), ", ")
 		if ipAddresses == "" {
 			ipAddresses = "-"
 		}
+		ipPrefixes := strings.Join(instanceInterfaceValues(item.Raw, "ipPrefixes"), ", ")
+		if ipPrefixes == "" {
+			ipPrefixes = "-"
+		}
 		vpcName := s.Resolver.ResolveID("vpc", item.Extra["vpcId"])
 		siteName := s.Resolver.ResolveID("site", item.Extra["siteId"])
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, ipAddresses, item.Status, vpcName, siteName, formatLabels(item.Labels, 60), item.ID)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, ipAddresses, ipPrefixes, item.Status, vpcName, siteName, formatLabels(item.Labels, 60), item.ID)
 	}
 	return tw.Flush()
 }
 
-func instanceIPAddresses(raw interface{}) []string {
+func instanceInterfaceValues(raw interface{}, field string) []string {
 	instance, ok := raw.(map[string]interface{})
 	if !ok {
 		return nil
 	}
-	addresses := interfaceIPAddresses(instance["interfaces"])
-	if len(addresses) > 0 {
-		return addresses
-	}
-	status, ok := instance["status"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	network, ok := status["network"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	return interfaceIPAddresses(network["interfaces"])
-}
-
-func interfaceIPAddresses(raw interface{}) []string {
-	interfaces, _ := raw.([]interface{})
-	var addresses []string
+	interfaces, _ := instance["interfaces"].([]interface{})
+	var values []string
 	for _, rawInterface := range interfaces {
 		instanceInterface, ok := rawInterface.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		addresses = append(addresses, stringSlice(instanceInterface["ipAddresses"])...)
+		values = append(values, stringSlice(instanceInterface[field])...)
 	}
-	return addresses
+	return values
 }
 
 func cmdMachineList(s *Session, args []string) error {

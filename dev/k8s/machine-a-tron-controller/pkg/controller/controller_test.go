@@ -298,6 +298,127 @@ func TestServiceBuilder_BuildService_BMCIPAsExternalIP(t *testing.T) {
 	assert.Empty(t, svc.Spec.ClusterIPs)
 }
 
+// TestServiceBuilder_BuildNvosService checks the per-switch NVOS Service: its
+// name, externalIP, and port 9370 forwarded to the bmc-mock listener.
+func TestServiceBuilder_BuildNvosService(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace: "test-ns",
+		BaseSelector: map[string]string{
+			"app": "machine-a-tron",
+		},
+	}
+
+	sw := &matclient.MachineStatus{
+		MatID:        "switch-uuid-12345678",
+		DeviceKind:   matclient.DeviceKindSwitch,
+		HardwareType: ptr("nvidia_switch_nd5200_ld"),
+		APIState:     "Unknown",
+		PowerState:   "On",
+		NvosIP:       ptr("10.100.1.20"),
+		BMC: matclient.BMCStatus{
+			IP:      ptr("10.100.0.20"),
+			Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443},
+		},
+	}
+
+	svc := builder.BuildNvosService(sw, "mat-0")
+
+	assert.Equal(t, "mat-nvos-switch-uuid--"+shortHash(sw.MatID), svc.Name)
+	assert.Equal(t, "test-ns", svc.Namespace)
+	assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
+	assert.Equal(t, []string{"10.100.1.20"}, svc.Spec.ExternalIPs, "the NVOS address is published as an externalIP")
+	assert.Empty(t, svc.Spec.ClusterIP, "the clusterIP is left to the apiserver")
+	assert.Equal(t, MachineTypeNvos, svc.Labels[LabelMachineType])
+	assert.Equal(t, sw.MatID, svc.Labels[LabelMatID])
+	assert.Equal(t, "mat-0", svc.Spec.Selector[LabelPodName])
+	assert.Equal(t, "10.100.1.20", svc.Annotations[AnnotationNvosIP])
+	assert.Equal(t, "nvidia_switch_nd5200_ld", svc.Annotations[AnnotationHardwareType])
+	assert.NotContains(t, svc.Annotations, AnnotationBMCIP)
+
+	require.Len(t, svc.Spec.Ports, 1)
+	port := svc.Spec.Ports[0]
+	assert.Equal(t, PortNameNmxc, port.Name)
+	assert.Equal(t, corev1.ProtocolTCP, port.Protocol)
+	assert.Equal(t, int32(NmxcPort), port.Port, "NICo expects NMX-C on 9370")
+	assert.Equal(t, intstr.FromInt32(8443), port.TargetPort, "forwarded to the bmc-mock listener")
+}
+
+// TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint checks that a
+// switch with an NVOS lease yields both a BMC and an NVOS Service.
+func TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace:    "test-ns",
+		BaseSelector: map[string]string{"app": "machine-a-tron"},
+	}
+
+	tests := []struct {
+		name        string
+		machine     matclient.MachineStatus
+		wantNvosSvc bool
+	}{
+		{
+			name: "switch with an NVOS lease gets an NVOS Service",
+			machine: matclient.MachineStatus{
+				MatID:      "switch-1",
+				DeviceKind: matclient.DeviceKindSwitch,
+				NvosIP:     ptr("10.100.1.1"),
+				BMC:        matclient.BMCStatus{IP: ptr("10.100.0.1")},
+			},
+			wantNvosSvc: true,
+		},
+		{
+			name: "switch without an NVOS lease yet gets only its BMC Service",
+			machine: matclient.MachineStatus{
+				MatID:      "switch-2",
+				DeviceKind: matclient.DeviceKindSwitch,
+				BMC:        matclient.BMCStatus{IP: ptr("10.100.0.2")},
+			},
+			wantNvosSvc: false,
+		},
+		{
+			name: "switch reporting an empty NVOS address gets only its BMC Service",
+			machine: matclient.MachineStatus{
+				MatID:      "switch-3",
+				DeviceKind: matclient.DeviceKindSwitch,
+				NvosIP:     ptr(""),
+				BMC:        matclient.BMCStatus{IP: ptr("10.100.0.4")},
+			},
+			wantNvosSvc: false,
+		},
+		{
+			name: "a machine reporting an address in nvos_ip is not a switch",
+			machine: matclient.MachineStatus{
+				MatID:      "host-1",
+				DeviceKind: "machine",
+				NvosIP:     ptr("10.100.1.3"),
+				BMC:        matclient.BMCStatus{IP: ptr("10.100.0.3")},
+			},
+			wantNvosSvc: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &matclient.MachinesStatusResponse{Machines: []matclient.MachineStatus{tt.machine}}
+			services := builder.BuildServicesFromStatus(status, "")
+
+			var nvos []*corev1.Service
+			for _, svc := range services {
+				if svc.Labels[LabelMachineType] == MachineTypeNvos {
+					nvos = append(nvos, svc)
+				}
+			}
+			assert.Len(t, services, 1+len(nvos), "the BMC Service is always built")
+			if tt.wantNvosSvc {
+				require.Len(t, nvos, 1)
+				assert.Equal(t, []string{*tt.machine.NvosIP}, nvos[0].Spec.ExternalIPs)
+			} else {
+				assert.Empty(t, nvos)
+			}
+		})
+	}
+}
+
 func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 	builder := &ServiceBuilder{
 		Namespace: "test-ns",
@@ -382,6 +503,8 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 	}
 }
 
+// TestComputeServiceDiff checks which Services are created, updated, deleted
+// and recreated between the desired and existing sets.
 func TestComputeServiceDiff(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -638,6 +761,18 @@ func TestComputeServiceDiff(t *testing.T) {
 			wantRecreateCount: 1,
 		},
 		{
+			// Switch NVOS Services from the version that set the NVOS IP as
+			// clusterIP are recreated the same way
+			name: "legacy NVOS service is recreated with the address in externalIPs",
+			desired: []*corev1.Service{
+				makeTestServiceWithNvosIP("nvos-1", "mat-id-1", "10.100.1.20"),
+			},
+			existing: []*corev1.Service{
+				makeLegacyNvosClusterIPService("nvos-1", "mat-id-1", "10.100.1.20"),
+			},
+			wantRecreateCount: 1,
+		},
+		{
 			// Legacy Service that lost its lease before the upgrade and got
 			// the same address back: healed by the collision check
 			name: "unannotated service holding its own BMC IP as clusterIP is recreated",
@@ -874,6 +1009,24 @@ func makeTestServiceWithBMCIP(name, matID, ip string) *corev1.Service {
 func makeLegacyClusterIPService(name, matID, ip string) *corev1.Service {
 	svc := makeTestService(name, matID)
 	svc.Annotations[AnnotationBMCIP] = ip
+	return withAllocatedClusterIP(svc, ip)
+}
+
+// makeTestServiceWithNvosIP creates a test NVOS service publishing ip as externalIP.
+func makeTestServiceWithNvosIP(name, matID, ip string) *corev1.Service {
+	svc := makeTestService(name, matID)
+	svc.Labels[LabelMachineType] = MachineTypeNvos
+	svc.Annotations[AnnotationNvosIP] = ip
+	svc.Spec.ExternalIPs = []string{ip}
+	return svc
+}
+
+// makeLegacyNvosClusterIPService creates a test NVOS service as built by
+// controller versions that set the NVOS IP as clusterIP.
+func makeLegacyNvosClusterIPService(name, matID, ip string) *corev1.Service {
+	svc := makeTestService(name, matID)
+	svc.Labels[LabelMachineType] = MachineTypeNvos
+	svc.Annotations[AnnotationNvosIP] = ip
 	return withAllocatedClusterIP(svc, ip)
 }
 

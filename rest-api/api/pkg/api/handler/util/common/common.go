@@ -70,6 +70,10 @@ var (
 	ErrAllocationConstraintNotFound = errors.New("Allocation does not have an associated Constraint")
 	// ErrInstanceTypeMachineNotFound
 	ErrInstanceTypeMachineNotFound = errors.New("Instance Type does not have a Machine available for allocation")
+	// ErrSpectrumXMachineSelection distinguishes incompatible selectors from an empty allocation pool.
+	ErrSpectrumXMachineSelection = errors.New("no Machines with the requested SpectrumX capabilities are available for specified Instance Type")
+	// ErrMachineUnavailable is returned when a candidate Machine, re-read under its lock, is no longer Ready, unassigned, or matching the label selector
+	ErrMachineUnavailable = errors.New("machine is no longer available for allocation")
 	// ErrInvalidFunctionParams
 	ErrInvalidFunctionParams = errors.New("invalid function parameters")
 
@@ -346,8 +350,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	)
 
 	var infiniBandInterfaces []cam.APIInfiniBandInterfaceCreateOrUpdateRequest
+	var spectrumXAttachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest
 	if apiRequest != nil {
 		infiniBandInterfaces = apiRequest.InfiniBandInterfaces
+		spectrumXAttachments = apiRequest.SpectrumXAttachments
 	}
 	requireInfiniBandMatch := len(infiniBandInterfaces) > 0
 	var suggestedByDevice map[string][]int
@@ -373,37 +379,20 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 		}
 	}
 
+	compatible, err := FilterMachinesBySpectrumXAttachments(ctx, tx, dbSession, machines, spectrumXAttachments)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+		return nil, err
+	}
+	if len(machines) > 0 && len(compatible) == 0 {
+		return nil, ErrSpectrumXMachineSelection
+	}
+	machines = compatible
+
 	if len(machines) > 0 {
 		for _, mc := range machines {
-			// Acquire an advisory lock on the MachineID, other provider will be look for other is this is being locked
-			// this lock is released when the transaction commits or rollback
-			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
-			if err != nil {
-				continue
-			}
-
-			// Re-obtain the Machine record, to ensure that it is still available
-			umc, err := mcDAO.GetByID(ctx, tx, mc.ID, nil, true)
-			if err != nil {
-				continue
-			}
-
-			if umc.Status != cdbm.MachineStatusReady {
-				continue
-			}
-
-			if umc.IsAssigned {
-				continue
-			}
-
-			// Labels can change after the initial candidate query. Recheck the
-			// locked Machine before assigning it so the placement constraint is
-			// enforced against the latest record we observed.
-			if !umc.MatchesLabelSelector(machineLabelSelector) {
-				continue
-			}
-
-			// If InfiniBand Interfaces are specified in the request, verify that the Machine has matching InfiniBand Interfaces
+			// If InfiniBand Interfaces are specified in the request, verify that the Machine has matching InfiniBand Interfaces.
+			// The Capabilities were loaded before the loop, so this check doesn't need the Machine lock.
 			if requireInfiniBandMatch {
 				// Get the Machine InfiniBand Capabilities for the Machine
 				machineIbCaps := machineIbCapsByMachineID[mc.ID]
@@ -427,19 +416,54 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 				}
 			}
 
-			// We should now be able to proceed with the allocation
-			// Update the machine status to assigned
-			updateInput := cdbm.MachineUpdateInput{
-				MachineID:  mc.ID,
-				IsAssigned: cutil.GetPtr(true),
-				Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
-			}
+			// Lock and assign the Machine inside a savepoint, so a rejected Machine is unlocked
+			// right away instead of staying locked until the Instance create transaction ends.
+			var mcu *cdbm.Machine
+			err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+				// Acquire an advisory lock on the MachineID, so concurrent requests skip this Machine
+				lerr := sp.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+				if lerr != nil {
+					return lerr
+				}
 
-			// return the updated machine
-			mcu, err := mcDAO.Update(ctx, tx, updateInput)
+				// Re-obtain the Machine record, to ensure that it is still available
+				umc, gerr := mcDAO.GetByID(ctx, sp, mc.ID, nil, true)
+				if gerr != nil {
+					return gerr
+				}
+
+				if umc.Status != cdbm.MachineStatusReady {
+					return ErrMachineUnavailable
+				}
+
+				if umc.IsAssigned {
+					return ErrMachineUnavailable
+				}
+
+				// Labels can change after the initial candidate query. Recheck the
+				// locked Machine before assigning it so the placement constraint is
+				// enforced against the latest record we observed.
+				if !umc.MatchesLabelSelector(machineLabelSelector) {
+					return ErrMachineUnavailable
+				}
+
+				// We should now be able to proceed with the allocation
+				// Update the machine status to assigned
+				var uerr error
+				mcu, uerr = mcDAO.Update(ctx, sp, cdbm.MachineUpdateInput{
+					MachineID:  mc.ID,
+					IsAssigned: cutil.GetPtr(true),
+					Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
+				})
+				return uerr
+			})
+			if errors.Is(err, cdb.ErrTransactionSavepoint) {
+				return nil, err
+			}
 			if err != nil {
 				continue
 			}
+
 			_, err = cdbm.NewStatusDetailDAO(dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
 				EntityID: mc.ID,
 				Status:   cdbm.MachineStatusInUse,

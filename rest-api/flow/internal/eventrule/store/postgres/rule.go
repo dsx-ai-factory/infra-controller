@@ -110,7 +110,7 @@ func (s *Store) Create(
 	err = s.pg.DB.NewInsert().
 		Model(record).
 		Column("id", "name", "description", "enabled", "event_type", "policy").
-		Returning("*").
+		Returning("?Columns").
 		Scan(ctx)
 	if err != nil {
 		return nil, err

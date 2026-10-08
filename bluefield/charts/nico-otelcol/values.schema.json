@@ -159,6 +159,16 @@
         }
       }
     },
+    "puntStatsHelper": {
+      "type": "object",
+      "properties": {
+        "dstPath": {
+          "type": "string",
+          "description": "File written by punt-stats-helper and read by the punt_stats receiver. Must be a file under the /var/run/punt-stats emptyDir mounted in both containers; any other path lands in a private container filesystem the collector cannot read.",
+          "pattern": "^/var/run/punt-stats(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$"
+        }
+      }
+    },
     "prometheusRemoteAccess": {
       "type": "boolean",
       "description": "Expose unauthenticated Prometheus metrics on all DPU host interfaces instead of loopback",

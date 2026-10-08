@@ -199,9 +199,12 @@ dedicated `nico-pxe` image and HTTP service:
 devspace deploy -n nico-system --profile full
 ```
 
-The default and `dsx-exchange` profiles leave `nico-pxe` disabled. The local
-PXE image includes its request templates and Scout firmware scripts, but it
-does not include OS boot artifacts. Configure `nico-pxe.bootArtifactContainers`
+The umbrella chart includes `nico-pxe` unconditionally, so
+`nico-pxe.enabled=false` does not disable it. The default and `dsx-exchange`
+profiles do not supply the dedicated PXE image: their PXE pod uses the API-only
+image and cannot start the PXE binary. Select `full` to deploy a working PXE
+image. The local PXE image includes its request templates and Scout firmware
+scripts, but it does not include OS boot artifacts. Configure `nico-pxe.bootArtifactContainers`
 before using the profile for an actual host or DPU boot.
 
 The post-deploy setup uses temporary port-forwards to register the site and verifies that machines from Core are visible through the REST API. To keep the REST API and Keycloak available on localhost after `devspace deploy` exits, run these in separate terminals:

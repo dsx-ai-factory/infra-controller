@@ -31,7 +31,7 @@ use nv_redfish::computer_system::{
     Bios, BootOption, ComputerSystem, SecureBoot, SecureBootCurrentBootType,
 };
 use nv_redfish::ethernet_interface::{EthernetInterface, UefiDevicePath as EthUefiDevicePath};
-use nv_redfish::oem::nvidia::NvidiaComputerSystem;
+use nv_redfish::oem::nvidia::{NvidiaComputerSystem, NvidiaProcessor};
 use nv_redfish::pcie_device::PcieDevice;
 use nv_redfish::resource::PowerState;
 use nv_redfish::schema::computer_system::SerialConsoleProtocol;
@@ -67,6 +67,94 @@ pub(crate) struct ExploredComputerSystem<B: Bmc> {
     ethernet_interfaces: Vec<EthernetInterface<B>>,
     oem_nvidia_bluefield: Option<NvidiaComputerSystem<B>>,
     secure_boot: Option<SecureBoot<B>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VeraRubinMachinePosition {
+    pub physical_slot_number: Option<i32>,
+    pub compute_tray_index: Option<i32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VeraRubinProcessor {
+    oem: Option<VeraRubinProcessorOem>,
+}
+
+#[derive(serde::Deserialize)]
+struct VeraRubinProcessorOem {
+    #[serde(rename = "Nvidia")]
+    nvidia: Option<VeraRubinNvidiaProcessor>,
+}
+
+#[derive(serde::Deserialize)]
+struct VeraRubinNvidiaProcessor {
+    #[serde(rename = "MNNVLinkTopology")]
+    mnnvlink_topology: Option<VeraRubinNvLinkTopology>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VeraRubinNvLinkTopology {
+    tray_slot_number: Option<i64>,
+    tray_slot_index: Option<i64>,
+}
+
+/// Converts a Redfish system resource without fetching linked inventory.
+pub(super) trait ComputerSystemExt {
+    fn to_model(&self) -> ModelComputerSystem;
+}
+
+impl<B: Bmc> ComputerSystemExt for ComputerSystem<B> {
+    fn to_model(&self) -> ModelComputerSystem {
+        let hw_id = self.hardware_id();
+        let power_state = self
+            .power_state()
+            .and_then(|state| match state {
+                PowerState::On => Some(ModelPowerState::On),
+                PowerState::Off => Some(ModelPowerState::Off),
+                PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
+                PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
+                PowerState::Paused => Some(ModelPowerState::Paused),
+                PowerState::Hibernating => Some(ModelPowerState::Hibernating),
+                PowerState::Sleeping => Some(ModelPowerState::Sleeping),
+                PowerState::UnsupportedValue => None,
+            })
+            .unwrap_or_default();
+        let serial_console_ssh_port = self
+            .raw()
+            .serial_console
+            .as_ref()
+            .and_then(|console| console.ssh.as_ref())
+            .map(enabled_serial_console_ssh_port)
+            .transpose()
+            .unwrap_or_else(|invalid_port| {
+                tracing::warn!(system_id = %self.raw().id, serial_console_ssh_port = invalid_port,
+                    "Ignoring invalid SSH serial-console port reported by Redfish");
+                None
+            })
+            .flatten();
+
+        ModelComputerSystem {
+            id: self.raw().id.clone(),
+            manufacturer: hw_id.manufacturer.map(|value| value.to_string()),
+            model: hw_id.model.map(|value| value.to_string()),
+            serial_number: hw_id
+                .serial_number
+                .map(|value| value.into_inner().trim().to_string()),
+            sku: self.sku().map(|value| value.to_string()),
+            power_state,
+            bios_version: self
+                .raw()
+                .bios_version
+                .clone()
+                .flatten()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            serial_console_ssh_port,
+            ..Default::default()
+        }
+    }
 }
 
 impl<B: Bmc> ExploredComputerSystem<B> {
@@ -196,19 +284,24 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             }
         }
     }
-    pub(crate) fn to_model(
+    /// Converts the primary system with its fully explored inventory and host fallbacks.
+    pub(super) fn to_model(
         &self,
         hw_type: Option<hw::HwType>,
         chassis: &ExploredChassisCollection<B>,
         pcie_devices: &[PcieDevice<B>],
     ) -> Result<ModelComputerSystem, Error<B>> {
-        let hw_id = self.system.hardware_id();
+        let system_model = self.system.to_model();
         let is_dpu = hw_type == Some(hw::HwType::Bluefield);
         let ethernet_interfaces = self.ethernet_interfaces(hw_type)?;
 
         let mut base_mac = None;
         let mut nic_mode = None;
-        let mut serial_number = hw_id.serial_number.map(|v| v.into_inner());
+        let mut serial_number = self
+            .system
+            .hardware_id()
+            .serial_number
+            .map(|value| value.into_inner());
         if is_dpu {
             // This part processes dpu case and do two things such as
             // 1. update system serial_number in case it is empty using chassis serial_number
@@ -280,54 +373,10 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         let power_state = chassis
             .liteon_power_state()
             .map(|v| v.to_model())
-            .unwrap_or_else(|| {
-                self.system
-                    .power_state()
-                    .and_then(|v| match v {
-                        PowerState::On => Some(ModelPowerState::On),
-                        PowerState::Off => Some(ModelPowerState::Off),
-                        PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
-                        PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
-                        PowerState::Paused => Some(ModelPowerState::Paused),
-                        PowerState::Hibernating => Some(ModelPowerState::Hibernating),
-                        PowerState::Sleeping => Some(ModelPowerState::Sleeping),
-                        PowerState::UnsupportedValue => None,
-                    })
-                    .unwrap_or_default()
-            });
-
-        let bios_version = self
-            .system
-            .raw()
-            .bios_version
-            .clone()
-            .flatten()
-            .map(|version| version.trim().to_string())
-            .filter(|version| !version.is_empty());
-
-        let serial_console_ssh_port = self
-            .system
-            .raw()
-            .serial_console
-            .as_ref()
-            .and_then(|serial_console| serial_console.ssh.as_ref())
-            .map(enabled_serial_console_ssh_port)
-            .transpose()
-            .unwrap_or_else(|invalid_port| {
-                tracing::warn!(
-                    system_id = %self.system.raw().id,
-                    serial_console_ssh_port = invalid_port,
-                    "Ignoring invalid SSH serial-console port reported by Redfish",
-                );
-                None
-            })
-            .flatten();
+            .unwrap_or(system_model.power_state);
 
         Ok(ModelComputerSystem {
             ethernet_interfaces,
-            id: self.system.raw().id.clone(),
-            manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
-            model: hw_id.model.map(|v| v.to_string()),
             serial_number: serial_number.map(|v| v.to_string()),
             attributes: ComputerSystemAttributes {
                 nic_mode,
@@ -336,10 +385,8 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             pcie_devices,
             base_mac,
             power_state,
-            sku: self.system.sku().map(|v| v.to_string()),
             boot_order,
-            bios_version,
-            serial_console_ssh_port,
+            ..system_model
         })
     }
 
@@ -623,6 +670,76 @@ impl<B: Bmc> ExploredComputerSystem<B> {
     }
 }
 
+/// Reads the compute-tray position from the canonical Vera Rubin GPU.
+///
+/// This is best effort so an unavailable optional Processor resource cannot
+/// turn an otherwise successful hardware discovery into a failure.
+pub(crate) async fn vera_rubin_machine_position<B: Bmc>(
+    system: &ComputerSystem<B>,
+) -> Option<VeraRubinMachinePosition> {
+    let processors = match system.processors().await {
+        Ok(Some(processors)) => processors,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "Failed to fetch Vera Rubin processors for machine position"
+            );
+            return None;
+        }
+    };
+    let gpu = processors
+        .iter()
+        .find(|processor| processor.raw().id == "GPU_0")?;
+    let oem = match gpu.oem_nvidia() {
+        Ok(Some(NvidiaProcessor::Gpu(oem))) => oem,
+        Ok(Some(NvidiaProcessor::Lpu(_) | NvidiaProcessor::Generic(_)) | None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                processor_id = %gpu.raw().id,
+                "Failed to parse NVIDIA processor data for machine position"
+            );
+            return None;
+        }
+    };
+    let topology = oem.mnnv_link_topology.as_ref()?.as_ref()?;
+
+    let position = VeraRubinMachinePosition {
+        physical_slot_number: machine_position_value(topology.tray_slot_number.flatten()),
+        compute_tray_index: machine_position_value(topology.tray_slot_index.flatten()),
+    };
+    (position.physical_slot_number.is_some() || position.compute_tray_index.is_some())
+        .then_some(position)
+}
+
+fn machine_position_value(value: Option<i64>) -> Option<i32> {
+    value.and_then(|value| i32::try_from(value).ok().filter(|value| *value >= 0))
+}
+
+/// Parses the Vera Rubin GPU's raw Redfish resource into report position fields.
+pub fn parse_vera_rubin_machine_position(
+    raw: &str,
+) -> Result<Option<VeraRubinMachinePosition>, serde_json::Error> {
+    let processor = serde_json::from_str::<VeraRubinProcessor>(raw)?;
+    let Some(topology) = processor
+        .oem
+        .and_then(|oem| oem.nvidia)
+        .and_then(|nvidia| nvidia.mnnvlink_topology)
+    else {
+        return Ok(None);
+    };
+    let position = VeraRubinMachinePosition {
+        physical_slot_number: machine_position_value(topology.tray_slot_number),
+        compute_tray_index: machine_position_value(topology.tray_slot_index),
+    };
+
+    Ok(
+        (position.physical_slot_number.is_some() || position.compute_tray_index.is_some())
+            .then_some(position),
+    )
+}
+
 fn is_usable_ethernet_mac_address(
     interface_enabled: Option<bool>,
     mac_address: Option<&str>,
@@ -727,7 +844,7 @@ fn pcie_device_to_model<B: Bmc>(
 fn enabled_serial_console_ssh_port(ssh: &SerialConsoleProtocol) -> Result<Option<u16>, i64> {
     ssh.service_enabled
         .filter(|enabled| *enabled)
-        .and_then(|_| ssh.port.flatten())
+        .and(ssh.port.flatten())
         .map(|port| {
             let converted = u16::try_from(port).map_err(|_| port)?;
             (converted != 0).then_some(converted).ok_or(port)
@@ -740,8 +857,62 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::{
-        SerialConsoleProtocol, enabled_serial_console_ssh_port, is_usable_ethernet_mac_address,
+        SerialConsoleProtocol, VeraRubinMachinePosition, enabled_serial_console_ssh_port,
+        is_usable_ethernet_mac_address, machine_position_value, parse_vera_rubin_machine_position,
     };
+
+    #[test]
+    fn machine_position_values_preserve_zero_and_reject_sentinels_and_overflow() {
+        value_scenarios!(run = machine_position_value;
+            "valid values" {
+                Some(0) => Some(0),
+                Some(26) => Some(26),
+                Some(i64::from(i32::MAX)) => Some(i32::MAX),
+            }
+            "missing or invalid values" {
+                None => None,
+                Some(-1) => None,
+                Some(i64::from(i32::MAX) + 1) => None,
+            }
+        );
+    }
+
+    #[test]
+    fn vera_rubin_machine_position_parses_valid_fields_independently() {
+        value_scenarios!(
+            run = |raw| parse_vera_rubin_machine_position(raw).unwrap();
+            "complete topology" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":26,"TraySlotIndex":16}}}}"#
+                    => Some(VeraRubinMachinePosition {
+                        physical_slot_number: Some(26),
+                        compute_tray_index: Some(16),
+                    }),
+            }
+            "zero is a valid position" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":0,"TraySlotIndex":0}}}}"#
+                    => Some(VeraRubinMachinePosition {
+                        physical_slot_number: Some(0),
+                        compute_tray_index: Some(0),
+                    }),
+            }
+            "one invalid field preserves the other" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":26,"TraySlotIndex":-1}}}}"#
+                    => Some(VeraRubinMachinePosition {
+                        physical_slot_number: Some(26),
+                        compute_tray_index: None,
+                    }),
+            }
+            "missing topology has no position" {
+                r#"{"Oem":{"Nvidia":{}}}"# => None,
+            }
+            "invalid fields have no position" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":-1,"TraySlotIndex":2147483648}}}}"#
+                    => None,
+            }
+        );
+
+        assert!(parse_vera_rubin_machine_position("not json").is_err());
+    }
 
     #[test]
     fn extracts_only_enabled_valid_ssh_serial_console_ports() {

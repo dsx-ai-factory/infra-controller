@@ -509,6 +509,53 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
 	})
+
+	t.Run("interface inventory lifecycle", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "test-site-interfaces", cdbm.SiteStatusRegistered, nil, ipu)
+		emID := uuid.New()
+		initial := []cdbm.ExpectedMachineInterface{{
+			MacAddress: "02:00:00:00:00:09", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9"),
+			FixedMask: cutil.GetPtr("255.255.255.0"), FixedGateway: cutil.GetPtr("192.0.2.1"), Primary: cutil.GetPtr(true),
+			NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband),
+			Role:               cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}}
+		changed := []cdbm.ExpectedMachineInterface{{
+			MacAddress: "02:00:00:00:00:09", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10"),
+		}}
+		steps := []struct {
+			name     string
+			reported []cdbm.ExpectedMachineInterface
+			want     []cdbm.ExpectedMachineInterface
+			ageRow   bool
+		}{
+			{name: "import from Core", reported: initial, want: initial},
+			{name: "recent write survives stale inventory", reported: changed, want: initial},
+			{name: "interface-only change", reported: changed, want: changed, ageRow: true},
+			{name: "Core clears interfaces", want: []cdbm.ExpectedMachineInterface{}, ageRow: true},
+		}
+		for _, step := range steps {
+			t.Run(step.name, func(t *testing.T) {
+				if step.ageRow {
+					cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+				}
+				reported := &corev1.ExpectedMachine{
+					Id: &corev1.UUID{Value: emID.String()}, BmcMacAddress: "02:00:00:00:01:09",
+					ChassisSerialNumber: "INTERFACE-SN-1",
+				}
+				for _, expectedInterface := range step.reported {
+					reported.HostNics = append(reported.HostNics, expectedInterface.ToProto())
+				}
+				mei := ManageExpectedMachine{dbSession: dbSession}
+				require.NoError(t, mei.UpdateExpectedMachinesInDB(ctx, site.ID, &corev1.ExpectedMachineInventory{
+					ExpectedMachines: []*corev1.ExpectedMachine{reported},
+					Timestamp:        timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}))
+				stored, err := emDAO.Get(ctx, nil, emID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, step.want, stored.Interfaces)
+			})
+		}
+	})
 }
 
 // TestManageExpectedMachine_UpdateRespectsStaleInventoryThreshold covers the gate shared by every

@@ -31,7 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chassis::ExploredChassisCollection;
-use computer_system::ExploredComputerSystem;
+use computer_system::{ComputerSystemExt, ExploredComputerSystem};
+pub use computer_system::{VeraRubinMachinePosition, parse_vera_rubin_machine_position};
 pub use error::Error;
 use inventories::ExploredInventories;
 use itertools::Itertools;
@@ -156,21 +157,48 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         root = root.as_ref().clone().restrict_expand().into();
     }
 
-    let mut systems_iter = root
+    let systems = root
         .systems()
         .await
         .map_err(Error::nv_redfish("systems"))?
         .ok_or_else(Error::bmc_not_provided("systems"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("systems members"))?
-        .into_iter();
+        .map_err(Error::nv_redfish("systems members"))?;
 
-    let first_system = systems_iter
-        .next()
-        .ok_or_else(Error::bmc_not_provided("at least one computer system"))?;
-    let other_system_with_bios = systems_iter.find(|system| system.raw().bios.is_some());
-    let system = other_system_with_bios.unwrap_or(first_system);
+    let machine_position = if root.vendor() == Some(Vendor::new("NVIDIA"))
+        && root.product() == Some(Product::new("VR NVL72"))
+    {
+        match systems
+            .iter()
+            .find(|system| system.raw().id == "HGX_Baseboard_0")
+        {
+            Some(system) => computer_system::vera_rubin_machine_position(system).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let primary_index = systems
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, system)| system.raw().bios.is_some())
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    if systems.is_empty() {
+        return Err(Error::bmc_not_provided("at least one computer system")());
+    }
+    let mut systems = systems;
+    let system = systems.swap_remove(primary_index);
+    let additional_systems = systems
+        .into_iter()
+        .filter(|other| other.raw().id != system.raw().id)
+        .sorted_by(|left, right| left.raw().id.cmp(&right.raw().id))
+        .dedup_by(|left, right| left.raw().id == right.raw().id)
+        .map(|other| other.to_model())
+        .collect::<Vec<_>>();
 
     let manager = root
         .managers()
@@ -272,7 +300,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
                 | hw::HwType::Gb200
                 | hw::HwType::LiteonPowerShelf
                 | hw::HwType::DeltaPowerShelf
-                | hw::HwType::NvSwitch,
+                | hw::HwType::NvSwitch
+                | hw::HwType::Sushy,
             ) => false,
             None => false,
         })
@@ -327,6 +356,21 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let manager = explored_manager.to_model()?;
     let service = explored_inventories.to_model(hw_type);
     let hardware_class = hardware_class(&root, &system);
+    let chassis = explored_chassis.to_model();
+    let physical_slot_number = machine_position
+        .filter(|_| {
+            chassis
+                .iter()
+                .all(|chassis| chassis.physical_slot_number.is_none())
+        })
+        .and_then(|position| position.physical_slot_number);
+    let compute_tray_index = machine_position
+        .filter(|_| {
+            chassis
+                .iter()
+                .all(|chassis| chassis.compute_tray_index.is_none())
+        })
+        .and_then(|position| position.compute_tray_index);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -334,8 +378,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         last_exploration_latency: None,
         machine_id: None,
         managers: vec![manager],
-        systems: vec![system],
-        chassis: explored_chassis.to_model(),
+        systems: std::iter::once(system).chain(additional_systems).collect(),
+        chassis,
         service,
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
@@ -348,8 +392,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        physical_slot_number: None,
-        compute_tray_index: None,
+        physical_slot_number,
+        compute_tray_index,
         topology_id: None,
         revision_id: None,
         remediation_error: None,
@@ -510,6 +554,7 @@ pub(crate) fn hw_type<B: Bmc>(
                 Some(hw::HwType::Gb200)
             }
             "NVIDIA" if root.product() == Some(Product::new("P3809")) => Some(hw::HwType::NvSwitch),
+            "Contoso" | "Sushy" | "RedVirt" => Some(hw::HwType::Sushy),
             _ => None,
         })
         .or_else(|| {
@@ -854,6 +899,7 @@ fn machine_setup_status<B: Bmc>(
         hw::HwType::LiteonPowerShelf => (),
         hw::HwType::DeltaPowerShelf => (),
         hw::HwType::NvSwitch => (),
+        hw::HwType::Sushy => (),
         hw::HwType::Viking => {
             diffs.extend(
                 hw::viking::EXPECTED_BIOS_ATTRS

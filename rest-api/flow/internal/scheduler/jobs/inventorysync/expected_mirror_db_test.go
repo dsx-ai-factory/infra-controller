@@ -5,6 +5,7 @@ package inventorysync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -86,6 +87,140 @@ func computeSpec(mfr, serial, mac string) expectedComponentSpec {
 		SerialNumber: serial,
 		Name:         "node-" + serial,
 		BMC:          expectedBMCSpec{MACAddress: mac, IPAddress: "10.0.0.1"},
+	}
+}
+
+func TestSyncExpectedFromCore(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+	t.Cleanup(func() { pool.Close() })
+	dbConf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	dbConf.DBName = pool.DBName
+
+	const rackExternalID = "rack-01"
+	var rackID uuid.UUID
+	componentIDs := make(map[string]uuid.UUID)
+
+	for _, step := range []struct {
+		name            string
+		rackName        string
+		machineName     string
+		switchName      string
+		includeShelf    bool
+		machineError    error
+		reconnect       bool
+		wantMachineName string
+	}{
+		{
+			name:            "initial poll resolves components to the newly mirrored rack",
+			rackName:        "rack-initial",
+			machineName:     "machine-initial",
+			switchName:      "switch-initial",
+			includeShelf:    true,
+			wantMachineName: "machine-initial",
+		},
+		{
+			name:            "failed machine pull preserves machines while other snapshots apply",
+			rackName:        "rack-updated",
+			machineName:     "machine-updated",
+			switchName:      "switch-updated",
+			machineError:    errors.New("machine inventory temporarily unavailable"),
+			wantMachineName: "machine-initial",
+		},
+		{
+			name:            "fresh session retries the deferred machine update without replacing rows",
+			rackName:        "rack-updated",
+			machineName:     "machine-updated",
+			switchName:      "switch-updated",
+			reconnect:       true,
+			wantMachineName: "machine-updated",
+		},
+	} {
+		ok := t.Run(step.name, func(t *testing.T) {
+			if step.reconnect {
+				// Keep the database from the previous polls; a new fixture would
+				// discard the persisted state this recovery needs to reuse.
+				pool.Close()
+				reconnected, err := cdb.NewSessionFromConfig(ctx, dbConf)
+				require.NoError(t, err, "reconnect to the original Flow database")
+				pool = reconnected
+			}
+
+			mockClient := nicoapi.NewMockClient()
+			mockClient.AddExpectedRackDetail(coreRackNamed(rackExternalID, step.rackName, "NVIDIA", "RACK-01"))
+			mockClient.AddExpectedMachineDetail(nicoapi.ExpectedMachineDetail{
+				ExpectedMachineID:   "00000000-0000-4000-8000-000000000001",
+				BMCMACAddress:       "aa:bb:cc:dd:ee:01",
+				ChassisSerialNumber: "MACHINE-01",
+				RackID:              rackExternalID,
+				Name:                step.machineName,
+			})
+			mockClient.AddExpectedSwitchDetail(nicoapi.ExpectedSwitchDetail{
+				ExpectedSwitchID:   "00000000-0000-4000-8000-000000000002",
+				BMCMACAddress:      "aa:bb:cc:dd:ee:02",
+				SwitchSerialNumber: "SWITCH-01",
+				RackID:             rackExternalID,
+				Name:               step.switchName,
+			})
+			if step.includeShelf {
+				mockClient.AddExpectedPowerShelfDetail(nicoapi.ExpectedPowerShelfDetail{
+					ExpectedPowerShelfID: "00000000-0000-4000-8000-000000000003",
+					BMCMACAddress:        "aa:bb:cc:dd:ee:03",
+					ShelfSerialNumber:    "SHELF-01",
+					RackID:               rackExternalID,
+					Name:                 "shelf-initial",
+				})
+			}
+			var client nicoapi.Client = mockClient
+			if step.machineError != nil {
+				client = &errExpectedMachinesClient{Client: mockClient, err: step.machineError}
+			}
+
+			syncExpectedFromCore(ctx, pool, client)
+
+			var racks []model.Rack
+			err = pool.DB.NewSelect().Model(&racks).WhereAllWithDeleted().Scan(ctx)
+			require.NoError(t, err, "reload racks")
+			require.Len(t, racks, 1, "rack row count")
+			rack := racks[0]
+			if rackID == uuid.Nil {
+				rackID = rack.ID
+			}
+			assert.NotEqual(t, uuid.Nil, rack.ID, "rack ID")
+			assert.Equal(t, rackID, rack.ID, "rack ID remains stable across polls")
+			assert.Equal(t, strPtr(rackExternalID), rack.ExternalID, "rack external ID")
+			assert.Equal(t, step.rackName, rack.Name, "rack name")
+			assert.Nil(t, rack.DeletedAt, "rack remains active")
+
+			for _, want := range []struct {
+				componentType devicetypes.ComponentType
+				name          string
+				deleted       bool
+			}{
+				{componentType: devicetypes.ComponentTypeCompute, name: step.wantMachineName},
+				{componentType: devicetypes.ComponentTypeNVSwitch, name: step.switchName},
+				{componentType: devicetypes.ComponentTypePowerShelf, name: "shelf-initial", deleted: !step.includeShelf},
+			} {
+				componentType := devicetypes.ComponentTypeToString(want.componentType)
+				components, err := getAllComponentsByTypeIncludingDeleted(ctx, pool.DB, componentType)
+				require.NoError(t, err, "%s reload", componentType)
+				require.Len(t, components, 1, "%s row count", componentType)
+				component := components[0]
+				originalID, exists := componentIDs[componentType]
+				if !exists {
+					originalID = component.ID
+					componentIDs[componentType] = originalID
+				}
+				assert.NotEqual(t, uuid.Nil, component.ID, "%s ID", componentType)
+				assert.Equal(t, originalID, component.ID, "%s ID remains stable across polls", componentType)
+				assert.Equal(t, rackID, component.RackID, "%s references the mirrored rack", componentType)
+				assert.Equal(t, want.name, component.Name, "%s name", componentType)
+				assert.Equal(t, want.deleted, component.DeletedAt != nil, "%s soft deletion", componentType)
+			}
+		})
+		if !ok {
+			return
+		}
 	}
 }
 

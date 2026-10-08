@@ -740,9 +740,8 @@ fn map_power_action(raw: i32) -> Result<PowerAction, Status> {
 fn map_switch_maintenance_operation(action: PowerAction) -> SwitchMaintenanceOperation {
     match action {
         PowerAction::On => SwitchMaintenanceOperation::PowerOn,
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => {
-            SwitchMaintenanceOperation::PowerOff
-        }
+        PowerAction::GracefulShutdown => SwitchMaintenanceOperation::PowerOff { graceful: true },
+        PowerAction::ForceOff => SwitchMaintenanceOperation::PowerOff { graceful: false },
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
             SwitchMaintenanceOperation::Reset
         }
@@ -752,9 +751,8 @@ fn map_switch_maintenance_operation(action: PowerAction) -> SwitchMaintenanceOpe
 fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
     match action {
         PowerAction::On => MachineMaintenanceOperation::PowerOn,
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => {
-            MachineMaintenanceOperation::PowerOff
-        }
+        PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
+        PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
             MachineMaintenanceOperation::Reset
         }
@@ -766,9 +764,10 @@ fn map_power_shelf_maintenance_operation(
 ) -> Result<PowerShelfMaintenanceOperation, &'static str> {
     match action {
         PowerAction::On => Ok(PowerShelfMaintenanceOperation::PowerOn),
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => {
-            Ok(PowerShelfMaintenanceOperation::PowerOff)
+        PowerAction::GracefulShutdown => {
+            Ok(PowerShelfMaintenanceOperation::PowerOff { graceful: true })
         }
+        PowerAction::ForceOff => Ok(PowerShelfMaintenanceOperation::PowerOff { graceful: false }),
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
             Err("power shelf state controller supports PowerOn and PowerOff only")
         }
@@ -6974,11 +6973,11 @@ mod tests {
         );
         assert_eq!(
             map_switch_maintenance_operation(PowerAction::ForceOff),
-            SwitchMaintenanceOperation::PowerOff,
+            SwitchMaintenanceOperation::PowerOff { graceful: false },
         );
         assert_eq!(
             map_switch_maintenance_operation(PowerAction::GracefulShutdown),
-            SwitchMaintenanceOperation::PowerOff,
+            SwitchMaintenanceOperation::PowerOff { graceful: true },
         );
         assert_eq!(
             map_switch_maintenance_operation(PowerAction::ForceRestart),
@@ -6998,11 +6997,11 @@ mod tests {
         );
         assert_eq!(
             map_machine_maintenance_operation(PowerAction::ForceOff),
-            MachineMaintenanceOperation::PowerOff,
+            MachineMaintenanceOperation::PowerOff { graceful: false },
         );
         assert_eq!(
             map_machine_maintenance_operation(PowerAction::GracefulShutdown),
-            MachineMaintenanceOperation::PowerOff,
+            MachineMaintenanceOperation::PowerOff { graceful: true },
         );
         assert_eq!(
             map_machine_maintenance_operation(PowerAction::ForceRestart),
@@ -7022,11 +7021,11 @@ mod tests {
         );
         assert_eq!(
             map_power_shelf_maintenance_operation(PowerAction::ForceOff).unwrap(),
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: false },
         );
         assert_eq!(
             map_power_shelf_maintenance_operation(PowerAction::GracefulShutdown).unwrap(),
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         );
         assert!(map_power_shelf_maintenance_operation(PowerAction::ForceRestart).is_err());
         assert!(map_power_shelf_maintenance_operation(PowerAction::AcPowercycle).is_err());

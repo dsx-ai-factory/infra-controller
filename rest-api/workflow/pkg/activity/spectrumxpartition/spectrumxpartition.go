@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -178,7 +179,7 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 	sxpsToDelete := []*cdbm.SpectrumXPartition{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if sxpInventory.InventoryPage == nil || sxpInventory.InventoryPage.TotalPages == 0 || (sxpInventory.InventoryPage.CurrentPage == sxpInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(sxpInventory.GetInventoryPage()) {
 		for i := range existingSxps {
 			sxp := &existingSxps[i]
 

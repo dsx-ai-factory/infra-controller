@@ -29,14 +29,15 @@ use librms::protos::rack_manager::{
 };
 use mat_protocol_gateway::ExitReason;
 use rms_mock::{FaultConfig, RmsMockConfig};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use tonic::transport::Channel;
 
 use crate::common::{
     FakeController, FakeMachineATron, GUID_A, GUID_B, SWITCH_A, SWITCH_B, TRAY_A, counts,
-    devices_a, devices_b, finished, free_loopback_address, gateway_config, node, nodes, rms_client,
-    spawn_run, wait_until_ready,
+    devices_a, devices_b, finished, gateway_config, node, nodes, rms_client, spawn_run,
+    wait_until_ready,
 };
 
 fn s1() -> NodeInfo {
@@ -97,12 +98,16 @@ async fn power_and_lifecycle_batches_are_split_by_rack_and_their_parents_poll_th
         },
     )
     .await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_until_ready(&http, listen).await;
     let mut rms = rms_client(listen).await;
 
@@ -260,12 +265,16 @@ async fn firmware_and_switch_image_applies_hand_out_gateway_jobs_and_the_catalog
         catalogue(&["fw-b", "fw-shared"]),
     )
     .await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_until_ready(&http, listen).await;
     let mut rms = rms_client(listen).await;
 

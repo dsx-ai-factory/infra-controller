@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -128,6 +129,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 				SiteID:              siteID,
 				RackGroupID:         reported.RackGroupID,
 				Topology:            reported.Topology,
+				Protocol:            reported.Protocol,
 				Racks:               reported.Racks,
 				Name:                reported.Name,
 				Description:         reported.Description,
@@ -152,6 +154,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 
 		// update if any field differs
 		if cur.Topology != reported.Topology ||
+			!reflect.DeepEqual(cur.Protocol, reported.Protocol) ||
 			!reflect.DeepEqual(cur.Racks, reported.Racks) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
@@ -166,6 +169,8 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 				ExpectedRackGroupID: cur.ID,
 				ExpectedUpdated:     &cur.Updated,
 				Topology:            &reported.Topology,
+				ProtocolSet:         true,
+				Protocol:            reported.Protocol,
 				Racks:               reported.Racks,
 				Name:                &reported.Name,
 				Description:         &reported.Description,
@@ -185,7 +190,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 	// Delete any Expected Rack Group present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedRackGroupIDs.
-	if expectedRackGroupInventory.InventoryPage == nil || expectedRackGroupInventory.InventoryPage.TotalPages == 0 || (expectedRackGroupInventory.InventoryPage.CurrentPage == expectedRackGroupInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedRackGroupInventory.GetInventoryPage()) {
 		for _, er := range existingExpectedRackGroups {
 			if _, keep := reportedRackGroupIDs[er.RackGroupID]; keep {
 				continue

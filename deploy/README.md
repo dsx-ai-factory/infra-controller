@@ -331,6 +331,9 @@ Path: `deploy/nico-base/pxe/`
   - `Role/RoleBinding nico-pxe` (CertificateRequests for cert‑manager)
 
 The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io` and reads its runtime configuration from environment variables.
+The base preserves boot artifacts bundled in the image. Add the
+`boot-artifacts-containers` component to populate a shared volume from separate
+artifact images; its copy commands grant group 10001 read and traverse access.
 
 **External inputs you must provide**
 

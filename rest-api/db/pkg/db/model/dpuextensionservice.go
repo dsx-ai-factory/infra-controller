@@ -305,6 +305,8 @@ type DpuExtensionServiceFilterInput struct {
 	Versions               []string
 	Statuses               []string
 	SearchQuery            *string
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 // DpuExtensionServiceUpdateInput is used to update a DpuExtensionService object
@@ -326,6 +328,8 @@ type DpuExtensionServiceClearInput struct {
 	Description           bool
 	Version               bool
 	VersionInfo           bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // DpuExtensionServiceDAO is an interface for interacting with the DpuExtensionService model
@@ -434,6 +438,9 @@ func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	}
 
 	query := db.GetIDB(tx, dessd.dbSession).NewSelect().Model(&dess)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if filter.DpuExtensionServiceIDs != nil {
 		query = query.Where("des.id IN (?)", bun.In(filter.DpuExtensionServiceIDs))
@@ -600,10 +607,22 @@ func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 		updatedFields = append(updatedFields, "version_info")
 	}
 
+	if input.Deleted {
+		des.Deleted = nil
+
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID).Exec(ctx)
+		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

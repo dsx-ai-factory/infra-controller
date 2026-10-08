@@ -607,37 +607,47 @@ impl MachineHandle {
         Self::for_control_test_in_section(dpus, ipmi_port, "test")
     }
 
+    /// A host handle for control-router tests configured by `machine_config_section`.
     #[cfg(test)]
     pub(crate) fn for_control_test_in_section(
         dpus: Vec<DpuMachineHandle>,
         ipmi_port: Option<u16>,
         machine_config_section: &str,
     ) -> Self {
-        let (message_tx, _message_rx) = mpsc::unbounded_channel();
         let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 2]);
-        let live_state = LiveState {
-            ipmi_port,
-            ..LiveState::default()
+        let host_info = HostMachineInfo {
+            hw_type: Default::default(),
+            rack_placement: None,
+            bmc_mac_address: mac,
+            serial: "test-host".to_string(),
+            dpus: Vec::new(),
+            non_dpu_mac_address: None,
+            nvos_mac_addresses: Vec::new(),
+            switch_serial_number: None,
+            hw_mac_addr_pool: MacAddressPoolConfig::new(mac, 24).unwrap(),
+            delta_psu_power: None,
+            initial_host_firmware: None,
+            desired_host_firmware: None,
         };
+        let handle = Self::for_control_test_host(host_info, dpus, machine_config_section);
+        handle.0.live_state.write().unwrap().ipmi_port = ipmi_port;
+        handle
+    }
+
+    /// A handle for `host_info` with no actor behind it.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        dpus: Vec<DpuMachineHandle>,
+        machine_config_section: &str,
+    ) -> Self {
+        let (message_tx, _message_rx) = mpsc::unbounded_channel();
         Self(Arc::new(HostMachineActor {
             message_tx,
             join_handle: Mutex::new(None),
-            live_state: Arc::new(RwLock::new(live_state)),
+            live_state: Arc::new(RwLock::new(LiveState::default())),
             mat_id: Uuid::new_v4(),
-            host_info: HostMachineInfo {
-                hw_type: Default::default(),
-                rack_placement: None,
-                bmc_mac_address: mac,
-                serial: "test-host".to_string(),
-                dpus: Vec::new(),
-                non_dpu_mac_address: None,
-                nvos_mac_addresses: Vec::new(),
-                switch_serial_number: None,
-                hw_mac_addr_pool: MacAddressPoolConfig::new(mac, 24).unwrap(),
-                delta_psu_power: None,
-                initial_host_firmware: None,
-                desired_host_firmware: None,
-            },
+            host_info,
             dpus,
             machine_config_section: machine_config_section.to_string(),
             bmc_injection: Arc::new(InjectionStore::new()),

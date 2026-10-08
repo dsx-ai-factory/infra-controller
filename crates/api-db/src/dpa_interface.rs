@@ -1231,6 +1231,7 @@ mod test {
             uefi_version_virtio_blk_current: None,
             uefi_version_virtio_net_current: None,
             base_mac: Some(MacAddress::from_str("00:11:22:33:44:55")?),
+            base_guid: None,
             status: Some("OK".to_string()),
         };
 

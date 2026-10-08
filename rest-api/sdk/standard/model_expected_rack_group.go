@@ -33,6 +33,8 @@ type ExpectedRackGroup struct {
 	Site NullableSite `json:"site,omitempty"`
 	// External group-level NVLink topology identifier.
 	Topology *string `json:"topology,omitempty"`
+	// Rack fabric protocol. Null only for declarations created before protocol became required.
+	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
 	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`
 	// Human-readable name of the Expected Rack Group
@@ -233,6 +235,49 @@ func (o *ExpectedRackGroup) HasTopology() bool {
 // SetTopology gets a reference to the given string and assigns it to the Topology field.
 func (o *ExpectedRackGroup) SetTopology(v string) {
 	o.Topology = &v
+}
+
+// GetProtocol returns the Protocol field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedRackGroup) GetProtocol() string {
+	if o == nil || IsNil(o.Protocol.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Protocol.Get()
+}
+
+// GetProtocolOk returns a tuple with the Protocol field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedRackGroup) GetProtocolOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Protocol.Get(), o.Protocol.IsSet()
+}
+
+// HasProtocol returns a boolean if a field has been set.
+func (o *ExpectedRackGroup) HasProtocol() bool {
+	if o != nil && o.Protocol.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetProtocol gets a reference to the given NullableString and assigns it to the Protocol field.
+func (o *ExpectedRackGroup) SetProtocol(v string) {
+	o.Protocol.Set(&v)
+}
+
+// SetProtocolNil sets the value for Protocol to be an explicit nil
+func (o *ExpectedRackGroup) SetProtocolNil() {
+	o.Protocol.Set(nil)
+}
+
+// UnsetProtocol ensures that no value is present for Protocol, not even an explicit nil
+func (o *ExpectedRackGroup) UnsetProtocol() {
+	o.Protocol.Unset()
 }
 
 // GetRacks returns the Racks field value if set, zero value otherwise.
@@ -451,6 +496,9 @@ func (o ExpectedRackGroup) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Topology) {
 		toSerialize["topology"] = o.Topology
+	}
+	if o.Protocol.IsSet() {
+		toSerialize["protocol"] = o.Protocol.Get()
 	}
 	if !IsNil(o.Racks) {
 		toSerialize["racks"] = o.Racks

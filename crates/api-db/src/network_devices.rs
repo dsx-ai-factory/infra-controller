@@ -27,6 +27,9 @@ use sqlx::{PgConnection, PgTransaction};
 use super::{DatabaseError, ObjectFilter};
 use crate::db_read::DbReader;
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub struct NetworkDeviceSearchConfig {
     include_dpus: bool,
 }
@@ -61,7 +64,10 @@ pub async fn find<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let mut query = sqlx::QueryBuilder::new("SELECT * FROM network_devices l");
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT l.id, l.name, l.description, l.ip_addresses, l.device_type, l.discovered_via
+         FROM network_devices l",
+    );
 
     let mut devices: Vec<NetworkDevice> = match filter {
         ObjectFilter::All => query
@@ -106,7 +112,9 @@ async fn create(
     txn: &mut PgConnection,
     data: &LldpSwitchData,
 ) -> Result<NetworkDevice, DatabaseError> {
-    let query = "INSERT INTO network_devices(id, name, description, ip_addresses) VALUES($1, $2, $3, $4::inet[]) RETURNING *";
+    let query = "INSERT INTO network_devices(id, name, description, ip_addresses)
+                 VALUES($1, $2, $3, $4::inet[])
+                 RETURNING id, name, description, ip_addresses, device_type, discovered_via";
 
     sqlx::query_as(query)
         .bind(&data.id)
@@ -151,7 +159,9 @@ pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<()
 /// delete port_to_network_device_map call.
 pub async fn cleanup_unused_switches(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
     lock_network_device_table(txn).await?;
-    let query = "DELETE FROM network_devices WHERE id NOT IN (SELECT network_device_id FROM port_to_network_device_map) RETURNING *";
+    let query = "DELETE FROM network_devices
+                 WHERE id NOT IN (SELECT network_device_id FROM port_to_network_device_map)
+                 RETURNING id, name, description, ip_addresses, device_type, discovered_via";
 
     let result = sqlx::query_as::<_, NetworkDevice>(query)
         .fetch_all(txn.deref_mut())
@@ -197,7 +207,7 @@ pub mod dpu_to_network_device_map {
                             network_device_id=EXCLUDED.network_device_id,
                             local_port=EXCLUDED.local_port,
                             remote_port=EXCLUDED.remote_port
-                       RETURNING *"#;
+                       RETURNING dpu_id, local_port, remote_port, network_device_id"#;
 
         sqlx::query_as(query)
             .bind(dpu_id)
@@ -265,7 +275,8 @@ pub mod dpu_to_network_device_map {
         txn: impl DbReader<'_>,
         device_id: &str,
     ) -> Result<Vec<DpuToNetworkDeviceMap>, DatabaseError> {
-        let base_query = "SELECT * FROM port_to_network_device_map l WHERE network_device_id=$1";
+        let base_query = "SELECT l.dpu_id, l.local_port, l.remote_port, l.network_device_id
+                          FROM port_to_network_device_map l WHERE network_device_id=$1";
 
         sqlx::query_as(base_query)
             .bind(device_id)
@@ -278,7 +289,8 @@ pub mod dpu_to_network_device_map {
         txn: impl DbReader<'_>,
         dpu_ids: &[MachineId],
     ) -> Result<Vec<DpuToNetworkDeviceMap>, DatabaseError> {
-        let base_query = "SELECT * FROM port_to_network_device_map l WHERE dpu_id=ANY($1)";
+        let base_query = "SELECT l.dpu_id, l.local_port, l.remote_port, l.network_device_id
+                          FROM port_to_network_device_map l WHERE dpu_id=ANY($1)";
 
         sqlx::query_as(base_query)
             .bind(dpu_ids)

@@ -26,9 +26,9 @@ var _ MappedNullable = &InstanceSpectrumXAttachmentCreateOrUpdateRequest{}
 type InstanceSpectrumXAttachmentCreateOrUpdateRequest struct {
 	// ID of the SpectrumX Partition the attachment should associate with
 	SpectrumXPartitionId string `json:"spectrumXPartitionId"`
-	// SpectrumX device to attach over, matching the device description reported for the Machine's SpectrumX interfaces
+	// Exact, case-sensitive name of a persisted Machine capability with type `Network` and device type `SpectrumX`. Generic network and DPU capabilities do not satisfy this selector.
 	Device string `json:"device"`
-	// Index of the device, used to identify which interface card to attach the Partition to
+	// Zero-based interface index within the matching SpectrumX device-description group. Must be strictly less than the persisted capability count on the Machine.
 	DeviceInstance int32 `json:"deviceInstance"`
 	// Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected.
 	AttachmentType string `json:"attachmentType"`

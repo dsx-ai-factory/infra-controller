@@ -6,6 +6,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -129,6 +130,44 @@ func WithTxResultOpts[T any](ctx context.Context, dbSession *Session, opts *sql.
 		return zero, fmt.Errorf("%w: %w", ErrTransactionCommit, err)
 	}
 	return result, nil
+}
+
+// WithSavepoint runs fn inside a savepoint of tx. If fn returns an error, tx
+// rolls back to the savepoint, releases it, and returns that error. This also
+// releases any advisory lock fn acquired, and clears a failed statement that
+// would otherwise abort tx. If fn returns nil, the savepoint is released and
+// its writes and locks stay held until tx ends.
+//
+// Use it to take a lock on a candidate that may be rejected, so the lock does
+// not outlive the rejection. Failures of the savepoint statements themselves
+// are tagged with ErrTransactionSavepoint.
+//
+// A successful fn that writes or locks rows keeps a subtransaction ID until tx
+// ends. Postgres caches only 64 per backend before snapshots on every
+// connection slow down, so keep such calls in one tx below that.
+func (tx *Tx) WithSavepoint(ctx context.Context, fn func(sp *Tx) error) error {
+	sp, err := tx.tx.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrTransactionSavepoint, err)
+	}
+	err = fn(&Tx{tx: sp})
+	if err != nil {
+		// ROLLBACK TO SAVEPOINT leaves the savepoint open, so it is released too.
+		// Otherwise each rejected fn nests the next savepoint one level deeper until tx ends.
+		rerr := sp.Rollback()
+		if rerr == nil {
+			rerr = sp.Commit()
+		}
+		if rerr != nil {
+			return errors.Join(err, fmt.Errorf("%w: %w", ErrTransactionSavepoint, rerr))
+		}
+		return err
+	}
+	err = sp.Commit()
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrTransactionSavepoint, err)
+	}
+	return nil
 }
 
 // Commit wraps bun's Commit

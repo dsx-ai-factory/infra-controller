@@ -22,8 +22,8 @@ kubectl kustomize "${repo_root}/deploy/nico-base/pxe" \
             and ($main[0].securityContext.runAsUser == 10001)
             and ($main[0].securityContext.runAsGroup == 10001)
             and ([$pod.volumes[] | select(.name == "config" and .configMap.name == "nico-pxe-config" and .configMap.optional == true)] | length) == 1
-            and ([$pod.volumes[] | select(.name == "boot-artifacts" and .emptyDir == {})] | length) == 1
-            and ([$main[0].volumeMounts[] | select(.name == "boot-artifacts" and .mountPath == "/forge-boot-artifacts/blobs/internal")] | length) == 1
+            and ([$pod.volumes[] | select(.name == "boot-artifacts")] | length) == 0
+            and ([$main[0].volumeMounts[] | select(.name == "boot-artifacts")] | length) == 0
             and (all($pod.containers[].volumeMounts[]?; .name as $name | any($pod.volumes[]; .name == $name)))
             and ($pod.containers | length) == 1)
     ' >/dev/null

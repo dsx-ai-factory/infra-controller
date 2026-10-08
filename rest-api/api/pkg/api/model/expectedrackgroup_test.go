@@ -48,6 +48,13 @@ func rackGroupValidationCases() []rackGroupValidationCase {
 }
 
 func TestAPIExpectedRackGroupCreateRequest_Validate(t *testing.T) {
+	t.Run("missing protocol", func(t *testing.T) {
+		request := APIExpectedRackGroupCreateRequest{
+			SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4",
+		}
+		require.ErrorContains(t, request.Validate(), "protocol")
+	})
+
 	cases := append(rackGroupValidationCases(),
 		rackGroupValidationCase{name: "omitted optional fields"},
 		rackGroupValidationCase{name: "blank identity", request: APIExpectedRackGroupUpdateRequest{RackGroupID: cutil.GetPtr(" ")}, wantErr: true},
@@ -55,7 +62,7 @@ func TestAPIExpectedRackGroupCreateRequest_Validate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			request := APIExpectedRackGroupCreateRequest{
-				SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4",
+				SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4", Protocol: "NVLINK_V6",
 				Racks: tc.request.Racks,
 				Name:  tc.request.Name, Description: tc.request.Description, Labels: tc.request.Labels,
 			}
@@ -78,6 +85,8 @@ func TestAPIExpectedRackGroupUpdateRequest_Validate(t *testing.T) {
 		rackGroupValidationCase{name: "empty update", wantErr: true},
 		rackGroupValidationCase{name: "replace topology", request: APIExpectedRackGroupUpdateRequest{Topology: cutil.GetPtr("gb300_nvl72r1_c2g4")}},
 		rackGroupValidationCase{name: "blank topology", request: APIExpectedRackGroupUpdateRequest{Topology: cutil.GetPtr(" ")}, wantErr: true},
+		rackGroupValidationCase{name: "replace protocol", request: APIExpectedRackGroupUpdateRequest{Protocol: cutil.GetPtr("NVLINK_V6")}},
+		rackGroupValidationCase{name: "blank protocol", request: APIExpectedRackGroupUpdateRequest{Protocol: cutil.GetPtr(" ")}, wantErr: true},
 	)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,11 +111,11 @@ func TestAPIReplaceAllExpectedRackGroupsRequest_Validate(t *testing.T) {
 		{"null array", `{"expectedRackGroups":null}`, true},
 		{"explicit empty clears", `{"expectedRackGroups":[]}`, false},
 		{"null entry", `{"expectedRackGroups":[null]}`, true},
-		{"valid entry", `{"expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"gb200_nvl72r1_c2g4"}]}`, false},
-		{"other site", `{"expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440001","rackGroupId":"group","topology":"gb200_nvl72r1_c2g4"}]}`, true},
+		{"valid entry", `{"expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"gb200_nvl72r1_c2g4","protocol":"NVLINK_V6"}]}`, false},
+		{"other site", `{"expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440001","rackGroupId":"group","topology":"gb200_nvl72r1_c2g4","protocol":"NVLINK_V6"}]}`, true},
 		{"uppercase site rejected by UUID validation", `{"siteId":"550E8400-E29B-41D4-A716-446655440000","expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t"}]}`, true},
 		{"uppercase entry site rejected by UUID validation", `{"expectedRackGroups":[{"siteId":"550E8400-E29B-41D4-A716-446655440000","rackGroupId":"group","topology":"t"}]}`, true},
-		{"duplicate group", `{"expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t"},{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t"}]}`, true},
+		{"duplicate group", `{"expectedRackGroups":[{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t","protocol":"NVLINK_V6"},{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t","protocol":"NVLINK_V6"}]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := APIReplaceAllExpectedRackGroupsRequest{SiteID: rackGroupTestSiteID}

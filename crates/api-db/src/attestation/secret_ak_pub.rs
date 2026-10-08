@@ -19,12 +19,15 @@ use sqlx::PgConnection;
 
 use crate::{DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub async fn insert(
     txn: &mut PgConnection,
     secret: &Vec<u8>,
     ak_pub: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
-    let query = "INSERT INTO attestation_secret_ak_pub VALUES ($1, $2) RETURNING *";
+    let query = "INSERT INTO attestation_secret_ak_pub VALUES ($1, $2) RETURNING secret, ak_pub";
     let res = sqlx::query_as(query)
         .bind(secret.as_slice())
         .bind(ak_pub.as_slice())
@@ -39,7 +42,8 @@ pub async fn delete(
     txn: &mut PgConnection,
     secret: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
-    let query = "DELETE FROM attestation_secret_ak_pub WHERE secret = ($1) RETURNING *";
+    let query =
+        "DELETE FROM attestation_secret_ak_pub WHERE secret = ($1) RETURNING secret, ak_pub";
 
     let res = sqlx::query_as(query)
         .bind(secret.as_slice())
@@ -54,7 +58,7 @@ pub async fn get_by_secret(
     txn: &mut PgConnection,
     secret: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
-    let query = "SELECT * FROM attestation_secret_ak_pub WHERE secret = ($1)";
+    let query = "SELECT secret, ak_pub FROM attestation_secret_ak_pub WHERE secret = ($1)";
 
     sqlx::query_as(query)
         .bind(secret.as_slice())

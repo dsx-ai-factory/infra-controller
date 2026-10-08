@@ -114,6 +114,12 @@ const (
 	MachineDPUFirmwareUpdateStatusMessage = "Machine DPU firmware update is in progress"
 )
 
+// reconcileStampBackdate is how far before its start a reconcile stamps the Machines it writes.
+// Temporal schedules the next cron run from the previous run's start truncated to the second,
+// and delivery time varies. So a cycle can start sooner than one interval after the last. Without
+// the backdate, that cycle would skip those Machines as externally modified.
+const reconcileStampBackdate = 5 * time.Second
+
 // ManageMachine is an activity wrapper for Machine management tasks that allows injecting DB access
 type ManageMachine struct {
 	dbSession      *cdb.Session
@@ -124,6 +130,12 @@ type ManageMachine struct {
 func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr string, machineInventory *corev1.MachineInventory) error {
 	logger := log.With().Str("Activity", "UpdateMachinesInDB").Str("Site ID", siteIDStr).Logger()
 	logger.Info().Msg("starting activity")
+
+	// Every reported Machine this reconcile writes is stamped with this one time rather than the
+	// time each statement runs. The staleness guard below reads the same column, so stamping the
+	// current time instead would leave it less than one interval old when the next snapshot
+	// arrives, and that snapshot would skip the Machine as externally modified.
+	reconcileStamp := cdb.GetCurTime().Add(-reconcileStampBackdate)
 
 	siteID, err := uuid.Parse(siteIDStr)
 	if err != nil {
@@ -361,6 +373,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Hostname:                 hostname,
 				Labels:                   labels,
 				Status:                   machineStatus,
+				Updated:                  &reconcileStamp,
 			}
 
 			newMachine, serr := mDAO.Create(ctx, txn, createInput)
@@ -451,12 +464,12 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			}
 
 			if wasDeleted {
-				// Clear bumps Updated, so restored Machines bypass the staleness check below
-				// for this inventory. The update below refreshes the row and keeps Updated
-				// recent; a subsequent inventory within the threshold may be deferred.
+				// Restored Machines bypass the staleness check below, since Clear writes the
+				// row this reconcile is about to populate.
 				existingCloudMachine, err = mDAO.Clear(ctx, txn, cdbm.MachineClearInput{
 					MachineID: existingCloudMachine.ID,
 					Deleted:   true,
+					Updated:   &reconcileStamp,
 				})
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to clear soft-delete timestamp for Machine")
@@ -481,7 +494,6 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 			// If the machine was updated at all since this inventory was received, we
 			// should consider the inventory details stale for this machine.
-			// We'll add a 5 second buffer to account for a little clock skew/drift.
 			if !wasDeleted && site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated) {
 				slogger.Warn().Msg("machine updated more recently than inventory received time, skipping processing")
 				txn.Rollback()
@@ -519,6 +531,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Labels:                labels,
 				Status:                &machineStatus,
 				IsMissingOnSite:       cwutil.GetPtr(false),
+				Updated:               &reconcileStamp,
 			}
 
 			_, serr := mDAO.Update(ctx, txn, updateInput)
@@ -585,6 +598,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					MaintenanceMessage:   clearMaintenanceMessage,
 					NetworkHealthMessage: clearNetworkHealthMessage,
 					InstanceTypeID:       clearInstanceTypeID,
+					Updated:              &reconcileStamp,
 				}
 				_, serr = mDAO.Clear(ctx, txn, clearInput)
 				if serr != nil {
@@ -729,10 +743,11 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			machine = existingCloudMachine
 		}
 
-		// Update/create Machine Capabilities
-		// Check if discovery data is available
-		if discoveryInfo == nil {
-			logger.Warn().Msg("received MachineInfo without DiscoveryInfo, skipping Machine Capability processing")
+		// Capabilities are reported independently of DiscoveryInfo: Core can publish
+		// SpectrumX selectors from DPA inventory without hardware discovery data.
+		// An absent set is unavailable; an explicit empty set removes stale rows.
+		if controllerMachineStatus.GetCapabilities() == nil {
+			slogger.Warn().Msg("received MachineInfo without Capabilities, skipping Machine Capability processing")
 			continue
 		}
 
@@ -744,7 +759,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if machineInventory.InventoryPage == nil || machineInventory.InventoryPage.TotalPages == 0 || (machineInventory.InventoryPage.CurrentPage == machineInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
 		for _, existingMachine := range existingMachines {
 			if existingMachine.Deleted != nil {
 				continue
@@ -775,6 +790,8 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				}
 			}
 
+			// This update stamps its own time rather than reconcileStamp. It takes no row lock, so
+			// a backdated stamp could predate an external write and cut short its staleness window.
 			_, serr := mDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: existingMachine.ID, Status: &status, IsMissingOnSite: cwutil.GetPtr(true), IsUsableByTenant: cwutil.GetPtr(false)})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update missing on Site flag in DB")
@@ -856,7 +873,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	for _, gpuCap := range controllerCapsGpu {
 		// Set the device type to NVLink if it's an NVLink GPU capability.
 		// Unknown wire values are coerced to the empty string with a
-		// warning logged — preserve the explicit `default` branch so
+		// warning logged. Preserve the explicit `default` branch so
 		// schema drift is surfaced rather than silently swallowed.
 		// TODO: support other GPU device-type variants as the wire enum
 		// grows; currently only NVLink is recognized.
@@ -865,6 +882,8 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 		deviceType = &dtEmpty
 		if gpuCap.DeviceType != nil {
 			switch *gpuCap.DeviceType {
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+				// No action required
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
 				dt := cdbm.MachineCapabilityDeviceTypeNVLink
 				deviceType = &dt
@@ -940,13 +959,15 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 		// Preserve supported network device types so capability identity remains
 		// stable when otherwise identical generic, DPU, and SpectrumX entries coexist.
 		// Unknown wire values are coerced to the empty string with a
-		// warning logged — preserve the explicit `default` branch so
+		// warning logged. Preserve the explicit `default` branch so
 		// schema drift is surfaced rather than silently swallowed.
 		var deviceType *cdbm.MachineCapabilityDeviceType
 		dtEmpty := cdbm.MachineCapabilityDeviceType("")
 		deviceType = &dtEmpty
 		if netCap.DeviceType != nil {
 			switch *netCap.DeviceType {
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+				// No action required
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 				dt := cdbm.MachineCapabilityDeviceTypeDPU
 				deviceType = &dt

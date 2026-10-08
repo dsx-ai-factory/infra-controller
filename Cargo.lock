@@ -1111,6 +1111,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-site-explorer",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-version",
  "clap",
  "eyre",
@@ -1627,6 +1628,7 @@ dependencies = [
  "mac_address",
  "metrics-endpoint",
  "moka",
+ "nv-redfish-dispatcher",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
@@ -1639,6 +1641,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-pki-types",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -2183,6 +2186,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -2511,6 +2515,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
+ "carbide-nmxc-mock",
  "carbide-rms-mock",
  "carbide-rpc",
  "carbide-test-support",
@@ -2769,6 +2774,22 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tracing",
+]
+
+[[package]]
+name = "carbide-nmxc-mock"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "carbide-axum-utils",
+ "carbide-test-support",
+ "libnmxc",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3059,6 +3080,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "carbide-resource-pool"
+version = "0.0.0"
+dependencies = [
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-macros",
+ "carbide-sqlx-testing",
+ "carbide-test-support",
+ "ctor",
+ "sqlx",
 ]
 
 [[package]]
@@ -3419,6 +3453,7 @@ dependencies = [
  "carbide-ssh-console-mock-api-server",
  "carbide-test-support",
  "carbide-tls",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "clap",
@@ -3649,6 +3684,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -6957,7 +6993,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.7#a963e59d7106f62991a5c3abd6886fe62fb4cbe0"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.10#bcd34e1c8c09c10103c456690eb2cfd32b3c355d"
 dependencies = [
  "chrono",
  "clap",
@@ -10506,6 +10542,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12278,6 +12320,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

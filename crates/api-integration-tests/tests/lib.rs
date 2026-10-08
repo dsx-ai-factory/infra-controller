@@ -36,7 +36,7 @@ use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
 use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::site_prefix::SitePrefixId;
-use eyre::ContextCompat;
+use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
 use itertools::Itertools;
@@ -211,6 +211,12 @@ async fn test_integration() -> eyre::Result<()> {
 
     // Run several tests in parallel.
     let all_tests = join_all([
+        test_force_delete_waits_for_instance_dpu(
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+        )
+        .boxed(),
         test_machine_a_tron_multidpu(
             HardwareType::DellPowerEdgeR750,
             &test_env,
@@ -703,6 +709,98 @@ async fn test_metrics_integration() -> eyre::Result<()> {
     server_handle.wait().await?;
     db_pool.close().await;
     Ok(())
+}
+
+/// The opt-in RPC waits for a running simulated DPU to apply Admin networking.
+async fn test_force_delete_waits_for_instance_dpu(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    segment_id: &str,
+) -> eyre::Result<()> {
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| async move {
+            machine_handle
+                .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+                .await?;
+            let machine_ids = [
+                machine_handle
+                    .observed_machine_id()
+                    .context("ready host has no observed machine ID")?,
+                machine_handle.dpus()[0]
+                    .observed_machine_id()
+                    .context("ready DPU has no observed machine ID")?,
+            ];
+            let host_id: StableHostMachineId = machine_ids[0].try_into()?;
+            let instance_id = instance::create(
+                &test_env.carbide_api_addrs,
+                &host_id,
+                segment_id,
+                None,
+                false,
+                true,
+                &[],
+            )
+            .await?;
+            let network_config =
+                db::machine::get_network_config(&test_env.db_pool, &machine_ids[0]).await?;
+            assert_eq!(network_config.value.use_admin_network, Some(false));
+
+            let request = rpc::forge::AdminForceDeleteMachineRequest {
+                host_query: host_id.to_string(),
+                delete_interfaces: true,
+                delete_bmc_interfaces: true,
+                wait_for_instance_dpu: true,
+                ..Default::default()
+            };
+            let response =
+                machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+            assert!(!response.all_done);
+            let instance_id = instance_id.parse()?;
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_some()
+            );
+
+            // Keep the actors running so the DPU acknowledges the Admin request.
+            tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let response =
+                        machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+                    if response.all_done {
+                        return Ok::<(), eyre::Report>(());
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                }
+            })
+            .await
+            .wrap_err("timed out waiting for force deletion after the DPU acknowledgement")??;
+
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_none(),
+                "force deletion must remove the assigned Instance",
+            );
+            for machine_id in machine_ids {
+                assert!(
+                    db::machine::find_one(&test_env.db_pool, &machine_id, Default::default())
+                        .await?
+                        .is_none(),
+                    "force deletion must remove machine {machine_id}",
+                );
+            }
+            Ok(())
+        },
+    )
+    .await
 }
 
 async fn test_machine_a_tron_multidpu(
@@ -1301,6 +1399,8 @@ async fn test_machine_a_tron_scout_stream(
     .await
 }
 
+/// Simulates `host_count` hosts of `hw_type` with machine-a-tron against the
+/// integration test API and hands the ingested state to the caller's check.
 #[allow(clippy::too_many_arguments)]
 async fn run_machine_a_tron_machine_test<F, O>(
     hw_type: HardwareType,
@@ -1391,6 +1491,7 @@ where
         mac_address_pool: None,
         ufm_mock: Default::default(),
         rms_mock: Default::default(),
+        nmxc_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(

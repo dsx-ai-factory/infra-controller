@@ -167,6 +167,9 @@ pub(crate) async fn find_machines_by_ids(
         db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
             .await?;
 
+    let lldp_neighbors_by_machine =
+        db::machine_lldp_neighbor::find_by_machine_ids(&mut txn, &machine_ids).await?;
+
     txn.commit().await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
@@ -178,6 +181,7 @@ pub(crate) async fn find_machines_by_ids(
         snapshots,
         &sla_config,
         spectrum_x_capabilities_by_machine,
+        lldp_neighbors_by_machine,
     )))
 }
 
@@ -720,6 +724,9 @@ pub(crate) async fn admin_force_delete_machine(
 
     let mut txn = api.txn_begin().await?;
 
+    // Serialize the Admin switch with routing-policy writers and other
+    // force-delete calls. Take the routing lock before any Machine row locks.
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
     let machine = match db::machine::find_by_query(&mut txn, query).await? {
         Some(machine) => machine,
         None => {
@@ -843,32 +850,110 @@ pub(crate) async fn admin_force_delete_machine(
 
     // So far we only inspected state - now we start the deletion process
     // TODO: In the new model we might just need to move one Machine to this state
+    let mut network_ready = true;
     let instance_id = if let Some(host_machine) = &host_machine {
-        // Write to the machine row before fetching the instance, to lock it in case
-        // allocate_instance is running at the same time.
-        db::machine::advance(
-            host_machine,
-            &mut txn,
-            &ManagedHostState::ForceDeletion,
-            None,
-        )
-        .await?;
+        let already_force_deleting =
+            matches!(host_machine.state.value, ManagedHostState::ForceDeletion);
+        // Advance locks the host before reading its Instance or network version.
+        // Polling calls take that lock explicitly without duplicating state history.
+        if !already_force_deleting {
+            db::machine::advance(
+                host_machine,
+                &mut txn,
+                &ManagedHostState::ForceDeletion,
+                None,
+            )
+            .await?;
+        } else {
+            db::machine::find_one(
+                &mut txn,
+                &host_machine.id,
+                MachineSearchConfig {
+                    for_update: true,
+                    ..MachineSearchConfig::default()
+                },
+            )
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
+                id: host_machine.id.to_string(),
+            })?;
+        }
         let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
         if let Some(instance_id) = &instance_id {
             response.instance_id = instance_id.to_string();
+        }
+
+        // Record the opt-in before requesting Admin. Retries must keep waiting
+        // even if the Instance is gone or the caller omits the option.
+        let requires_admin_ack = db::machine::record_force_delete_admin_ack_requirement(
+            txn.as_mut(),
+            &host_machine.id,
+            request.wait_for_instance_dpu && instance_id.is_some(),
+        )
+        .await?;
+        if requires_admin_ack {
+            let snapshot = db::managed_host::load_snapshot(
+                &mut txn,
+                &host_machine.id,
+                LoadSnapshotOptions::default(),
+            )
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
+                id: host_machine.id.to_string(),
+            })?;
+            network_ready = snapshot.managed_host_network_config_version_synced();
+            if !snapshot.use_admin_network() {
+                let mut admin_config = snapshot.host_snapshot.network_config.value.clone();
+                admin_config.use_admin_network = Some(true);
+                // The Machine row is locked, so its version cannot change
+                // between loading the snapshot and this update.
+                if let ConditionalWrite::NotApplied(_) = db::machine::try_update_network_config(
+                    txn.as_mut(),
+                    &host_machine.id,
+                    snapshot.host_snapshot.network_config.version,
+                    &admin_config,
+                )
+                .await?
+                {
+                    return Err(CarbideError::Internal {
+                        message: format!(
+                            "network configuration update for machine {} returned no row \
+                             at version {} while the machine record was locked",
+                            host_machine.id, snapshot.host_snapshot.network_config.version,
+                        ),
+                    }
+                    .into());
+                }
+                if api
+                    .runtime_config
+                    .dpu_config
+                    .restart_ovs_on_use_admin_network_change
+                {
+                    carbide_machine_controller::handler::process_dpu_use_admin_network_state_change(
+                        txn.as_mut(),
+                        &snapshot,
+                    )
+                    .await?;
+                }
+                network_ready = false;
+            }
         }
         instance_id
     } else {
         None
     };
     for dpu_machine in dpu_machines.iter() {
-        db::machine::advance(
-            dpu_machine,
-            &mut txn,
-            &ManagedHostState::ForceDeletion,
-            None,
-        )
-        .await?;
+        if !matches!(dpu_machine.state.value, ManagedHostState::ForceDeletion) {
+            db::machine::advance(
+                dpu_machine,
+                &mut txn,
+                &ManagedHostState::ForceDeletion,
+                None,
+            )
+            .await?;
+        }
     }
 
     if let Some(instance_id) = instance_id {
@@ -886,9 +971,17 @@ pub(crate) async fn admin_force_delete_machine(
     // avoid holding a long-running transaction while we issue redfish calls.
     txn.commit().await?;
 
+    if !network_ready {
+        response.all_done = false;
+        return Ok(Response::new(response));
+    }
+
     // Note: The following deletion steps are all ordered in an idempotent fashion
     if let Some(instance_id) = instance_id {
         crate::handlers::instance::force_delete_instance(instance_id, api, &mut response).await?;
+        if !response.all_done {
+            return Ok(Response::new(response));
+        }
     }
 
     if let Some(machine) = &host_machine {
@@ -1110,6 +1203,7 @@ fn snapshot_map_to_rpc_machines(
         HostMachineId,
         Vec<db::dpa_interface::SpectrumXDeviceCapability>,
     >,
+    mut lldp_neighbors_by_machine: HashMap<MachineId, Vec<model::lldp::LldpNeighbor>>,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
@@ -1126,6 +1220,10 @@ fn snapshot_map_to_rpc_machines(
         if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
+            if let Some(neighbors) = lldp_neighbors_by_machine.remove(&machine_id) {
+                rpc_machine.status.get_or_insert_default().lldp_neighbors =
+                    neighbors.into_iter().map(Into::into).collect();
+            }
             if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
                 && !spectrum_x_capabilities.is_empty()
             {
