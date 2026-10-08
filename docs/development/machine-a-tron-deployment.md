@@ -1,4 +1,4 @@
-# Machine-a-tron Build and Deployment Guide <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Machine-a-tron Build and Deployment Guide <Badge intent="info">v2.1</Badge>
 
 machine-a-tron is a bare-metal simulator for NICo testing. It hosts mock Data
 Processing Units (DPUs) and servers behind Redfish Baseboard Management

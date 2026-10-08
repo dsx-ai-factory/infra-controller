@@ -1,4 +1,4 @@
-# Machine Stuck in DPUInitializing/Init During Ingestion
+# Machine Stuck in DPUInitializing/Init During Ingestion <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a predicted host remains in `DPUInitializing/Init`
 during ingestion and its NVIDIA BlueField-2 DPU exposes InfiniBand interfaces

@@ -4,7 +4,6 @@
 package workflow
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/alert"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
@@ -25,12 +23,6 @@ import (
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
-
-// sendAlert dispatches an alert on a best-effort basis. The call must never
-// block or fail the workflow, so it runs with a background context.
-func sendAlert(a alert.Alert) {
-	alert.Send(context.Background(), a)
-}
 
 // updateRunningTaskStatus records the transition to TaskStatusRunning via the
 // UpdateTaskStatus activity. Returns an error if taskID is nil or the activity fails.
@@ -329,6 +321,7 @@ func executeGenericStageParallel(
 	ctx workflow.Context,
 	steps []operationrules.SequenceStep,
 	typeToTargets map[devicetypes.ComponentType]common.Target,
+	allTargets map[devicetypes.ComponentType]common.Target,
 	activityInfo any,
 ) error {
 	batchingEnabled := componentActionBatchingEnabled(ctx)
@@ -375,7 +368,7 @@ func executeGenericStageParallel(
 			childStep,
 			target,
 			activityInfo,
-			typeToTargets,
+			allTargets,
 		)
 		futures = append(futures, childWorkflowEntry{
 			future:        future,
@@ -422,10 +415,12 @@ func parseDurationParam(val any) time.Duration {
 // stage that fails short-circuits the loop; the partially-populated
 // report is returned alongside the wrapped stage error so the caller can
 // attach it to the terminal task status.
+// typeToTargets selects steps and report counts; allTargets supplies cross-type checks.
 func executeRuleBasedOperation(
 	ctx workflow.Context,
 	taskID uuid.UUID,
 	typeToTargets map[devicetypes.ComponentType]common.Target,
+	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
 	ruleDef *operationrules.RuleDefinition,
 ) (*report.Report, error) {
@@ -466,6 +461,7 @@ func executeRuleBasedOperation(
 			ctx,
 			stage.Steps,
 			typeToTargets,
+			allTargets,
 			operationInfo,
 		)
 		if err != nil {

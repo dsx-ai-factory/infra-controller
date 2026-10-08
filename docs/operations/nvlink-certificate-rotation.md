@@ -1,4 +1,4 @@
-# NMX-C Certificate Monitoring and Rotation
+# NMX-C Certificate Monitoring and Rotation <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 NICo can monitor the TLS certificate presented by each discovered NMX-C
 certificate-monitor target and request certificate reconfiguration before

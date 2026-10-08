@@ -7,13 +7,35 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 const escapeSequenceWait = 50 * time.Millisecond
+
+func terminalEOFIsTransient(input *os.File) (bool, error) {
+	if !term.IsTerminal(int(input.Fd())) {
+		return false, nil
+	}
+	pollFDs := []unix.PollFd{{
+		Fd:     int32(input.Fd()),
+		Events: unix.POLLIN,
+	}}
+	for {
+		_, err := unix.Poll(pollFDs, 0)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("polling terminal input: %w", err)
+		}
+		return pollFDs[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) == 0, nil
+	}
+}
 
 // readEscapeSequence waits briefly for the two bytes that distinguish an
 // arrow-key escape sequence from a lone Escape key. Polling avoids blocking

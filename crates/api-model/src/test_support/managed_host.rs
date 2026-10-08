@@ -320,6 +320,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "System.Embedded.1".to_string(),

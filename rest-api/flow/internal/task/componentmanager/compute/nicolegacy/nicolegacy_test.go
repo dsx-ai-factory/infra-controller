@@ -155,6 +155,25 @@ func TestFirmwareControlRejectsAuthenticationData(t *testing.T) {
 	require.ErrorContains(t, err, "not supported by the nicolegacy compute manager")
 }
 
+type firmwareStateClient struct {
+	nicoapi.Client
+	desired   []*corev1.DesiredFirmwareVersionEntry
+	endpoints []*corev1.ExploredEndpoint
+}
+
+func (c *firmwareStateClient) GetDesiredFirmwareVersions(
+	context.Context,
+) ([]*corev1.DesiredFirmwareVersionEntry, error) {
+	return c.desired, nil
+}
+
+func (c *firmwareStateClient) FindExploredEndpointsByIds(
+	context.Context,
+	[]string,
+) ([]*corev1.ExploredEndpoint, error) {
+	return c.endpoints, nil
+}
+
 func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
 	tests := map[string]struct {
 		subTargets []string

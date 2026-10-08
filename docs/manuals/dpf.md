@@ -1217,7 +1217,7 @@ replace a different credential-file Secret named in the Core values.
 
 **Through a watched Secret**, configure the `nico-api` chart to mount a sparse
 credential file containing only `bmc_site_wide_root`. The exact Secret creation
-and chart values are in [helm-prereqs → DPF](../../helm-prereqs/README.md#dpf).
+and chart values are in [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf).
 Set `nico-api.credentials.bmcSiteWideRootSource: local` with the
 `existingSecret` values before Core is deployed. Creating the Secret after
 installation does not mount it; adding the mount later requires a Core values

@@ -48,6 +48,7 @@ mod end_to_end_tests;
 mod guard;
 mod ingress;
 mod response;
+mod slo;
 mod target;
 #[cfg(test)]
 mod test_support;
@@ -322,6 +323,7 @@ async fn proxy_request_inner(
     state: BmcProxyState,
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
+    let arrived = tokio::time::Instant::now();
     let Some(principals) = state.authorized_caller(&request) else {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
     };
@@ -409,6 +411,7 @@ async fn proxy_request_inner(
         .acquire(
             target_ip,
             class,
+            arrived,
             deadline,
             upstream_body.exchange_bound(class.upstream_timeout),
         )
@@ -456,6 +459,7 @@ async fn proxy_request_inner(
     } = upstream_response;
     let status = response.status();
     report(&mut slot, class, Trip::Status(status));
+    slot.answered();
     let headers = response.headers().clone();
     let origins = BmcOrigins::new(response.url().clone(), target_ip);
     let body = prepare_response_body(
@@ -486,13 +490,18 @@ async fn proxy_request_inner(
 /// the BMC failed: one the proxy could not connect for, or one the BMC did
 /// not answer within at least half its class's budget. A shorter attempt was
 /// cut short by the wait for its slot, and a timed-out upload, `streamed`,
-/// may have been the caller's.
+/// may have been the caller's. Against the class's latency target, an
+/// attempt that timed out counts as long as the request took, and one the
+/// proxy could not connect for, or failed on its own, does not count.
 fn answer_failed_attempt(
     slot: &mut Slot,
     failed: AttemptFailed,
     class: &RequestClass,
     streamed: bool,
 ) -> Response<Body> {
+    if !matches!(failed.by_bmc, Some(BmcFailure::TimedOut { .. })) {
+        slot.unmeasured();
+    }
     let ended = match failed.by_bmc {
         Some(BmcFailure::Unreachable) => Some(Trip::Unreachable),
         Some(BmcFailure::TimedOut { budget })

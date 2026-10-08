@@ -198,7 +198,10 @@ pub struct EndpointExplorationReport {
     /// `Managers` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managers: Vec<Manager>,
-    /// `Systems` reported by Redfish
+    /// ComputerSystems reported by Redfish, with the primary system first.
+    /// Additional systems are ordered by ID and contain resource fields only;
+    /// their linked BIOS, EthernetInterfaces, BootOptions and PCIe inventory
+    /// have not been explored. Empty linked inventory does not imply absence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub systems: Vec<ComputerSystem>,
     /// `Chassis` reported by Redfish
@@ -266,10 +269,41 @@ pub struct EndpointExplorationReport {
 }
 
 impl EndpointExplorationReport {
-    /// model does a best effort to find a model name within the report
+    /// Returns the system selected for endpoint identity and host management.
+    /// The first entry is primary; an empty report has no primary system.
+    pub fn primary_system(&self) -> Option<&ComputerSystem> {
+        self.systems.first()
+    }
+
+    /// Builds a PoweredOff health alert from the primary system's power state.
+    /// Transitional states are allowed during graceful power resets; additional
+    /// systems do not determine the host's power health.
+    pub fn power_state_alert(&self, address: IpAddr) -> Option<health_report::HealthProbeAlert> {
+        let system = self.primary_system().filter(|system| {
+            !matches!(
+                system.power_state,
+                PowerState::On | PowerState::PoweringOn | PowerState::PoweringOff
+            )
+        })?;
+        Some(health_report::HealthProbeAlert {
+            id: "PoweredOff".parse().unwrap(),
+            target: Some(address.to_string()),
+            in_alert_since: None,
+            message: format!(
+                "System \"{}\" power state is \"{:?}\"",
+                system.id, system.power_state
+            ),
+            tenant_message: None,
+            classifications: vec![health_report::HealthAlertClassification::prevent_allocations()],
+        })
+    }
+
+    /// Returns the primary system model, falling back to DPU or chassis identification.
     pub fn model(&self) -> Option<String> {
         // Prefer Systems, not Chassis; at least for Lenovo, Chassis has what is more of a SKU instead of the actual model name.
-        let system_with_model = self.systems.iter().find(|&x| x.model.is_some());
+        let system_with_model = self
+            .primary_system()
+            .filter(|system| system.model.is_some());
         Some(match system_with_model {
             Some(system) => match &system.model {
                 Some(model) => model.to_owned(),
@@ -1400,18 +1434,43 @@ impl EndpointExplorationReport {
         not_found
     }
 
-    /// Extract position info from chassis entries into the report-level fields.
-    ///
-    /// Uses "first wins" strategy: takes the first non-None value found across
-    /// all chassis entries. This is consistent with how `model()` extracts data
-    /// from the chassis array.
-    pub fn parse_position_info(&mut self) {
-        for chassis in &self.chassis {
-            self.physical_slot_number = self.physical_slot_number.or(chassis.physical_slot_number);
-            self.compute_tray_index = self.compute_tray_index.or(chassis.compute_tray_index);
-            self.topology_id = self.topology_id.or(chassis.topology_id);
-            self.revision_id = self.revision_id.or(chassis.revision_id);
+    /// Computes rack position from normalized inventory without BMC requests.
+    /// Chassis values take precedence over the canonical HGX GPU's position per field.
+    pub fn rack_position(&self) -> RackPosition {
+        let processor = self
+            .systems
+            .iter()
+            .find(|system| system.id == "HGX_Baseboard_0")
+            .and_then(|system| {
+                system
+                    .processors
+                    .iter()
+                    .flatten()
+                    .find(|processor| processor.id == "GPU_0")
+            });
+        RackPosition {
+            physical_slot_number: self
+                .chassis
+                .iter()
+                .find_map(|chassis| chassis.physical_slot_number)
+                .or_else(|| processor.and_then(|processor| processor.physical_slot_number)),
+            compute_tray_index: self
+                .chassis
+                .iter()
+                .find_map(|chassis| chassis.compute_tray_index)
+                .or_else(|| processor.and_then(|processor| processor.compute_tray_index)),
+            topology_id: self.chassis.iter().find_map(|chassis| chassis.topology_id),
+            revision_id: self.chassis.iter().find_map(|chassis| chassis.revision_id),
         }
+    }
+
+    /// Fills report position fields from collected inventory, preserving existing values.
+    pub fn parse_position_info(&mut self) {
+        let position = self.rack_position();
+        self.physical_slot_number = self.physical_slot_number.or(position.physical_slot_number);
+        self.compute_tray_index = self.compute_tray_index.or(position.compute_tray_index);
+        self.topology_id = self.topology_id.or(position.topology_id);
+        self.revision_id = self.revision_id.or(position.revision_id);
     }
 }
 
@@ -1709,6 +1768,9 @@ pub struct ComputerSystem {
     pub attributes: ComputerSystemAttributes,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pcie_devices: Vec<PCIeDevice>,
+    /// Requested processor inventory; `None` when processor discovery was not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processors: Option<Vec<Processor>>,
     #[serde(default, deserialize_with = "base_mac_deserialize")]
     pub base_mac: Option<BaseMac>,
     #[serde(default)]
@@ -1722,6 +1784,32 @@ pub struct ComputerSystem {
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
+}
+
+/// Minimal processor inventory with position normalized by the explorer.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Processor {
+    /// Redfish resource identifier within its computer system.
+    pub id: String,
+    /// Processor model reported by Redfish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Nonnegative tray slot number extracted by the explorer when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_slot_number: Option<i32>,
+    /// Nonnegative compute tray index extracted by the explorer when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_tray_index: Option<i32>,
+}
+
+/// Rack position derived from the collected chassis and processor inventory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RackPosition {
+    pub physical_slot_number: Option<i32>,
+    pub compute_tray_index: Option<i32>,
+    pub topology_id: Option<i32>,
+    pub revision_id: Option<i32>,
 }
 
 pub fn base_mac_deserialize<'a, D>(deserializer: D) -> Result<Option<BaseMac>, D::Error>
@@ -2774,6 +2862,232 @@ mod tests {
     use super::*;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    fn processor_position_report() -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "HGX_Baseboard_0".into(),
+                processors: Some(vec![Processor {
+                    id: "GPU_0".into(),
+                    model: Some("Test GPU".into()),
+                    physical_slot_number: Some(26),
+                    compute_tray_index: Some(16),
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rack_position_selects_canonical_system_and_processor() {
+        value_scenarios!(run = |(system_id, processor_id): (&str, &str)| {
+            let mut report = processor_position_report();
+            report.systems[0].id = system_id.into();
+            report.systems[0].processors.as_mut().unwrap()[0].id = processor_id.into();
+            let position = report.rack_position();
+            (position.physical_slot_number, position.compute_tray_index)
+        };
+            "resource identity" {
+                ("HGX_Baseboard_0", "GPU_0") => (Some(26), Some(16)),
+                ("System_0", "GPU_0") => (None, None),
+                ("HGX_Baseboard_0", "GPU_1") => (None, None),
+            }
+        );
+    }
+
+    #[test]
+    fn chassis_position_takes_precedence_and_missing_fields_use_processors() {
+        let mut report = processor_position_report();
+        report.chassis = vec![Chassis {
+            physical_slot_number: Some(3),
+            topology_id: Some(7),
+            revision_id: Some(2),
+            ..Default::default()
+        }];
+        assert_eq!(
+            report.rack_position(),
+            RackPosition {
+                physical_slot_number: Some(3),
+                compute_tray_index: Some(16),
+                topology_id: Some(7),
+                revision_id: Some(2),
+            }
+        );
+        report.compute_tray_index = Some(9);
+        report.parse_position_info();
+        assert_eq!(report.physical_slot_number, Some(3));
+        assert_eq!(report.compute_tray_index, Some(9));
+        assert_eq!(report.topology_id, Some(7));
+        assert_eq!(report.revision_id, Some(2));
+    }
+
+    #[test]
+    fn processor_inventory_survives_serialization_and_old_reports_remain_readable() {
+        let report = processor_position_report();
+        let encoded = serde_json::to_value(&report).unwrap();
+        let restored: EndpointExplorationReport = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored, report);
+
+        let old_system: ComputerSystem = serde_json::from_str(r#"{"Id":"System_0"}"#).unwrap();
+        assert_eq!(old_system.processors, None);
+
+        let system = ComputerSystem {
+            processors: Some(vec![]),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&system).unwrap();
+        assert_eq!(encoded["Processors"], serde_json::json!([]));
+        let restored: ComputerSystem = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.processors, Some(vec![]));
+    }
+
+    #[test]
+    fn component_power_state_does_not_create_host_power_alert() {
+        for component_state in [PowerState::Off, PowerState::Unknown] {
+            let report = EndpointExplorationReport {
+                systems: vec![
+                    ComputerSystem {
+                        id: "System_0".into(),
+                        power_state: PowerState::On,
+                        ..Default::default()
+                    },
+                    ComputerSystem {
+                        id: "HGX_Baseboard_0".into(),
+                        power_state: component_state,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            assert!(
+                report
+                    .power_state_alert("192.0.2.1".parse().unwrap())
+                    .is_none()
+            );
+        }
+        let report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "System_0".into(),
+                power_state: PowerState::Off,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let alert = report
+            .power_state_alert("192.0.2.1".parse().unwrap())
+            .unwrap();
+        assert_eq!(alert.id.to_string(), "PoweredOff");
+        assert_eq!(alert.target.as_deref(), Some("192.0.2.1"));
+        assert!(alert.message.contains("System_0"));
+    }
+
+    #[test]
+    fn primary_power_state_alert() {
+        let address = "192.0.2.1".parse().unwrap();
+        assert!(
+            EndpointExplorationReport::default()
+                .power_state_alert(address)
+                .is_none()
+        );
+        for (power_state, expected_alert) in [
+            (PowerState::On, false),
+            (PowerState::PoweringOn, false),
+            (PowerState::PoweringOff, false),
+            (PowerState::Off, true),
+            (PowerState::Paused, true),
+            (PowerState::Hibernating, true),
+            (PowerState::Sleeping, true),
+            (PowerState::Unknown, true),
+        ] {
+            let report = EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".into(),
+                    power_state,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                report.power_state_alert(address).is_some(),
+                expected_alert,
+                "{power_state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn additional_systems_do_not_change_host_identity_or_model() {
+        let primary = ComputerSystem {
+            id: "System_0".into(),
+            manufacturer: Some("NVIDIA".into()),
+            model: Some("host model".into()),
+            serial_number: Some("host serial".into()),
+            ethernet_interfaces: vec![EthernetInterface {
+                id: Some("eth0".into()),
+                mac_address: Some("94:6d:ae:53:cb:9b".parse().unwrap()),
+                interface_enabled: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut single = EndpointExplorationReport {
+            systems: vec![primary.clone()],
+            ..Default::default()
+        };
+        single.generate_machine_id(true).unwrap();
+        assert!(single.machine_id.is_some());
+        let mut multiple = EndpointExplorationReport {
+            systems: vec![
+                primary,
+                ComputerSystem {
+                    id: "HGX_Baseboard_0".into(),
+                    manufacturer: Some("other vendor".into()),
+                    model: Some("GPU model".into()),
+                    serial_number: Some("GPU serial".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        multiple.generate_machine_id(true).unwrap();
+        assert_eq!(multiple.machine_id, single.machine_id);
+        assert_eq!(multiple.model(), single.model());
+        assert_eq!(multiple.primary_system().unwrap().id, "System_0");
+        assert_eq!(multiple.all_mac_addresses(), single.all_mac_addresses());
+        assert_eq!(
+            multiple.complete_boot_interfaces().collect::<Vec<_>>(),
+            single.complete_boot_interfaces().collect::<Vec<_>>()
+        );
+        let encoded = serde_json::to_string(&multiple).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EndpointExplorationReport>(&encoded).unwrap(),
+            multiple
+        );
+    }
+
+    #[test]
+    fn host_model_uses_primary_or_chassis_without_falling_back_to_component_systems() {
+        value_scenarios!(run = |primary_model: Option<&str>| {
+            let report = EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".into(), model: primary_model.map(str::to_string),
+                    ..Default::default()
+                }, ComputerSystem {
+                    id: "HGX_Baseboard_0".into(), model: Some("GPU model".into()),
+                    ..Default::default()
+                }], chassis: vec![Chassis {
+                    model: Some("host chassis".into()), ..Default::default()
+                }], ..Default::default()
+            };
+            report.model()
+        };
+            "model source" {
+                Some("host model") => Some("host model".to_string()),
+                None => Some("host chassis".to_string()),
+            }
+        );
+    }
 
     /// A class is the key an operator writes profiles against, so whatever the
     /// BMC reports has to reduce to a name the API will accept, including when
@@ -3915,6 +4229,7 @@ mod tests {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
@@ -4082,6 +4397,7 @@ mod tests {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
