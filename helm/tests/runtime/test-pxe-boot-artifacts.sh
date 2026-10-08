@@ -133,8 +133,16 @@ VALUES
     [[ "$scenario" != copied-restrictive ]] || serve_path=/custom-boot-path
     [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
       stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == '640 0 10001' ]]
-    [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
-      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64")" == '750 0 10001' ]]
+    directory_stat="$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
+      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64")"
+    if [[ "$scenario" == copied-restrictive ]]; then
+      # fsGroup sets setgid on volume directories; copied directories can inherit it.
+      [[ "$directory_stat" == '750 0 10001' || "$directory_stat" == '2750 0 10001' ]]
+    else
+      # The legacy Kustomize copier can create the destination with mkdir's 0755
+      # before cp runs. It must still normalize the directory's group ownership.
+      [[ "${directory_stat#* }" == '0 10001' ]]
+    fi
   fi
   printf 'PASS %s: HTTP %s, exact artifact content, serving UID 10001\n' "$scenario" "$code"
   kill "$port_forward_pid"

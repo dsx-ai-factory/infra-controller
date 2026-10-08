@@ -93,6 +93,7 @@ initContainers: []
 ## after all other init containers to set group 10001 and grant group read/traverse
 ## on the copied trees, including source files with mode 0600. Existing copy
 ## commands work without migration. No world permissions are added.
+## The final init uses /bin/sh, chgrp, and chmod from the selected PXE image.
 ## When empty, no boot-artifacts volume is mounted, preserving image-bundled files.
 ## Quote tags (for example, tag: "1.10") to preserve their exact text.
 ## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls

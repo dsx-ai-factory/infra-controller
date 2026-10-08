@@ -494,6 +494,7 @@ Test files live in `tests/` directories within each chart. CI runs these tests a
 
 The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
 locally built PXE runtime image containing the binary, templates, and coreutils.
+The Docker host needs enough inotify instances available for a new kind cluster.
 It creates and removes its own kind cluster and fixture image. It verifies HTTP
 serving as UID 10001 for root-owned `0600` artifacts copied with legacy commands
 and for artifacts bundled in the image, including a custom serving path and a
