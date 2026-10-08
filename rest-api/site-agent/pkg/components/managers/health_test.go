@@ -16,6 +16,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
 )
@@ -37,6 +38,13 @@ type fakeCoreGrpc struct {
 
 func (f fakeCoreGrpc) CheckConnection(ctx context.Context) { f.check(ctx) }
 
+type fakeFlowGrpc struct {
+	managerapi.FlowGrpcInterface
+	check func(context.Context)
+}
+
+func (f fakeFlowGrpc) CheckConnection(ctx context.Context) { f.check(ctx) }
+
 type fakeBootstrap struct {
 	managerapi.BootstrapInterface
 	registrationErr error
@@ -49,8 +57,13 @@ func newHealthTestManager(t *testing.T, api *managerapi.ManagerAPI) *elektratype
 	t.Helper()
 	previousAccess := ManagerAccess
 	t.Cleanup(func() { ManagerAccess = previousAccess })
-	data := &elektratypes.Elektra{Managers: managertypes.NewManagerType()}
-	ManagerAccess = &Manager{API: api, Data: &managerapi.ManagerData{EB: data}}
+	conf := &conftypes.Config{}
+	data := &elektratypes.Elektra{Managers: managertypes.NewManagerType(), Conf: conf}
+	ManagerAccess = &Manager{
+		API:  api,
+		Data: &managerapi.ManagerData{EB: data},
+		Conf: &managerapi.ManagerConf{EB: conf},
+	}
 	return data
 }
 
@@ -61,21 +74,35 @@ func TestCheckHealth(t *testing.T) {
 		require.True(t, ok)
 		assert.WithinDuration(t, time.Now().Add(healthCheckTimeout), deadline, time.Second)
 	}
-	var checked []string
-	newHealthTestManager(t, &managerapi.ManagerAPI{
-		Orchestrator: fakeOrchestrator{check: func(ctx context.Context) {
-			assertDeadline(t, ctx)
-			checked = append(checked, "Temporal")
-		}},
-		CoreGrpc: fakeCoreGrpc{check: func(ctx context.Context) {
-			assertDeadline(t, ctx)
-			checked = append(checked, "Core gRPC")
-		}},
-	})
+	tests := []struct {
+		name            string
+		flowGrpcEnabled bool
+		wantChecked     []string
+	}{
+		{name: "Flow gRPC disabled", wantChecked: []string{"Temporal", "Core gRPC"}},
+		{name: "Flow gRPC enabled", flowGrpcEnabled: true, wantChecked: []string{"Temporal", "Core gRPC", "Flow gRPC"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var checked []string
+			check := func(name string) func(context.Context) {
+				return func(ctx context.Context) {
+					assertDeadline(t, ctx)
+					checked = append(checked, name)
+				}
+			}
+			data := newHealthTestManager(t, &managerapi.ManagerAPI{
+				Orchestrator: fakeOrchestrator{check: check("Temporal")},
+				CoreGrpc:     fakeCoreGrpc{check: check("Core gRPC")},
+				FlowGrpc:     fakeFlowGrpc{check: check("Flow gRPC")},
+			})
+			data.Conf.FlowGrpc.Enabled = tt.flowGrpcEnabled
 
-	checkHealth()
+			checkHealth()
 
-	assert.Equal(t, []string{"Temporal", "Core gRPC"}, checked)
+			assert.Equal(t, tt.wantChecked, checked)
+		})
+	}
 }
 
 func TestHandleLivenessRequest(t *testing.T) {
@@ -117,7 +144,7 @@ func TestHandleLivenessRequest(t *testing.T) {
 func TestHandleReadinessRequest(t *testing.T) {
 	tests := []struct {
 		name string
-		// record sets the Temporal and Core gRPC state the latest checks left behind.
+		// record sets the dependency state the latest checks left behind.
 		record   func(data *elektratypes.Elektra)
 		wantCode int
 		wantBody string
@@ -150,6 +177,27 @@ func TestHandleReadinessRequest(t *testing.T) {
 			},
 			wantCode: http.StatusServiceUnavailable,
 			wantBody: "Temporal: Unhealthy\nCore gRPC: NotKnown\n",
+		},
+		{
+			name: "enabled Flow gRPC is reported",
+			record: func(data *elektratypes.Elektra) {
+				data.Conf.FlowGrpc.Enabled = true
+				data.Managers.Workflow.State.HealthStatus.Store(uint64(computils.CompHealthy))
+				data.Managers.CoreGrpc.State.HealthStatus.Store(uint64(computils.CompHealthy))
+				data.Managers.FlowGrpc.State.HealthStatus.Store(uint64(computils.CompUnhealthy))
+			},
+			wantCode: http.StatusServiceUnavailable,
+			wantBody: "Flow gRPC: Unhealthy\n",
+		},
+		{
+			name: "disabled Flow gRPC is ignored",
+			record: func(data *elektratypes.Elektra) {
+				data.Managers.Workflow.State.HealthStatus.Store(uint64(computils.CompHealthy))
+				data.Managers.CoreGrpc.State.HealthStatus.Store(uint64(computils.CompHealthy))
+				data.Managers.FlowGrpc.State.HealthStatus.Store(uint64(computils.CompUnhealthy))
+			},
+			wantCode: http.StatusOK,
+			wantBody: "ok\n",
 		},
 	}
 	for _, tt := range tests {

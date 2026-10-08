@@ -80,17 +80,17 @@ Common causes:
 
 ### Check a Site Agent pod
 
-Each Site Agent pod reports its own state on its status port, `8080` unless the chart's `service.port` changes it. The Site Agent Service picks a pod for each request and leaves out pods that aren't Ready. So port-forward to the pod you want to check, such as `nico-rest-site-agent-0`:
+Each Site Agent pod reports its own state on its `http` port, `8080` unless the chart's `service.port` changes it. The Site Agent Service picks a pod for each request and leaves out pods that aren't Ready. So port-forward to the `http` port of the pod you want to check, such as `nico-rest-site-agent-0`:
 
 ```bash
-kubectl port-forward -n <site-agent-namespace> pod/nico-rest-site-agent-0 8080:8080
+kubectl port-forward -n <site-agent-namespace> pod/nico-rest-site-agent-0 8080:http
 curl -s localhost:8080/readyz
 curl -s localhost:8080/status | jq
 ```
 
-`/readyz` returns `ok`, or a `503` with one line for each of Temporal and Core gRPC that isn't healthy, such as `Temporal: Unhealthy`. Any client that can reach the pod can read these endpoints, so `/readyz`, `/healthz`, and `/status` leave out the errors themselves. Find them in the pod's logs with `kubectl logs -n <site-agent-namespace> pod/nico-rest-site-agent-0`. The [Site Agent installation guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/INSTALLATION.md#step-13--deploy-nico-rest-site-agent) describes when `/readyz` and `/healthz` fail.
+`/readyz` returns `ok`, or a `503` with one line for each of Temporal, Core gRPC, and Flow gRPC that isn't healthy, such as `Temporal: Unhealthy`. It checks Flow gRPC only when `FLOW_GRPC_ENABLED` is `true`, as it is by default in the chart. Any client that can reach the pod can read these endpoints, so `/readyz`, `/healthz`, and `/status` leave out the errors themselves. Find them in the pod's logs with `kubectl logs -n <site-agent-namespace> pod/nico-rest-site-agent-0`. The [Site Agent installation guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/INSTALLATION.md#step-13--deploy-nico-rest-site-agent) describes when `/readyz` and `/healthz` fail.
 
-`/status` returns JSON. Only the pod whose name ends in `-0` runs the bootstrap, so every other pod reports the bootstrap as disabled:
+`/status` returns JSON. Only the pod whose name ends in `-0` runs the bootstrap, so every other pod reports the bootstrap as disabled. This example comes from that pod with Flow gRPC enabled:
 
 ```json
 {
@@ -109,7 +109,7 @@ curl -s localhost:8080/status | jq
     "lastConnectionAttempt": "2026-10-06T20:50:00Z"
   },
   "coreGrpc": {"health": "Healthy", "requestsSucceeded": 120, "requestsFailed": 0},
-  "flowGrpc": null
+  "flowGrpc": {"health": "Healthy", "requestsSucceeded": 40, "requestsFailed": 0}
 }
 ```
 
@@ -129,7 +129,7 @@ curl -s localhost:8080/status | jq
 | `coreGrpc.health` | `Healthy` or `Unhealthy`, from the latest health check or Core gRPC call. `NotKnown` before the first |
 | `coreGrpc.requestsSucceeded` | Core gRPC calls that succeeded since the container started, including the health check every `30s` |
 | `coreGrpc.requestsFailed` | Core gRPC calls that failed since the container started |
-| `flowGrpc` | The same fields for Flow gRPC, `null` unless `FLOW_GRPC_ENABLED` is `true`. `flowGrpc.health` comes from the latest Flow gRPC call, and is `NotKnown` before the first |
+| `flowGrpc` | The same fields for Flow gRPC, `null` unless `FLOW_GRPC_ENABLED` is `true`. `flowGrpc.health` comes from the latest health check or Flow gRPC call, and is `NotKnown` before the first |
 
 ## Upgrades and Configuration
 

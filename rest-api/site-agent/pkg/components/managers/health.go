@@ -16,16 +16,16 @@ import (
 )
 
 const (
-	// healthCheckInterval is how often the Site Agent checks Temporal and Core gRPC.
-	// The readiness probe and the health metrics report the latest results, so the
-	// kubelet's probe rate adds no calls.
+	// healthCheckInterval is how often the Site Agent checks Temporal, Core gRPC, and
+	// Flow gRPC when it is enabled. The readiness probe and the health metrics report
+	// the latest results, so the kubelet's probe rate adds no calls.
 	healthCheckInterval = 30 * time.Second
 	// healthCheckTimeout bounds each dependency check.
 	healthCheckTimeout = 5 * time.Second
 )
 
-// StartHealthChecker checks Temporal and Core gRPC every healthCheckInterval. Each
-// check records its result in its manager's state.
+// StartHealthChecker checks Temporal, Core gRPC, and enabled Flow gRPC every
+// healthCheckInterval. Each check records its result in its manager's state.
 func StartHealthChecker() {
 	ticker := time.NewTicker(healthCheckInterval)
 	defer ticker.Stop()
@@ -39,6 +39,9 @@ func checkHealth() {
 	checks := []func(context.Context){
 		ManagerAccess.API.Orchestrator.CheckConnection,
 		ManagerAccess.API.CoreGrpc.CheckConnection,
+	}
+	if ManagerAccess.Conf.EB.FlowGrpc.Enabled {
+		checks = append(checks, ManagerAccess.API.FlowGrpc.CheckConnection)
 	}
 	for _, check := range checks {
 		ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
@@ -64,9 +67,9 @@ func handleLivenessRequest(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "ok")
 }
 
-// handleReadinessRequest reports the latest Temporal and Core gRPC state, the same
-// state behind the health metrics, and lists every dependency that is not healthy. Like
-// the liveness response, it leaves out the errors, which are logged.
+// handleReadinessRequest reports the latest Temporal, Core gRPC, and enabled Flow gRPC
+// state, the same state behind the health metrics, and lists every dependency that is not
+// healthy. Like the liveness response, it leaves out the errors, which are logged.
 func handleReadinessRequest(w http.ResponseWriter, r *http.Request) {
 	managers := ManagerAccess.Data.EB.Managers
 	var failures []string
@@ -75,6 +78,11 @@ func handleReadinessRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if health := computils.CompStatus(managers.CoreGrpc.State.HealthStatus.Load()); health != computils.CompHealthy {
 		failures = append(failures, "Core gRPC: "+health.String())
+	}
+	if ManagerAccess.Conf.EB.FlowGrpc.Enabled {
+		if health := computils.CompStatus(managers.FlowGrpc.State.HealthStatus.Load()); health != computils.CompHealthy {
+			failures = append(failures, "Flow gRPC: "+health.String())
+		}
 	}
 	if len(failures) > 0 {
 		http.Error(w, strings.Join(failures, "\n"), http.StatusServiceUnavailable)
