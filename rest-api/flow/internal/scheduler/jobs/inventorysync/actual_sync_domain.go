@@ -318,8 +318,11 @@ func buildDomainTopologySnapshot(
 		current := snapshot.clusterByGroup[groupID]
 		if err != nil || clusterID == uuid.Nil || (current != nil && *current != clusterID) {
 			if !snapshot.invalidGroups[groupID] {
-				log.Error().Str("rack_group_id", groupID).Str("nmxc_cluster_id", membership.DomainID).
-					Msg("Invalid or conflicting NMX-C cluster observation; preserving this group's cluster")
+				event := log.Error().Str("rack_group_id", groupID).Str("nmxc_cluster_id", membership.DomainID)
+				if current != nil {
+					event = event.Str("current_nmxc_cluster_id", current.String())
+				}
+				event.Msg("Invalid or conflicting NMX-C cluster observation; preserving this group's cluster")
 			}
 			snapshot.invalidGroups[groupID] = true
 		}
