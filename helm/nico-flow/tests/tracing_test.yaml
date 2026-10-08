@@ -33,7 +33,7 @@ tests:
 
   - it: enables export independently of endpoint and protocol
     set:
-      tracing.enabled: true
+      flowConfig.tracing.enabled: true
     asserts:
       - matchRegex:
           path: data["flowconfig.yaml"]
@@ -42,7 +42,16 @@ tests:
 
   - it: defaults to disabled when reused values have no tracing block
     set:
-      tracing: null
+      flowConfig.tracing: null
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: false'
+        template: configmap.yaml
+
+  - it: defaults to disabled when the enable flag is null
+    set:
+      flowConfig.tracing.enabled: null
     asserts:
       - matchRegex:
           path: data["flowconfig.yaml"]
@@ -52,7 +61,7 @@ tests:
   - it: rejects a string enable flag
     template: deployment.yaml
     set:
-      tracing.enabled: invalid
+      flowConfig.tracing.enabled: invalid
     asserts:
       - failedTemplate:
-          errorMessage: tracing.enabled must be a boolean (true or false)
+          errorMessage: 'flowConfig.tracing.enabled must be a boolean (true or false); got "invalid"'

@@ -112,11 +112,14 @@ takes its default too, since --set key=null removes the key.
 {{- else if not (kindIs "map" $cfg) -}}
 {{- fail "flowConfig must be a map of settings such as flowConfig.leakDetectionInterval, not the chart 0.2.x raw file string; see the nico-flow README section \"Upgrading from 0.2.x\"" -}}
 {{- end -}}
-{{- $defaults := dict "inventoryRunFrequency" "1m" "disableInventory" false "leakDetectionInterval" "1m" "disableLeakDetection" false -}}
+{{- $defaults := dict "inventoryRunFrequency" "1m" "disableInventory" false "leakDetectionInterval" "1m" "disableLeakDetection" false "tracing" (dict "enabled" false) -}}
 {{- range $k, $v := $defaults -}}
 {{- if or (not (hasKey $cfg $k)) (kindIs "invalid" (index $cfg $k)) -}}
 {{- $_ := set $cfg $k $v -}}
 {{- end -}}
+{{- end -}}
+{{- if or (not (hasKey $cfg.tracing "enabled")) (kindIs "invalid" $cfg.tracing.enabled) -}}
+{{- $_ := set $cfg.tracing "enabled" false -}}
 {{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}

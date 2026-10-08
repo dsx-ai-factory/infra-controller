@@ -1,8 +1,4 @@
 {{- $cfg := include "nico-flow.flowConfig" . | fromYaml -}}
-{{- $tracing := .Values.tracing | default dict -}}
-{{- if and (hasKey $tracing "enabled") (not (kindIs "invalid" $tracing.enabled)) (not (kindIs "bool" $tracing.enabled)) -}}
-{{- fail "tracing.enabled must be a boolean (true or false)" -}}
-{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,4 +14,4 @@ data:
     leak_detection_interval: {{ include "nico-flow.flowConfigInterval" (dict "key" "leakDetectionInterval" "value" $cfg.leakDetectionInterval) }}
     disable_leak_detection: {{ include "nico-flow.flowConfigBool" (dict "key" "disableLeakDetection" "value" $cfg.disableLeakDetection) }}
     tracing:
-      enabled: {{ $tracing.enabled | default false }}
+      enabled: {{ include "nico-flow.flowConfigBool" (dict "key" "tracing.enabled" "value" $cfg.tracing.enabled) }}

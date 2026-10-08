@@ -169,9 +169,9 @@ flowConfig:
   ## Skip the periodic leak detection job. Boolean, default false.
   disableLeakDetection: false
 
-## Export requires enabled=true and an OTEL_* endpoint in extraEnv.flow.
-tracing:
-  enabled: false
+  ## Export requires enabled=true and an OTEL_* endpoint in extraEnv.flow.
+  tracing:
+    enabled: false
 
 ## Additional environment variables. Use the standard OTEL_* variables to
 ## configure Flow's existing OpenTelemetry exporter.
