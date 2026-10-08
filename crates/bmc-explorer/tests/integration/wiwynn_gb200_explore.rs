@@ -23,10 +23,9 @@ use crate::common;
 #[test]
 async fn chassis_position_remains_the_source_for_gb200() {
     let h = test_support::wiwynn_gb200_bmc_at_rack_position(11).await;
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
 
     let cbc = report
         .chassis

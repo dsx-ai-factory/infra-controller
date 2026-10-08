@@ -57,15 +57,31 @@ impl DgxGB300Nvl<'_> {
     pub(crate) fn component_integrity_config(
         &self,
     ) -> Vec<redfish::component_integrity::ComponentIntegrity> {
-        let erot = |id: String| redfish::component_integrity::ComponentIntegrity {
-            id: id.into(),
-            integrity_type: "SPDM".into(),
-            enabled: true,
+        let erot = |id: String, target_component_uri: String| {
+            redfish::component_integrity::ComponentIntegrity {
+                id: id.into(),
+                target_component_uri: target_component_uri.into(),
+                integrity_type: "SPDM".into(),
+                enabled: true,
+            }
         };
-        std::iter::once(erot("ERoT_BMC_0".to_string()))
-            .chain((0..self.cpu.len()).map(|n| erot(format!("HGX_ERoT_CPU_{n}"))))
-            .chain((0..self.gpu.len()).map(|n| erot(format!("HGX_ERoT_GPU_{n}"))))
-            .collect()
+        std::iter::once(erot(
+            "ERoT_BMC_0".to_string(),
+            "/redfish/v1/Managers/BMC_0".to_string(),
+        ))
+        .chain((0..self.cpu.len()).map(|n| {
+            erot(
+                format!("HGX_ERoT_CPU_{n}"),
+                format!("/redfish/v1/Chassis/HGX_CPU_{n}"),
+            )
+        }))
+        .chain((0..self.gpu.len()).map(|n| {
+            erot(
+                format!("HGX_ERoT_GPU_{n}"),
+                format!("/redfish/v1/Chassis/HGX_GPU_{n}"),
+            )
+        }))
+        .collect()
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {

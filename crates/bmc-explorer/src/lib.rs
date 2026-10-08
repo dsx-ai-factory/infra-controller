@@ -58,6 +58,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chassis::ExploredChassisCollection;
+use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
 pub use error::Error;
 use inventories::ExploredInventories;
@@ -152,11 +153,8 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
-/// `bmc` is the client `root` was fetched through. It is passed separately
-/// because nv-redfish keeps the service root's client private, and the
-/// `ComponentIntegrity` collection is a resource nv-redfish does not model.
+/// Collects required resources, then converts them into an exploration report.
 pub async fn nv_generate_exploration_report<B: Bmc>(
-    bmc: &B,
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
@@ -164,7 +162,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let mut explored_chassis =
         ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
-    let component_integrities = component_integrity::explore(bmc, &root).await;
+    let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
     // Delta power shelves do not expose a `/redfish/v1/Systems` collection (and
     // report no vendor in the service root, so nv-redfish fabricates the path
@@ -175,7 +173,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             &root,
             explored_chassis,
             explored_inventories,
-            component_integrities,
+            explored_component_integrities,
         )
         .await;
     }
@@ -394,6 +392,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let service = explored_inventories.to_model(hw_type);
     let hardware_class = hardware_class(&root, &systems[0]);
     let chassis = explored_chassis.to_model();
+    let component_integrities = explored_component_integrities.to_model();
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
         last_exploration_error: None,
@@ -452,7 +451,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
-    component_integrities: component_integrity::Observation,
+    explored_component_integrities: ExploredComponentIntegrity<B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let hw_type = hw::HwType::DeltaPowerShelf;
 
@@ -471,6 +470,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
 
     let system = explored_chassis.synthesized_powershelf_system();
     let hardware_class = hardware_class(root, &system);
+    let component_integrities = explored_component_integrities.to_model();
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,

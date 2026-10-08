@@ -524,8 +524,8 @@ impl RedfishClient {
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
-        let (service_root, bmc) = nv_pool
-            .service_root_and_bmc(bmc_ip_address, credentials, |root| {
+        let service_root = nv_pool
+            .service_root_with_cache_predicate(bmc_ip_address, credentials, |root| {
                 let complete = root.root.chassis.is_some() && root.root.managers.is_some();
                 if !complete {
                     tracing::warn!(
@@ -543,7 +543,6 @@ impl RedfishClient {
             })?;
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
-            bmc.as_ref(),
             service_root,
             &nv_bmc_explore_config(boot_interface),
         )
@@ -2297,7 +2296,6 @@ mod tests {
             "Processors": {"@odata.id": "/advertised-gpu-inventory"},
         });
         let nv_report = bmc_explorer::nv_generate_exploration_report(
-            bmc.bmc.as_ref(),
             bmc.service_root,
             &bmc_explorer::Config {
                 boot_interface_mac: None,

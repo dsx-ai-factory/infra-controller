@@ -29,10 +29,9 @@ async fn explore_nvidia_dgx_vr_and_generate_machine_id() {
     let h = test_support::nvidia_dgx_vr_host_bmc().await;
     let config = common::explorer_config();
 
-    let mut report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root.clone(), &config)
-            .await
-            .expect("NvidiaDgxVr host exploration should succeed");
+    let mut report = nv_generate_exploration_report(h.service_root.clone(), &config)
+        .await
+        .expect("NvidiaDgxVr host exploration should succeed");
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(
@@ -64,7 +63,7 @@ async fn explore_nvidia_dgx_vr_and_generate_machine_id() {
     );
     assert_eq!(report.systems[0].serial_console_ssh_port, Some(2200));
 
-    let refreshed_report = nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
+    let refreshed_report = nv_generate_exploration_report(h.service_root, &config)
         .await
         .expect("subsequent NvidiaDgxVr host exploration should succeed");
     assert_eq!(refreshed_report.systems, report.systems);
@@ -152,10 +151,9 @@ async fn additional_systems_do_not_fetch_linked_inventory() {
     });
     // Fetch members individually so the advertised links pass through injection.
     let service_root = h.service_root.as_ref().clone().restrict_expand().into();
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(service_root, &common::explorer_config())
+        .await
+        .unwrap();
     assert_eq!(report.systems[1].id, "HGX_Baseboard_0");
     assert_eq!(
         report.systems[1].serial_number.as_deref(),
@@ -195,10 +193,9 @@ async fn unavailable_processors_do_not_prevent_system_discovery() {
         remaining: Some(1),
     });
     let service_root = h.service_root.as_ref().clone().restrict_expand().into();
-    let mut report =
-        nv_generate_exploration_report(h.bmc.as_ref(), service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let mut report = nv_generate_exploration_report(service_root, &common::explorer_config())
+        .await
+        .unwrap();
     assert_eq!(report.systems[0].id, "System_0");
     assert_eq!(report.systems[1].id, "HGX_Baseboard_0");
     assert_eq!(report.systems[1].processors, Some(vec![]));
@@ -224,7 +221,7 @@ async fn non_vera_rubin_systems_do_not_fetch_processors() {
         remaining: Some(1),
     });
     let root = h.service_root.as_ref().clone().restrict_expand().into();
-    let report = nv_generate_exploration_report(h.bmc.as_ref(), root, &common::explorer_config())
+    let report = nv_generate_exploration_report(root, &common::explorer_config())
         .await
         .unwrap();
     assert!(
@@ -288,7 +285,7 @@ async fn vera_rubin_collects_all_processors_and_selects_tray_gpu_from_report() {
         },
     ]);
     let root = h.service_root.as_ref().clone().restrict_expand().into();
-    let report = nv_generate_exploration_report(h.bmc.as_ref(), root, &common::explorer_config())
+    let report = nv_generate_exploration_report(root, &common::explorer_config())
         .await
         .unwrap();
     assert_eq!(report.systems[0].processors, None);
