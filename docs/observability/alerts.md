@@ -104,11 +104,15 @@ availability as one minus the error rate from the `_count` series split by gRPC 
 
 ```text
 1 - (
-  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m]))
+  (sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m])) or vector(0))
   /
   sum(rate(carbide_api_grpc_server_duration_milliseconds_count[5m]))
 )
 ```
+
+When every request succeeds, Prometheus has no error series to match and you get an empty result.
+`or vector(0)` substitutes a zero error rate, so the query reports `1`, which is 100% availability.
+An empty result then means only one thing: no requests in the window.
 
 **API latency** uses the same histogram. Extract p95 or p99 percentiles and convert to
 seconds (metric is in milliseconds, SLO target is 1 second = 1000ms):
