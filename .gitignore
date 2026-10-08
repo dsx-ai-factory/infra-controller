@@ -3,6 +3,10 @@
 bluefield/forge-dpu*.deb
 bluefield/forge-dpu*/
 bluefield/otel-dpu*/
+bluefield/otel/go/
+bluefield/otel/ocb
+bluefield/otel/ocb-build/
+bluefield/otel/ocb_config.yaml
 public/
 .vagrant
 .DS_Store
