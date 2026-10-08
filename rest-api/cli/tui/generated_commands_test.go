@@ -477,8 +477,10 @@ func TestGeneratedCommand_MachineDeleteOffersForceMode(t *testing.T) {
 		input           string
 		wantQuery       string
 		wantForcePrompt bool
+		wantIncomplete  bool
 		cancel          bool
 	}{
+		{name: "incomplete Site cleanup returns retry instructions", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true, wantIncomplete: true},
 		{name: "guided force delete", args: []string{"machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
 		{name: "guided standard delete", args: []string{"machine-1"}, input: "n\ny\n", wantForcePrompt: true},
 		{name: "explicit force flag", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
@@ -495,6 +497,12 @@ func TestGeneratedCommand_MachineDeleteOffersForceMode(t *testing.T) {
 				calls.Add(1)
 				queries <- r.URL.RawQuery
 				w.Header().Set("Content-Type", "application/json")
+				if tc.wantIncomplete {
+					w.Header().Set("Retry-After", "5")
+					w.WriteHeader(http.StatusConflict)
+					_, _ = io.WriteString(w, `{"message":"Machine deletion is incomplete; after 5 seconds repeat this DELETE request with the same options until it returns 202. Cleanup is not automatically retried"}`)
+					return
+				}
 				w.WriteHeader(http.StatusAccepted)
 				_, _ = io.WriteString(w, `{"message":"Deletion request was accepted"}`)
 			}))
@@ -514,6 +522,14 @@ func TestGeneratedCommand_MachineDeleteOffersForceMode(t *testing.T) {
 				})
 				return out, runErr
 			})
+			if tc.wantIncomplete {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "repeat this DELETE request with the same options")
+				assert.Equal(t, int32(1), calls.Load())
+				assert.Equal(t, tc.wantQuery, <-queries)
+				assert.NotContains(t, output, "Deletion request was accepted")
+				return
+			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantForcePrompt, strings.Contains(output, "Force delete Machine machine-1?"))
 			if tc.wantForcePrompt {

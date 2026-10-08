@@ -3292,7 +3292,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 		{name: "allocation retry retains accounting records after Core not found", query: "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithAllocation=true", allocationCount: 1, retainRecords: true, coreError: status.Error(codes.NotFound, "Machine not found"), wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "spare capacity permits REST cleanup", query: "/?force=true&allowDeleteWithInstanceType=true", allocationCount: 1, spareMachine: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "Instance override does not acknowledge allocation shortfall", query: "/?force=true&allowDeleteWithInstance=true", hasAttachedInstance: true, allocationCount: 1, allowInstance: true, wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithAllocation=true"},
-		{name: "pending Core cleanup retains records", query: "/?force=true&allowDeleteWithInstanceType=true", corePending: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "pending Core cleanup retains records", query: "/?force=true&allowDeleteWithInstanceType=true", corePending: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusConflict, wantMessage: "repeat this DELETE request with the same options"},
 		{name: "override without force is rejected", query: "/?allowDeleteWithInstance=true", wantStatus: http.StatusBadRequest, wantMessage: "requires force=true"},
 		{name: "true proxies the complete force-delete request", query: "/?force=true&allowDeleteWithInstanceType=true", wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "older Core target not found completes compatibility cleanup", query: "/?force=true&allowDeleteWithInstanceType=true", coreError: status.Error(codes.NotFound, "Machine not found"), wantCoreCall: true, wantStatus: http.StatusAccepted},
@@ -3444,6 +3444,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, !tc.retainRecords, machine.IsUsableByTenant)
 				require.Equal(t, tc.isMissingOnSite, machine.IsMissingOnSite)
+				require.Equal(t, tc.retainRecords, machine.IsForceDeletionRequested)
 				if tc.retainRecords {
 					require.NotNil(t, machine.InstanceTypeID)
 				}
@@ -3479,6 +3480,78 @@ func TestMachineHandler_Delete(t *testing.T) {
 			require.Empty(t, machineInterfaces)
 		})
 	}
+
+	t.Run("retained force-deleted Machine cannot back another deletion", func(t *testing.T) {
+		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: true})
+		handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
+		ctx := context.Background()
+		machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(ctx, nil, fixture.MachineID,
+			[]string{cdbm.InfrastructureProviderRelationName, cdbm.SiteRelationName, cdbm.InstanceTypeRelationName}, false)
+		require.NoError(t, err)
+		association := common.TestBuildMachineInstanceType(t, fixture.DBSession, machine, machine.InstanceType)
+		spare := common.TestBuildMachine(t, fixture.DBSession, machine.InfrastructureProvider, machine.Site, machine.InstanceTypeID, nil, cdbm.MachineStatusReady)
+		common.TestBuildMachineInstanceType(t, fixture.DBSession, spare, machine.InstanceType)
+		user := fixture.User.(*cdbm.User)
+		tenant := common.TestBuildTenant(t, fixture.DBSession, "sequential-tenant", "sequential-tenant-org", user)
+		allocation := common.TestBuildAllocation(t, fixture.DBSession, machine.Site, tenant, "sequential-allocation", user)
+		constraint := common.TestBuildAllocationConstraint(t, fixture.DBSession, allocation, machine.InstanceType, nil, 1, user)
+
+		first := fixture.Request(t, handler.Handle, http.MethodDelete, "/?force=true&allowDeleteWithInstance=true", nil, "")
+		require.Equal(t, http.StatusAccepted, first.Code, first.Body.String())
+		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(ctx, nil, association.ID, nil)
+		require.NoError(t, err)
+
+		secondFixture := fixture
+		secondFixture.MachineID = spare.ID
+		for _, missing := range []bool{false, true} {
+			_, err = cdbm.NewMachineDAO(fixture.DBSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+				MachineID: machine.ID, IsMissingOnSite: &missing,
+			})
+			require.NoError(t, err)
+			second := secondFixture.Request(t, handler.Handle, http.MethodDelete, "/?force=true&allowDeleteWithInstanceType=true", nil, "")
+			require.Equal(t, http.StatusBadRequest, second.Code, second.Body.String())
+			require.Contains(t, second.Body.String(), "set allowDeleteWithAllocation=true")
+		}
+		acknowledged := secondFixture.Request(t, handler.Handle, http.MethodDelete, "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithAllocation=true", nil, "")
+		require.Equal(t, http.StatusAccepted, acknowledged.Code, acknowledged.Body.String())
+		remaining, err := common.GetCountOfMachinesForInstanceType(ctx, nil, fixture.DBSession, *machine.InstanceTypeID)
+		require.NoError(t, err)
+		require.Zero(t, remaining)
+		preserved, err := cdbm.NewAllocationConstraintDAO(fixture.DBSession).GetByID(ctx, nil, constraint.ID, nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, preserved.ConstraintValue)
+	})
+
+	t.Run("incomplete cleanup is explicit and finishes on retry", func(t *testing.T) {
+		response := &corev1.AdminForceDeleteMachineResponse{AllDone: false}
+		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, response)
+		handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
+		ctx := context.Background()
+		machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(ctx, nil, fixture.MachineID, []string{cdbm.InstanceTypeRelationName}, false)
+		require.NoError(t, err)
+		association := common.TestBuildMachineInstanceType(t, fixture.DBSession, machine, machine.InstanceType)
+		query := "/?force=true&allowDeleteWithInstanceType=true"
+
+		first := fixture.Request(t, handler.Handle, http.MethodDelete, query, nil, "")
+		require.Equal(t, http.StatusConflict, first.Code, first.Body.String())
+		require.Equal(t, "5", first.Header().Get("Retry-After"))
+		require.Contains(t, first.Body.String(), "repeat this DELETE request with the same options")
+		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(ctx, nil, association.ID, nil)
+		require.NoError(t, err)
+		remaining, err := common.GetCountOfMachinesForInstanceType(ctx, nil, fixture.DBSession, *machine.InstanceTypeID)
+		require.NoError(t, err)
+		require.Zero(t, remaining)
+
+		response.AllDone = true
+		retry := fixture.Request(t, handler.Handle, http.MethodDelete, query, nil, "")
+		require.Equal(t, http.StatusAccepted, retry.Code, retry.Body.String())
+		_, err = cdbm.NewMachineDAO(fixture.DBSession).GetByID(ctx, nil, fixture.MachineID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(ctx, nil, association.ID, nil)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		client := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
+		client.AssertNumberOfCalls(t, "ExecuteWorkflow", 2)
+	})
 
 	t.Run("cleanup failure rolls back before compatibility retry", func(t *testing.T) {
 		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: true})

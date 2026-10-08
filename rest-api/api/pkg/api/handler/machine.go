@@ -1821,6 +1821,7 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Machine deletion options", err)
 	}
 
+	var cleanupIncomplete bool
 	err = cdb.WithTx(ctx, dmh.dbSession, func(tx *cdb.Tx) error {
 		mDAO := cdbm.NewMachineDAO(dmh.dbSession)
 		// Check that Machine exists
@@ -1914,7 +1915,12 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to lock Instance Type for Machine deletion", nil)
 				}
 				// Account for every association row that cleanup would remove.
-				fits, derr := common.CheckMachinesForInstanceTypeAllocation(ctx, tx, dmh.dbSession, logger, instanceTypeID, associationCounts[instanceTypeID])
+				lostCapacity := associationCounts[instanceTypeID]
+				if machine.IsForceDeletionRequested {
+					// A retry must not subtract capacity already excluded by the prior request.
+					lostCapacity = 0
+				}
+				fits, derr := common.CheckMachinesForInstanceTypeAllocation(ctx, tx, dmh.dbSession, logger, instanceTypeID, lostCapacity)
 				if derr != nil {
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to check Allocation Constraints for Machine deletion", nil)
 				}
@@ -1940,12 +1946,12 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 				return apiErr
 			}
 
-			// Core can accept deletion before finishing cleanup. Preserve tenant
-			// ownership and allocation accounting, including on a NotFound retry.
-			// Inventory will mark retained missing Machines and Instances as Error.
-			if retainRecords || (apiErr == nil && !coreResponse.AllDone) {
+			// The generic proxy calls Core once. An incomplete result requires the
+			// caller to retry; persist the lost capacity before reporting that result.
+			cleanupIncomplete = apiErr == nil && !coreResponse.AllDone
+			if retainRecords || cleanupIncomplete {
 				_, derr = mDAO.Update(ctx, tx, cdbm.MachineUpdateInput{
-					MachineID: machine.ID, IsUsableByTenant: cutil.GetPtr(false),
+					MachineID: machine.ID, IsUsableByTenant: cutil.GetPtr(false), IsForceDeletionRequested: cutil.GetPtr(true),
 				})
 				if derr != nil {
 					logger.Error().Err(derr).Msg("failed to mark force-deleted Machine unusable")
@@ -2110,6 +2116,12 @@ func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 	}
 
 	logger.Info().Msg("finishing API handler")
+
+	if cleanupIncomplete {
+		c.Response().Header().Set("Retry-After", "5")
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict,
+			"Machine deletion is incomplete; after 5 seconds repeat this DELETE request with the same options until it returns 202. Cleanup is not automatically retried", nil)
+	}
 
 	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

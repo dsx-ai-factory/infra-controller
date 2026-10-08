@@ -11633,7 +11633,7 @@ paths:
             default: false
           in: query
           name: allowDeleteWithAllocation
-          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Does not imply either Instance or Instance Type deletion permission.
+          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Retained Machines whose Site deletion was accepted do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
 
       responses:
         '202':
@@ -11653,6 +11653,18 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '409':
+          description: Site cleanup is incomplete. No automatic continuation is scheduled. Wait at least 5 seconds, then repeat the same DELETE request with the same query options until it returns 202. REST records are retained and the Machine no longer backs Allocation capacity while cleanup is pending.
+          headers:
+            Retry-After:
+              description: Minimum delay in seconds before repeating the deletion request.
+              schema:
+                type: integer
+                example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '412':
           description: The Machine deletion preconditions were not met.
           content:
@@ -11690,7 +11702,14 @@ paths:
         requested and sufficient remaining Allocation capacity. Otherwise, records remain
         for inventory to mark missing Machines and Instances as `Error`, then their owners
         can explicitly clean them up. Allocation Constraints remain unchanged.
-        HTTP 202 confirms acceptance, not completion.
+        Forced deletion returns HTTP 202 only when Site cleanup is complete; tenant and
+        Allocation records may still be retained as described above. Retained Machines
+        whose forced deletion was accepted no longer back Allocation capacity, and
+        present inventory cannot restore their usability or associations. HTTP 409
+        with `Retry-After: 5` means cleanup is incomplete: repeat the same DELETE request
+        with the same query options after at least 5 seconds until HTTP 202. No automatic
+        continuation is scheduled. Regular deletion continues to return HTTP 202 after
+        REST cleanup.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:

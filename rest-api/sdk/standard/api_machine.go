@@ -411,7 +411,7 @@ func (r ApiDeleteMachineRequest) AllowDeleteWithInstance(allowDeleteWithInstance
 	return r
 }
 
-// Requires force&#x3D;true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Does not imply either Instance or Instance Type deletion permission.
+// Requires force&#x3D;true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Retained Machines whose Site deletion was accepted do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
 func (r ApiDeleteMachineRequest) AllowDeleteWithAllocation(allowDeleteWithAllocation bool) ApiDeleteMachineRequest {
 	r.allowDeleteWithAllocation = &allowDeleteWithAllocation
 	return r
@@ -425,7 +425,7 @@ func (r ApiDeleteMachineRequest) Execute() (*MessageResponse, *http.Response, er
 DeleteMachine Delete a Machine from a Site
 
 Requires Provider Admin access to the Machine's Infrastructure Provider. Regular deletion requires the Machine to be missing on Site for at least 24 hours, with no attached Instance or assigned Instance Type.
-Forced deletion requires a Registered Site and the applicable overrides below. Machines marked missing on Site can also be force deleted without the 24-hour wait required for regular deletion. REST records are removed only after Site cleanup completes, with no Instance deletion requested and sufficient remaining Allocation capacity. Otherwise, records remain for inventory to mark missing Machines and Instances as `Error`, then their owners can explicitly clean them up. Allocation Constraints remain unchanged. HTTP 202 confirms acceptance, not completion.
+Forced deletion requires a Registered Site and the applicable overrides below. Machines marked missing on Site can also be force deleted without the 24-hour wait required for regular deletion. REST records are removed only after Site cleanup completes, with no Instance deletion requested and sufficient remaining Allocation capacity. Otherwise, records remain for inventory to mark missing Machines and Instances as `Error`, then their owners can explicitly clean them up. Allocation Constraints remain unchanged. Forced deletion returns HTTP 202 only when Site cleanup is complete; tenant and Allocation records may still be retained as described above. Retained Machines whose forced deletion was accepted no longer back Allocation capacity, and present inventory cannot restore their usability or associations. HTTP 409 with `Retry-After: 5` means cleanup is incomplete: repeat the same DELETE request with the same query options after at least 5 seconds until HTTP 202. No automatic continuation is scheduled. Regular deletion continues to return HTTP 202 after REST cleanup.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -555,6 +555,17 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

@@ -64,8 +64,10 @@ type MachineInstanceTypeUpdateInput struct {
 
 // MachineInstanceTypeFilterInput input parameters for GetAll method
 type MachineInstanceTypeFilterInput struct {
-	MachineID       *string
-	InstanceTypeIDs []uuid.UUID
+	// ExcludeForceDeletionRequested counts only Machines still backing Allocation capacity.
+	ExcludeForceDeletionRequested bool
+	MachineID                     *string
+	InstanceTypeIDs               []uuid.UUID
 }
 
 // GetIndentedJSON returns formatted json of MachineInstanceType
@@ -195,6 +197,12 @@ func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	mits := []MachineInstanceType{}
 
 	query := db.GetIDB(tx, mitsd.dbSession).NewSelect().Model(&mits)
+
+	if filter.ExcludeForceDeletionRequested {
+		query = query.Join("JOIN machine AS capacity_machine ON capacity_machine.id = mit.machine_id").
+			Where("capacity_machine.deleted IS NULL").
+			Where("capacity_machine.is_force_deletion_requested = false")
+	}
 
 	if filter.MachineID != nil {
 		query = query.Where("mit.machine_id = ?", *filter.MachineID)
