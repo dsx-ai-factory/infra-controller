@@ -211,7 +211,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 
 	// Routes
 	// Common routes are service oriented e.g. health
-	commonAPIRoutes := api.NewSystemAPIRoutes()
+	commonAPIRoutes := api.NewSystemAPIRoutes(dbSession)
 	for _, commonAPIRoute := range commonAPIRoutes {
 		// Register route
 		e.Add(commonAPIRoute.Method, commonAPIRoute.Path, commonAPIRoute.Handler.Handle)

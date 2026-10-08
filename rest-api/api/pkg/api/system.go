@@ -7,21 +7,28 @@ import (
 	"net/http"
 
 	apiHandler "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 )
 
-// NewSystemAPIRoutes returns API routes that provide system level  functions
-func NewSystemAPIRoutes() []Route {
+const (
+	healthCheckPath    = "/healthz"
+	readinessCheckPath = "/readyz"
+)
+
+// NewSystemAPIRoutes returns liveness and readiness routes. Readiness uses the
+// API's non-nil database session; liveness does not check dependencies.
+func NewSystemAPIRoutes(dbSession *cdb.Session) []Route {
 	apiRoutes := []Route{
 		// Health check endpoints
 		{
-			Path:    "/healthz",
+			Path:    healthCheckPath,
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewHealthCheckHandler(),
 		},
 		{
-			Path:    "/readyz",
+			Path:    readinessCheckPath,
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewHealthCheckHandler(),
+			Handler: apiHandler.NewReadinessCheckHandler(dbSession),
 		},
 	}
 
@@ -30,12 +37,5 @@ func NewSystemAPIRoutes() []Route {
 
 // IsSystemRoute returns true for a path registered as SystemAPIRoute
 func IsSystemRoute(p string) bool {
-	routes := NewSystemAPIRoutes()
-	for _, r := range routes {
-		if r.Path == p {
-			return true
-		}
-	}
-
-	return false
+	return p == healthCheckPath || p == readinessCheckPath
 }
