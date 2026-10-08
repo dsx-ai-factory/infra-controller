@@ -78,6 +78,11 @@ pub async fn detect_hw_type<B: Bmc>(
 
     let is_bluefield_system = is_bluefield_system_id(&system.raw().id);
     let system_explore_config = computer_system::Config {
+        need_bios: true,
+        need_boot_options: true,
+        need_ethernet_interfaces: true,
+        need_secure_boot: true,
+        need_processors: false,
         need_oem_nvidia_bluefield: is_bluefield_system,
         ignore_500_on_bios_fetch: is_bluefield_system,
         retry_404_on_eth_interfaces: is_bluefield_system,

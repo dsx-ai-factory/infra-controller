@@ -1434,18 +1434,43 @@ impl EndpointExplorationReport {
         not_found
     }
 
-    /// Extract position info from chassis entries into the report-level fields.
-    ///
-    /// Uses "first wins" strategy: takes the first non-None value found across
-    /// all chassis entries. This is consistent with how `model()` extracts data
-    /// from the chassis array.
-    pub fn parse_position_info(&mut self) {
-        for chassis in &self.chassis {
-            self.physical_slot_number = self.physical_slot_number.or(chassis.physical_slot_number);
-            self.compute_tray_index = self.compute_tray_index.or(chassis.compute_tray_index);
-            self.topology_id = self.topology_id.or(chassis.topology_id);
-            self.revision_id = self.revision_id.or(chassis.revision_id);
+    /// Computes rack position from normalized inventory without BMC requests.
+    /// Chassis values take precedence over the canonical HGX GPU's position per field.
+    pub fn rack_position(&self) -> RackPosition {
+        let processor = self
+            .systems
+            .iter()
+            .find(|system| system.id == "HGX_Baseboard_0")
+            .and_then(|system| {
+                system
+                    .processors
+                    .iter()
+                    .flatten()
+                    .find(|processor| processor.id == "GPU_0")
+            });
+        RackPosition {
+            physical_slot_number: self
+                .chassis
+                .iter()
+                .find_map(|chassis| chassis.physical_slot_number)
+                .or_else(|| processor.and_then(|processor| processor.physical_slot_number)),
+            compute_tray_index: self
+                .chassis
+                .iter()
+                .find_map(|chassis| chassis.compute_tray_index)
+                .or_else(|| processor.and_then(|processor| processor.compute_tray_index)),
+            topology_id: self.chassis.iter().find_map(|chassis| chassis.topology_id),
+            revision_id: self.chassis.iter().find_map(|chassis| chassis.revision_id),
         }
+    }
+
+    /// Fills report position fields from collected inventory, preserving existing values.
+    pub fn parse_position_info(&mut self) {
+        let position = self.rack_position();
+        self.physical_slot_number = self.physical_slot_number.or(position.physical_slot_number);
+        self.compute_tray_index = self.compute_tray_index.or(position.compute_tray_index);
+        self.topology_id = self.topology_id.or(position.topology_id);
+        self.revision_id = self.revision_id.or(position.revision_id);
     }
 }
 
@@ -1743,6 +1768,9 @@ pub struct ComputerSystem {
     pub attributes: ComputerSystemAttributes,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pcie_devices: Vec<PCIeDevice>,
+    /// Requested processor inventory; `None` when processor discovery was not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processors: Option<Vec<Processor>>,
     #[serde(default, deserialize_with = "base_mac_deserialize")]
     pub base_mac: Option<BaseMac>,
     #[serde(default)]
@@ -1756,6 +1784,32 @@ pub struct ComputerSystem {
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
+}
+
+/// Minimal processor inventory with position normalized by the explorer.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Processor {
+    /// Redfish resource identifier within its computer system.
+    pub id: String,
+    /// Processor model reported by Redfish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Nonnegative tray slot number extracted by the explorer when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_slot_number: Option<i32>,
+    /// Nonnegative compute tray index extracted by the explorer when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_tray_index: Option<i32>,
+}
+
+/// Rack position derived from the collected chassis and processor inventory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RackPosition {
+    pub physical_slot_number: Option<i32>,
+    pub compute_tray_index: Option<i32>,
+    pub topology_id: Option<i32>,
+    pub revision_id: Option<i32>,
 }
 
 pub fn base_mac_deserialize<'a, D>(deserializer: D) -> Result<Option<BaseMac>, D::Error>
@@ -2808,6 +2862,85 @@ mod tests {
     use super::*;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    fn processor_position_report() -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "HGX_Baseboard_0".into(),
+                processors: Some(vec![Processor {
+                    id: "GPU_0".into(),
+                    model: Some("Test GPU".into()),
+                    physical_slot_number: Some(26),
+                    compute_tray_index: Some(16),
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rack_position_selects_canonical_system_and_processor() {
+        value_scenarios!(run = |(system_id, processor_id): (&str, &str)| {
+            let mut report = processor_position_report();
+            report.systems[0].id = system_id.into();
+            report.systems[0].processors.as_mut().unwrap()[0].id = processor_id.into();
+            let position = report.rack_position();
+            (position.physical_slot_number, position.compute_tray_index)
+        };
+            "resource identity" {
+                ("HGX_Baseboard_0", "GPU_0") => (Some(26), Some(16)),
+                ("System_0", "GPU_0") => (None, None),
+                ("HGX_Baseboard_0", "GPU_1") => (None, None),
+            }
+        );
+    }
+
+    #[test]
+    fn chassis_position_takes_precedence_and_missing_fields_use_processors() {
+        let mut report = processor_position_report();
+        report.chassis = vec![Chassis {
+            physical_slot_number: Some(3),
+            topology_id: Some(7),
+            revision_id: Some(2),
+            ..Default::default()
+        }];
+        assert_eq!(
+            report.rack_position(),
+            RackPosition {
+                physical_slot_number: Some(3),
+                compute_tray_index: Some(16),
+                topology_id: Some(7),
+                revision_id: Some(2),
+            }
+        );
+        report.compute_tray_index = Some(9);
+        report.parse_position_info();
+        assert_eq!(report.physical_slot_number, Some(3));
+        assert_eq!(report.compute_tray_index, Some(9));
+        assert_eq!(report.topology_id, Some(7));
+        assert_eq!(report.revision_id, Some(2));
+    }
+
+    #[test]
+    fn processor_inventory_survives_serialization_and_old_reports_remain_readable() {
+        let report = processor_position_report();
+        let encoded = serde_json::to_value(&report).unwrap();
+        let restored: EndpointExplorationReport = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored, report);
+
+        let old_system: ComputerSystem = serde_json::from_str(r#"{"Id":"System_0"}"#).unwrap();
+        assert_eq!(old_system.processors, None);
+
+        let system = ComputerSystem {
+            processors: Some(vec![]),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&system).unwrap();
+        assert_eq!(encoded["Processors"], serde_json::json!([]));
+        let restored: ComputerSystem = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.processors, Some(vec![]));
+    }
 
     #[test]
     fn component_power_state_does_not_create_host_power_alert() {
@@ -4096,6 +4229,7 @@ mod tests {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
@@ -4263,6 +4397,7 @@ mod tests {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),

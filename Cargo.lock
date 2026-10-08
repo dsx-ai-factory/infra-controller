@@ -3335,6 +3335,7 @@ dependencies = [
  "itertools 0.14.0",
  "libredfish",
  "mac_address",
+ "nv-redfish",
  "opentelemetry 0.32.0",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",

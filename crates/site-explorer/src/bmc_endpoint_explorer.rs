@@ -1635,6 +1635,13 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                 );
             }
 
+            if s1.processors != s2.processors {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_processors = ?s1.processors,
+                    nvredfish_processors = ?s2.processors,
+                    "system processors are not equal");
+            }
+
             if s1.attributes != s2.attributes {
                 tracing::warn!(
                     system_id = ?s1.id,
