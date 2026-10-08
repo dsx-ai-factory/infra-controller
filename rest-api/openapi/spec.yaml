@@ -3223,6 +3223,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-vpc
