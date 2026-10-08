@@ -58,7 +58,7 @@ case "$*" in
         fi
         ;;
     'get deployment keycloak -n kc-ns -o jsonpath='*)
-        # valueFrom stands for a KC_DB_URL with no literal value.
+        # valueFrom stands for a KC_DB_URL without a literal value.
         if [[ "${FAKE_KEYCLOAK_URL}" != "valueFrom" ]]; then
             printf '%s' "${FAKE_KEYCLOAK_URL}"
         fi
@@ -140,7 +140,8 @@ resolver_cases=(
     "retained PVC without the StatefulSet or a deployed Temporal|temporal|auto|||pvc||false|false|"
     "deleted Keycloak recorded on nico-pg-cluster while the StatefulSet serves Temporal|keycloak|auto|||statefulset|keycloak=nico-pg-cluster|false|true|"
     "Keycloak enabled for the first time while the StatefulSet serves Temporal|keycloak|auto|||statefulset||false|true|"
-    "deleted Temporal recorded on the StatefulSet after it was removed|temporal|auto||||temporal=standalone|false|false|"
+    "deleted Temporal recorded on a StatefulSet whose volume is gone too|temporal|auto||||temporal=standalone|false|true|"
+    "deleted Keycloak recorded on the StatefulSet that still exists|keycloak|auto|||statefulset|keycloak=standalone|false|false|"
     "explicit true overrides the deployed database|temporal|true|postgres.postgres.svc.cluster.local.||statefulset||false|true|"
     "Temporal on an unrecognized host|temporal|auto|pg.example.com||||false||auto doesn't recognize pg.example.com, the PostgreSQL host the deployed temporal uses"
     "Temporal on a host that only starts like nico-pg-cluster|temporal|auto|nico-pg-cluster.postgres.example.net|||statefulset|false||auto doesn't recognize nico-pg-cluster.postgres.example.net"

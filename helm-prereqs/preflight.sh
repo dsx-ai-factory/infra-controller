@@ -771,8 +771,17 @@ _db_location() {
             ;;
     esac
     case "${_recorded}" in
-        nico-pg-cluster|standalone)
-            _DB_LOCATION="${_recorded}"
+        nico-pg-cluster)
+            _DB_LOCATION=nico-pg-cluster
+            ;;
+        standalone)
+            # Without the StatefulSet or its volume, the data the record points
+            # at is gone, so the database starts fresh like a new one.
+            if [[ -n "${_standalone}" ]]; then
+                _DB_LOCATION=standalone
+            else
+                _DB_LOCATION=new
+            fi
             ;;
         "")
             # REST always deploys Temporal, so a missing release next to the
