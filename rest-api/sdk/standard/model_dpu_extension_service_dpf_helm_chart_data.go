@@ -28,8 +28,12 @@ type DpuExtensionServiceDpfHelmChartData struct {
 	// Helm chart name
 	ChartName string `json:"chartName"`
 	// Helm chart version
-	ChartVersion string                                  `json:"chartVersion"`
-	Security     DpuExtensionServiceDpfHelmChartSecurity `json:"security"`
+	ChartVersion string `json:"chartVersion"`
+	// Required immutable DPF workload identity. Its value must be unique case-insensitively among active NICo-managed DPF Helm services.
+	ServiceID string `json:"serviceID"`
+	// Required DPF deployment location. NICo currently accepts only an explicit false value, which deploys the chart on DPUs.
+	DeployInCluster bool                                    `json:"deployInCluster"`
+	Security        DpuExtensionServiceDpfHelmChartSecurity `json:"security"`
 	// Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
 	Values               map[string]interface{}                                  `json:"values,omitempty"`
 	ServiceDaemonSet     NullableDpuExtensionServiceDpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
@@ -42,11 +46,13 @@ type _DpuExtensionServiceDpfHelmChartData DpuExtensionServiceDpfHelmChartData
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuExtensionServiceDpfHelmChartData(repoURL string, chartName string, chartVersion string, security DpuExtensionServiceDpfHelmChartSecurity) *DpuExtensionServiceDpfHelmChartData {
+func NewDpuExtensionServiceDpfHelmChartData(repoURL string, chartName string, chartVersion string, serviceID string, deployInCluster bool, security DpuExtensionServiceDpfHelmChartSecurity) *DpuExtensionServiceDpfHelmChartData {
 	this := DpuExtensionServiceDpfHelmChartData{}
 	this.RepoURL = repoURL
 	this.ChartName = chartName
 	this.ChartVersion = chartVersion
+	this.ServiceID = serviceID
+	this.DeployInCluster = deployInCluster
 	this.Security = security
 	return &this
 }
@@ -129,6 +135,54 @@ func (o *DpuExtensionServiceDpfHelmChartData) GetChartVersionOk() (*string, bool
 // SetChartVersion sets field value
 func (o *DpuExtensionServiceDpfHelmChartData) SetChartVersion(v string) {
 	o.ChartVersion = v
+}
+
+// GetServiceID returns the ServiceID field value
+func (o *DpuExtensionServiceDpfHelmChartData) GetServiceID() string {
+	if o == nil {
+		var ret string
+		return ret
+	}
+
+	return o.ServiceID
+}
+
+// GetServiceIDOk returns a tuple with the ServiceID field value
+// and a boolean to check if the value has been set.
+func (o *DpuExtensionServiceDpfHelmChartData) GetServiceIDOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.ServiceID, true
+}
+
+// SetServiceID sets field value
+func (o *DpuExtensionServiceDpfHelmChartData) SetServiceID(v string) {
+	o.ServiceID = v
+}
+
+// GetDeployInCluster returns the DeployInCluster field value
+func (o *DpuExtensionServiceDpfHelmChartData) GetDeployInCluster() bool {
+	if o == nil {
+		var ret bool
+		return ret
+	}
+
+	return o.DeployInCluster
+}
+
+// GetDeployInClusterOk returns a tuple with the DeployInCluster field value
+// and a boolean to check if the value has been set.
+func (o *DpuExtensionServiceDpfHelmChartData) GetDeployInClusterOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.DeployInCluster, true
+}
+
+// SetDeployInCluster sets field value
+func (o *DpuExtensionServiceDpfHelmChartData) SetDeployInCluster(v bool) {
+	o.DeployInCluster = v
 }
 
 // GetSecurity returns the Security field value
@@ -243,6 +297,8 @@ func (o DpuExtensionServiceDpfHelmChartData) ToMap() (map[string]interface{}, er
 	toSerialize["repoURL"] = o.RepoURL
 	toSerialize["chartName"] = o.ChartName
 	toSerialize["chartVersion"] = o.ChartVersion
+	toSerialize["serviceID"] = o.ServiceID
+	toSerialize["deployInCluster"] = o.DeployInCluster
 	toSerialize["security"] = o.Security
 	if o.Values != nil {
 		toSerialize["values"] = o.Values
@@ -266,6 +322,8 @@ func (o *DpuExtensionServiceDpfHelmChartData) UnmarshalJSON(data []byte) (err er
 		"repoURL",
 		"chartName",
 		"chartVersion",
+		"serviceID",
+		"deployInCluster",
 		"security",
 	}
 
@@ -299,6 +357,8 @@ func (o *DpuExtensionServiceDpfHelmChartData) UnmarshalJSON(data []byte) (err er
 		delete(additionalProperties, "repoURL")
 		delete(additionalProperties, "chartName")
 		delete(additionalProperties, "chartVersion")
+		delete(additionalProperties, "serviceID")
+		delete(additionalProperties, "deployInCluster")
 		delete(additionalProperties, "security")
 		delete(additionalProperties, "values")
 		delete(additionalProperties, "serviceDaemonSet")
