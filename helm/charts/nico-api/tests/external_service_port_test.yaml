@@ -32,3 +32,21 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: 'nico-api: externalService.port must be a port number, got "https"'
+
+  - it: rejects a port above 65535
+    set:
+      externalService:
+        enabled: true
+        port: 70000
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-api: externalService.port must be a port number, got "70000"'
+
+  - it: rejects port 0 instead of falling back to the default
+    set:
+      externalService:
+        enabled: true
+        port: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-api: externalService.port must be a port number, got "0"'

@@ -186,7 +186,9 @@ externalService:
   ipFamilyPolicy: ""
   ipFamilies: []
   # External HTTP ports. nico-pxe-external-80 is omitted when alternatePort
-  # is 0; the Service name does not change with the port.
+  # is 0; the Service name does not change with the port. Clients are set up
+  # for the defaults (the DHCP boot URL and the DPU agent PXE URL), so change
+  # the ports together with them.
   port: 8080
   alternatePort: 80
   # Local preserves client source IPs. MetalLB only lets Local Services share
@@ -195,7 +197,8 @@ externalService:
   # Annotation key that lets the two Services share an IP. Its value is the
   # chart name. Change the key for a load-balancer controller that does not
   # use MetalLB annotations, or set it to "" to omit the annotation. An
-  # annotations entry with the same key overrides the built-in value.
+  # annotations entry under either MetalLB spelling replaces the built-in
+  # annotation; one with the same key overrides its value.
   sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
   annotations: {}
   # annotations:

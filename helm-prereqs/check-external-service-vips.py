@@ -126,7 +126,9 @@ def check_vips(stream, metallb_stream=None):
             policy, ports = sharing_defaults.get(component, ("Cluster", set()))
             ports = set(ports)
             if name == "externalService":
-                policy = str(service.get("externalTrafficPolicy") or policy)
+                # A blank policy renders no externalTrafficPolicy, which Kubernetes treats as Cluster.
+                raw_policy = service.get("externalTrafficPolicy")
+                policy = policy if raw_policy is None else (str(raw_policy) or "Cluster")
                 if component in ("nico-api", "nico-ssh-console-rs", "nico-pxe") and service.get("port") not in (None, ""):
                     ports = {f"TCP/{service['port']}"} | ({"TCP/80"} if component == "nico-pxe" else set())
                 if component == "nico-pxe" and "alternatePort" in service:

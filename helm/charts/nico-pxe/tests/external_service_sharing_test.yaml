@@ -143,3 +143,21 @@ tests:
           path: metadata.annotations
           value:
             metallb.io/allow-shared-ip: grp
+
+  - it: rejects a port above 65535
+    set:
+      externalService:
+        enabled: true
+        port: 70000
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.port must be a port number, got "70000"'
+
+  - it: rejects an alternatePort above 65535
+    set:
+      externalService:
+        enabled: true
+        alternatePort: 70000
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.alternatePort must be a port number or 0, got "70000"'

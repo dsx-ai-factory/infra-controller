@@ -409,6 +409,7 @@ spec:
               "allow-shared-ip value, but MetalLB only shares Local Services that select the same pods"]),
             ("alternatePort disabled frees port 80",
              ("nico-ssh-console-rs", {"port": 80}), ("nico-pxe", {"alternatePort": 0, "externalTrafficPolicy": "Cluster"}), []),
+            ("blank policy is the Kubernetes default", ("nico-api", {"externalTrafficPolicy": ""}), ("nico-dhcp", {}), []),
         ]
         for name, first, second, expected in cases:
             with self.subTest(name=name):

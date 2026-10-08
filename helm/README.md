@@ -306,12 +306,12 @@ makes no assumption beyond passing the annotations through.
   their own UDP and TCP (or port 80 and 8080) Services share one IP. The key is
   `externalService.sharedIpAnnotation` (default
   `metallb.universe.tf/allow-shared-ip`). Change it for a controller that uses
-  a different key, or set it to `""` to omit it. An operator annotation
-  overrides the built-in value only when its key matches
-  `externalService.sharedIpAnnotation` exactly. MetalLB also accepts
-  `metallb.io/allow-shared-ip`, but the chart merges by key string, so an
-  operator annotation with the other spelling is rendered next to the built-in
-  one instead of replacing it.
+  a different key, or set it to `""` to omit it. An operator annotation under
+  either MetalLB spelling (`metallb.universe.tf/allow-shared-ip` or
+  `metallb.io/allow-shared-ip`) replaces the built-in annotation, so a Service
+  never carries two sharing values. Other operator annotations are merged next
+  to the built-in one, and an entry with the same key as
+  `externalService.sharedIpAnnotation` overrides its value.
 - Other charts pass `externalService.annotations` (or `perPodAnnotations`)
   through unchanged. Add the controller's sharing annotation there to join a
   group.
@@ -322,7 +322,8 @@ makes no assumption beyond passing the annotations through.
   ports do not change. DNS, DHCP, and NTP keep their standard ports.
 - `externalService.externalTrafficPolicy` is configurable on each chart's
   external Service. Defaults are unchanged: `Local` for `nico-api`, `nico-pxe`,
-  and `nico-ntp`, and the Kubernetes default (`Cluster`) elsewhere. The DHCPv6
+  and `nico-ntp`, and the Kubernetes default (`Cluster`) for `nico-dhcp`,
+  `nico-dns`, `nico-ssh-console-rs`, and `unbound`. The DHCPv6
   relay Service (`nico-dhcp.v6ExternalService`) stays `Local`. `Local`
   preserves client source IPs, and `Cluster` may SNAT them. MetalLB only lets a
   `Local` Service share an IP with Services that select the same pods, so
@@ -353,7 +354,7 @@ helm upgrade --install nico ./helm -n nico-system -f my-site-values.yaml -f helm
 | Service, replica | Protocol and port | Shared IP group | Traffic policy and restriction |
 |------------------|-------------------|-----------------|--------------------------------|
 | nico-api | TCP 443 | own IP | Local, shares only with identical selectors |
-| nico-pxe | TCP 8080 and 80 | own IP, built-in `nico-pxe` key | Local, shares only with identical selectors |
+| nico-pxe | TCP 8080 and 80 | own IP, built-in `nico-pxe` sharing value | Local, shares only with identical selectors |
 | nico-ssh-console-rs | TCP 22 | `nico-shared` | Cluster |
 | nico-dhcp | UDP 67 | `nico-shared` | Cluster, IP is the DHCP server identifier |
 | unbound | UDP and TCP 53 | `nico-shared` | Cluster, cannot share with nico-dns (port 53) |
