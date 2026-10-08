@@ -32,6 +32,44 @@ pub struct RevisionData {
 }
 
 impl RevisionData {
+    /// Return whether the state represents a successful apply, including a save failure.
+    pub(crate) fn is_apply_success(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|state| {
+                matches!(
+                    state.as_str(),
+                    "applied" | "applied_and_saved" | "auto_save_error"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Return whether an apply has reached a known end state, excluding save-only states.
+    pub(crate) fn is_terminal_for_apply(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|state| {
+                matches!(
+                    state.as_str(),
+                    "applied"
+                        | "applied_and_saved"
+                        | "auto_save_error"
+                        | "telemetry_subscribe_error"
+                        | "invalid"
+                        | "verify_error"
+                        | "dry_run_complete"
+                        | "ready_error"
+                        | "ays_fail"
+                        | "apply_error"
+                        | "apply_fail"
+                        | "confirm_fail"
+                        | "apply_interrupted"
+                )
+            })
+            .unwrap_or(false)
+    }
+
     pub(crate) fn apply_status(&self) -> RevisionApplyStatus {
         let error_issues = self.error_issue_summaries();
         if !error_issues.is_empty() {
@@ -113,6 +151,74 @@ pub enum RevisionIssueSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_revision_states_for_apply() {
+        struct Case {
+            name: &'static str,
+            json: &'static str,
+            terminal: bool,
+            success: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "ignore_fail with an error issue remains pending",
+                json: r#"{"state":"ignore_fail","transition":{"issue":{"1":{"severity":"error","code":"check_failed"}}}}"#,
+                terminal: false,
+                success: false,
+            },
+            Case {
+                name: "apply failure without an issue is terminal",
+                json: r#"{"state":"apply_fail"}"#,
+                terminal: true,
+                success: false,
+            },
+            Case {
+                name: "verification failure is terminal",
+                json: r#"{"state":"verify_error"}"#,
+                terminal: true,
+                success: false,
+            },
+            Case {
+                name: "successful apply",
+                json: r#"{"state":"applied"}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "successful apply and save",
+                json: r#"{"state":"applied_and_saved"}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "successful apply with separate save error",
+                json: r#"{"state":"auto_save_error","transition":{"issue":{"1":{"severity":"error","code":"save_failed"}}}}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "save-only success does not terminate apply poll",
+                json: r#"{"state":"saved"}"#,
+                terminal: false,
+                success: false,
+            },
+        ];
+
+        for case in cases {
+            let revision: RevisionData = serde_json::from_str(case.json).unwrap_or_else(|error| {
+                panic!("{}: expected revision to parse: {error}", case.name)
+            });
+            assert_eq!(
+                revision.is_terminal_for_apply(),
+                case.terminal,
+                "{}",
+                case.name
+            );
+            assert_eq!(revision.is_apply_success(), case.success, "{}", case.name);
+        }
+    }
 
     #[test]
     fn revision_config_diff_requires_object_root_and_reports_empty_root() {
