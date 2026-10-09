@@ -3283,6 +3283,51 @@ fn validate_tool_url(name: &str, url: &str) -> eyre::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) enum SupernicFirmwareProfileDiagnostic {
+    PartNumber {
+        config_key_part_number: String,
+        profile_part_number: String,
+        psid: String,
+    },
+    Psid {
+        part_number: String,
+        config_key_psid: String,
+        profile_psid: String,
+    },
+}
+
+impl SupernicFirmwareProfileDiagnostic {
+    pub(crate) fn emit(self) {
+        match self {
+            Self::PartNumber {
+                config_key_part_number,
+                profile_part_number,
+                psid,
+            } => {
+                tracing::warn!(
+                    config_key_part_number = %config_key_part_number,
+                    profile_part_number = %profile_part_number,
+                    psid = %psid,
+                    "firmware profile part_number does not match config key"
+                );
+            }
+            Self::Psid {
+                part_number,
+                config_key_psid,
+                profile_psid,
+            } => {
+                tracing::warn!(
+                    part_number = %part_number,
+                    config_key_psid = %config_key_psid,
+                    profile_psid = %profile_psid,
+                    "firmware profile psid does not match config key"
+                );
+            }
+        }
+    }
+}
+
 impl CarbideConfig {
     /// Which configuration keys were explicitly provided by the merged
     /// sources, mapped to source labels — see [`super::provenance`]. Empty
@@ -3357,31 +3402,33 @@ impl CarbideConfig {
         Ok(())
     }
 
-    /// validate_supernic_firmware_profiles checks that each profile's inner
-    /// part_number and psid match the HashMap keys they are nested under.
-    /// Logs a warning for any mismatches (the inner values are authoritative
-    /// at runtime since they are what gets sent to scout).
-    pub fn validate_supernic_firmware_profiles(&self) {
+    /// Returns mismatches between each profile's inner part number/PSID and
+    /// the map keys it is nested under.
+    ///
+    /// The inner values remain authoritative because they are sent to Scout.
+    pub(crate) fn supernic_firmware_profile_diagnostics(
+        &self,
+    ) -> Vec<SupernicFirmwareProfileDiagnostic> {
+        let mut diagnostics = Vec::new();
         for (key_pn, psid_map) in &self.supernic_firmware_profiles {
             for (key_psid, profile) in psid_map {
                 if profile.firmware_spec.part_number != *key_pn {
-                    tracing::warn!(
-                        config_key_part_number = %key_pn,
-                        profile_part_number = %profile.firmware_spec.part_number,
-                        psid = %key_psid,
-                        "firmware profile part_number does not match config key"
-                    );
+                    diagnostics.push(SupernicFirmwareProfileDiagnostic::PartNumber {
+                        config_key_part_number: key_pn.clone(),
+                        profile_part_number: profile.firmware_spec.part_number.clone(),
+                        psid: key_psid.clone(),
+                    });
                 }
                 if profile.firmware_spec.psid != *key_psid {
-                    tracing::warn!(
-                        part_number = %key_pn,
-                        config_key_psid = %key_psid,
-                        profile_psid = %profile.firmware_spec.psid,
-                        "firmware profile psid does not match config key"
-                    );
+                    diagnostics.push(SupernicFirmwareProfileDiagnostic::Psid {
+                        part_number: key_pn.clone(),
+                        config_key_psid: key_psid.clone(),
+                        profile_psid: profile.firmware_spec.psid.clone(),
+                    });
                 }
             }
         }
+        diagnostics
     }
 
     /// get_supernic_firmware_profile looks up the firmware profile for a
